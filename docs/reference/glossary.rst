@@ -109,9 +109,11 @@ Candidate selection
 The decision whether a produced update should replace the current served
 release. A ``CandidateEvaluator`` measures the candidate, a
 ``CandidateSelector`` makes the select-or-reject decision, and a
-``CandidateEvaluationPlugin`` implements both. Every recipe carries the
-plugin as ``candidate_evaluation``. For a weight recipe, each checkpoint that
-a training job saves is one candidate. Selection decides only what is served;
+``CandidateEvaluationPlugin`` implements both. A weight recipe configures the
+plugin as ``candidate_evaluation``, from the top-level ``evaluation``
+section; a harness recipe builds it for each scenario from its publication
+policy. For a weight recipe, each checkpoint that a training job saves is one
+candidate. Selection decides only what is served;
 the next training job starts from the newest saved checkpoint either way.
 
 Surface
@@ -293,8 +295,8 @@ Method
 
 The learning algorithm itself. A recipe is the object that binds one method to a
 scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
-methods, each a ``Proposer`` with, where it needs its own, a scorer and a
-selection policy.
+methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
+step's workspace, with a scorer when its evaluation runs episodes.
 
 Adapter
 -------
@@ -308,15 +310,40 @@ Episode
 -------
 
 One headless run of the agent under test against one task, in a throwaway root
-holding nothing but the rendered tree. Harness evolution scores every task twice
-per step, once per side; the ``floor`` selection runs the candidate side only.
+holding nothing but the rendered tree. The ``compare`` policy scores each task
+on both trees, the candidate and the head; ``floor`` scores the candidate
+only. The history keeps every scored episode and reuses it.
 
 Patch
 -----
 
-One proposed change to a harness tree: each changed source path mapped to the
-file's new text, or to ``null`` to remove the file. A step applies one patch
-to the head tree and evaluates the result as one candidate.
+One change to a harness tree: each changed source path mapped to the file's
+new text, or to ``null`` to remove the file. A step's patch is the difference
+between the head tree and its candidate, and a client proposes a change to the
+served tree as a patch.
+
+Workspace
+---------
+
+The directory of one harness evolution step. It holds a copy of the head tree
+(``harness/``), what the step learns from (``material/``), and the method's
+own files (``state/``). The tree that the method leaves in ``harness/`` is the
+step's candidate, and Reef keeps the directory as the step record.
+
+History
+-------
+
+Every tree that a harness scenario's steps proposed or evaluated, published or
+not, with every episode and every decision. It is the evaluation's score
+cache, and methods read it.
+
+Publication policy
+------------------
+
+How a harness evaluation decides whether a candidate is published, set in
+``evolution.evaluation.policy``: ``compare`` publishes a candidate that scores
+better than the head tree, ``floor`` one whose every episode reaches a score,
+and ``none`` every candidate that passes validation.
 
 Preset
 ------

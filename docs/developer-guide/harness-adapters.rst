@@ -61,7 +61,8 @@ Rendering turns a harness tree into the files one agent reads: the tree and
 an adapter descriptor in, root-relative paths with their text out
 (``reef.harness.tree.render_tree``). It touches no disk and starts no agent.
 Reef renders a tree to run an episode, to serve a release, and to validate a
-proposed patch. A release stores the source tree, and ``GET /reef/harness``
+candidate tree or a client's proposed patch. A release stores the source tree,
+and ``GET /reef/harness``
 renders it for each request.
 
 Reef and the adapter own the rendering together. The shared rules come
@@ -189,7 +190,7 @@ Every model call must go to Reef. Before any step, the render refuses a tree
 that sets a key the descriptor's ``model_binding`` writes, unless the binding's
 credential (the value holding ``{api_key}``) is set beside it. The binding is
 merged after the tree and wins every key it writes, so only a tree rendered
-without the binding, as validation renders a proposal, can set one;
+without the binding, as validation renders a candidate, can set one;
 validation refuses an inline credential, so the credential tells the two
 apart. No adapter can turn this check off. Each adapter refuses the other
 routes its harness reads, such as a fallback model or a second provider, in

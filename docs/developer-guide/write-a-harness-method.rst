@@ -1,75 +1,451 @@
 Write a harness method
 ======================
 
-A harness method decides which change to try at each step and how to score
-an evaluation episode. Reef does the rest: it reads the head tree from the
-scenario's git history, applies the method's patch, validates the candidate
-tree for the adapter, runs the evaluation, commits the result, and publishes
-a selected tree as a new release.
+.. page::
+   :for: authors of a harness evolution method, and anyone reading ``reef/train/harness_backend/``
+   :needs: the loop and the tree layout from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
+   :outcome: a method that runs in Reef's steps, the evaluation it needs, and a deployment that names it
 
-See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the
-workflow, the tree layout, and a runnable example.
+A harness method decides how the harness tree changes. At each step, Reef
+gives the method a workspace: one directory with a copy of the head tree, the
+step's traces, and the method's own files. The method edits the tree in that
+directory. Reef then validates the tree, evaluates it under the deployment's
+publication policy, records the result in the scenario's history, and
+publishes a selected tree as a new release.
 
-The parts of a method
----------------------
+A method is one class with one operation:
 
-A method implements up to four classes. Only the proposer is always the
-method's own; the other parts have defaults.
+.. code:: python
 
-+----------------------+-----------------------+--------------------------------------------------+
-| Part                 | Base class            | When the method needs it                         |
-+======================+=======================+==================================================+
-| Proposer             | ``Proposer``          | Always: it returns the change for each step.     |
-+----------------------+-----------------------+--------------------------------------------------+
-| Episode scorer       | ``EpisodeScorer``     | When no recipe default scores its episodes.      |
-+----------------------+-----------------------+--------------------------------------------------+
-| Selection policy     | ``SelectionPlugin``   | When it decides publication its own way; the     |
-|                      |                       | default is ``score_comparison``.                 |
-+----------------------+-----------------------+--------------------------------------------------+
-| Promoter             | ``Promoter``          | When it chooses which failing prompts become     |
-|                      |                       | evaluation tasks (``evolution.promote_failures``)|
-+----------------------+-----------------------+--------------------------------------------------+
+   from reef.train.harness_backend import Method, StepResult, Tools, Workspace
 
-``Proposer``, ``Promoter`` and the step's types are in
-``reef.train.harness_backend``; ``EpisodeScorer`` is in
-``reef.evaluation.harness``, and ``SelectionPlugin`` in ``reef.evaluation``.
-A method never subclasses the backend. Everything a step gives the method is
-in one ``ProposalContext``, and everything the method gives back is in one
-``TreeProposal``, including the state the method keeps between steps.
 
-The deployment file names each class, for example
-``propose: methods.mine:MyProposer``. A class with settings uses the mapping
-form ``{module: methods.mine:MyProposer, config: {...}}`` and overrides the
-class method ``from_config(config)``. The default ``from_config`` builds the
-class with no arguments and refuses a non-empty ``config``.
+   class MyMethod(Method):
+       def step(self, workspace: Workspace, tools: Tools) -> StepResult: ...
+
+``step`` edits ``workspace.harness``. The tree in that directory when ``step``
+returns is the step's candidate. ``tools`` calls models, checks trees, and
+scores trees on tasks. The ``StepResult`` says what the step did. The
+deployment names the class in ``evolution.method``. A method never subclasses
+the backend.
 
 A small method
 --------------
 
-This method adds one rule to ``rules.md`` the first time a step's samples
-contain a failure, and scores an episode by its final answer. The ``[fib]`` prefix is a
-convention of this method: Reef passes the task text through unchanged.
+This method makes one model call per step. It shows the served model the
+traces that scored below 1, asks for new rules, and writes them to
+``rules.md``:
+
+.. code:: python
+
+   from reef.core.prompts import untrusted_text
+   from reef.harness.tree import TreePatch
+   from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+
+   PROMPT = "Rewrite these agent rules so that the failing requests succeed. Reply with the rules alone."
+
+
+   class Reflect(Method):
+       """One model call per step: rewrite rules.md from the failing traces."""
+
+       def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+           failing = [trace for trace in workspace.traces() if trace.score is not None and trace.score < 1.0]
+           if not failing:
+               return StepResult("no failing trace")  # harness/ is unchanged, so the step is skipped
+           tree = workspace.tree()
+           shown = "\n\n".join(
+               f"task: {trace.task}\nreply: {trace.reply}\nfeedback: {trace.feedback}" for trace in failing
+           )
+           rules = tree.files.get("rules.md", "")
+           prompt = f"{PROMPT}\n\nRules:\n{rules}\n\nFailing requests:\n{untrusted_text(shown)}"
+           reply = tools.models.served.chat([{"role": "user", "content": prompt}])
+           candidate = tree.apply(TreePatch({"rules.md": reply.strip() + "\n"}))
+           validation = tools.check(candidate)
+           if not validation.passed:
+               return StepResult(f"the new rules fail validation: {validation.message()}")
+           workspace.write_tree(candidate)
+           return StepResult(f"rewrote rules.md from {len(failing)} failing traces", {"failing": len(failing)})
+
+`Configure a deployment`_ shows the deployment file that runs it, and `Score
+an episode`_ shows the scorer it names.
+
+The step
+--------
+
+One step runs in this order:
+
+#. Reef reads the head tree from the scenario's releases, chooses the step's
+   evaluation tasks, and writes the step's workspace.
+#. Reef calls ``step(workspace, tools)``.
+#. Reef reads the tree in ``harness/``. An unchanged tree skips the step. A
+   tree that fails validation skips the step too, and the step's ``skipped``
+   names the problems. There is no retry, so call ``tools.check`` before you
+   return.
+#. The publication policy evaluates the candidate (see `Evaluation`_). Reef
+   records the decision in the history and publishes a selected candidate as
+   a new release.
+
+Two kinds of automatic step do not call the method. A recheck compares the
+latest publish with the tree it replaced
+(``evolution.evaluation.recheck_every``). A client's proposal from
+``POST /reef/harness/proposals`` takes the next automatic step, and the
+evaluation scores it in place of a method's candidate. A step that answers a
+training request always calls the method (see `Answer a training request`_).
+
+If ``step`` raises, the step fails and publishes nothing. The step record
+keeps the model calls made before the failure.
+
+The workspace
+-------------
+
+Each step gets one directory,
+``<evolution.state_dir>/<scenario>/<component>/steps/<step>``.
+``<component>`` is the release component that the recipe evolves, such as
+``harness`` for ``HarnessEvolutionRecipe`` (see `History
+<../user-guide/evolve-your-harness.rst#history>`__). Reef keeps the directory
+after the step as the step record.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 14 68
+
+   * - Directory
+     - Access
+     - Contents
+   * - ``harness/``
+     - read-write
+     - a copy of the head tree; the tree here when ``step`` returns is the
+       candidate
+   * - ``material/``
+     - read-only
+     - what the step learns from (below)
+   * - ``state/``
+     - read-write
+     - the method's own files, committed with the step (see `Keep state
+       between steps`_)
+   * - ``scratch/``
+     - read-write
+     - temporary files; Reef removes the directory when the step ends
+   * - ``output/``
+     - read-write
+     - files the method keeps with the step record
+
+``material/`` holds these files:
+
+- ``traces/<n>/trace.json`` and ``traces/<n>/trajectory.json``: one trace per
+  sample of the step's job data, and the trace's ATIF trajectory.
+- ``request.json``: the training request the step answers. Only a request
+  step has it.
+- ``evaluation.json``: the step's evaluation tasks and the episodes per task
+  and tree (``repeats``), which ``workspace.tasks()`` and
+  ``workspace.evaluation_repeats()`` read.
+- ``failures.json``: the failure manifest of the head tree, after the
+  first evaluation.
+- ``host.json``: the adapter, each tree kind it renders with that kind's
+  path pattern and description, its config targets, and whether its tasks
+  are directories.
+
+The scenario's history is beside the step directories, at
+``workspace.history_dir``. A method reads it and never writes it (see `Read
+the history`_).
+
+A Python method reads the directories through ``Workspace``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
+
+   * - Member
+     - Value
+   * - ``harness``, ``material``, ``state``, ``scratch``, ``output``
+     - the paths of the directories
+   * - ``step``
+     - the step's number, 1 or more
+   * - ``tree()``
+     - the ``HarnessTree`` that ``harness/`` holds now
+   * - ``write_tree(tree)``
+     - replace everything in ``harness/`` with ``tree``
+   * - ``traces()``
+     - the ``Trace`` values of ``material/traces/``, in trace order
+   * - ``request()``
+     - the ``TrainingRequest`` the step answers, ``None`` on an automatic step
+   * - ``tasks()``
+     - the step's evaluation tasks, the seed tasks first
+   * - ``evaluation_repeats()``
+     - the episodes that the evaluation runs per task and tree
+       (``evolution.evaluation.repeats``), 0 when the deployment configured
+       no scorer
+   * - ``host()``
+     - the host facts: ``adapter``, ``kinds``, ``config_targets`` and
+       ``tasks_are_directories``
+   * - ``history()``
+     - the scenario's ``History``, read from ``history_dir``
+
+A ``Trace`` has these fields:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 82
+
+   * - Field
+     - Value
+   * - ``task``
+     - the last user prompt of the request, ``None`` for a request without
+       a user prompt
+   * - ``reply``
+     - the final assistant text, ``None`` when there is none. With the
+       inference stages (``InferenceRecord2Record`` and ``InferenceSamples``),
+       every model call is a trace, and only the call that ends a run has a
+       reply: a call that ends on a tool call has none
+   * - ``score``
+     - the reported score, ``None`` for unscored traffic
+   * - ``feedback``
+     - the reported feedback as text (structured feedback as JSON text),
+       ``None`` when there is none
+   * - ``record``
+     - the agent record id of the request
+   * - ``client``
+     - the client's ``x-reef-tag-client`` tag, else its session tag, else
+       ``untagged``
+   * - ``directory``
+     - the trace's directory; ``trajectory()`` reads its ATIF trajectory
+
+Material is client data. Wrap its text with ``reef.core.prompts.untrusted_text``
+before the text enters a model prompt (see `Untrusted input`_).
+
+The tools
+---------
+
+``tools`` is the method's way to call a model and to run an episode:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
+
+   * - Tool
+     - Contract
+   * - ``tools.models``
+     - the model bindings: ``tools.models.served`` is the model under test,
+       and ``tools.models["reflection"]`` is the ``evolution.models``
+       entry of that name
+   * - ``tools.check(tree)``
+     - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``, and
+       ``problems``, every problem found
+   * - ``tools.evaluate(tree, tasks, *, repeats=1)``
+     - ``repeats`` scored episodes of ``tree`` on each task, task by task, as
+       ``EpisodeRecord`` values; ``tasks`` is a list of tasks, and a single
+       string is refused
+   * - ``tools.calls``
+     - the step's call meter: ``spend()`` and ``record(entry)`` for a model
+       call that does not go through ``tools.models``, and
+       ``note(kind, text, *, failed=False)`` for one line of the step's
+       activity
+
+Call a model
+~~~~~~~~~~~~
+
+``binding.chat(messages, *, timeout_s=None, **params)`` returns the assistant
+text. The messages use the OpenAI shape whatever the endpoint's dialect.
+``binding.complete(body)`` sends a raw request body and returns the
+provider's response.
+
+Every call through ``tools.models`` counts against
+``evolution.max_model_calls_per_step`` (0, no limit, by default). A call past
+the limit raises ``RuntimeError``. Each call lands in the step record's
+``calls.json``: the request, the reply or the error, the provider's response,
+the seconds and the token usage. A method can also let a process call a model
+by itself, such as a coding agent behind a gateway. Then the gateway calls
+``tools.calls.spend()`` before each call and ``tools.calls.record(entry)``
+after it, so that the budget and the record stay complete.
+
+Evaluate a tree
+~~~~~~~~~~~~~~~
+
+``tools.evaluate`` runs episodes as the step's evaluation does: the same
+rendering, worker pool, scorer and episode settings. Each ``EpisodeRecord``
+has the ``task``, the ``repeat`` index, the ``score``, and the ``reply``. The
+``score`` is ``None`` for an episode that could not run, and then
+``failure`` says why. ``episode`` names the episode's record directory in the
+history.
+
+The history keeps every episode, and reuses a scored episode of the same
+tree, task, repeat and evaluation context. Asking again costs nothing, except
+for an episode that could not run: the history does not reuse it, so it runs
+again. Ask for more repeats to get new samples. A tree that the method
+evaluates joins the history as a candidate of the step.
+
+``evolution.max_episodes_per_step`` (0, no limit, by default) limits the
+episodes that ``tools.evaluate`` runs in one step. Reused episodes do not
+count. An episode counts when it ran, also in a call whose scorer raised.
+``evaluate`` raises ``RuntimeError`` when the deployment configured no
+scorer. It also raises ``RuntimeError`` when a call needs more episodes than
+the step has left, and then no episode of the call runs. It raises
+``ValueError`` when the tree fails ``check``, and ``TypeError`` when
+``tasks`` is one string. A refused call adds nothing to the history.
+
+The result
+----------
+
+``StepResult`` has three optional fields:
+
+- ``summary``: plain text that says what the step did. The step pages show it,
+  and the commit metrics keep it as ``method_summary``.
+- ``notes``: a JSON object; ``StepResult`` refuses a value that is not one.
+  The commit metrics keep it as ``method_notes``. Reef never reads it to make
+  a decision.
+- ``requires``: what the change needs on the person's machine, as
+  ``reef.core.requirements`` items. Reef reads it on a request step only (see
+  `Answer a training request`_).
+
+Reef writes the result to the step record's ``result.json``. The history keeps
+``summary`` and ``notes`` with the candidate, whether the step publishes or
+not.
+
+Keep state between steps
+------------------------
+
+A method keeps what it learns across steps as files in ``workspace.state``:
+an archive, a population, a playbook, or counters. Reef commits every file of
+``state/`` with the step and writes the files back into the next step's
+``state/``. The state lives in the scenario's commit history, so it survives
+a restart. Reef commits it whether the candidate is published, rejected or
+skipped: a step that skips because the tree did not change still commits its
+state. A step that fails commits none of its state, and the previous state
+stays.
+
+.. code:: python
+
+   import json
+
+
+   class Counting(Method):
+       def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+           path = workspace.state / "counts.json"
+           counts = json.loads(path.read_text()) if path.is_file() else {"steps": 0}
+           counts["steps"] += 1
+           path.write_text(json.dumps(counts))
+           ...  # this step's change to workspace.harness
+           return StepResult(notes=counts)
+
+The files must be UTF-8 text, at most 16 MiB together. A ``state/`` that
+breaks either rule skips the step, and the previous state stays.
+
+Read the history
+----------------
+
+The history holds every tree that a step proposed or evaluated, every
+episode, and every decision. ``workspace.history()`` returns it as a
+``reef.evaluation.harness.History``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
+
+   * - Member
+     - Value
+   * - ``candidates``
+     - each tree's ``CandidateRecord`` by checksum: ``step``, ``origin``
+       (``seed``, ``method``, ``proposal`` or ``release``), ``parent``,
+       ``summary`` and ``notes``
+   * - ``episodes``
+     - every ``EpisodeRecord``, in run order
+   * - ``decisions``
+     - every ``DecisionRecord``: ``step``, ``tree`` (the candidate),
+       ``head`` (the head tree that the step started from), ``selected``
+       (published, or held for review under ``evolution.publish: review``),
+       ``policy`` and ``reason``
+   * - ``tree(checksum)``
+     - the files of a tree that the history holds
+   * - ``scores(checksum, tasks, *, repeats=1)``
+     - the tree's scores on ``tasks``, task by task and repeat by repeat: the
+       latest episode of each pair, ``None`` where none ran or the latest
+       could not run
+   * - ``decision(step)``
+     - the decision on that step's candidate, ``None`` when the step decided
+       none
+   * - ``episode_dir(episode)``
+     - the episode's record directory: its trajectory files and
+       ``episode.json``
+
+The history also keeps the records of a step attempt that did not commit,
+such as one whose method, evaluation or commit failed. The next attempt runs
+under the same step number, so a record whose ``step`` is ``workspace.step``
+or more comes from such an attempt. A method that counts or compares what it
+tried skips these records.
+
+A tree's checksum is ``HarnessTree.checksum()``. This code reads what happened
+to the previous step's candidate:
+
+.. code:: python
+
+   history = workspace.history()
+   decision = history.decision(workspace.step - 1)
+   repeats = max(1, workspace.evaluation_repeats())
+   if decision is not None:
+       selected = decision.selected  # published, or held for review
+       scores = history.scores(decision.tree, workspace.tasks(), repeats=repeats)
+       head_scores = history.scores(decision.head, workspace.tasks(), repeats=repeats)
+
+GEPA settles its pending candidate this way. Meta-Harness reads its whole
+population from the history: every candidate, its scores and its notes.
+
+Answer a training request
+-------------------------
+
+In ``manual`` and ``hybrid`` training mode, a step can answer a training
+request from ``POST /reef/train`` (see `Manual training
+<../reference/http-api.rst#manual-training>`__). Every method takes such a
+step. ``workspace.request()`` returns the ``TrainingRequest``: ``id``,
+``text``, ``session``, ``release_id``, ``requires``, and ``client``, the
+requesting client's report of its machine. The text is client text (see
+`Untrusted input`_). In ``manual`` mode the step has no traces. In ``hybrid``
+mode it has up to ``job_samples`` traces from the next automatic job data, or
+none.
+
+Return ``requires`` when the change needs something on the person's machine
+that the request did not name: an ``env`` variable, a ``permission``, a
+``service`` or a ``binary``. Reef screens each item for credentials and
+instruction overrides. It merges the items that pass after the request's own
+items into the step's ``training_request.requires``, and the release manifest
+serves them to clients.
+
+A client's proposal and a recheck cannot take a request's step. The
+evaluation and ``evolution.publish`` apply as for any other step.
+
+Evaluation
+----------
+
+The deployment's ``evolution.evaluation`` section names the evaluation
+tasks, the scorer, and the publication policy that decides whether Reef
+publishes the candidate: ``compare``, ``floor`` or ``none``. `Evaluation: the
+publication policy
+<../user-guide/evolve-your-harness.rst#evaluation-the-publication-policy>`__
+explains each policy and the score cache, and `Harness evolution keys
+<../reference/configuration.rst#harness-evolution-keys>`__ lists every key.
+
+Choose the policy that fits how the method decides. GEPA and Meta-Harness
+compare means. ACE and ReasoningBank learn online from traffic with ``none``.
+The beta Reefine recipe uses ``floor`` with one health task.
+
+The evaluation reads the score cache that ``tools.evaluate`` fills. So a
+candidate that the method already scored with ``tools.evaluate`` on the
+step's tasks, ``workspace.evaluation_repeats()`` times each, needs no new
+episodes in the evaluation.
+
+Score an episode
+~~~~~~~~~~~~~~~~
+
+An ``EpisodeScorer`` (``reef.evaluation.harness``) scores one finished
+episode. ``score(task, result)`` returns a finite number; higher is better.
+``result`` holds the exit code, stdout, stderr, and the parsed
+``trajectory``. An episode that could not run does not reach the scorer.
 
 .. code:: python
 
    from reef.evaluation.harness import EpisodeScorer
    from reef.harness.episodes.trajectory import final_assistant_text
-   from reef.harness.tree import TreePatch
-   from reef.train.harness_backend import ProposalContext, Proposer, TreeProposal
 
-   RULE = "State the final answer alone on the last line.\n"
    EXPECTED = {"[fib]": "2880067194370816120"}
-
-
-   class FinalLineRule(Proposer):
-       def propose(self, context: ProposalContext) -> TreeProposal | None:
-           """Add the rule after a failing sample; once the rules hold it, skip the step."""
-           if all((sample.metadata.get("reward") or 0.0) > 0.0 for sample in context.samples):
-               return None
-           rules = context.tree.files.get("rules.md", "")
-           if RULE in rules:
-               return None
-           return TreeProposal(TreePatch({"rules.md": rules + RULE}))
 
 
    class ExactAnswer(EpisodeScorer):
@@ -78,301 +454,31 @@ convention of this method: Reef passes the task text through unchanged.
            text = final_assistant_text(result.trajectory) or ""
            return 1.0 if text.strip().endswith(EXPECTED[task.split()[0]]) else 0.0
 
-`Configure a deployment`_ shows the deployment file that runs it.
-
-Propose a change
-----------------
-
-``Proposer.propose(context)`` is called once per step, and returns a
-``TreeProposal`` or ``None``.
-
-The context
-~~~~~~~~~~~
-
-+----------------------+------------------------------------------------------------------------+
-| Field                | Value                                                                  |
-+======================+========================================================================+
-| ``step``             | This step's number, 1 or more.                                         |
-+----------------------+------------------------------------------------------------------------+
-| ``tree``             | The head ``HarnessTree``, the tree the patch applies to.               |
-|                      | ``tree.files`` maps each path to its text.                             |
-+----------------------+------------------------------------------------------------------------+
-| ``descriptor``       | The adapter the tree renders for: the kinds and config targets a tree  |
-|                      | may hold there.                                                        |
-+----------------------+------------------------------------------------------------------------+
-| ``samples``          | The step's trace samples (ATIF ``TrajectorySample`` values) in the     |
-|                      | order of its job data. Read the reward and feedback from               |
-|                      | ``sample.metadata`` (``reward`` is absent for unscored traffic) and    |
-|                      | the original provider exchanges with                                   |
-|                      | ``reef.core.trajectories.recorded_payloads``.                          |
-+----------------------+------------------------------------------------------------------------+
-| ``sources``          | One ``SampleSource`` per sample, in sample order. See                  |
-|                      | `Untrusted input`_.                                                    |
-+----------------------+------------------------------------------------------------------------+
-| ``request``          | The training instruction this step answers, ``None`` for an automatic  |
-|                      | step. See `Manual requests`_.                                          |
-+----------------------+------------------------------------------------------------------------+
-| ``evaluation_tasks`` | The tasks this step's evaluation runs: the seed tasks, then the        |
-|                      | promoted ones.                                                         |
-+----------------------+------------------------------------------------------------------------+
-| ``models``           | The model bindings the proposer may call. See `Call models and run     |
-|                      | trials`_.                                                              |
-+----------------------+------------------------------------------------------------------------+
-| ``manifest``         | The previous step's ``FailureManifest``, ``None`` before the first.    |
-+----------------------+------------------------------------------------------------------------+
-| ``rejected``         | The latest rejected proposals, oldest first. Each                      |
-|                      | ``RejectedProposal`` has ``step``, ``patch`` and ``reason``, so a      |
-|                      | method can stop proposing what the evaluation refused.                 |
-+----------------------+------------------------------------------------------------------------+
-| ``problems``         | Empty on the first call of a step; the validation problems of the      |
-|                      | previous patch on the retry.                                           |
-+----------------------+------------------------------------------------------------------------+
-| ``method_state``     | The state the method committed with the latest step, empty before its  |
-|                      | first. See `Keep state between steps`_.                                |
-+----------------------+------------------------------------------------------------------------+
-| ``last_outcome``     | The ``StepOutcome`` of the latest evaluated step, ``None`` before the  |
-|                      | first.                                                                 |
-+----------------------+------------------------------------------------------------------------+
-| ``trials``           | A ``TrialRunner`` for trial episodes of a tree.                        |
-+----------------------+------------------------------------------------------------------------+
-| ``agent_host``       | Set only for a proposer that runs a coding agent. See `Run a coding    |
-|                      | agent`_.                                                               |
-+----------------------+------------------------------------------------------------------------+
-
-The proposal
-~~~~~~~~~~~~
-
-A ``TreePatch`` maps a tree path to its new text, or to ``None`` to remove
-the file. A path the patch does not name keeps its text:
-
-.. code:: python
-
-   TreePatch({"rules.md": "Answer briefly.\n", "skills/old-skill/SKILL.md": None})
-
-``TreeProposal`` carries the patch and three optional fields:
-
-- ``requires``: what the change needs on the person's machine, as
-  ``reef.core.requirements`` items, beyond the request's own. See
-  `Manual requests`_.
-- ``notes``: a JSON mapping that the commit metrics keep as
-  ``proposal_notes``. Reef never reads it to make a decision.
-- ``method_state``: the method's new state. ``None`` keeps the committed
-  state.
-
-The return value decides what the step does:
-
-+---------------------------------+----------------------------------------------------------------+
-| ``propose`` returns             | The step                                                       |
-+=================================+================================================================+
-| ``TreeProposal(patch)``         | Applies the patch to ``context.tree``, validates the result,   |
-|                                 | and evaluates it.                                              |
-+---------------------------------+----------------------------------------------------------------+
-| ``TreeProposal(TreePatch({}))`` | Skips the evaluation, but commits ``method_state`` and         |
-|                                 | ``notes``.                                                     |
-+---------------------------------+----------------------------------------------------------------+
-| ``None``                        | Skips the step and records nothing for the method.             |
-+---------------------------------+----------------------------------------------------------------+
-
-If ``propose`` raises, the step fails and publishes nothing.
-
-Validation
-~~~~~~~~~~
-
-Reef validates the patched tree for the adapter before it runs an episode.
-Every path must sit on the layout and be of a kind the adapter renders, every
-file must pass its kind's content checks, and the tree must render. A patch
-that changes no text is a problem too.
-
-A patch with problems gets one retry: Reef calls ``propose`` again with the
-same context and ``problems`` set. A second patch with problems skips the
-step, and the reason names the problems. The episodes test only a valid tree.
-
-Keep state between steps
-------------------------
-
-A method keeps its search state (an archive, a population, a counter) in
-``method_state``, a JSON mapping. Reef commits the proposal's
-``method_state`` with the step, whatever the step's result, and passes it
-back as ``context.method_state`` at the next step. The state lives in the
-scenario's commit history, so it survives a restart and needs no files of
-the method's own.
-
-The result of an evaluated step reaches the method at its next proposal:
-``context.last_outcome`` is a ``StepOutcome`` with ``step``, ``patch``,
-``selected``, ``reason``, and the per-task ``candidate_scores`` and
-``current_scores`` (``None`` for an episode that could not run). It is the
-outcome of the latest step that evaluated the method's own proposal: a
-recheck and a client's proposal from ``POST /reef/harness/proposals`` leave
-it as it was. A method folds it into its state at the next step. Compare
-``last_outcome.step`` with the step the method proposed: a proposal that the
-step skipped (one that failed validation, say) has no outcome.
-
-.. code:: python
-
-   class CountingProposer(Proposer):
-       def propose(self, context):
-           state = dict(context.method_state)
-           outcome = context.last_outcome
-           if outcome is not None and outcome.step == state.get("proposed_step"):
-               state["wins"] = state.get("wins", 0) + int(outcome.selected)
-           patch = ...  # this step's change
-           return TreeProposal(patch, method_state={**state, "proposed_step": context.step})
-
-GEPA (``recipes/gepa/``) keeps its whole candidate archive this way, and
-Meta-Harness (``recipes/meta_harness/``) keeps its population of trees.
-
-Call models and run trials
---------------------------
-
-``context.models.served`` is the model under test. Named bindings, such as
-``context.models["teacher"]``, come from ``evolution.models``. Call a
-binding with ``binding.chat(messages, *, timeout_s=None, **params) -> str``.
-The messages use the OpenAI shape whatever the endpoint's dialect, and the
-call returns the assistant text. ``binding.complete(body)`` sends a raw
-request body and returns the provider's response.
-
-Every call counts against ``evolution.max_model_calls_per_step`` (0, no cap,
-by default). A call past the cap raises ``RuntimeError``. The step record's
-``proposer.json`` keeps every call when ``evolution.step_record_dir`` is set.
-
-``context.trials.run(tree, tasks)`` runs one episode of ``tree`` per task,
-in task order, and returns a ``ScoredEpisode`` for each, with ``score``
-(``None`` when the episode could not run), ``failure`` and ``reply``. Trials
-use the evaluation's worker pool, model binding and scorer, so a trial
-measures what the evaluation would. A method that probes its candidates
-before it settles on a patch, such as GEPA's minibatch check, uses trials
-instead of launching episodes itself.
-
-Run a coding agent
-------------------
-
-A proposer that runs a coding agent overrides the ``runs_agent`` property to
-return ``True``. When the deployment configures ``evolution.proposer_agent``,
-``context.agent_host`` is an ``AgentHost``: the adapter ``descriptor`` and
-its installed ``binary``, the agent's ``executor`` (its isolation, separate
-from the episodes), the step's record directory ``step_dir``, the
-``timeout_s`` of the whole run and the ``trial_timeout_s`` of each trial, and
-``calls``, the step's budget and record. Without that setting
-``agent_host`` is ``None``.
-
-``reef.harness.tree.TreeWorkspace`` gives the agent the head tree as plain
-files: ``TreeWorkspace.create(context.tree, root)`` writes them, the agent
-edits them with its own tools, and ``workspace.read()`` returns the patch
-from the head tree and the files the agent wrote off the layout. For model
-calls the agent process makes outside ``context.models``, call
-``agent_host.calls.spend()`` before each and ``agent_host.calls.record(entry)``
-after it. ``recipes.beta.reefine.agent`` is a complete agent proposer.
-
-Manual requests
----------------
-
-In ``manual`` or ``hybrid`` training mode, the proposer must override
-``reads_requests`` to return ``True``. Otherwise the recipe fails at startup
-with ``RecipeConfigError``. See `Manual training
-<../reference/http-api.rst#manual-training>`__ for the request route.
-
-``context.request`` is a ``TrainingRequest`` with ``id``, ``text``,
-``session``, ``release_id``, ``requires``, and ``client``, the requesting
-client's report of its machine. The text is client text: see `Untrusted
-input`_. In ``manual`` mode, ``samples`` is empty. In ``hybrid`` mode, it
-holds up to ``job_samples`` samples from the next automatic job data, and
-may be empty.
-
-Return ``requires`` in the proposal when the change needs something on the
-person's machine that the request did not name: an ``env`` variable, a
-``permission``, a ``service`` or a ``binary``. Reef merges them with the
-request's own items into the step's ``training_request`` metrics, and the
-release manifest serves them to clients.
-
-Reef evaluates a request's patch and applies the same ``evolution.publish``
-policy as for other steps. Pending client proposals and periodic rechecks
-cannot take over the step assigned to a request.
-
-Score an episode
-----------------
-
-``EpisodeScorer.score(task, result)`` scores one completed episode. Reef
-calls it for each side the selection policy evaluates; ``floor`` evaluates
-only the candidate. The ``result`` holds the exit code, stdout, stderr, and
-the parsed ``trajectory``. Episodes that could not run do not reach the
-scorer. A judge that calls a model overrides
-``score_with_models(task, result, models)`` instead.
+The ``[fib]`` prefix is a convention of this scorer: Reef passes the task text
+through unchanged. A judge that calls a model overrides
+``score_with_models(task, result, models)``, which receives the step's model
+bindings. The evaluation always calls ``score_with_models``, and its default
+calls ``score``. ``score`` stays abstract, so a judge implements it too, for
+example by raising an error (see `Scenario model configuration
+<../user-guide/scenario-models.rst#harness-evolution>`__).
 ``VerifierRewardScorer`` scores a Harbor task episode by its verifier's
 reward.
 
-Selection policies
-------------------
+Promote traffic prompts
+~~~~~~~~~~~~~~~~~~~~~~~
 
-``evolution.selection`` names the policy that decides publication:
-
-- ``score_comparison`` (the default) selects a candidate when the task
-  pairings it wins exceed the ones it loses by more than
-  ``evolution.min_win_margin``.
-- ``floor`` runs only the candidate and selects it when every task reaches
-  ``evolution.floor_score`` (default ``1.0``). An episode that could not run
-  misses the floor. ``current_scores`` is empty.
-- ``always`` selects every evaluated candidate.
-
-A custom policy reads ``EvaluationResult.metrics``, which holds the per-task
-score lists ``candidate_scores`` and ``current_scores`` in task order; a
-score is ``None`` when an episode could not run. The candidate is a
-``reef.evaluation.harness.HarnessCandidate``, whose ``method_state`` is the
-state the proposal committed. The policy below selects a candidate only when
-at least one task improves and none regresses:
-
-.. code:: python
-
-   from reef import CandidateEvaluator, SelectionDecision
-   from reef.evaluation import SelectionPlugin
-
-
-   class ParetoPlugin(SelectionPlugin):
-       def __init__(self, candidate_backend: CandidateEvaluator):
-           self.candidate_backend = candidate_backend
-
-       @classmethod
-       def from_config(cls, config, *, candidate_backend: CandidateEvaluator) -> "ParetoPlugin":
-           return cls(candidate_backend)
-
-       def evaluate(self, candidate):
-           return self.candidate_backend.evaluate(candidate)
-
-       def decide(self, candidate, evaluation):
-           pairs = zip(
-               evaluation.metrics["candidate_scores"],
-               evaluation.metrics["current_scores"],
-               strict=True,
-           )
-           scores = [(c if c is not None else -1e30, k if k is not None else -1e30) for c, k in pairs]
-           selected = all(c >= k for c, k in scores) and any(c > k for c, k in scores)
-           return SelectionDecision(
-               selected=selected,
-               policy="pareto",
-               reason="no task regressed and at least one improved" if selected else "a task regressed or none improved",
-               evaluation=evaluation,
-           )
-
-Set ``selection: my_pkg.policies:ParetoPlugin`` to use it. Reef checks the
-class when it loads the configuration and calls ``from_config`` for each
-scenario's candidate backend, with the ``config`` of the mapping form. A
-``SelectionPlugin`` must both evaluate and decide; keep publication in this
-flow so Reef can keep the head when a candidate is rejected.
-
-Promote failing prompts
------------------------
-
-``evolution.promote`` matters only with ``evolution.promote_failures``. Its
-``Promoter`` receives the step's samples and the ``FailureManifest`` through
-``promote(samples, *, manifest=None)`` and returns the prompts to add as
-permanent evaluation tasks. Reef deduplicates and screens the prompts, then
-caps how many it adds. Without a promoter, Reef uses the user prompt of
-each failing trace.
+With ``evolution.evaluation.promote_failures: true``, prompts of the step's
+traces become permanent evaluation tasks. ``evolution.evaluation.promote``
+names a ``Promoter`` (``reef.evaluation.harness``). Its ``promote(samples)``
+receives the step's trace samples and returns the prompts to promote. Without
+a promoter, Reef promotes the user prompt of every trace. Either way, Reef
+removes duplicates, screens the prompts, and limits how many it adds.
 
 Configure a deployment
 ----------------------
 
-The recipe config names the plugin classes, the tasks, the step size, and
-the seed, the directory that holds the first tree:
+A deployment names ``reef.recipe.harness:HarnessEvolutionRecipe`` and puts
+the method in ``evolution.method``:
 
 .. code:: yaml
 
@@ -381,187 +487,155 @@ the seed, the directory that holds the first tree:
      config:
        evolution:
          adapter: pi
-         binary: pi
-         batch_size: 1
          seed: methods/seed            # holds rules.md, skills/<name>/SKILL.md, ...
-         propose: methods.mine:FinalLineRule
-         evaluate: methods.mine:ExactAnswer
-         tasks:
-           - "[fib] Compute fib(90) exactly. Reply with the integer alone on the last line."
-         models:                       # optional extras; each key read via api_key_env
-           teacher:
-             url: https://api.openai.com
-             model: gpt-4o
-             api_key_env: OPENAI_API_KEY
+         method: methods.reflect:Reflect
+         evaluation:
+           tasks:
+             - "[fib] Compute fib(90) exactly. Reply with the integer alone on the last line."
+           scorer: methods.scoring:ExactAnswer
+           policy: compare
    inference:
+     upstream-url: ${REEF_UPSTREAM_URL}
      upstream-model: qwen3-8b
 
-``seed`` becomes the base release of a new scenario. A relative path
-resolves against the directory ``reef serve`` runs in, and the seed must
-pass validation for the adapter, or startup fails. A scenario that already
-has releases keeps its head: the seed applies only to a new scenario.
+``reef serve -c`` starts this deployment. Start Reef where it can import the
+method package. Give ``-c`` an absolute path, or Reef resolves it against the
+working directory. The files in ``tutorials/evolve-your-harness/configs/``
+are working examples. `Recipe configuration
+<../reference/configuration.rst#recipe-configuration>`__ describes presets and
+composite recipes. `Harness evolution keys
+<../reference/configuration.rst#harness-evolution-keys>`__ lists every field.
 
-The YAML above is a standalone recipe preset. Save it as
-``recipes/<name>.yaml`` and set ``REEF_RECIPE_CONFIG_DIR`` to that directory;
-there is no default directory. Presets are read as-is, so write literal
-values instead of ``${VAR}``. Variable interpolation applies to deployment
-configs.
+``seed`` is the directory of the first tree. It becomes the base release of a
+new scenario, and a scenario that already has releases keeps its head. A
+relative path resolves against the directory that ``reef serve`` runs in. The
+seed must pass validation for the adapter, or startup fails.
 
-A preset describes the method and model but does not start the serving
-processes. ``reef serve -c`` reads a deployment config. The one in
-``tutorials/evolve-your-harness/configs/serve.yaml`` is a working example:
+Keep the evaluation tasks short: a ``compare`` step scores each task on the
+candidate, and on the head when the history holds no score for it.
+
+Method settings
+~~~~~~~~~~~~~~~
+
+A method with settings overrides the class method ``from_config(config)``.
+The deployment then uses the mapping form,
+``method: {module: methods.reflect:Reflect, config: {model: reflection}}``.
+The default ``from_config`` builds the class with no arguments and refuses a
+non-empty ``config``. Parse the config into a ``PluginSettings`` dataclass
+(``reef.core.plugins``), which refuses an unknown key:
+
+.. code:: python
+
+   from dataclasses import dataclass
+
+   from reef.core.config import config_option
+   from reef.core.plugins import PluginSettings
+
+
+   @dataclass(frozen=True)
+   class ReflectSettings(PluginSettings):
+       model: str = config_option("served", help="The model binding that writes the rules.")
+
+
+   class Reflect(Method):
+       def __init__(self, settings: ReflectSettings) -> None:
+           self.model = settings.model
+
+       @classmethod
+       def from_config(cls, config):
+           return cls(ReflectSettings.parse(config, plugin_class=cls))
+
+The step then calls ``tools.models[self.model]``. A model other than
+``served`` comes from ``evolution.models``, and its key comes from the
+environment variable that ``api_key_env`` names:
 
 .. code:: yaml
 
-   recipe:
-     implementation: <name>  # resolves to recipes/<name>.yaml
-   reef:
-     token: reef-local
-     port: 8900
-   inference:
-     upstream-url: ${REEF_UPSTREAM_URL}
-     upstream-api-key: ${REEF_UPSTREAM_API_KEY}
-     upstream-model: ${REEF_MODEL}
-
-The tutorial selects the dotted class directly and keeps its recipe settings
-in the same versioned deployment file. See `Recipe configuration
-<../reference/configuration.rst#recipe-configuration>`__ for both forms.
-
-Keep the ``tasks`` list short: Reef runs them in each evaluation step. Start
-Reef where it can import the method package. Give ``-c`` an absolute path,
-or Reef resolves it against the working directory. See `Harness evolution
-keys <../reference/configuration.rst#harness-evolution-keys>`__ for every
-field.
-
-Two trace sources
-~~~~~~~~~~~~~~~~~
-
-The deployment's ``pipeline`` section selects the source of each step's
-traces. ``pipeline.sample2job.config.job_samples`` sets the number of traces
-in one step. Without it, ``recipe.config.evolution.batch_size`` (default 1)
-gives the number.
-
-- The recipe's default stages train on valid reports with explicit scores. Use
-  them when a grader, test, or user action supplies an outcome.
-- The inference stages train on recorded inference requests and do not require
-  reports. A step starts every ``job_samples`` requests. These samples carry
-  no ``reward``, which the proposer must handle. The SkillClaw night example
-  judges its own unscored samples later. Name the stages as follows:
-
-  .. code:: yaml
-
-     pipeline:
-       record2record:
-         module: reef.record2record:InferenceRecord2Record
-       record2sample:
-         module: reef.record2sample.traces:InferenceSamples
+   evolution:
+     method: {module: methods.reflect:Reflect, config: {model: reflection}}
+     models:
+       reflection:
+         url: https://api.openai.com
+         model: gpt-4o
+         api_key_env: OPENAI_API_KEY
 
 Package a method
 ----------------
 
-A method that binds its own defaults or reads settings of its own ships a
-``HarnessEvolutionRecipe`` subclass. Its ``evolution_spec()`` returns the
-default proposer, scorer, selection and seed, the counterpart of
-``training_spec()`` for weight training; a deployment's
-``evolution.propose``, ``evolution.evaluate``, ``evolution.selection`` and
-``evolution.seed`` replace each one:
-
-.. code:: python
-
-   from dataclasses import dataclass, field
-   from pathlib import Path
-
-   from reef.core.plugins import PluginReference
-   from reef.recipe.harness import HarnessEvolutionRecipe, HarnessEvolutionSpec
-
-   from .proposer import FinalLineRule
-   from .scorer import ExactAnswer
-
-
-   @dataclass(frozen=True)
-   class FinalLineRecipe(HarnessEvolutionRecipe):
-       name: str = field(default="final_line", kw_only=True)
-
-       @classmethod
-       def evolution_spec(cls) -> HarnessEvolutionSpec:
-           return HarnessEvolutionSpec(
-               proposer=PluginReference(FinalLineRule),
-               scorer=PluginReference(ExactAnswer),
-               seed=Path(__file__).with_name("seed"),
-           )
-
-Every method package keeps each part in the same file:
+A method in this repository is one package under ``recipes/``:
 
 .. code:: text
 
-   recipe.py       the HarnessEvolutionRecipe subclass: its name, its config fields, and evolution_spec()
-   proposer.py     its Proposer
-   scorer.py       its EpisodeScorer, when it scores episodes its own way
-   selection.py    its SelectionPlugin, when it selects its own way
-   processor.py    its record stages, when it reads records its own way
-   seed/           its first tree
+   recipes/<name>/
+     __init__.py     exports the Method
+     method.py       the Method, and its PluginSettings when it takes settings
+     *.md            its prompts, read at import
+     README.md       what the method does, how it uses the workspace, and how to run it
+     examples/       runnable deployments
 
-``recipes/gepa/``, ``recipes/meta_harness/`` and ``recipes/beta/reefine/``
-follow this layout.
+A method needs no recipe of its own. Subclass ``HarnessEvolutionRecipe`` only
+when the method changes more than the tree. SkillClaw's recipe adds a
+delivery surface that injects its skill catalog. The beta Reefine recipe runs
+a coding agent in a sandbox that it configures. A subclass that reads keys of
+its own removes them from the ``evolution`` section in ``_recipe_kwargs``
+before it calls the base class.
+
+These packages are complete methods:
+
+- `GEPA <../../recipes/gepa/README.md>`__: reflective prompt evolution. It
+  keeps a Pareto archive in ``state/``, scores minibatches with
+  ``tools.evaluate``, and settles each candidate from the history.
+- `Meta-Harness <../../recipes/meta_harness/README.md>`__: a model reads the
+  earlier candidates, their scores and their notes from the history, and
+  writes a whole new tree.
+- `ACE <../../recipes/ace/README.md>`__ (Agentic Context Engineering): a
+  reflector call and a curator call per trace edit a playbook. ``state/``
+  holds the playbook, and ``rules.md`` shows it to the agent.
+- `ReasoningBank <../../recipes/reasoning_bank/README.md>`__: each trace is a
+  success or a failure, by its score or by a judge model. An extractor turns
+  it into memory items, each an Agent Skill ``skills/rb-<slug>/SKILL.md``.
 
 Untrusted input
 ---------------
 
-Treat samples and request text as client-controlled data. If a method puts
-sample text in a model prompt, fence it first. With ``promote_failures``, a
-failing sample's user prompt may also become an evaluation task. Read
-``sources`` when a decision depends on who supplied a sample.
+Treat traces and request text as client-controlled data. If a method puts
+their text in a model prompt, fence it first. With ``promote_failures``, a
+trace's user prompt can also become an evaluation task. Read ``trace.client``
+when a decision depends on who supplied a trace:
 
 .. code:: python
 
-   import json
-
    from reef.core.prompts import untrusted_text
-   from reef.core.trajectories import recorded_payloads
 
-
-   class TaggedFailures(Proposer):
-       def propose(self, context):
-           tagged = [
-               sample
-               for sample, source in zip(context.samples, context.sources, strict=True)
-               if source.client != "untagged"
-           ]
-           shown = untrusted_text(json.dumps([recorded_payloads(sample) for sample in tagged], default=str))
-           prompt = f"Failing requests:\n{shown}\n\nPropose one skill."
-           reply = context.models.served.chat([{"role": "user", "content": prompt}])
-           ...
+   tagged = [trace for trace in workspace.traces() if trace.client != "untagged"]
+   shown = untrusted_text("\n\n".join(f"{trace.task}\n{trace.reply}" for trace in tagged))
+   prompt = f"Requests from tagged clients:\n{shown}\n\nWrite one skill that would help."
 
 ``untrusted_text`` places text inside a block with random delimiters. Text
-inside cannot close the block and pose as the prompt's author.
-
-Each ``SampleSource`` has ``record`` (the agent record id of the sample's
-last request, ``None`` when it has none) and ``client`` (the
-``x-reef-tag-client`` header value, else the session tag, else
-``untagged``). A client can set its own tag; trust it as an identity only
-if a gateway sets it.
+inside cannot close the block and pose as the prompt's author. A client can
+set its own tag, so trust ``trace.client`` as an identity only if a gateway
+sets the tag.
 
 Reef screens prompts before it adds them as evaluation tasks. It skips
 prompts that carry credentials or instruction overrides, such as ``ignore
 the previous instructions``, a forged ``new system prompt:``, or a
 chat-template control token. The step counts these under
-``screened_tasks``. Promotion is capped by
-``evolution.max_promoted_per_client`` for each tagged client and
-``evolution.max_promoted_tasks`` overall.
+``screened_tasks``. ``evolution.evaluation.max_promoted_per_client`` limits
+the promoted prompts of each tagged client, and
+``evolution.evaluation.max_promoted_tasks`` limits all of them.
 
 Put code-bearing kinds that client text can shape (``code_extension``,
-``native_tool`` and ``native_hook``) in ``evolution.review_kinds`` so a
+``native_tool`` and ``native_hook``) in ``evolution.review_kinds``, so that a
 person reviews them before publication. A ``native_graph`` holds no code and
-can publish on the evaluation alone; add it to ``review_kinds`` if every
-loop change should be reviewed. A ``native_loop`` always waits for a person.
+can publish on the evaluation alone; add it to ``review_kinds`` if every loop
+change needs a review. A ``native_loop`` always waits for a person.
 
 .. warning::
 
    Do not put credentials in tree files. Validation refuses a config file
    with a credential field (a name such as ``apiKey``, ``api_key_env``,
    ``token``, ``secrets`` or ``password``) and any other file that holds a
-   credential-shaped literal, whether the file comes from the seed, the
-   method's proposal or a client's proposal. The served model binds at
-   render time through the adapter's model binding, and a named model in
-   ``evolution.models`` reads its key from ``api_key_env``, so a tree never
-   needs one.
+   credential-shaped literal. This applies to the seed, a method's candidate
+   and a client's proposal. The served model binds at render time through the
+   adapter's model binding, and a named model in ``evolution.models`` reads
+   its key from ``api_key_env``, so a tree never needs one.

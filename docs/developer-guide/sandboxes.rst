@@ -14,8 +14,9 @@ Callers do not need to know which sandbox runs their commands. Only
 - ``remote_executor(kind, section, environ)`` returns the cloud sandbox of
   provider ``kind`` (a key of ``REMOTE_EXECUTORS``: ``e2b`` or ``modal``) from
   that provider's options in ``section``. A caller with its own settings, such
-  as ``evolution.proposer_agent``, passes its section; the factory reads only
-  the provider's options, ``forward_ports`` and ``env_from``.
+  as the beta Reefine recipe's ``evolution.agent``, passes its
+  section; the factory reads only the provider's options, ``forward_ports``
+  and ``env_from``.
 - ``reef.sandbox.remote.REMOTE_TASK_ENVIRONMENTS`` lists the Harbor environment
   types that run a task's containers on a provider, each with the variables
   its credentials come from.
@@ -110,7 +111,7 @@ processes but does not delete caller-owned files. ``start`` opens the
 executor's session. When that opens a new session, such as a cloud sandbox, the
 environment owns it and ``stop(delete=True)`` closes it. Passing an open
 session borrows it for a trial. Stopping the trial's environment leaves the
-shared session running; its owner must close it after the proposer finishes.
+shared session running; its owner must close it after the agent finishes.
 
 Cancelling a command terminates its environment's processes before returning.
 Cancellation also closes the session, including a borrowed one. Ordinary
@@ -120,7 +121,8 @@ rebuilds are unsupported.
 
 Local execution provides no sandbox isolation. Bubblewrap and the cloud sandboxes retain their
 existing read-only inputs, writable state and network behavior. Configuration
-remains independent for evaluation and proposer execution; see
+remains independent for the evaluation episodes and for an agent that a method
+runs; see
 `Running episodes <../user-guide/evolve-your-harness.rst#running-episodes>`__.
 
 ``execute`` and ``run_sync`` bridge existing synchronous callers to this async

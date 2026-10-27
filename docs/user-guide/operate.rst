@@ -53,10 +53,10 @@ Read the proposal inbox
 
 .. code:: bash
 
-   ls -R .reef/proposals/code-repair
-   cat .reef/proposals/code-repair/settled/*.json
+   ls -R .reef/harness/code-repair/harness/proposals
+   cat .reef/harness/code-repair/harness/proposals/settled/*.json
 
-A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``evolution.proposals_dir`` (default ``.reef/proposals``), one directory per scenario. Each file holds the body the agent sent (``patch``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
+A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``<evolution.state_dir>/<scenario>/<component>/proposals/``, where ``evolution.state_dir`` defaults to ``.reef/harness`` and ``<component>`` is the release component the recipe evolves: ``harness`` for ``HarnessEvolutionRecipe``, as in the commands above (see `History <evolve-your-harness.rst#history>`__). Each file holds the body the agent sent (``patch``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
 
 .. list-table::
    :header-rows: 1
@@ -64,7 +64,7 @@ A harness scenario keeps the proposals its agents sent through ``POST /reef/harn
 
    * - Directory
      - Meaning
-   * - the scenario directory itself
+   * - ``proposals/`` itself
      - pending: admitted at the route, not yet taken by a step
    * - ``claimed/``
      - taken by the step now running; a step that failed before it settled leaves the file here, and no later step takes it again
@@ -73,7 +73,7 @@ A harness scenario keeps the proposals its agents sent through ``POST /reef/harn
    * - ``settled/``
      - the evaluation settled it; ``result`` holds the step, whether it was selected, and the selection's reason
 
-The commit that settled a proposal carries ``proposal: {id, session, reason}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. A step takes the oldest pending proposal before it asks the method's own ``propose``; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
+The commit that settled a proposal carries ``proposal: {id, session, release_id, reason}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. An automatic step takes the oldest pending proposal in place of running the method; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
 
 Read what a release requires
 ----------------------------
@@ -379,7 +379,7 @@ not change. A scenario does not open, and the error says why, when:
 To change an imported task, give it a new name.
 
 A harness evolution recipe evaluates on the imported eval tasks with
-``evolution.eval_task_store: imported-tasks`` and an adapter that runs a task
+``evolution.evaluation.task_store: imported-tasks`` and an adapter that runs a task
 directory, such as ``terminus``. Each step reads the eval split again, so a
 task that you import later joins the next step. See `Harness evolution keys
 <../reference/configuration.rst#harness-evolution-keys>`__.
@@ -491,5 +491,6 @@ new host with the same configuration continues every scenario from the
 database and the two remote stores.
 
 Some recipes have their own directories, for example the harness evolution
-recipe's ``evolution.step_record_dir`` and ``evolution.proposals_dir``. These directories are not scenario
-storage. Keep them on a persistent volume.
+recipe's ``evolution.state_dir``, which holds each scenario's proposals,
+history and step records. These directories are not scenario storage. Keep
+them on a persistent volume.

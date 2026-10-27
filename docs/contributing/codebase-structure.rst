@@ -13,13 +13,14 @@ at ``reef/train/harness_backend/`` and the harness source tree at
 ``reef/recipe/sft/``, and its Slime loss family is in
 ``reef/train/slime_backend/sft.py``. Paper-backed methods live in separate
 packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``gepa``,
-``meta_harness``, ``skillclaw``). Beta methods live under ``recipes/beta/``
-(``coral``, ``spade``, ``autoenvscaling``, ``reefine``) until they publish
-reproducible results. A weight method holds its recipe, processor
-and training objective, with the ``slime/`` subpackage only the training
-plane imports. A harness method holds its recipe and proposer, and a scorer
-or selection policy when it needs its own. Nothing under ``reef/`` imports a
-method package.
+``meta_harness``, ``skillclaw``, ``ace``, ``reasoning_bank``). Beta methods
+live under ``recipes/beta/`` (``coral``, ``spade``, ``autoenvscaling``,
+``reefine``) until they publish reproducible results. A weight method holds
+its recipe, processor and training objective, with the ``slime/`` subpackage
+only the training plane imports. A harness method holds its ``Method``, its
+prompts, and a scorer when it needs its own; it adds a recipe subclass only
+when it changes more than the tree, such as the delivery surface. Nothing
+under ``reef/`` imports a method package.
 
 Reef is organized around an application kernel and three capability domains,
 not a strict stack of top-level packages. The arrows below show the primary
@@ -97,9 +98,10 @@ import a concrete integration.
 |                         | ``ReportSamples``, ``JudgedSamples``), and the generator | training loops                             |
 |                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | proposing candidates, training loops,      |
-|                         | episodes, built-in selection policies, and the           | artifact publication                       |
-|                         | ``evaluation`` plugin configuration                      |                                            |
+| ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | making candidates, training loops,         |
+|                         | episodes, the harness history and its score cache, the   | artifact publication                       |
+|                         | harness publication policies, and the ``evaluation``     |                                            |
+|                         | plugin configuration                                     |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/sample2job/``    | shaping the samples of the selected record set units     | which records train, the training loop,    |
 |                         | into one job's data (``Sample2Job``)                     | step signals                               |
@@ -123,8 +125,9 @@ import a concrete integration.
 | ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
 |                         | and environment lifecycle through Harbor                 | policy                                     |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``recipes/``            | one method per package: recipe, processor, objective,    | shared machinery, or another method        |
-|                         | and its runnable examples                                |                                            |
+| ``recipes/``            | one method per package: the recipe, processor and        | shared machinery, or another method        |
+|                         | objective of a weight method, or the ``Method`` of a     |                                            |
+|                         | harness method, with its runnable examples               |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``tests/``              | repository-level tests grouped by responsibility         | tests hidden inside an integration subtree |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -332,8 +335,11 @@ The extension points those packages expose are in `Python API
   Put concrete inference engines and their request/control adapters in
   ``reef/inference/<integration>/``; put implementation tied to a concrete
   training stack in its own ``reef/train/<integration>/`` subtree.
-  ``reef/train/harness_backend/`` is the general harness evolution engine,
-  and ``reef/harness/tree/`` holds the source tree it evolves.
+  ``reef/train/harness_backend/`` is the general harness evolution engine:
+  the step, its workspace, and the method contract.
+  ``reef/evaluation/harness/`` holds the harness evaluation, the history and
+  the publication policies, and ``reef/harness/tree/`` holds the source tree
+  the engine evolves.
   ``reef/train/slime_backend/`` is the weights counterpart.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into samples? Put the

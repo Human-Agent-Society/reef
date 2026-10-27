@@ -11,9 +11,9 @@ Accepting records, replaying them after a restart, holding a job's data until it
 acknowledged, committing algorithm state, submitting training jobs, and
 publishing the next version are Reef's job, not the method's.
 
-This page covers a **weight** recipe. For a harness-evolution method with a
-proposer, an episode scorer, and a selection policy against a fixed model, see
-`Write a harness method <write-a-harness-method.rst>`__.
+This page covers a **weight** recipe. For a harness evolution method, a
+``Method`` that edits a harness tree for a fixed model, see `Write a harness
+method <write-a-harness-method.rst>`__.
 
 .. code:: mermaid
 
@@ -263,9 +263,9 @@ only its own metrics. A commit refuses an evaluation metric whose key is
 already a training metric. The recipe's ``candidate_evaluation``
 decides what happens to it. A weight recipe declares its evaluator in the
 deployment config. The top-level ``evaluation`` section serves weight recipes
-only. A harness recipe names its plugin in ``evolution.selection`` instead
-(see `Write a harness method
-<write-a-harness-method.rst#selection-policies>`__):
+only. A harness recipe chooses its publication policy in
+``evolution.evaluation`` instead (see `Write a harness method
+<write-a-harness-method.rst#evaluation>`__):
 
 .. code:: yaml
 

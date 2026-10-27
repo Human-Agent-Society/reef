@@ -196,7 +196,7 @@ reef.post(
 
 用模型 API（而非 GPU），根据打分反馈进化编码 agent 的 skills 和 rules。
 
-Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。proposer 为这个 tree 写一个 patch，评估在候选版本上运行真实的 agent episode，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
+Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估在候选版本上运行真实的 agent episode，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
 cd tutorials/evolve-your-harness
@@ -220,7 +220,7 @@ recipe 链接到其指南，每个已测 benchmark 链接到其结果页，[Reci
 |---|---|---|---|---|
 | 开放式发现 | 对一个有可度量目标、没有已知答案的难题反复尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
 | 有已知答案的离线任务 | 来自固定集合的独立任务，每个都有参考答案 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/)、[SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/)、[SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/)、[OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Meta-Harness](recipes/meta_harness/README.md) | 已测：[IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results)、[AIME 2024](recipes/opd/examples/math/README.md#results)、[AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract)、[SciKnowEval](recipes/sdpo/examples/sciknoweval/README.md#results)、[ToolAlpaca](recipes/sdft/examples/skill_stream/README.md#results)、[Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results)。 |
-| 从使用中在线学习 | 与用户的会话，交互本身就是信号 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | 已测：[GSM8K 与模拟学生用户](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
+| 从使用中在线学习 | 与用户的会话，交互本身就是信号 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/)、[ACE](recipes/ace/README.md)、[ReasoningBank](recipes/reasoning_bank/README.md) | 已测：[GSM8K 与模拟学生用户](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
 
 [`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解
 反馈、候选修改和发布流程，可以从[编程 harness 教程](tutorials/evolve-your-harness/README.md)开始。

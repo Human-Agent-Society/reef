@@ -32,7 +32,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| propose a harness edit and grade an episode | `Harness method <#harness-method>`__             | harness-evolution methods    |
+| evolve a harness tree and score an episode  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evaluate a produced candidate               | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -146,10 +146,13 @@ for every scenario in a deployment.
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── HarnessEvolutionRecipe   harness tree + episodes  reef.recipe.harness
-       ├── GEPARecipe                                     recipes.gepa.recipe
-       ├── MetaHarnessRecipe                              recipes.meta_harness.recipe
        ├── SkillClawRecipe                                recipes.skillclaw.recipe
        └── ReefineRecipe (beta)                           recipes.beta.reefine
+
+A harness method is a ``Method`` that ``HarnessEvolutionRecipe`` runs, not a
+recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
+``evolution.method``. SkillClaw and Reefine subclass it because they change
+more than the tree.
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the
@@ -162,9 +165,10 @@ recipe to remain record-only.
 +---------------------------------+------------------------------------------------------+
 | train and publish weights       | subclass ``WeightTrainingRecipe``                    |
 +---------------------------------+------------------------------------------------------+
-| use Reef's harness loop         | configure ``HarnessEvolutionRecipe``; subclass it    |
-|                                 | for a method's defaults (``evolution_spec()``) or    |
-|                                 | extra validation                                     |
+| use Reef's harness loop         | configure ``HarnessEvolutionRecipe`` with a          |
+|                                 | ``Method`` in ``evolution.method``; subclass it only |
+|                                 | when the method changes more than the tree, such as  |
+|                                 | the delivery surface                                 |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
 |                                 | ``build_surface()``                                  |
@@ -1401,129 +1405,131 @@ the selected backend resolves its own loss implementation lazily.
 Harness method
 --------------
 
-A harness evolution method fills up to four slots with plugin classes. Reef
-runs the loop around them: it reads the head tree from the scenario's git
-history, asks the proposer for a patch, validates the patched tree, runs the
-evaluation, and publishes the candidate or keeps the head. `Write a harness
-method <../developer-guide/write-a-harness-method.rst>`__ is the guide; this
-section is the reference.
+A harness evolution method is one ``Method`` class. Reef runs the loop around
+it: it reads the head tree from the scenario's git history, writes the step's
+workspace, calls ``step``, validates the tree that the method leaves,
+evaluates it under ``evolution.evaluation``, and publishes the candidate or
+keeps the head. `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ is the guide; this section
+is the reference.
 
 .. code:: python
 
-   from reef.evaluation import SelectionPlugin
-   from reef.evaluation.harness import EpisodeScorer
-   from reef.train.harness_backend import ProposalContext, Proposer, TreeProposal
+   from reef.evaluation.harness import EpisodeScorer, History, Promoter
+   from reef.harness.tree import HarnessTree, TreePatch
+   from reef.train.harness_backend import Method, ModelCalls, StepResult, Tools, Trace, Workspace
 
-   class MyProposer(Proposer):
-       def propose(self, context: ProposalContext) -> TreeProposal | None: ...
+   class MyMethod(Method):
+       def step(self, workspace: Workspace, tools: Tools) -> StepResult: ...
 
    class MyScorer(EpisodeScorer):
        def score(self, task, result) -> float: ...
 
-   class MySelection(SelectionPlugin):  # optional
-       @classmethod
-       def from_config(cls, config, *, candidate_backend) -> "MySelection": ...
-       def evaluate(self, candidate) -> EvaluationResult: ...
-       def decide(self, candidate, evaluation) -> SelectionDecision: ...
-
 A deployment names each class as ``package.module:ClassName``, or as a mapping
 with ``module`` and ``config``. Reef builds it with the class method
-``from_config``. ``Proposer``, ``EpisodeScorer`` and ``Promoter`` inherit
+``from_config``. ``Method``, ``EpisodeScorer`` and ``Promoter`` inherit
 ``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
-builds the class with no arguments and refuses a non-empty ``config``.
-``Proposer``, ``Promoter``, ``ProposalContext`` and ``TreeProposal`` come from
-``reef.train.harness_backend``; ``HarnessTree`` and ``TreePatch`` come from
-``reef.harness.tree``.
+builds the class with no arguments and refuses a non-empty ``config``. A
+class with settings parses ``config`` into a ``reef.core.plugins.PluginSettings``
+dataclass, which refuses an unknown key.
 
-+--------------------------------+----------------------------------------------------------+
-| Member                         | Contract                                                 |
-+================================+==========================================================+
-| ``context.step``               | this step's number, at least 1                           |
-+--------------------------------+----------------------------------------------------------+
-| ``context.tree``               | the head ``HarnessTree``: source path to text, the       |
-|                                | files the patch applies to                               |
-+--------------------------------+----------------------------------------------------------+
-| ``context.descriptor``         | the adapter the tree renders for; it says which kinds    |
-|                                | and config targets a tree may hold                       |
-+--------------------------------+----------------------------------------------------------+
-| ``context.samples``            | the job data's ATIF ``TrajectorySample`` values, with    |
-|                                | one ``SampleSource`` per sample in ``context.sources``   |
-+--------------------------------+----------------------------------------------------------+
-| ``context.request``            | the ``TrainingRequest`` this step answers, ``None``      |
-|                                | for an automatic step                                    |
-+--------------------------------+----------------------------------------------------------+
-| ``context.evaluation_tasks``   | the tasks this step's evaluation runs, the seed          |
-|                                | tasks first                                              |
-+--------------------------------+----------------------------------------------------------+
-| ``context.models``             | the method's only path to a model: ``models.served``     |
-|                                | is the model under test, ``models["teacher"]`` comes     |
-|                                | from ``evolution.models``; every call counts against     |
-|                                | ``evolution.max_model_calls_per_step``                   |
-+--------------------------------+----------------------------------------------------------+
-| ``context.manifest``           | the previous step's ``FailureManifest``, the per-task    |
-|                                | record of which episodes failed and how; ``None``        |
-|                                | before the first settled step                            |
-+--------------------------------+----------------------------------------------------------+
-| ``context.rejected``           | the latest rejected proposals, oldest first, each        |
-|                                | with its step, patch and reason                          |
-+--------------------------------+----------------------------------------------------------+
-| ``context.problems``           | empty on a step's first proposal; on the retry, the      |
-|                                | validation problems of the first                         |
-+--------------------------------+----------------------------------------------------------+
-| ``context.method_state``       | the JSON state the method committed with the             |
-|                                | latest step, empty before its first                      |
-+--------------------------------+----------------------------------------------------------+
-| ``context.last_outcome``       | the latest evaluated step's ``StepOutcome``: its         |
-|                                | step, patch, whether it was selected, the reason,        |
-|                                | and both score vectors; ``None`` before the first        |
-+--------------------------------+----------------------------------------------------------+
-| ``context.trials``             | a ``TrialRunner`` whose ``run(tree, tasks)`` scores      |
-|                                | trial episodes on the evaluation's workers; ``None``     |
-|                                | when the deployment allows none                          |
-+--------------------------------+----------------------------------------------------------+
-| ``context.agent_host``         | set when ``runs_agent`` is true and the deployment       |
-|                                | configured ``evolution.proposer_agent``                  |
-+--------------------------------+----------------------------------------------------------+
-| ``reads_requests``             | property, ``False`` by default: ``True`` when the        |
-|                                | proposer answers training requests (``manual`` and       |
-|                                | ``hybrid``)                                              |
-+--------------------------------+----------------------------------------------------------+
-| ``runs_agent``                 | property, ``False`` by default: ``True`` when the        |
-|                                | proposer runs a coding agent on ``context.agent_host``   |
-+--------------------------------+----------------------------------------------------------+
-| ``TreeProposal``               | ``patch`` (a ``TreePatch``: path to new text, or to      |
-|                                | ``None`` for a removal), ``requires`` (what the          |
-|                                | change needs where the harness runs), ``notes`` (a       |
-|                                | JSON mapping the commit records under                    |
-|                                | ``proposal_notes``) and ``method_state`` (replaces       |
-|                                | the committed state; ``None`` keeps it)                  |
-+--------------------------------+----------------------------------------------------------+
-| ``result``                     | one finished episode: exit code, stdout, stderr, and     |
-|                                | the parsed ``trajectory``                                |
-+--------------------------------+----------------------------------------------------------+
-| ``evaluation.metrics``         | guarantees ``candidate_scores`` and                      |
-|                                | ``current_scores``: per-task score lists in task         |
-|                                | order, ``None`` for an episode that could not run;       |
-|                                | ``current_scores`` is empty under                        |
-|                                | ``selection: floor``, which runs the candidate alone     |
-+--------------------------------+----------------------------------------------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 36 64
 
-Returning ``None`` from ``propose`` skips the step: its row's ``skipped``
-reads ``no proposal``, and the method's state stays as it was. A
-``TreeProposal`` with the empty patch skips the step too, but the step
-commits its ``method_state`` and records its ``notes``. A patch whose tree fails
-validation gets one retry with the problems in ``context.problems``; a second
-failure skips the step. A model-based judge overrides
-``EpisodeScorer.score_with_models(task, result, models)`` instead of
-``score``.
+   * - Member
+     - Contract
+   * - ``Method.step(workspace, tools)``
+     - edit ``workspace.harness`` into the step's candidate and return a
+       ``StepResult``; leave the tree unchanged to skip the step
+   * - ``Workspace``
+     - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
+       paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
+       ``tree()``, ``write_tree(tree)``, ``traces()``, ``request()`` (a
+       ``TrainingRequest`` or ``None``), ``tasks()``,
+       ``evaluation_repeats()`` (the episodes per task and tree, 0 when the
+       deployment configured no scorer), ``host()``, ``history()`` and
+       ``state_files()`` (every file of ``state/`` as a path mapped to its
+       text; ``ValueError`` past 16 MiB or for a file that is not UTF-8
+       text)
+   * - ``Trace``
+     - ``directory``, ``task``, ``reply``, ``score``, ``feedback``,
+       ``record`` and ``client``; ``trajectory()`` reads the ATIF
+       trajectory
+   * - ``Tools.models``
+     - a ``ModelBindings``: ``served`` and every ``evolution.models`` entry;
+       ``chat(messages, *, timeout_s=None, **params)`` returns the assistant
+       text, ``complete(body)`` the provider's response. Every call counts
+       against ``evolution.max_model_calls_per_step`` and lands in
+       ``calls.json``
+   * - ``Tools.calls``
+     - the step's ``ModelCalls``: ``spend()`` counts one call and raises
+       ``RuntimeError`` past the budget, ``record(entry)`` appends one call
+       to ``calls.json``, and ``note(kind, text, *, failed=False)`` adds one
+       line to the step's activity
+   * - ``Tools.check(tree)``
+     - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
+       ``problems`` and ``message()``
+   * - ``Tools.evaluate(tree, tasks, *, repeats=1)``
+     - ``repeats`` ``EpisodeRecord`` values per task of the list ``tasks``
+       (a single string is refused), task by task; reuses the scored
+       episodes the history holds; ``RuntimeError`` without a scorer, or
+       when the call needs more episodes than
+       ``evolution.max_episodes_per_step`` leaves, and then no episode runs;
+       ``ValueError`` for a tree that fails ``check``
+   * - ``StepResult``
+     - ``summary`` (plain text, the commit's ``method_summary``), ``notes``
+       (a JSON object, refused otherwise; the commit's ``method_notes``) and
+       ``requires`` (``reef.core.requirements`` items, read on a request step
+       only); all optional
+   * - ``History``
+     - ``candidates`` (``CandidateRecord`` by tree checksum), ``episodes``
+       and ``decisions`` in file order; ``tree(checksum)``,
+       ``episodes_of(checksum)``, ``scores(checksum, tasks, *, repeats=1)``,
+       ``decision(step)`` and ``episode_dir(episode)``
+   * - ``CandidateRecord``
+     - ``tree``, ``step``, ``origin`` (``seed``, ``method``, ``proposal`` or
+       ``release``), ``parent``, ``summary`` and ``notes``
+   * - ``EpisodeRecord``
+     - ``episode``, ``tree``, ``task``, ``task_key``, ``repeat``,
+       ``context``, ``step``, ``score`` (``None`` for an episode that could
+       not run), ``failure``, ``reply``, ``residue``, ``agents``, ``path``
+       and ``transcript_read``
+   * - ``DecisionRecord``
+     - ``step``, ``tree`` (the candidate's checksum), ``head`` (the checksum
+       of the head tree that the step started from), ``selected``
+       (published, or held for review), ``policy`` and ``reason``
+   * - ``EpisodeScorer.score(task, result)``
+     - a finite float for one finished episode, higher is better; ``result``
+       holds ``exit_code``, ``stdout``, ``stderr``, the parsed
+       ``trajectory`` and ``residue``. The evaluation calls
+       ``score_with_models(task, result, models)``, whose default calls
+       ``score``. A model-based judge overrides ``score_with_models`` to use
+       the step's model bindings, and still implements the abstract
+       ``score``, for example by raising. A scorer that needs a local GPU
+       overrides ``execution_requirements()``
+   * - ``Promoter.promote(samples)``
+     - the prompts to promote from the step's trace samples, with
+       ``evolution.evaluation.promote_failures``
+   * - ``evaluation.metrics``
+     - holds ``candidate_scores`` and ``current_scores`` under
+       ``policy: compare`` and ``policy: floor``: one score per task and
+       repeat in task order, ``None`` for an episode that could not run;
+       ``current_scores`` is empty under ``floor``, which runs the candidate
+       alone. Under ``policy: none``, which runs no episode, it holds no
+       score
 
-Migration: the keyword form ``propose(nodes, samples, models, ...)`` became
-``propose(context)``. Read the tree from ``context.tree.files``, and return
-``TreeProposal(TreePatch({path: text}))`` instead of mutations. State that
-a method kept in a backend subclass moves to ``TreeProposal.method_state``,
-which the next step reads as ``context.method_state``. The worked examples
-are in `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__.
+A step whose method leaves the tree unchanged is skipped: its row's
+``skipped`` reads ``the method left the head tree unchanged``. A candidate
+that fails validation skips the step too, and ``skipped`` names its problems.
+Either way the step commits the method's ``state/``. If ``step`` raises, the
+step fails and publishes nothing.
+
+``reef.evaluation.harness`` holds the publication policies that
+``evolution.evaluation.policy`` names: ``ComparePolicy`` (``compare``, with
+``statistic`` ``wins`` or ``mean`` and ``min_margin``), ``FloorPolicy``
+(``floor``, with ``floor_score``) and ``NoEvaluationPolicy`` (``none``). A
+harness recipe takes no other policy.
 
 Candidate evaluation
 --------------------
@@ -1583,12 +1589,9 @@ when it loads the configuration and calls ``from_config`` for each scenario.
 Reef rejects functions, abstract classes and objects that only expose
 matching methods.
 
-Harness recipes instead name a ``reef.evaluation.SelectionPlugin``
-class in ``evolution.selection``. Its ``from_config(config, *,
-candidate_backend)`` binds the plugin to the scenario's candidate backend.
-``BackendAlwaysSelectPlugin`` and ``reef.evaluation.harness``'s
-``ScoreComparisonPlugin`` and ``FloorPlugin`` are the built-in policies
-``always``, ``score_comparison`` and ``floor``.
+Harness recipes do not read the ``evaluation`` section. They choose a
+publication policy in ``evolution.evaluation.policy`` instead (see `Harness
+method`_).
 
 Surface
 -------

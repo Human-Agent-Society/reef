@@ -207,9 +207,10 @@ Evolve a coding agent's skills and rules from scored feedback, using a model
 API instead of GPUs.
 
 A harness deployment serves `reef.recipe.harness:HarnessEvolutionRecipe`. The
-recipe keeps the agent harness as a tree of text files. A proposer writes a
-patch to that tree, the evaluation runs real agent episodes on the candidate,
-and a candidate that wins publishes as a release that any client can pull. The
+recipe keeps the agent harness as a tree of text files. At each step, a method
+edits a copy of that tree from the step's traces, the evaluation runs real
+agent episodes on the candidate, and a candidate that wins publishes as a
+release that any client can pull. The
 [harness evolution tutorial](tutorials/evolve-your-harness/README.md) runs the
 smallest full loop on pi. It needs an OpenAI-compatible endpoint, and Node.js
 and npm for pi. From your Reef checkout and activated Python environment:
@@ -252,7 +253,7 @@ selected by dotted class reference and not shipped in the Reef wheel.
 |---|---|---|---|---|
 | Open-ended discovery | Repeated attempts at one hard problem with a measurable objective and no known answer | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
 | Offline tasks with a known answer | Independent tasks from a fixed set, each with a reference answer | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/), [SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/), [SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/), [OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Meta-Harness](recipes/meta_harness/README.md) | Measured: [IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results), [AIME 2024](recipes/opd/examples/math/README.md#results), [AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract), [SciKnowEval](recipes/sdpo/examples/sciknoweval/README.md#results), [ToolAlpaca](recipes/sdft/examples/skill_stream/README.md#results), [Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results). |
-| Online learning from usage | Sessions with a user, where the interaction itself is the signal | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Measured: [GSM8K with a simulated student user](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
+| Online learning from usage | Sessions with a user, where the interaction itself is the signal | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [ACE](recipes/ace/README.md), [ReasoningBank](recipes/reasoning_bank/README.md) | Measured: [GSM8K with a simulated student user](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
 outside the catalog. For a small walkthrough of feedback, candidate edits, and

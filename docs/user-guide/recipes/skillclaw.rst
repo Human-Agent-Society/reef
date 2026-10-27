@@ -43,20 +43,23 @@ How Reef implements it
 
 skillclaw is a method package on the harness evolution engine
 (``reef/train/harness_backend/``); `Evolve your harness
-<../evolve-your-harness.rst>`__ describes the mechanism it runs on. The method
-supplies a ``Proposer`` (``NightProposer``) and an ``EpisodeScorer``
-(``ProbeScorer``) in ``harness/plugins.py``; the engine validates the
-candidate tree, runs the evaluation tasks, records each step, and publishes
-the selected tree. The proposer runs the night flow and maps the night's pool
-changes to one patch, one ``skills/<name>/SKILL.md`` file per added or
-rewritten skill, so a whole night is evaluated and published as one
-candidate tree.
+<../evolve-your-harness.rst>`__ describes the mechanism it runs on. The
+package supplies a ``Method`` (``NightMethod``) and an ``EpisodeScorer``
+(``ProbeScorer``) in ``harness/plugins.py``. In each step, ``NightMethod``
+runs the night flow over the step's traffic traces and writes the night's
+pool changes into the step's workspace as one patch: one
+``skills/<name>/SKILL.md`` file per added or rewritten skill. A whole night
+is therefore published as one candidate tree. The engine validates the tree,
+records the step, and publishes the tree.
 
-Two choices distinguish it from the tutorial method. ``selection: always``
-publishes every night that produces a proposal, because the next day is the
-measurement. And the skill catalog must reach the model on every live
-request, so the recipe overrides ``build_surface``, the hook controlling how
-a published release reaches the request path (`recipe.py
+Two choices distinguish it from the tutorial method. First, the evaluation
+policy is ``none``, so every night that changes the pool publishes: the next
+day is the measurement. The method still runs three probe tasks on the
+served pool and on the night's pool through ``tools.evaluate`` and keeps the
+scores in the step's notes, but the scores never decide the publish. Second,
+the skill catalog must reach the model on every live request, so the recipe
+overrides ``build_surface``, the hook controlling how a published release
+reaches the request path (`recipe.py
 <../../../recipes/skillclaw/recipe.py>`__). That override is the one
 extension point beyond the method's own plugin classes. The recipe also names
 no ``harness_adapter``: the pool reaches the model through that catalog, not
@@ -67,10 +70,12 @@ Configuration
 
 ``recipes/skillclaw/skillclaw.yaml`` is the recipe config the driver boots. It
 names ``recipes.skillclaw.recipe:SkillClawRecipe`` as its ``implementation``
-and sets ``evolution.batch_size: 60``, so every report of
-the day goes into one job's data and the day's last one triggers the night. The engine's keys are
-in `Recipe configuration
-<../../reference/configuration.rst#recipe-configuration>`__.
+and ``harness.plugins:NightMethod`` as ``evolution.method``, and sets
+``evolution.evaluation.policy: none``. ``evolution.batch_size: 60`` puts
+every report of the day into one job's data, so the day's last report
+triggers the night. ``evolution.seed_skills`` names the benchmark's skills
+library, which becomes the first pool. The engine's keys are in `Recipe
+configuration <../../reference/configuration.rst#recipe-configuration>`__.
 
 Run the example
 ---------------

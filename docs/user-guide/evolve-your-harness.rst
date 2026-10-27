@@ -7,12 +7,15 @@ harness form an agent. Harness evolution improves the harness tree while the
 model weights stay fixed. Reef needs no GPU for this. The model stays a fixed
 endpoint, hosted or local, and the agent stays online throughout.
 
-Reef supplies the mechanism: it reads the head tree, asks for a patch, runs
-the candidate and the head on the same tasks, and publishes a win as a new
-release. You supply two Python classes: a ``Proposer`` (which change to try)
-and an ``EpisodeScorer`` (how an episode scored). The deployment names them in ``evolution.propose`` and
-``evolution.evaluate``. `Write a harness method <../developer-guide/write-a-harness-method.rst>`__ documents the
-contract.
+Reef supplies the mechanism. At each step it gives a method a workspace with
+a copy of the head tree and the step's traces. It takes the tree that the
+method leaves there as the candidate, evaluates it, and publishes it as a new
+release when the deployment's publication policy selects it. You choose a
+method (which change to try) and, unless the policy runs no episode, a scorer
+(how an episode scored). The deployment names them in ``evolution.method`` and
+``evolution.evaluation.scorer``. `Choose or write a method`_ lists the methods
+in this repository, and `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ documents the contract.
 
 At a glance
 -----------
@@ -27,11 +30,15 @@ At a glance
 |                   | Agent, Terminus 2, and ``native``, Reef's own loop. One      |
 |                   | adapter per agent maps the tree onto that agent's files.     |
 +-------------------+--------------------------------------------------------------+
-| What decides      | The candidate and the current tree run the same tasks in     |
-|                   | fresh roots. The candidate is published only when it wins    |
-|                   | more tasks than it loses, by more than a margin you set.     |
+| What decides      | The publication policy in ``evolution.evaluation``.          |
+|                   | ``compare`` scores the candidate and the current tree on the |
+|                   | same tasks in fresh roots, and publishes the candidate only  |
+|                   | when it scores better by more than a margin you set.         |
+|                   | ``floor`` publishes a candidate that reaches a score on      |
+|                   | every task, and ``none`` publishes every valid candidate.    |
+|                   | The history keeps every score and reuses it.                 |
 +-------------------+--------------------------------------------------------------+
-| What holds it     | A rejected candidate publishes nothing. A failing            |
+| What holds it     | A rejected candidate publishes nothing. A promoted           |
 |                   | prompt joins the task suite only after a credential and an   |
 |                   | instruction override screen, with a cap per client. Wins     |
 |                   | that touch code can wait for a person before they are        |
@@ -40,11 +47,11 @@ At a glance
 |                   | a sandbox with no host credentials and no network beyond the |
 |                   | model endpoint.                                              |
 +-------------------+--------------------------------------------------------------+
-| Where to start    | `Run the example <#run-the-example>`__ evolves one skill on  |
+| Where to start    | `Run the example <#run-the-example>`__ evolves the rules of  |
 |                   | ``pi`` with a local model and no GPU. The tutorial's         |
 |                   | ``serve-native.yaml`` runs the same loop on the native       |
-|                   | harness, where the model proposes tools, hooks, and graph    |
-|                   | changes to its own loop.                                     |
+|                   | harness, where the model changes the tools, hooks, and       |
+|                   | graphs of its own loop.                                      |
 +-------------------+--------------------------------------------------------------+
 
 The harness tree
@@ -182,18 +189,18 @@ The loop
 --------
 
 Harness evolution advances one step at a time. A step is a single pass of
-the cycle described above: Reef reads the head tree from git, asks
-``propose`` for a patch, applies it to get the candidate tree, runs the
-candidate and the head over the same tasks, and publishes the candidate as a
-new release when it wins. The step is the unit the rest of this page counts
-in.
+the cycle described above: Reef reads the head tree from git, writes the
+step's workspace, and runs the method, which edits the copy of the tree there.
+The evaluation then scores the tree the method left, and Reef publishes it as
+a new release when the publication policy selects it. The step is the unit
+the rest of this page counts in.
 
 .. flow::
-   :loop: publish the winner; the head stays otherwise
+   :loop: publish a selected candidate; the head stays otherwise
 
-   Job data :: the units of one step, or a queued request, or both
-   ``propose`` :: one patch to the head tree, or ``None``
-   Episodes* :: run the candidate and the head on the same tasks
+   Job data :: the traces of one step, or a queued request, or both
+   Method :: edits a copy of the head tree in the step's workspace
+   Evaluation* :: scores the candidate under the publication policy
    Result :: publish the candidate as a new release, or keep the head
 
 A step begins either from job data of recorded traffic or from a training
@@ -280,31 +287,77 @@ collected by the ``pipeline`` stages, or a training request received.
 
 When both conditions are met, the training request takes precedence for the
 next step. Reef builds one step that uses both, whether or not
-``job_samples`` is met. The proposer then
+``job_samples`` is met. The method then
 receives the training request and the traces that automatic job data would
 take next. It gets up to ``job_samples`` traces, or none, and uses both
-to make a patch.
+to make its change.
 
-Propose: a patch to the head tree
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The method: a candidate tree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reef calls the proposer once per step, with the head tree, the step's trace
-samples, the request when the step answers one, and the model bindings it may
-call. It returns a patch, or ``None`` to skip the step. Reef validates the
-patched tree for the adapter; a patch with problems gets one retry with the
-problems in hand, and a second failure skips the step. The episodes and
-comparison that follow are what test a valid patch.
+Reef runs the method once per step, in a workspace: a directory that holds a
+copy of the head tree, the step's traces, the request when the step answers
+one, the step's evaluation tasks, and the method's own files from earlier
+steps. The method calls models and may score trees on tasks through the
+tools that Reef gives it. The tree it leaves in the workspace is the
+candidate. An unchanged tree skips the step. Reef validates the candidate for
+the adapter, and a candidate with problems skips the step too. There is no
+retry. The evaluation that follows tests a valid candidate.
 
-For more detail, refer to `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__.
+Two automatic steps do not run the method: a recheck (see `Rechecking
+published tree with grown evaluation suite`_), and a step that takes a
+client's proposal from ``POST /reef/harness/proposals``.
 
-Evaluation: selection of the better tree
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For the workspace, the tools, and the method's state, refer to `Write a
+harness method <../developer-guide/write-a-harness-method.rst>`__.
 
-Reef runs episodes for the prompts from the evaluation suite (seeded from
-``evolution.tasks``) on both the candidate tree (the head with the patch
-applied) and the head, and asks the episode scorer to score the results. The
-tree with the better result is selected to become the next head.
+Evaluation: the publication policy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``evolution.evaluation`` names three things: the evaluation tasks, the
+episode scorer, and the publication policy that decides whether the candidate
+becomes the next head.
+
+- The tasks come from one source: ``evolution.evaluation.tasks`` (a list of
+  prompts or task directories), ``evolution.evaluation.task_manifest`` with
+  ``evolution.evaluation.tasks_root`` (the eval split of a task manifest), or
+  ``evolution.evaluation.task_store`` (the eval split of a task store, such
+  as ``imported-tasks``). A manifest or a store holds task directories. Task
+  directories need an adapter that plays them, such as ``terminus``.
+  Promotion can add prompts to the tasks (see `Promotion: growing evaluation
+  suite`_).
+- ``evolution.evaluation.scorer`` names the ``EpisodeScorer`` that scores
+  each episode.
+- ``evolution.evaluation.policy`` is one of three policies:
+
+  - ``compare`` (the default) runs the candidate and the head on the same
+    tasks, ``evolution.evaluation.repeats`` times each.
+    ``evolution.evaluation.statistic`` sets what it compares: ``wins`` (the
+    default) counts the task pairings each tree wins, and ``mean`` compares
+    the mean scores.
+  - ``floor`` runs only the candidate, and publishes it when every episode
+    scores at least ``evolution.evaluation.floor_score`` (1.0 by default).
+  - ``none`` runs no episode, and publishes every candidate that passes
+    validation. It needs no tasks and no scorer.
+
+The history is the score cache. It keeps every episode, and it reuses a
+scored episode of the same tree, task, repeat index and evaluation context.
+The evaluation context is everything else that an episode's score depends
+on:
+
+- the served model, and the named models of ``evolution.models``;
+- the adapter and its version, and the harness binary that
+  ``evolution.binary`` names;
+- the scorer;
+- the episode settings, ``evolution.evaluation.episode_timeout_s`` and
+  ``evolution.evaluation.forbid_residue``;
+- the episode executor, ``evolution.executor`` and ``evolution.sandbox``.
+
+An evaluation runs only the episodes that the history cannot reuse. A change
+to any part of the context misses the cache. An episode that could not run is
+never reused: the next evaluation that needs it runs it again. Under
+``compare``, the head's scores usually come from the step that published it,
+so a step runs the candidate's episodes alone.
 
 Running episodes
 ^^^^^^^^^^^^^^^^
@@ -333,13 +386,14 @@ network access; it does not enforce a hostname firewall.
 
 On macOS or a host without Linux namespaces, select a cloud sandbox, ``e2b`` or
 ``modal``, to run ordinary evaluation episodes in disposable sandboxes. The
-evaluation and a method's trial episodes use the same episode runner and
-trajectory readers::
+evaluation and a method's own ``tools.evaluate`` episodes use the same episode
+runner and trajectory readers::
 
     evolution:
       adapter: pi
       executor: e2b
-      episode_timeout_s: 600
+      evaluation:
+        episode_timeout_s: 600
       sandbox:
         e2b_api_key_env: E2B_API_KEY
         # Only needed for a model listening on this evaluation worker's localhost:
@@ -370,7 +424,8 @@ To use Modal instead, select ``executor: modal``::
     evolution:
       adapter: pi
       executor: modal
-      episode_timeout_s: 600
+      evaluation:
+        episode_timeout_s: 600
       sandbox:
         modal_app: reef-sandboxes
         forward_ports: [8000]
@@ -405,10 +460,10 @@ are not implemented by this provider. Pi and Codex have opt-in real E2B tests
 in ``tests/smoke/test_e2b_episode.py``; other adapters need their template and
 runtime-state paths validated with their own agent binaries.
 
-``evolution.proposer_agent.sandbox: e2b`` remains independent: it selects where
-the proposer and its trials run, reusing the same E2B implementation while
-keeping one VM open for that proposer run. Set ``evolution.executor: e2b`` to
-select cloud execution for the regular evaluation episodes as well.
+The beta Reefine recipe runs a coding agent and configures where it runs with
+its own ``evolution.agent.sandbox``. That setting is independent of
+``evolution.executor``: set ``evolution.executor: e2b`` to run the evaluation
+episodes in cloud sandboxes as well.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
@@ -419,15 +474,17 @@ the comparison and publishes nothing.
 Evaluating the result
 ^^^^^^^^^^^^^^^^^^^^^
 
-Two settings shape the evaluation result:
+Under ``compare``, ``evolution.evaluation.min_margin: M`` (0 by default) is a
+noise floor on the result. With ``statistic: wins``, the candidate must win
+more than ``M`` task pairings beyond its losses, so on a stochastic episode a
+single lucky flip does not publish. With ``statistic: mean``, the candidate's
+mean score must exceed the head's mean by more than ``M``. An episode that
+could not run ranks below every score for ``wins`` and counts as 0 for
+``mean``. ``evolution.evaluation.repeats`` runs each task more than once per
+tree, and each repeat counts on its own.
 
-- ``evolution.min_win_margin: M`` (0 by default) is a noise floor on the
-  result: the candidate must win more than ``M`` task pairings beyond its
-  losses, so on a stochastic episode a single lucky flip does not publish.
-- ``evolution.max_rejected_history: N`` (25 by default, 0 off) keeps the
-  last ``N`` rejected proposals in the scenario state, each with its step,
-  its patch, and the result's reason. The proposer receives them as
-  ``rejected`` and can stop re-proposing what the evaluation already refused.
+Every decision is in the history with the candidate it decided, so a method
+can read what the evaluation refused before it tries again.
 
 By default a successful evaluation is served at once.
 ``evolution.publish: review`` holds every win as a pending release instead,
@@ -445,12 +502,13 @@ Similarly, for more detail, refer to `Write a harness method
 Promotion: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The evaluation suite consists of the seed tasks specified in
-``evolution.tasks`` by default. To grow it automatically from failed tasks,
-configure ``evolution.promote_failures: true``, which adds failing traces'
-prompts to the evaluation set permanently. This also means the method's
+The evaluation suite consists of the seed tasks from the task source by
+default. To grow it automatically from traffic, configure
+``evolution.evaluation.promote_failures: true``, which adds the prompts of the
+step's traces to the evaluation set permanently. This also means the
 episode scorer must be able to score any arbitrary prompt. A
-request step in ``hybrid`` promotes the failures it carries the same way.
+request step in ``hybrid`` promotes the traces it carries the same way.
+Promotion adds prompts, so it needs an adapter whose task is a prompt.
 
 A promoted prompt is real client traffic, so it is screened before it
 becomes a task. A prompt carrying a key-shaped literal meets the tree's own
@@ -458,42 +516,48 @@ credential tripwire: it is never promoted, never persisted, and never re-run
 as a task, and the step goes on without it. A prompt shaped like an
 instruction override (``ignore the previous instructions``, a forged system
 message, a chat-template control token) is screened the same way. One tagged
-client holds at most ``evolution.max_promoted_per_client`` promoted tasks,
-so a single sender cannot fill the suite.
+client holds at most ``evolution.evaluation.max_promoted_per_client``
+promoted tasks, so a single sender cannot fill the suite, and
+``evolution.evaluation.max_promoted_tasks`` caps them all.
 
-Which prompts are promoted is the method's call. An optional
-``evolution.promote`` names a ``Promoter`` class, whose
-``promote(samples, *, manifest=None)`` receives the step's trace samples
-and failure manifest and returns the prompts to promote. Without it, every
-failing trace's user prompt is promoted. Reef dedupes, screens and caps
-whatever it returns either way.
+An optional ``evolution.evaluation.promote`` names a ``Promoter`` class that
+chooses the prompts. Its ``promote(samples)`` receives the step's trace
+samples and returns the prompts to promote, for example only those of failing
+traces. Without it, every trace's user prompt is promoted. Reef dedupes,
+screens and caps whatever it returns either way.
 
 Rechecking published tree with grown evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A publish passes the evaluation as the suite stood at the time, so a suite that
 keeps growing can later expose a published tree as a regression on a task the
-evaluation had not seen yet. ``evolution.recheck_every: N`` (0, off, by default)
-closes that gap: every ``N`` steps, and at once when the served model or the
-adapter version has changed since the publish, the loop re-evaluates the last
-published tree against the tree it replaced on the current suite instead of
-proposing. If
-the older tree now wins, the loop publishes it, which rolls the deployment
-back; if the published tree still wins, nothing changes. Only the tree from
-the most recent publish is kept as a rollback target, and a rollback consumes
-it, so the recheck reverts one bad publish rather than walking the whole
-history back.
+evaluation had not seen yet. ``evolution.evaluation.recheck_every: N`` (0, off,
+by default) closes that gap. It needs the ``compare`` policy. Every ``N``
+steps, and at once when any part of the evaluation context (see `Evaluation:
+the publication policy`_) has changed since the publish, the loop
+re-evaluates the last published tree against the tree it replaced on the
+current suite instead of running the method. A recheck runs fresh episodes
+instead of reading the cache. If the older tree now wins, the loop publishes
+it, which rolls the deployment back; if the published tree still wins,
+nothing changes. Only the tree from the most recent publish is kept as a
+rollback target, and a rollback consumes it, so the recheck reverts one bad
+publish rather than walking the whole history back.
 
 Cost
 ^^^^
 
-Most of a step's cost is the evaluation. Every task runs on both trees,
-``episode_repeats`` times each (once by default), which makes
-``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both
-sides of a pairing see the same upstream conditions. Each episode renders one
-side into a throwaway root, runs the agent binary with the task as its prompt
-under the ``episode_timeout_s`` limit (600 s by default), reads the
-trajectory back, and deletes the root.
+Most of a step's cost is the episodes. Under ``compare``, every task runs on
+both trees, ``evolution.evaluation.repeats`` times each (once by default),
+which makes at most ``2 x len(tasks) x repeats`` headless episodes,
+interleaved so both sides of a pairing see the same upstream conditions. The
+evaluation skips each episode that the history can reuse, usually all of the
+head's. ``floor`` runs only the candidate's ``len(tasks) x repeats``
+episodes, and ``none`` runs none. A method that scores trees itself adds its
+own episodes, at most ``evolution.max_episodes_per_step`` per step when that
+is set. Each episode renders one tree into a throwaway root, runs the agent
+binary with the task as its prompt under the
+``evolution.evaluation.episode_timeout_s`` limit (600 s by default), reads
+the trajectory back, and deletes the root.
 
 Bookkeeping of the steps
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -502,51 +566,89 @@ Commit history
 ^^^^^^^^^^^^^^
 
 Every result is recorded in the scenario's commit history, whether the candidate
-was published or rejected. A commit carries:
+was published, rejected or skipped. A commit carries:
 
 - its patch: each changed path with its new text, or ``null`` for a removal,
   so a rejected rewrite is readable too;
-- both score vectors;
-- what the proposer cost: ``proposer_calls``, ``proposer_seconds``,
-  ``proposer_input_tokens`` and ``proposer_output_tokens`` (the tokens are
-  recorded, never charged);
+- the sum of the episode scores of each side the policy ran
+  (``candidate_score`` and ``current_score``), the decision's numbers
+  (``wins``, ``losses`` and ``ties``; ``candidate_mean`` and
+  ``current_mean``; or ``passed`` and ``failed``), and how many episodes ran
+  and how many came from the history (``episodes_run`` and
+  ``episodes_cached``). The score of every episode is in the `History`_;
+- what the method said: ``method_summary`` and ``method_notes``;
+- what the method cost: ``model_calls``, ``model_seconds``,
+  ``model_input_tokens`` and ``model_output_tokens`` (the tokens are
+  recorded, never charged), and ``method_episodes``, the episodes that its
+  own ``tools.evaluate`` ran;
 - the path each episode took, per side and task. On the native harness this
   is the stage names the loop exited in order and the reason its turn ended
   (``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per
   episode, with ``error`` and ``errored_agent`` when a turn ended on an
   error, beside ``candidate_agents``).
 
+History
+^^^^^^^
+
+The history keeps every tree that a step proposed or evaluated, published or
+not, with every episode and every decision. It is the score cache, and
+methods read it. Each scenario's history is the directory
+``<evolution.state_dir>/<scenario>/<component>/history/``. ``<component>``
+is the release component that the recipe evolves: ``harness`` for
+``HarnessEvolutionRecipe``, ``skills`` for SkillClaw, and the component's own
+name in a composite recipe.
+
+- ``candidates.jsonl`` has one line per tree: its checksum, its parent, the
+  step that first proposed or evaluated it, its origin (``seed``,
+  ``method``, ``proposal`` or ``release``), and the method's summary and
+  notes. A tree that the history holds without a summary or notes, such as
+  one that the method scored with ``tools.evaluate`` first, gets a second
+  line when a step proposes it with a summary or notes: the line adds them.
+  The last line of a tree is its record.
+- ``episodes.jsonl`` has one line per episode: the tree, the task, the repeat
+  index, the evaluation context, the step, the score, the failure and the
+  reply.
+- ``decisions.jsonl`` has one line per decided step: the candidate, the head
+  tree that the step started from, whether the candidate was selected, the
+  policy and its reason. A step that ran twice, because its first attempt
+  did not commit, can have two lines. The last one is the step's decision.
+- ``trees/<checksum>/`` holds the files of each tree.
+- ``episodes/<id>/`` holds each episode's trajectory files as the adapter
+  writes them (``session.jsonl`` and ``agents/*.jsonl`` on native, the
+  vendor's own session tree on pi and the others), copied out of the
+  throwaway root before it is removed. Beside them, ``episode.json`` has the
+  task, the exit code, stdout and stderr, the residue, the score, the failure
+  and the stage path, so a scorer can be replayed from the record alone.
+
+Only the trainer writes the history. The files are append-only, and nothing
+prunes them.
+
 Step record
 ^^^^^^^^^^^
 
 The commit history holds the result; the step record holds what decided it.
-Recording of step records is off by default and exists for debugging and audit:
-set ``evolution.step_record_dir`` to a directory, made absolute at build, and
-each scenario's steps write their raw material under it.
+Each step keeps its workspace for debugging and audit, as
+``<evolution.state_dir>/<scenario>/<component>/steps/<step>/``, and the
+commit names that directory as ``step_record``:
 
-A step writes three things:
+- ``harness/`` holds the tree the method left: the candidate.
+- ``material/`` holds what the method read: the traces, the request, the
+  evaluation tasks, the failure manifest and the host facts.
+- ``state/`` and ``output/`` hold the method's files.
+- ``calls.json`` holds one entry per model call the method made: the
+  ``model``, the ``messages`` and ``params`` of a ``chat`` or the ``body`` of
+  a ``complete``, then the ``reply`` and provider ``response`` for a
+  ``chat``, the ``response`` for a ``complete``, or the ``error``, the
+  ``seconds`` it took, and the token ``usage``.
+- ``result.json`` holds the method's ``summary``, ``notes`` and
+  ``requires``.
 
-- ``<scenario>/<step>/proposer.json`` holds one entry per model call the
-  proposer made: the ``model``, the ``messages`` and ``params`` of a
-  ``chat`` or the ``body`` of a ``complete``, then the ``reply`` and
-  provider ``response`` for a built-in ``chat`` binding, the ``response``
-  for ``complete``, or the ``error``, and the ``seconds`` it took.
-- ``<scenario>/<step>/patch.json`` holds the proposal's patch, written before
-  validation decides, so a refused proposal is on file.
-- ``<scenario>/<step>/episodes/<side>-<task index>/`` holds each evaluation
-  episode's trajectory files as the adapter writes them (``session.jsonl``
-  and ``agents/*.jsonl`` on native, the vendor's own session tree on pi and
-  the others), copied out of the throwaway root before it is removed,
-  beside an ``episode.json`` with the task, the exit code, stdout and
-  stderr, the residue, the score, the failure and the stage path, so a
-  scorer can be replayed from the record alone.
+In ``calls.json`` and ``result.json``, long text is clipped with a marker
+naming what was dropped, and a credential shaped literal is replaced by
+``[redacted credential]``. ``material/`` holds the traces as the clients sent
+them.
 
-Two rules govern what the text may contain. Long text is clipped with a
-marker naming what was dropped, and a credential shaped literal anywhere in
-the record is replaced by ``[redacted credential]``: the record holds what
-the tree boundary has not seen yet.
-
-The provider ``response`` stored in ``<scenario>/<step>/proposer.json``
+The provider ``response`` stored in ``calls.json``
 keeps the reasoning the provider returned, separate from the final reply.
 Chat Completions
 responses keep ``reasoning``, ``reasoning_content`` and
@@ -557,22 +659,21 @@ data, not converted into readable thinking. A provider that returns no
 reasoning, an older record, or a custom text-only binding has none to
 display; Reef does not reconstruct it.
 
-Not every step writes a full record. A recheck step asks the proposer
-nothing, so it writes ``episodes/`` only and counts zero proposer calls; a
-step skipped on the step cap or the failure streak writes nothing and names
-no ``step_record``. A proposer failure keeps its ``step_record`` directory
+Not every step writes a full record. A recheck and a step that takes a
+client's proposal do not run the method, so their directory stays empty and
+they count zero model calls. A step skipped on the step cap or the failure
+streak claims no directory and names no ``step_record``. A method failure
+keeps its ``step_record`` directory, with the calls made before the failure,
 on the request's failed commit, including after the trainer reloads, and a
-later retry points to its own directory; older failed commits that did not
-record this link are not matched to files by directory order or timestamps.
-A step directory is never reused: a step retried after a crash lands in
-``<step>-2``, so the earlier attempt stays on file, and nothing prunes the
-directory.
+later retry points to its own directory. A step directory is never reused: a
+step retried after a crash lands in ``<step>-2``, so the earlier attempt stays
+on file, and nothing prunes the directory.
 
-Together with the commit record, which names the step's directory as
-``step_record``, those files let a reader rebuild why the tree changed or
-did not. They are the proposer's raw traffic and the episodes' full logs, so
-keep the directory where the commit history lives; a copy that fails (a full
-disk) aborts the step rather than scoring it.
+Together with the commit record and the history, those files let a reader
+rebuild why the tree changed or did not. They hold the method's raw model
+traffic, the clients' traces and the episodes' full logs, so keep
+``evolution.state_dir`` where the commit history lives. An episode record
+copy that fails (a full disk) aborts the step rather than scoring it.
 
 Edge cases
 ~~~~~~~~~~
@@ -580,10 +681,13 @@ Edge cases
 Edge cases in the loop are resolved conservatively, so a step never
 publishes accidentally.
 
-- A ``None`` proposal skips the step.
-- An episode that could not run ranks below every real score, so a
-  candidate cannot win on a crash.
-- When both sides fail, the step is a tie.
+- A method that leaves the tree unchanged skips the step.
+- An episode that could not run ranks below every real score under
+  ``statistic: wins``, counts as 0 under ``statistic: mean``, and misses the
+  floor under ``floor``, so a candidate cannot win on a crash.
+- When both sides fail, the step is a tie, and a tie publishes nothing.
+- Under ``compare`` and ``floor``, a step whose evaluation has no task
+  publishes nothing.
 - A native episode whose turn ended on an error (a tree that cannot load, a
   graph that cannot run) counts as one that could not run, whatever its
   text.
@@ -643,11 +747,10 @@ The short-lived example's own stack stays in
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
 them there to point at your own. The model name is set once, as
-``inference.upstream-model``: the proposer, the evolve episodes and served
-traffic all use it, and ``run.py`` repeats it as ``MODEL``; a name the
-endpoint does not serve fails the proposer's call, and
-the step records ``skipped: no proposal``. The provider key is the one value
-``serve.yaml`` does not hold.
+``inference.upstream-model``: the method's model call, the evolve episodes and
+served traffic all use it, and ``run.py`` repeats it as ``MODEL``. A name the
+endpoint does not serve fails the method's call, so no step publishes. The
+provider key is the one value ``serve.yaml`` does not hold.
 
 `evolve-your-harness.ipynb
 <../../tutorials/evolve-your-harness/evolve-your-harness.ipynb>`__ is the same
@@ -658,15 +761,14 @@ pass as a notebook, cell by cell, with the service managed as a subprocess.
 graded, and every result is reported against its receipt. Every valid scored
 report trains, a passing one included, and ``evolution.batch_size: 1`` makes each
 report its own step, so every report this run submits triggers one evolve
-step. In this example the served model is its own proposer, through the text
-proposer of the beta `Reefine <../../recipes/beta/reefine/README.md>`__ recipe
-(``recipes.beta.reefine.proposer:TextProposer``), and it answers with one skill
-file.
+step. The example's method lives beside its configs, in
+``tutorials/evolve-your-harness/harness/plugins.py``: one call to the served
+model reads the step's failing traces and rewrites ``rules.md``.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
-published release, the evaluation metrics, and the evolved ``SKILL.md``,
-then stops the service.
+published release, the evaluation metrics, and the files that the release
+changed, then stops the service.
 
 Watch it learn
 --------------
@@ -687,10 +789,9 @@ shared machine, export ``REEF_TOKEN`` before ``run.sh`` starts it: the
 service then requires that token, and every ``curl`` on this page needs
 ``-H "Authorization: Bearer $REEF_TOKEN"``.
 
-One step is six episodes, three tasks on each of the two trees, and the
-reference run finished in 63 s on Qwen3-8B: one reported trace filled the
-step, the served model proposed a new skill beside the starter, and the evaluation
-scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The run has
+One step runs at most six episodes, three tasks on each of the two trees. The
+history supplies the head's scores once it holds them, so a later step
+usually runs only the candidate's three. The run has
 succeeded when one step's candidate is selected and ``GET /reef/harness``
 serves a release other than the seed.
 ``/reef/harness/releases`` then shows that step's training row with
@@ -709,11 +810,12 @@ still answering plain requests. A missing model server does not produce
 this symptom: the record phase raises on its first call and ``run.py``
 exits with the upstream error before any evolve step runs.
 
-A model that answers all three tasks correctly still trains one step per
-report. Evaluation runs the tasks again on the current and candidate trees,
-so passing the initial tasks does not determine whether a candidate will
-win, tie, or lose. A step publishes only when its candidate wins; rejected
-or skipped steps leave the served tree unchanged. ``run.py`` counts all
+A model that answers all three tasks correctly still starts one step per
+report. A step whose method leaves the tree unchanged is skipped. Evaluation
+runs the tasks on the current and candidate trees, so passing the initial
+tasks does not determine whether a candidate will win, tie, or lose. A step
+publishes only when its candidate wins; rejected or skipped steps leave the
+served tree unchanged. ``run.py`` counts all
 submitted reports, waits for the steps they triggered up to its deadline,
 and prints how many reports it submitted for steps and how many of them failed.
 
@@ -779,14 +881,15 @@ The answer carries the training record id and ``page_path``, the request's
 page (``GET /reef/harness/requests/<id>/page`` with the scenario and its page
 key as query parameters, so a browser opens it as is). Acceptance does not
 mean the change passed the evaluation: the page follows the step while it
-runs, then shows the result, what the patch changed, the review, and the next
-action. ``GET /reef/harness/requests/<id>/progress`` gives the same state as
-JSON for a client without a browser. See the `manual training API
-<../reference/http-api.rst#manual-training>`__ for the fields a request
+runs, then shows the result, the method's summary, what the patch changed,
+and the next action. ``GET /reef/harness/requests/<id>/progress`` gives the
+same state as JSON for a client without a browser. See the `manual training
+API <../reference/http-api.rst#manual-training>`__ for the fields a request
 carries and the screens its text passes.
 
-The proposer's ``reads_requests`` must be true. A request may carry
-``requires``; the proposer adds items of its own when the change it wrote
+Every method takes a request step: it can read the request from its workspace.
+How well it answers one depends on the method. A request may carry
+``requires``; the method adds items of its own when the change it wrote
 needs them, and the backend records ``training_request: {id, session,
 release_id, text, requires}`` in the step's commit metrics. A releases row
 carries what its own change named; the manifest carries what the release
@@ -805,15 +908,12 @@ the new tree, with a bug fix demo, a research demo and a measurement of which
 requests passed the checks (``./run.sh bugfix``, ``./run.sh research``,
 ``./run.sh measure``).
 
-Each step has a page, ``GET /reef/harness/releases/<step>/page``, one self
-contained HTML page with five sections: Why (the request, else the
-proposal's reason), What changed (the patch, file by file; an updated file as
-a line diff against the release the step ran on), Result (the evaluation's
-result and numbers, and the step record directory when
-``evolution.step_record_dir`` is set), Setup (what the release needs: the
-step's own items, then those carried from earlier steps) and Chain (the
-parent, this release, and its children). ``GET /reef/harness/releases``
-lists every row, oldest last, with a ``page_path`` for each.
+Each step has a page, ``GET /reef/harness/releases/<step>/page``: one self
+contained HTML page that explains the step, from why it ran to its result
+and what the release needs. The HTTP API's `Version page
+<../reference/http-api.rst#version-page>`__ lists the page's sections.
+``GET /reef/harness/releases`` lists every row, oldest first, with a
+``page_path`` for each.
 
 Promote a pending release
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -941,12 +1041,38 @@ set; the evaluation's sandbox does not apply to it. Under ``--follow head``,
 whoever can publish to the scenario runs code on the machine the process
 serves on. ``--follow pinned`` keeps a person in that loop.
 
-Write a method
---------------
+Choose or write a method
+------------------------
 
-Reef ships no general proposer and no general episode scorer. You supply a
-``Proposer``, an ``EpisodeScorer``, and optionally a selection policy; `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__ documents the contract, with worked examples.
+Reef ships no general method and no general episode scorer. The deployment
+names one method in ``evolution.method``. The packages in this repository
+learn in different ways:
+
+- `GEPA <recipes/gepa.rst>`__ (``recipes/gepa/``): reflective prompt
+  evolution. A reflection model rewrites one part of the tree from the
+  feedback of a minibatch of tasks, and the evaluation compares mean scores.
+- `Meta-Harness <../../recipes/meta_harness/README.md>`__
+  (``recipes/meta_harness/``): a model reads every earlier candidate with its
+  scores, and writes a whole new tree.
+- `SkillClaw <recipes/skillclaw.rst>`__ (``recipes/skillclaw/``): grows a
+  pool of skills from each day's recorded traffic, and serves the pool's
+  catalog with every request.
+- `ACE <../../recipes/ace/README.md>`__ (``recipes/ace/``): Agentic Context
+  Engineering. A reflector and a curator turn each trace into edits of a
+  playbook in ``rules.md``. It learns online, with ``policy: none``.
+- `ReasoningBank <../../recipes/reasoning_bank/README.md>`__
+  (``recipes/reasoning_bank/``): turns judged successes and failures into
+  memory items, each an Agent Skill. It learns online, with ``policy: none``.
+- `Reefine <../../recipes/beta/reefine/README.md>`__ (beta,
+  ``recipes/beta/reefine/``): answers plain-language requests with skills,
+  rules, commands or extensions. A ``floor`` evaluation checks the changed
+  harness on a health task.
+- The tutorial's own method (``tutorials/evolve-your-harness/harness/``): one
+  model call that rewrites ``rules.md`` from failing traces.
+
+To write your own method and scorer, read `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__. It documents the
+workspace, the tools, the state and the history, with worked examples.
 
 Connect a different agent
 -------------------------

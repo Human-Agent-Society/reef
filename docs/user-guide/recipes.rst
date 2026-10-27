@@ -111,6 +111,16 @@ recipe reads it out of the traffic it already serves.
      - ``recipes/skillclaw/``
      - `SkillClaw <recipes/skillclaw.rst>`__
      - `SkillClaw on WildClawBench <../../recipes/skillclaw/README.md>`__
+   * - ACE
+     - harness rules: a playbook of lessons
+     - ``recipes/ace/``
+     - `ACE <../../recipes/ace/README.md>`__
+     - `online deployment <../../recipes/ace/examples/serve.yaml>`__
+   * - ReasoningBank
+     - harness skills: memory items
+     - ``recipes/reasoning_bank/``
+     - `ReasoningBank <../../recipes/reasoning_bank/README.md>`__
+     - `online deployment <../../recipes/reasoning_bank/examples/serve.yaml>`__
 
 How a recipe is selected
 ------------------------

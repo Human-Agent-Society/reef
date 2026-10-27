@@ -62,6 +62,41 @@ Surrounding changes
   table when the cookbook carries the method. Update the relevant pipeline stage, objective, or surface
   reference if its public contract changes.
 
+Add a harness method
+--------------------
+
+Use this playbook for a method that evolves a harness tree. Read `Write a
+harness method <../developer-guide/write-a-harness-method.rst>`__ first.
+
+Implementation
+~~~~~~~~~~~~~~
+
+- Put the ``Method`` in ``recipes/<name>/method.py`` and export it from the
+  package's ``__init__.py``. A deployment runs
+  ``reef.recipe.harness:HarnessEvolutionRecipe`` and names the class in
+  ``evolution.method``, so the method needs no recipe of its own.
+- Parse the method's settings into a ``PluginSettings`` dataclass in
+  ``from_config``.
+- Keep what the method learns across steps in files under
+  ``workspace.state``. Read earlier candidates, scores and decisions from the
+  history instead of keeping copies of them.
+- Put a prompt longer than a sentence or two in a ``.md`` file beside the
+  method.
+- Subclass ``HarnessEvolutionRecipe`` only when the method changes more than
+  the tree, such as the delivery surface.
+
+Surrounding changes
+~~~~~~~~~~~~~~~~~~~
+
+- Add method tests under ``tests/recipes/<name>/``. Run a step as the trainer
+  does with ``backend_step`` in ``tests/support/harness_service.py``, or call ``step``
+  on a workspace from ``Workspace.create`` with a fake model binding.
+- Put runnable deployments under ``recipes/<name>/examples/``. The method's
+  ``README.md`` says what it does, how it uses the workspace, and where it
+  departs from its paper.
+- Add the method to the list in `Evolve your harness
+  <../user-guide/evolve-your-harness.rst#choose-or-write-a-method>`__.
+
 Add a training integration
 --------------------------
 
@@ -240,8 +275,9 @@ under ``recipes/<name>/examples/`` or in the external harness.
 - For a bundled adapter, add ``reef/harness/adapters/<name>/descriptor.yaml``
   and its package initializer. Use a ``quirks.py`` module only for behavior
   the declarative descriptor cannot express.
-- Add an asset such as ``version_check.ts`` only when the adapter needs it,
-  then include the asset in the package-data rules in ``pyproject.toml``.
+- Add an asset, such as Codex's ``bundled_models.json``, only when the
+  adapter needs it, then include the asset in the package-data rules in
+  ``pyproject.toml``.
 - For an external adapter, publish an entry in the
   ``reef.harness_adapters`` entry-point group that resolves to an
   ``AdapterDescriptor`` or a zero-argument descriptor factory.

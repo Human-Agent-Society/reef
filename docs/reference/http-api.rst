@@ -95,8 +95,9 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                                                   | the harness release catalog, oldest first         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``                                       | one HTML page per catalog step: why, design, what |
-|                                                                                  | changed, review, result, setup, chain             |
+| ``GET /reef/harness/releases/{step}/page``                                       | one HTML page per catalog step: why, the method's |
+|                                                                                  | summary, what changed, result, the method's       |
+|                                                                                  | notes, setup, chain                               |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/requests/{record_id}/page``                                  | one HTML page per filed harness request: its      |
 |                                                                                  | step's state, then the result; reloads itself     |
@@ -406,8 +407,8 @@ Manual training
 ---------------
 
 ``POST /reef/train`` queues one training instruction for a scenario in
-``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
-proposer whose ``reads_requests`` is true). It takes the user's ``text``,
+``data.training_mode: manual`` or ``hybrid``; in harness evolution, every
+method takes it. It takes the user's ``text``,
 originating ``session`` and ``release_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
@@ -435,8 +436,8 @@ credential and directive screens run over every ``name``, ``check`` and
 ``prompt`` as they run over ``text``, with the same HTTP 400 and a reason
 that names the rule. A malformed list is HTTP 400 naming the first bad item.
 
-The method's proposal may add items of its own (an extension that reads a
-variable, say). The backend runs the same credential and directive screens
+The method may add items of its own (an extension that reads a variable,
+say) in its step's result. The backend runs the same credential and directive screens
 over each added item, and merges the ones that pass by name after the
 person's items into the commit's ``training_request.requires``, so the
 releases row and the manifest carry what the person named and what the change
@@ -455,7 +456,7 @@ runs instructions: a queued instruction goes first, oldest first, one per
 step, and the units that automatic job data would take next, up to
 ``job_samples`` traces (by default ``evolution.batch_size``) and possibly none, ride beside it
 as the samples of its data (scored traces, or unscored records when the
-``pipeline`` section names the inference stages), so the proposer reads the
+``pipeline`` section names the inference stages), so the method reads the
 request next to them; with none queued the step trains as ``auto`` does.
 
 .. code:: bash
@@ -472,7 +473,7 @@ plus ``page_path``, the request's page with the query a browser opens it by
 HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
-instruction (a proposer error, for one) is not retried: the next step
+instruction (a method error, for one) is not retried: the next step
 consumes the instruction with a committed row whose ``skipped`` reads
 ``instruction failed`` and whose ``error`` carries the failure, and the
 queue moves on. Send the instruction again to run it again. That row
@@ -498,31 +499,19 @@ that answered a request carries, for example:
                          "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID",
                                        "prompt": "The Twilio account SID"}]}}
 
-A method may also record notes beside its proposal. They land under
-``proposal_notes``, a JSON mapping the backend writes as given and never
-reads, present only when non-empty. The beta Reefine recipe writes these keys:
+The method also says what its step did. The commit metrics keep its summary
+as ``method_summary``, plain text, and its notes as ``method_notes``, the
+JSON object it returned. Reef clips their long text and redacts
+credential-shaped literals in them, and never reads them to decide. Each is
+present only when the method returned it non-empty, and each method chooses
+its own note keys.
 
-- ``design``: the proposer's plan, a few sentences.
-- ``review``: ``{"result": "complete" | "partial", "covered": [...],
-  "uncovered": [...]}``, the proposer's own check of its change against the
-  request; absent when the review call failed.
-- ``refused_requires``: the items the method dropped, each as
-  ``{"item": <the item as written>, "reason": "..."}``.
-- ``undeclared_env``: the variables a written extension reads through
-  ``process.env`` that no ``requires`` item names. Nothing adds them; the
-  version page shows them.
-- ``failure``: why a request step produced nothing. The model call failed
-  (how long it took, the reply budget and the endpoint's error), or the
-  reply held no usable answer.
-
-Other methods may write other keys.
-
-An optional ``client`` reports the requesting machine, so a proposer builds
-for it rather than for the sandbox it tries changes in: ``platform``,
+An optional ``client`` reports the requesting machine, so a method builds
+for it rather than for the sandbox it evaluates in: ``platform``,
 ``arch`` and ``release`` (short words) and ``commands``, a map of command
 names to whether each is on the machine's PATH (at most 64). A client fills
 ``commands`` by looking each name up on the PATH; it runs nothing.
-It only informs the proposer: what does not fit that shape is dropped, never
+It only informs the method: what does not fit that shape is dropped, never
 a reason to refuse the request, and ``training_request.client`` carries what
 was kept.
 
@@ -594,7 +583,8 @@ Deleting a scenario
 ``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
 service and frees its name. Nothing is destroyed: the record store and commit
 log move under ``<agent_record_dir>/archived/``, the recipe's own directories
-(a proposal inbox, step records) move under an ``archived/`` sibling, and the
+(a harness scenario's proposal inbox, history and step records) move under an
+``archived/`` sibling, and the
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every release it published stays reachable. The
 base artifact, the shared head and releases other scenarios may fork from
@@ -636,8 +626,7 @@ so record acceptance never waits for artifact evolution.
 
 Unknown scenarios return ``404`` without implicit creation; invalid payloads
 return ``400``. A processor that does not support the requested mode returns
-``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
-require a proposer that explicitly accepts ``requests``.
+``501`` without changing its state.
 
 ``GET /reef/status`` reports the selected ``training_mode``. This selector
 is runtime state, not persisted scenario configuration: a service restart
@@ -700,9 +689,9 @@ A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
 The evaluation calls do not present a service token. When auth is configured,
 the service issues a random token at startup that opens the evaluation routes
-alone, and hands it to the recipe: the episodes and proposer run candidate
-code, which can then sample the served release but reach no other route. A
-restart issues a new one.
+alone, and hands it to the recipe. The episodes, which run candidate code, and
+the method's calls to the served model use it: they can sample the served
+release but reach no other route. A restart issues a new one.
 
 Response
 ~~~~~~~~
@@ -877,7 +866,7 @@ runs the release.
 Use ``?release_id=`` to request a specific catalog release, in either form.
 An unknown or unrestorable release returns HTTP 404.
 
-Catalog and manifest reads do not wait for an evolve step's proposer or
+Catalog and manifest reads do not wait for an evolve step's method or
 evaluation episodes: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
 rollback so a manifest's artifact and evaluation metrics come from the same
@@ -906,11 +895,11 @@ until paired episodes settle it.
 | ``patch``      | a JSON object of source tree path to the file's new text, or to      |
 |                | ``null`` to remove the file; it names at least one path              |
 +----------------+----------------------------------------------------------------------+
-| ``reason``     | the proposer's own account, stored with the proposal                 |
+| ``reason``     | the agent's own account, stored with the proposal                    |
 +----------------+----------------------------------------------------------------------+
 | ``session``    | the session that proposed, named in the commit that settles it       |
 +----------------+----------------------------------------------------------------------+
-| ``release_id`` | the release the proposer was running                                 |
+| ``release_id`` | the release the agent was running                                    |
 +----------------+----------------------------------------------------------------------+
 
 The service validates the patched head tree for the scenario's adapter, the
@@ -922,12 +911,12 @@ render. A patch that changes no file's text is refused too. The answer is
 problem that refused the patch, separated by ``;``, else ``null``;
 ``release_id`` is the head the patch was validated against.
 
-An admitted proposal waits in the scenario's inbox
-(``evolution.proposals_dir``) until the next automatic evolve step takes it,
-oldest first, before the method's own ``propose`` is asked. The step
+An admitted proposal waits in the scenario's inbox (``proposals/`` under the
+scenario's ``evolution.state_dir``) until the next automatic evolve step takes
+it, oldest first, in place of running the method. The step
 validates the patch again against its own head, since the head may have
 moved; a patch that no longer passes is refused and the step is skipped.
-Otherwise the evaluation settles it like a patch of the method's. The
+Otherwise the evaluation settles it like a method's candidate. The
 commit that settles it carries ``proposal: {id, session, release_id,
 reason}`` in its metrics, and the releases row carries that commit. When
 ``evolution.max_pending_proposals`` already wait, the answer is
@@ -954,12 +943,11 @@ no inference receipts, so the receipts a client captured stay free for
 feedback. A scenario in ``auto`` refuses the request; the client shows that
 error and leaves the mode switch to the person.
 
-The trainer delivers the request to a proposer whose ``reads_requests`` is
-true, then evaluates and publishes under the same policy as automatic
-evolution. Its commit metrics carry ``training_request: {id, text, session,
-release_id, requires}`` (with ``client`` when the request sent one) and, for
-a method that records notes beside its proposal, ``proposal_notes``, both
-visible through the release catalog.
+The trainer runs the method's step on the request, then evaluates and
+publishes under the same policy as automatic evolution. Its commit metrics
+carry ``training_request: {id, text, session, release_id, requires}`` (with
+``client`` when the request sent one) and the method's ``method_summary`` and
+``method_notes``, all visible through the release catalog.
 
 Rollback
 ~~~~~~~~
@@ -1023,51 +1011,58 @@ it. The page shares its chrome with the request page below: the same branded
 header, palette, card layout, automatic light and dark themes and responsive
 behavior, and one status vocabulary, so a step reads ``Published``,
 ``Ready for review``, ``Not selected`` or ``No changes`` in place of the
-record's own field names. The page has these sections, each its own card,
-in this order: Why (the request the
-step read, else the claimed proposal's reason, else a failure in the job data),
-Design (the proposer's plan, ``proposal_notes.design``, and How to use, the
-part of the plan under that heading; only when the method recorded one),
-What changed (the step's patch, file by file: ``create`` with the new text,
-``update`` as a line diff against the release the step ran on, ``remove``;
-when that release cannot be restored, a written file shows as ``write``
-with its new text), Review
-(``proposal_notes.review``: the proposer's own check of its change against
-the request, ``complete`` or ``partial``, then the points it covered and the
-ones it left uncovered, then ``proposal_notes.undeclared_env``,
-the variables a written extension reads that no ``requires`` item names;
-only when the row carries a review or that list), Result (the result and what
-it means, then the evaluation's numbers: ``wins``, ``losses``, ``ties``,
-``passed``, ``failed``,
-``floor_score``, ``evaluation_sides``, ``current_score``, ``candidate_score`` and
-``episode_failures``, each when the row carries it, so a ``floor`` evaluation,
-which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
-and no ``current_score``, then the skip reason, the selection reason, the step
-record directory when ``evolution.step_record_dir`` is set, and
-``proposal_notes.failure`` as the proposer failure
-when the step recorded one), Setup (the request's ``requires`` with
-name, kind, check and prompt, then the items the release carries from
-earlier steps in its chain, the same union the manifest's ``requires``
-carries; a rejected or skipped row lists only its own items, since its
-release id is the head's; then, under "Refused by the step", the items the
-step refused, from ``proposal_notes.refused_requires`` and, when the row
-carries it, ``training_request.refused_requires``, each as written with its
-reason; nothing when all are empty) and Chain (the parent release, this release,
-and its children: the steps evaluated on it, won, lost or pending, and a promote
-or rollback made on it, each linking that step's own page; a rejected or
-skipped step published nothing, so its
-Chain names the head it ran on and no children).
-Above the sections a step walk links the neighbouring steps, and the logo and
-the "Harness" crumb lead to the served head; a dead end, and the served head's
-own page, leave the link as plain text. Every link either page draws is one
-of the two ``/page`` routes, the only ones a browser can open, since the
-catalog answers JSON and refuses a query token.
-The line under the title carries the release id, marks the served head as
-``Currently served`` and reads the commit time as a date in UTC. The served
-head is the newest
-row that is neither pending nor a rejected or skipped step. A pending row
-that a later ``promote`` row names in ``rollback_target_release_id`` reads
-``Promoted at step N``, where N is that later row's step. A step outside the
+record's own field names.
+
+The page has these sections, each its own card, in this order:
+
+- **Why**: the request that the step read, else the claimed proposal's
+  reason, else a failure in the job data.
+- **Method summary**: ``method_summary`` as plain text with its line breaks.
+  Only when the step recorded one.
+- **What changed**: the step's patch, file by file: ``create`` with the new
+  text, ``update`` as a line diff against the release that the step ran on,
+  and ``remove``. When that release cannot be restored, a written file shows
+  as ``write`` with its new text.
+- **Result**: the result and what it means, then the evaluation's numbers,
+  each when the row carries it:
+
+  - ``wins``, ``losses`` and ``ties`` under ``compare``, or the two means
+    with ``statistic: mean``;
+  - ``passed``, ``failed`` and ``floor_score`` under ``floor``, which runs
+    no current side;
+  - the sum of each side's scores, the episode failures, and the episodes
+    run and reused;
+  - the method's model calls, their seconds and tokens, and the episodes it
+    ran;
+  - the tokens of the evaluation's episodes.
+
+  Then the skip reason, the selection reason, the candidate episodes that
+  failed or scored below the floor (for a rejected step), the step record
+  directory, and the step's error.
+- **Method notes**: ``method_notes`` as JSON. Only when the step recorded
+  them.
+- **Setup**: the request's ``requires`` with name, kind, check and prompt,
+  then the items that the release carries from earlier steps in its chain,
+  the same union that the manifest's ``requires`` carries. A rejected or
+  skipped row lists only its own items, since its release id is the head's.
+  Last, under "Refused by the step", the items that the step refused, from
+  ``training_request.refused_requires``, each as written with its reason;
+  nothing when there are none.
+- **Chain**: the parent release, this release, and its children: the steps
+  evaluated on it, won, lost or pending, and a promote or rollback made on
+  it, each linking that step's own page. A rejected or skipped step
+  published nothing, so its Chain names the head it ran on and no children.
+
+Above the sections, a step walk links the neighbouring steps, and the logo
+and the "Harness" crumb lead to the served head; a dead end, and the served
+head's own page, leave the link as plain text. Every link either page draws
+is one of the two ``/page`` routes, the only ones a browser can open, since
+the catalog answers JSON and refuses a query token. The line under the title
+carries the release id, marks the served head as ``Currently served`` and
+reads the commit time as a date in UTC. The served head is the newest row
+that is neither pending nor a rejected or skipped step. A pending row that a
+later ``promote`` row names in ``rollback_target_release_id`` reads
+``Promoted at vN``, where N is that later row's step. A step outside the
 catalog is HTTP 404 naming the range; a step that is not a number, or longer
 than nine digits, is HTTP 404 too. The row itself rides in a
 ``<script type="application/json">`` block at the end of the page, every
@@ -1094,27 +1089,25 @@ Request highlights the instruction; session, release, request ID, submission
 time and machine requirements are available in expandable details.
 Progress shows
 the request's state and what it means: ``queued`` while no step has taken
-the request, ``proposing`` while the served model writes the change,
+the request, ``proposing`` while the method makes the candidate,
 ``evaluating`` while the candidate's episodes run (with their count and the
 step record directory when the backend reports them, and the time into the
 step), and ``running`` while the trainer holds the request and the backend
-reports no phase. While a step holds the request, Activity lists what the proposer has
-done so far, newest first, each line at its time into the step and the
-newest with how long ago it happened: every model call as it starts and
-as it answers (its seconds and tokens, or its error), and for the agent
-proposer each tool the agent calls, each validation check, each trial with
-its exit and multimodal calls, and each multimodal call with its status;
-failed lines are marked. The page lists the latest 80; the step record
+reports no phase. While a step holds the request, Activity lists what the
+step has done so far, newest first, each line at its time into the step and
+the newest with how long ago it happened: every model call as it starts and
+as it answers (its seconds and tokens, or its error), each batch of episodes
+that the method's ``tools.evaluate`` runs, and each line the method notes
+itself (an agent method can note each tool its agent calls, say); failed
+lines are marked. The page lists the latest 80; the step record
 keeps every call. The catalog row whose ``metrics.training_request.id`` is the record
 id settles the page: the reload stops and Progress gives way to Result
 (the result as the version page words it, what it means and the next
-action, a failed instruction's ``error``, ``proposal_notes.failure`` as
-``proposer failure``, the release id and a link to the version page), What
-changed (each file the patch writes or removes, with its kind in the harness
-layout; labeled Proposed changes for pending, rejected, skipped or failed
-steps), Review (its result and the points it left uncovered, when the step
-recorded a review) and Design (the plan and its How to use part, when the
-step recorded them). A published result names the next action,
+action, a failed instruction's ``error``, the release id and a link to the
+version page), Method summary (when the step recorded one), What changed
+(each file the patch writes or removes, with its kind in the harness layout;
+labeled Proposed changes for pending, rejected, skipped or failed steps), and
+Method notes (when the step recorded them). A published result names the next action,
 ``GET /reef/harness``, with what the release requires where the harness
 runs; a pending result names the promote request. An unknown
 id, or one that is not a training instruction, is HTTP 404 naming it.
@@ -1125,20 +1118,20 @@ browser that renders: ``request_id``, ``settled``, ``step`` (the step the
 row landed as once it settles, else null), ``state`` (the page's own
 ``queued``, ``proposing``, ``evaluating`` or ``running``, and
 the settled row's result once a row answers the request, including ``failed``
-when a skipped step records a proposer failure or execution error), ``meaning`` (the
+for a step that failed), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
 step holds this request, ``started_at``, ``episodes_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
 ``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
-``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
-empty otherwise) from the backend's progress. Unlike the two pages this is
+``model`` for a model call, ``evaluate`` for the method's episodes, or a kind
+that the method notes itself; empty otherwise) from the backend's progress. Unlike the two pages this is
 an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.
 
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
 ``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
-phase ``evaluating``. Reviews and settled proposals store their outcome under
+phase ``evaluating``. Settled proposals store their outcome under
 ``result``. A harness manifest carries the evaluation metrics under
 ``evaluation`` only.
 
@@ -1170,28 +1163,33 @@ Retained step files
 ~~~~~~~~~~~~~~~~~~~
 
 ``GET /reef/harness/releases/{step}/records`` returns the raw file inventory
-for the same catalog step, authenticated and scenario-scoped like the version
-page. The response is ``{"status": "retained", "files": [{"path": "proposer.json",
-"bytes": 123}]}``. Add ``?path=proposer.json`` (or an inventory path under
-``episodes/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
-The service does not interpret proposer replies or agent events. A console can
-render those persisted formats without changing their learning semantics.
+of the same catalog step's record directory, authenticated and
+scenario-scoped like the version page. The response is
+``{"status": "retained", "files": [{"path": "calls.json", "bytes": 123}]}``.
+Add ``?path=calls.json`` (or another inventory path, such as ``result.json``
+or ``material/traces/0/trace.json``) to read
+``{"status": "retained", "path": "...", "text": "..."}``. The service does not
+interpret model replies or agent events. A console can render those persisted
+formats without changing their learning semantics. The evaluation episodes
+are in the scenario's history, not in the step directory, so this route does
+not serve them.
 
 The backend reads only the step directory referenced by the selected catalog
-row under its configured scenario record root. Absolute paths, traversal and
+row under the scenario's ``steps/`` directory. Absolute paths, traversal and
 symlinks are rejected. Only JSON and JSONL files are exposed; inventories are
 limited to 1000 filesystem entries and individual files to 4 MiB. Exceeding
 these limits returns HTTP 400 instead of silently truncating records. A missing
-file or catalog step is HTTP 404. A step with no archive metadata returns
-``status: not_recorded``, disabled recording returns ``status: disabled``, and
-an absent archive directory returns ``status: missing``. These states carry an
-empty files list. All successful reads use ``Cache-Control: no-store``.
+file or catalog step is HTTP 404. A step whose row names no record directory
+returns ``status: not_recorded``, and an absent directory returns
+``status: missing``. These states carry an empty files list. All successful
+reads use ``Cache-Control: no-store``.
 
-Proposer records contain recorded messages and replies. Native sessions retain
-request headers, assistant messages and tool events; reconstructed inputs are
-not exact provider request bodies. They do not retain provider response IDs,
-and a compaction event may prevent complete input reconstruction. Reads neither
-copy records into another store nor change retention. Step files remain separate
+``calls.json`` holds the recorded messages and replies of the method's model
+calls. An episode's native session log, in the history, retains request
+headers, assistant messages and tool events; reconstructed inputs are not
+exact provider request bodies. It does not retain provider response IDs, and a
+compaction event may prevent complete input reconstruction. Reads neither copy
+records into another store nor change retention. Step files remain separate
 from online record-body capacity eviction.
 
 Status

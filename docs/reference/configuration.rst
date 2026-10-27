@@ -747,7 +747,7 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    recipe.implementation | recipe | the recipe this deployment serves
    reef.host | 127.0.0.1 | bind address
    reef.port | 8900 | bind port
-   reef.served-url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
+   reef.served-url | | the URL a composite recipe's own evaluation calls (episodes and the method's calls to the served model) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
    reef.console-origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.allow-unauthenticated | false | when true, serve without a token on a ``reef.host`` that other machines can reach. When false, Reef does not start on such an address without a token. A loopback address, such as ``127.0.0.1``, ``::1`` or ``localhost``, needs no token
@@ -836,7 +836,7 @@ and ``POST /reef/train`` is refused. In ``manual``, inference and reports
 cannot authorize training by themselves; ``POST /reef/train`` supplies the
 user instruction, and harness evolution runs it alone. In ``hybrid``, the
 processor makes job data as in ``auto`` and runs instructions too, a queued
-instruction first; harness evolution hands the proposer, beside the
+instruction first; harness evolution gives the method, beside the
 instruction, the units that automatic job data would take next, up to
 ``job_samples`` traces (by default ``evolution.batch_size``) and possibly none: scored traces, or
 unscored records when the ``pipeline`` section names the inference stages. The processor defines
@@ -848,9 +848,9 @@ initial training mode. The modes share record push and retention. In ``manual``
 an instruction's data has no record set units; in ``hybrid`` it takes the units that
 automatic job data would. A recipe's ``Sample2Job`` declares
 ``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
-Harness evolution supports the three modes and requires a proposer that
-explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
-on an inference-only recipe does not create a training backend.
+Harness evolution supports the three modes, and every method takes a request
+step. Setting ``manual`` or ``hybrid`` on an inference-only recipe does not
+create a training backend.
 
 .. code:: yaml
 
@@ -930,10 +930,11 @@ model. Harness-evolution presets also carry ``recipe.config.evolution``:
      config:
        evolution:
          adapter: pi
-         propose: methods.mine:MyProposer
-         evaluate: methods.mine:MyScorer
-         tasks: ["..."]
+         method: methods.mine:MyMethod
          batch_size: 1
+         evaluation:
+           tasks: ["..."]
+           scorer: methods.mine:MyScorer
    inference:
      upstream-model: qwen3-8b
 
@@ -978,9 +979,8 @@ trainer keeps the reports its own contract parses:
            config:
              evolution:
                adapter: pi
-               propose: methods.mine:MyProposer
-               evaluate: methods.mine:MyScorer
-               tasks: ["..."]
+               method: methods.mine:MyMethod
+               evaluation: {tasks: ["..."], scorer: methods.mine:MyScorer}
          config:
            implementation: my_pkg.config:ConfigRecipe
    inference:
@@ -1004,7 +1004,7 @@ component that trains weights goes under its ``config.pipeline``:
          harness:
            implementation: reef.recipe.harness:HarnessEvolutionRecipe
            config:
-             evolution: {adapter: pi, propose: methods.mine:MyProposer, evaluate: methods.mine:MyScorer, tasks: ["..."]}
+             evolution: {adapter: pi, method: methods.mine:MyMethod, evaluation: {tasks: ["..."], scorer: methods.mine:MyScorer}}
    inference:
      model-path: Qwen/Qwen3-8B
    training:
@@ -1064,7 +1064,10 @@ Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
 These keys go under ``recipe.config.evolution``. `Evolve your harness
-<../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
+<../user-guide/evolve-your-harness.rst>`__ describes what each one changes,
+and `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
+describes the method contract. A key may use underscores or hyphens, and
+startup refuses an unknown key.
 
 .. config::
 
@@ -1080,49 +1083,78 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 
 .. config::
 
-   evolution.propose | a ``Proposer`` class: ``package.module:ClassName``, or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``propose(context)`` returns each step's patch (see `Write a harness method <../developer-guide/write-a-harness-method.rst>`__); unset, the recipe's own proposer, and a recipe with none refuses startup
-   evolution.evaluate | an ``EpisodeScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest`` or ``evolution.eval_task_store``
-   evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every evaluation task; the current release is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a ``SelectionPlugin`` class in the same form as ``evolution.propose``
-   evolution.floor_score | 1.0 | the score every evaluation task must reach under ``selection: floor``; a positive number, refused with any other selection, as ``min_win_margin`` is outside ``score_comparison``
-   evolution.tasks | non-empty list of episode prompts, scored once per tree per step
-   evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the evaluation's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it
-   evolution.tasks_root | the directory the manifest's task names live under
-   evolution.eval_task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. Set instead of ``evolution.tasks`` and ``evolution.task_manifest``, with the same adapter and ``promote_failures`` limits as ``evolution.task_manifest``. The eval split must hold a task when the scenario loads.
+   evolution.method | required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(workspace, tools)`` makes each step's candidate
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` kinds), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
-   evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
+   evolution.seed | the directory of the first tree: every regular file under it, at its path in the harness layout; it becomes the base release of a new scenario, and an existing scenario keeps its head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
-   evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
-   evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
-   evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
+   evolution.models | {} | the method's own models by name, which it calls as ``tools.models[name]``: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name; the name ``served`` is refused, since it is the model under test
+   evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
+   evolution.state_dir | .reef/harness | the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the release component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, ``skills`` for SkillClaw, the component's own name in a composite recipe), holds ``proposals/``, the inbox of ``POST /reef/harness/proposals`` with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files; ``history/``, every candidate, episode and decision, which is the score cache; and ``steps/``, one step record per step (the workspace, ``calls.json`` and ``result.json``; a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
-   evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
-   evolution.min_win_margin | 0 | under ``selection: score_comparison``, the candidate must win more than this many task pairings beyond its losses; refused with any other selection
-   evolution.max_rejected_history | 25 | how many of the latest rejected proposals the scenario state keeps (step, patch and reason) for the proposer to read; 0 keeps none
-   evolution.recheck_every | 0 | on each automatic step whose number is a multiple of this, and at once when the served model or the adapter version changed since the last publish, re-evaluate the last published tree against the tree it replaced instead of proposing; when the older tree wins, the step publishes it, which rolls back; 0 disables; refused with ``selection: floor``
-   evolution.multimodal | | Reefine (beta) only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; Reefine's example configuration reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
-   evolution.proposer_agent | | off unless set (the beta Reefine recipe sets it); a proposer whose ``runs_agent`` is true runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; a cloud sandbox runs it where it reaches the gateway through a tunnel: ``e2b`` with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>-episodes-v1`` with bubblewrap, built on first use) and the ``e2b`` extra, or ``modal`` with the ``evolution.sandbox`` Modal options in this section and the ``modal`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See ``recipes/beta/reefine/README.md``
+   evolution.max_model_calls_per_step | 0 | cap the method's model calls in one step, through ``tools.models`` or ``tools.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
+   evolution.max_episodes_per_step | 0 | cap the episodes that the method's ``tools.evaluate`` runs in one step; reused episodes and the evaluation's own episodes do not count; 0 disables the limit
+   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
+   evolution.publish | auto | ``review`` holds every successful evaluation as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
+   evolution.review_kinds | [] | tree kinds (``rules``, ``config``, ``skill``, ``agent_command``, ``code_extension`` and the ``native_*`` kinds) whose changed files make a win wait for a promote while the rest publish at once; a win that changes a ``native_loop`` file waits whether or not the list names it
    evolution.executor | local | ``local`` runs episodes as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per episode and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
    execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
    evolution.sandbox | | for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
-   evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent evaluation task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
-   evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
-   evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
-   evolution.promote | | optional ``Promoter`` class, in the same form as ``evolution.propose``; its ``promote(samples, *, manifest=None)`` chooses which trace prompts to promote; without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
-   evolution.publish | auto | ``review`` holds every successful evaluation as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
-   evolution.review_kinds | [] | tree kinds (``rules``, ``config``, ``skill``, ``agent_command``, ``code_extension`` and the ``native_*`` kinds) whose changed files make a win wait for a promote while the rest publish at once; a win that changes a ``native_loop`` file waits whether or not the list names it
-   evolution.seed | the directory of the first tree: every regular file under it, at its path in the harness layout; it becomes the base release of a new scenario, and an existing scenario keeps its head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the recipe's own seed (for example Reefine's starter skill), else the empty tree
-   evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
-   evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
-   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
-   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``patch.json`` (the proposal's patch, written before validation, so a refused patch is on file too, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
+
+``evolution.evaluation`` decides how Reef evaluates a candidate and when it
+publishes one: the tasks, the scorer, and the publication policy. It takes
+one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
+``task_store``. The task source and ``scorer`` are required unless
+``policy`` is ``none``.
+
+.. code:: yaml
+
+   evolution:
+     evaluation:
+       tasks: ["[fib] Compute fib(90) and reply with the number alone."]
+       scorer: harness.scoring:AnswerScorer
+       policy: compare
+       statistic: wins
+
+.. config::
+
+   evolution.evaluation.tasks | the evaluation tasks: episode prompts, or task directories for an adapter whose prompt is a task directory (``terminus``)
+   evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Only with an adapter whose prompt is a task directory (``terminus``); startup refuses a manifest that names no eval task
+   evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
+   evolution.evaluation.task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. The same adapter limit as ``task_manifest``
+   evolution.evaluation.scorer | an ``EpisodeScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward
+   evolution.evaluation.policy | compare | the publication policy: ``compare`` scores the candidate and the current tree on the same tasks and repeats; ``floor`` scores the candidate alone and publishes it when every episode scores at least ``floor_score``; ``none`` runs no episode and publishes every candidate that passes validation
+   evolution.evaluation.statistic | wins | what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses over the (task, repeat) pairs exceed ``min_margin``, an episode that could not run ranking below every score. ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``, an episode that could not run counting as 0
+   evolution.evaluation.min_margin | 0 | the margin a ``compare`` candidate must exceed: in wins minus losses, or in mean score; at least 0
+   evolution.evaluation.floor_score | 1.0 | the score every episode must reach under ``floor``; positive
+   evolution.evaluation.repeats | 1 | the episodes per task and tree; each repeat is scored, and compared, on its own
+   evolution.evaluation.episode_timeout_s | 600 | seconds one evaluation episode may run
+   evolution.evaluation.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
+   evolution.evaluation.recheck_every | 0 | on each automatic step whose number is a multiple of this, and at once when the evaluation context changed since the last publish, re-evaluate the last published tree against the tree it replaced, with fresh episodes, instead of running the method; when the older tree wins, the step publishes it, which rolls back; needs ``policy: compare``; 0 disables
+   evolution.evaluation.promote_failures | false | when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a promoted failure back; the seed tasks stay the floor. Refused with an adapter whose prompt is a task directory
+   evolution.evaluation.promote | | optional ``Promoter`` class, in the same form as ``evolution.method``, only with ``promote_failures``; its ``promote(samples)`` chooses which trace prompts to promote; without it every trace's user prompt is promoted, and the caps and the credential and directive screens still apply
+   evolution.evaluation.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded; 0 promotes none
+   evolution.evaluation.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
+
+The evaluation context is what an episode's score depends on besides the
+tree and the task: the served model and the named models of
+``evolution.models``; the adapter, its version and ``evolution.binary``; the
+scorer setting; ``episode_timeout_s`` and ``forbid_residue``; and the episode
+executor, ``evolution.executor`` and ``evolution.sandbox``. The history
+reuses a scored episode only in the context it ran in, and never reuses an
+episode that could not run.
+
+The beta Reefine recipe reads two keys of its own, ``evolution.agent``
+and ``evolution.multimodal``. Its `README
+<../../recipes/beta/reefine/README.md>`__ documents them.
 
 The served model's binding is merged in when an episode renders the tree; it
-never enters a published tree. The seed is the baseline the first patch is
-measured against. The step record holds the proposer's raw traffic and every evaluation
-episode's session log, so treat its directory like the commit history.
+never enters a published tree. The seed is the baseline the first candidate
+is measured against. The step records hold the method's raw model traffic and
+the clients' traces, and the history holds every evaluation episode's session
+log, so treat ``evolution.state_dir`` like the commit history.
 
 The ``inference`` section
 -------------------------
@@ -1181,8 +1213,8 @@ The ``evaluation`` section
 --------------------------
 
 Only weight-training recipes read this section; a deployment that pairs it
-with any other recipe fails at startup, because a harness recipe builds its
-evaluator in code. Every checkpoint that a training job saves becomes a
+with any other recipe fails at startup. A harness recipe configures its
+evaluation in ``evolution.evaluation`` instead (see `Harness evolution keys`_). Every checkpoint that a training job saves becomes a
 release. Absent by default, in which case Reef serves every release. When
 present, Reef calls the named class's ``from_config`` method once per
 scenario. The plugin then receives each saved checkpoint as a
@@ -1640,8 +1672,8 @@ The following names are relative to ``operations/``:
        admission; immediate admissions also contribute to count and duration.
    * - ``evaluate/request/*``, ``evaluate/admission/*``
      - The same measurements for calls on the evaluation route, a step's
-       episodes and proposer calls, which keep no record; counted apart so a
-       step does not read as served traffic.
+       episodes and the method's calls to the served model, which keep no
+       record; counted apart so a step does not read as served traffic.
    * - ``rollout/request/*``, ``rollout/admission/*``
      - The same measurements for the calls of rollout episodes that Reef runs
        itself (``x-reef-rollout``), which keep no record. Their retries,

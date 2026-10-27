@@ -166,8 +166,8 @@ Weight recipes need GPUs (`Evolve your model
 
 A harness recipe runs on a laptop with only a model endpoint. Bind
 ``reef.recipe.harness:HarnessEvolutionRecipe`` and give it a **preset**
-naming your ``propose`` and ``evaluate`` classes, the seed tree and the tasks
-to evaluate on. ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
+naming your method (``evolution.method``), the seed tree, and the evaluation's
+tasks and scorer (``evolution.evaluation``). ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
 together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 
