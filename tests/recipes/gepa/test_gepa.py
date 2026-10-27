@@ -746,7 +746,9 @@ def test_a_step_publishes_and_the_next_step_folds_its_validation_into_the_commit
     initial = tmp_path / "initial"
     built.seed.write(initial)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"))
+    dispatcher = Dispatcher(
+        built, factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"), hold_local_cycles=True
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("gepa-demo")
         assert scenario is not None

@@ -18,12 +18,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.scenario.test_component_trainers import _JudgedAtOnce, _Judgment
 from tests.support._threshold_processor import threshold_pipeline
 from tests.support._trajectories import policy_trajectory
-from tests.support.component_trainers import HARNESS, WEIGHTS, _ComponentBackend, _TwoTrainerRecipe
+from tests.support.component_trainers import (
+    HARNESS,
+    WEIGHTS,
+    JudgedAtOnce,
+    Judgment,
+    _ComponentBackend,
+    _TwoTrainerRecipe,
+)
 
-from recipes.tttd import TTTDBatches, TTTDGridSettings, TTTDGroupedRolloutReport, TTTDRecord2Record, TTTDTasks
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDTasks
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
@@ -40,10 +46,10 @@ from reef.record2record import (
 from reef.record2task import JudgedTasks
 from reef.record2task.assembly import SampleAssemblySettings
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2batch import Task2Batch
+from reef.task2job import Task2Job
 from reef.train import ComponentTrainer, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrainDataItem, TrainingBatch
+from reef.train.types import JobData, TrainDataItem
 
 
 class _SessionJudging(RecordJudging):
@@ -63,7 +69,7 @@ class _SessionJudging(RecordJudging):
             stage.retire(item.agent_record_id)
             return
         if last is not None and stage.tracked_record(last[0]) is not None:
-            stage.dispatch(_Judgment(last[0]))
+            stage.dispatch(Judgment(last[0]))
         self.sessions[session] = (item.agent_record_id, key)
         stage.track(item)
 
@@ -74,7 +80,7 @@ class _SessionJudging(RecordJudging):
 class _SessionTasks(JudgedTasks):
     """One-token stub samples; a turn marked declined is unusable."""
 
-    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> Any:
+    def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
         if record.payload.get("declined"):
             return None
         return policy_trajectory(
@@ -87,20 +93,20 @@ class _SessionTasks(JudgedTasks):
         )
 
 
-class SessionBatches(Task2Batch):
+class SessionJobData(Task2Job):
     """Batches the judged turns of ``_SessionJudging``."""
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, tasks)
 
 
 def session_pipeline(context: PipelineContext) -> TrainingPipeline:
     """Trains the judged turns of ``_SessionJudging``; a turn marked declined is unusable."""
     return TrainingPipeline(
         context,
-        record2record=JudgingRecord2Record(_SessionJudging(), _JudgedAtOnce()),
+        record2record=JudgingRecord2Record(_SessionJudging(), JudgedAtOnce()),
         record2task=_SessionTasks(),
-        task2batch=SessionBatches(context, None),
+        task2job=SessionJobData(context, None, None),
     )
 
 
@@ -136,7 +142,7 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
         context,
         record2record=record2record,
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2batch=TTTDBatches(context, record2record, None),
+        task2job=TTTDJobData(context, record2record, None, None),
     )
 
 
@@ -159,6 +165,7 @@ class _Recipe(_TwoTrainerRecipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
+                    default_job_samples=1,
                 ),
             )
             for component, backend in self.backends.items()
@@ -176,6 +183,8 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        # Loading a scenario wakes its workers: held, they leave every step to the test.
+        hold_local_cycles=True,
     )
 
 
@@ -213,7 +222,7 @@ def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     result = scenario.prepare_training_step(component)
     if result is None:
         return None
-    batch = scenario.trainer_for(component).pending_batch
+    batch = scenario.trainer_for(component).pending_job_data
     sources = [tuple(item.source_agent_record_ids) for item in batch.items]
     scenario.commit(result, component=component)
     return sources

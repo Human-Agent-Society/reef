@@ -230,7 +230,52 @@ def test_critic_metric_hook_reports_masked_explained_variance(monkeypatch: pytes
     )
 
     assert value.item() == 2.0
-    assert metrics["explained_variance"].item() == pytest.approx(0.75)
+    reduced = worker_hooks.finalize_critic_metrics({key: value.item() for key, value in metrics.items()})
+    assert reduced["explained_variance"] == pytest.approx(0.75)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("factor", [1.0, 0.5, 0.125])
+def test_global_ev_from_constant_return_microbatches(factor: float) -> None:
+    # Returns [0, 0] and [1, 1] each have zero local variance. Together,
+    # errors [0, .2, -.2, 0] have variance .02 and returns have variance .25.
+    moments = {
+        "count": 4,
+        "return_sum": 2,
+        "return_square_sum": 2,
+        "error_sum": 0,
+        "error_square_sum": 0.08,
+    }
+    metrics = {f"train/critic-ev_{key}": value * factor for key, value in moments.items()}
+    result = worker_hooks.finalize_critic_metrics(metrics)
+    assert result["train/critic-explained_variance"] == pytest.approx(0.92)
+    assert result["train/critic-explained_variance_valid"] == 1
+    assert not any("ev_" in key for key in result)
+
+
+@pytest.mark.unit
+def test_constant_returns_are_explicitly_undefined() -> None:
+    result = worker_hooks.finalize_critic_metrics(
+        {
+            "ev_count": 2,
+            "ev_return_sum": 2,
+            "ev_return_square_sum": 2,
+            "ev_error_sum": 1,
+            "ev_error_square_sum": 1,
+        }
+    )
+    assert result["explained_variance_valid"] == 0
+    assert "explained_variance" not in result
+
+
+@pytest.mark.unit
+def test_undefined_ev_does_not_reuse_the_previous_step_value() -> None:
+    worker_hooks.drain_worker_metrics()
+    worker_hooks.record_worker_metrics({"train/critic-explained_variance": 0.8})
+    worker_hooks.record_worker_metrics({"train/critic-explained_variance_valid": 0.0})
+    metrics = worker_hooks.drain_worker_metrics()
+    assert "train/critic-explained_variance" not in metrics
+    assert metrics["train/critic-explained_variance_valid"] == 0
 
 
 @pytest.mark.unit
@@ -306,30 +351,7 @@ def test_lora_hf_bootstrap_loads_wrapped_base_and_skips_adapters(monkeypatch: py
 
 
 @pytest.mark.unit
-def test_updater_and_policy_gradient_hooks_replace_only_worker_globals(monkeypatch: pytest.MonkeyPatch) -> None:
-    actor = _stub_module(monkeypatch, "slime.backends.megatron_utils.actor")
-    delta = _stub_module(
-        monkeypatch,
-        "slime.backends.megatron_utils.update_weight.update_weight_from_disk_delta",
-    )
-    updater_types = {
-        name: type(name, (), {})
-        for name in (
-            "ReefUpdateWeightFromDisk",
-            "ReefUpdateWeightFromDiskDelta",
-            "ReefUpdateWeightFromDistributed",
-            "ReefUpdateWeightFromTensor",
-        )
-    }
-    _stub_module(
-        monkeypatch,
-        "reef.train.slime_backend.reef_adapters.weight_updaters",
-        **updater_types,
-    )
-    worker_hooks._install_versioned_updaters()
-    assert actor.UpdateWeightFromTensor is updater_types["ReefUpdateWeightFromTensor"]
-    assert delta.UpdateWeightFromDiskDelta is updater_types["ReefUpdateWeightFromDiskDelta"]
-
+def test_policy_gradient_hook_replaces_only_worker_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     loaded: list[str] = []
     misc = importlib.import_module("slime.utils.misc")
     monkeypatch.setattr(
@@ -426,7 +448,7 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
         "_install_rollout_logging",
         "_install_critic_metrics",
         "_install_critic_hf_bootstrap",
-        "_install_versioned_updaters",
+        "_install_lora_hf_bootstrap",
     ):
         monkeypatch.setattr(worker_hooks, name, lambda *_, name=name: calls.append(name))
     monkeypatch.setattr(worker_hooks, "_install_pg_primitive", lambda _args: calls.append("pg"))

@@ -377,7 +377,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert surface.harness is None and built.harness_adapter is None
     # The backend reads its head from the committed releases, here the seed alone; no episodes run.
     trainer = built.build("demo", SQLiteRecordStore(), releases=ComponentReleases(TreeReleases(built.seed), "skills"))
-    assert isinstance(trainer, Trainer) and trainer.batch_size == 60
+    assert isinstance(trainer, Trainer) and trainer.job_samples == 60
 
 
 def test_seed_skills_must_name_an_existing_directory(example, tmp_path) -> None:
@@ -437,7 +437,7 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
     processor.push(_inference("inf-3"))
     processor.push(_report("rep-3", 1.0, "inf-3"))
     assert processor.ready(3)
-    batch = processor.build_batch(3)
+    batch = processor.build_job_data(3)
     assert sorted(sample.metadata.get("reward") for sample in batch.items) == [0.0, 1.0, 1.0]
 
 
@@ -598,7 +598,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         service.stop()
 
 
-def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
+def test_poke_night_recovers_a_pending_job_data(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
     night_llm(example, monkeypatch)  # every decision skips: the night commits without an artifact
     run_dir = tmp_path / "run"
     recipe = dry_recipe(example, tmp_path, batch_size=1)

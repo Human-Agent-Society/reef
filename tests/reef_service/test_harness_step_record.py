@@ -41,7 +41,7 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 # A harness shaped like the native loop: the root session, one delegated checker
 # turn under agents/, and the rendered rules echoed into the header for the scorer.
@@ -112,7 +112,7 @@ def native_backend(
 
 
 def step(backend: HarnessBackend, state=None) -> TrainStepResult:
-    return backend_step(backend, TrainingBatch("demo:1"), backend.initial_state() if state is None else state)
+    return backend_step(backend, JobData("demo:1"), backend.initial_state() if state is None else state)
 
 
 def read_json(path: Path):
@@ -331,7 +331,7 @@ def test_a_recheck_step_writes_episodes_only_and_asks_the_proposer_nothing(tmp_p
 
 def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
     backend, _ = native_backend(tmp_path, step_record_dir=str(tmp_path / "record"))
-    prepared = backend.prepare_step(TrainingBatch("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
     candidate = prepared.candidate
     assert candidate is not None and candidate.record_dir == (tmp_path / "record" / "demo" / "1").resolve()
     # A file where the episodes directory goes stands in for a full or unwritable record volume.

@@ -367,6 +367,14 @@ Isolation (`evolution.proposer_agent.sandbox`, or `REEF_PROPOSER_SANDBOX`):
     --recipe.config.evolution.proposer_agent.sandbox e2b
   ```
 
+* `modal`: the same, in a [Modal](https://modal.com/docs/guide/sandboxes)
+  Sandbox instead of an E2B microVM. It needs `pip install 'reef-infra[modal]'`
+  and Modal's credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or the
+  profile `modal setup` writes). Reef builds the image (the pinned pi,
+  bubblewrap, Python 3 and coreutils on Node 22) on first use, and Modal caches
+  it; `modal_image` names another, `modal_app` the Modal app the sandboxes
+  belong to. A Modal sandbox lives at most a day, and the command runs to its
+  end or its limit without a reconnect.
 * `none`: no isolation. The agent runs with the service's user and full
   network access, fed your clients' text. Choose it only where you trust
   every client, such as your own machine.
@@ -439,12 +447,12 @@ evaluator reads the task verifier's reward.
 
 `--recipe.config.evolution.adapter terminus` runs the recipe on
 Terminal-Bench's Terminus 2. Prepare a model endpoint with its API key, and
-Docker or E2B for the task container. With Docker, the default, prepare a
-working Docker installation on the service host. On macOS, Docker must share
-`~/.reef/episodes` with the host. Other platforms use the temp directory;
-set `TMPDIR` for the service if Docker's VM does not share it. To run the
-task containers on E2B instead, see
-[Docker or E2B](../../../docs/developer-guide/harness-adapters.rst#docker-or-e2b).
+Docker or a remote Harbor environment (E2B or Modal) for the task container.
+With Docker, the default, prepare a working Docker installation on the service
+host. On macOS, Docker must share `~/.reef/episodes` with the host. Other
+platforms use the temp directory; set `TMPDIR` for the service if Docker's VM
+does not share it. To run the task containers remotely instead, see
+[Docker or a remote environment](../../../docs/developer-guide/harness-adapters.rst#docker-or-a-remote-environment).
 
 Terminus runs one Harbor task at a time through `reef-terminus --task`, so
 there is no session to type in. Submit requests over HTTP and read their

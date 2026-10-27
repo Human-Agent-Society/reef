@@ -109,7 +109,7 @@ no prompt directory and loads no vendor plugin.
 ``code_extension`` is narrower still. Codex rejects it because lifecycle hooks
 run outside its command sandbox. Terminus accepts one Python module defining
 ``Agent(Terminus2)``, and only when Reef's sandbox isolates the runner and
-Harbor uses remote E2B tasks; see the adapter guide for the required
+Harbor runs the tasks remotely (``e2b`` or ``modal``); see the adapter guide for the required
 deployment settings.
 
 Native files
@@ -191,21 +191,21 @@ in.
 .. flow::
    :loop: publish the winner; the head stays otherwise
 
-   Batch :: a batch of units, or a queued request, or both
+   Job data :: the units of one step, or a queued request, or both
    ``propose`` :: one patch to the head tree, or ``None``
    Episodes* :: run the candidate and the head on the same tasks
    Result :: publish the candidate as a new release, or keep the head
 
-A step begins either from a batch of recorded traffic or from a training
+A step begins either from job data of recorded traffic or from a training
 request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the recipe config
 decides which of the two a deployment accepts.
 
-- ``auto`` (the default): steps start from a batch of recorded traffic
+- ``auto`` (the default): steps start from job data of recorded traffic
   alone. Training requests are ignored.
 - ``manual``: steps start from training requests alone. Ordinary
   traffic never starts evolution.
 - ``hybrid``: steps start from either, as the tutorial's ``deployment.yaml``
-  sets. Training requests are queued and takes precedence, and batching continues
+  sets. Training requests are queued and take precedence, and automatic steps continue
   between those requests.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
@@ -219,22 +219,23 @@ Trigger of step
 
 In ``auto`` mode, two settings decide when Reef starts a step:
 
-- ``recipe.config.evolution.batch_size`` (default 1): when this number of
-  traces is collected, Reef starts a step.
+- ``pipeline.task2job.config.job_samples``: when this number of traces is
+  collected, Reef starts a step. Without the key, it is
+  ``recipe.config.evolution.batch_size`` (default 1).
 - The ``pipeline.record2record`` and ``pipeline.record2task`` stages decide
-  what counts as one trace toward ``batch_size``.
+  what counts as one trace toward ``job_samples``.
 
 The recipe's default stages count reports. Every valid scored report with
 at least one unique inference reference counts as one trace, including
-successful outcomes. A report over one receipt batches as that exchange. A
-report over several receipts batches as one trajectory sample that carries
+successful outcomes. A report over one receipt trains as that exchange. A
+report over several receipts trains as one trajectory sample that carries
 every referenced exchange in order, which is how a client reports a whole
-run. Reports that reference inferences trained in earlier batches are
+run. Reports that reference inferences trained in earlier steps are
 dropped.
 
 To count recorded inference traffic instead, name the inference stages.
 Every inference then counts as one trace. No report is necessary: recorded
-traffic alone batches, unscored, for methods that judge for themselves.
+traffic alone trains, unscored, for methods that judge for themselves.
 
 .. code-block:: yaml
 
@@ -249,8 +250,8 @@ traffic alone batches, unscored, for methods that judge for themselves.
        module: reef.record2task.traces:InferenceTasks
 
 Reef holds the traces that wait for a step in a buffer. The buffer keeps at
-most ``pipeline.task2batch.config.buffer_size`` traces (default four times
-``batch_size``). When more traces arrive, Reef releases the oldest ones. This
+most ``pipeline.task2job.config.buffer_size`` traces (default four times
+``job_samples``). When more traces arrive, Reef releases the oldest ones. This
 limit applies in every mode.
 
 Under ``auto`` mode, training requests are rejected.
@@ -274,14 +275,14 @@ beyond ``buffer_size``.
 ``hybrid`` mode
 ^^^^^^^^^^^^^^^
 
-In ``hybrid`` mode, either condition starts a step: ``batch_size`` traces
+In ``hybrid`` mode, either condition starts a step: ``job_samples`` traces
 collected by the ``pipeline`` stages, or a training request received.
 
 When both conditions are met, the training request takes precedence for the
 next step. Reef builds one step that uses both, whether or not
-``batch_size`` is met. The proposer then
-receives the training request and the traces that an automatic batch would
-take next. It gets up to ``batch_size`` traces, or none, and uses both
+``job_samples`` is met. The proposer then
+receives the training request and the traces that automatic job data would
+take next. It gets up to ``job_samples`` traces, or none, and uses both
 to make a patch.
 
 Propose: a patch to the head tree
@@ -330,9 +331,10 @@ to forward, and missing variables fail configuration. This keeps remote sandbox
 credentials out of candidate episodes. ``egress_hosts`` currently enables
 network access; it does not enforce a hostname firewall.
 
-On macOS or a host without Linux namespaces, select ``e2b`` to run ordinary
-evaluation episodes in disposable cloud sandboxes. The evaluation and a
-method's trial episodes use the same episode runner and trajectory readers::
+On macOS or a host without Linux namespaces, select a cloud sandbox, ``e2b`` or
+``modal``, to run ordinary evaluation episodes in disposable sandboxes. The
+evaluation and a method's trial episodes use the same episode runner and
+trajectory readers::
 
     evolution:
       adapter: pi
@@ -362,6 +364,35 @@ already installed. ``evolution.binary`` names a binary in that template, not a
 path on the Reef host. Startup checks provider access, the template, the
 binary and namespace support using a short-lived sandbox. The host does not
 install the remote agent. Terminus retains its own Harbor hosted configuration.
+
+To use Modal instead, select ``executor: modal``::
+
+    evolution:
+      adapter: pi
+      executor: modal
+      episode_timeout_s: 600
+      sandbox:
+        modal_app: reef-sandboxes
+        forward_ports: [8000]
+
+Install ``reef-infra[modal]``. Modal's client takes its credentials from
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``, or from the profile that
+``modal setup`` writes; Reef uses them and does not pass them to the agent. The
+options are:
+
+- ``modal_app``: the Modal app the sandboxes belong to (``reef-sandboxes``).
+- ``modal_image``: a registry image to run. Without it, Reef builds Node 22
+  with bubblewrap, Python 3 and the npm adapter, and Modal caches the image. A
+  named image needs the binary, ``bwrap``, ``python3`` and coreutils'
+  ``timeout``.
+- ``modal_cpu`` and ``modal_memory_mb``: the sandbox's requests; Modal's
+  defaults otherwise.
+
+A Modal sandbox lives at most a day, so a run with a longer timeout is refused.
+Nested bubblewrap runs in Modal's default gVisor runtime. As with E2B, startup
+checks provider access, the image, the binary and namespace support with a
+short-lived sandbox, and a restart stops the sandboxes a stopped run of the
+same deployment left.
 
 Every ordinary episode gets its own VM. The remote filesystem and rendered
 inputs are read-only; the workspace and the adapter's declared state directories
@@ -625,8 +656,8 @@ pass as a notebook, cell by cell, with the service managed as a subprocess.
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
 graded, and every result is reported against its receipt. Every valid scored
-report batches, a passing one included, and ``evolution.batch_size: 1`` makes each
-report its own batch, so every report this run submits triggers one evolve
+report trains, a passing one included, and ``evolution.batch_size: 1`` makes each
+report its own step, so every report this run submits triggers one evolve
 step. In this example the served model is its own proposer, through the text
 proposer of the beta `Reefine <../../recipes/beta/reefine/README.md>`__ recipe
 (``recipes.beta.reefine.proposer:TextProposer``), and it answers with one skill
@@ -658,7 +689,7 @@ service then requires that token, and every ``curl`` on this page needs
 
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one reported trace filled the
-batch, the served model proposed a new skill beside the starter, and the evaluation
+step, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The run has
 succeeded when one step's candidate is selected and ``GET /reef/harness``
 serves a release other than the seed.
@@ -678,13 +709,13 @@ still answering plain requests. A missing model server does not produce
 this symptom: the record phase raises on its first call and ``run.py``
 exits with the upstream error before any evolve step runs.
 
-A model that answers all three tasks correctly still batches one step per
+A model that answers all three tasks correctly still trains one step per
 report. Evaluation runs the tasks again on the current and candidate trees,
 so passing the initial tasks does not determine whether a candidate will
 win, tie, or lose. A step publishes only when its candidate wins; rejected
 or skipped steps leave the served tree unchanged. ``run.py`` counts all
 submitted reports, waits for the steps they triggered up to its deadline,
-and prints how many reports it batched and how many of them failed.
+and prints how many reports it submitted for steps and how many of them failed.
 
 Use a published tree
 --------------------

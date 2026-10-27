@@ -1,5 +1,6 @@
 """Shipped examples use service defaults and explicit worker placement overrides."""
 
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,9 @@ from tests.support.config_helpers import deployment_layout
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.service.deploy.execution import service_executor_selection, validate_services
-from reef.train.slime_backend.launch import driver_arguments
+from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE
+from reef.service.deploy.service_config import service_config_from_mapping
+from reef.train.slime_backend.launch import SlimeDeployment, slime_arguments
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_CONFIGS = (
@@ -39,12 +42,20 @@ TRAINING_CONFIGS = (
 )
 
 
+def slime_flags(config):
+    """The ``--name=value`` arguments the HTTP service gives Slime for a resolved example."""
+    settings = asdict(service_config_from_mapping(config))
+    runtime = SlimeDeployment().component_config(settings, loss_family="")
+    arguments = slime_arguments(runtime["settings"], loss_family="", environ={})
+    return dict(argument.removeprefix("--").split("=", 1) for argument in arguments if "=" in argument)
+
+
 @pytest.mark.parametrize("relative", TRAINING_CONFIGS)
-def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relative):
+def test_training_examples_start_an_inference_component_without_reserving_gpus(relative):
     path = ROOT / relative
     config = deployment_layout(yaml.safe_load(path.read_text()))
     services = validate_services(config, relative)
-    assert [service["name"] for service in services] == ["slime-driver", "reef"]
+    assert [service["name"] for service in services] == [INFERENCE_COMPONENT_SERVICE, "reef"]
     assert "ray_address" not in config["reef"]
     assert not {"cuda_visible_devices", "ray_port", "ray_dashboard_port"} & config["training"].keys()
     for service in services:
@@ -54,20 +65,21 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
         assert not service.get("resources")
         assert service_executor_selection(config, service).settings.backend == "uni"
     assert not services[0].get("depends_on")
-    assert services[1]["depends_on"] == ["slime-driver"]
+    assert services[1]["depends_on"] == [INFERENCE_COMPONENT_SERVICE]
+    assert not config["reef"].get("colocate")
+    # Training and serving use separate GPUs of one node.
+    flags = slime_flags(config)
+    training_gpus = int(flags.get("actor-num-nodes", "1")) * int(flags["actor-num-gpus-per-node"])
+    serving_gpus = config["reef"]["inference_num_gpus"]
+    assert training_gpus + serving_gpus == int(flags["num-gpus-per-node"])
     if "coral" not in relative:
         launcher = path.with_name("run.sh").read_text().replace('"', "")
-        assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in launcher
+        devices = ",".join(str(device) for device in range(training_gpus + serving_gpus))
+        assert f"export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-{devices}}}" in launcher
     if "tttd" in relative:
-        assert config["training"]["num_gpus"] == 2
-        assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == str(
-            config["training"]["num_gpus"]
-        )
-        assert config["reef"]["colocate"] is True
-        assert "colocate" not in config["reef"]["training_backend_options"]
+        assert flags["actor-num-gpus-per-node"] == str(config["training"]["num_gpus"])
     elif "sao" in relative:
-        assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "1"
-        assert config["reef"]["inference_num_gpus"] == 1
+        assert (training_gpus, serving_gpus) == (1, 1)
 
 
 def test_recipe_yamls_no_longer_launch_ray_head_services():
@@ -87,10 +99,9 @@ def test_examples_select_service_executors_from_resources_and_slime_workers_on_r
     for service in services:
         expected = "ray" if service.get("resources") else "uni"
         assert service_executor_selection(config, service).settings.backend == expected
-    if any(service["name"] == "slime-driver" for service in services):
-        for role in ("training", "rollout"):
-            assert config["execution"][role] == "ray"
-            assert select_executor(role_executor_settings(config, role), role=role).settings.backend == "ray"
+    if config["reef"].get("training_backend") == "slime":
+        assert config["execution"]["training"] == "ray"
+        assert select_executor(role_executor_settings(config, "training"), role="training").settings.backend == "ray"
 
 
 @pytest.mark.parametrize("relative", EVOLUTION_CONFIGS)
@@ -119,10 +130,10 @@ def test_openclawrl_isolates_external_models_from_reef_training():
     root = ROOT / "recipes/openclawrl/examples/openclawrl"
     config = deployment_layout(yaml.safe_load((root / "serve.yaml").read_text()))
     compose = yaml.safe_load((root / "docker-compose.yaml").read_text())["services"]
-    driver, http = validate_services(config, "serve.yaml")
-    assert [driver["name"], http["name"]] == ["slime-driver", "reef"]
-    assert not driver.get("resources") and not driver.get("depends_on")
-    assert http["depends_on"] == ["slime-driver"]
+    component, http = validate_services(config, "serve.yaml")
+    assert [component["name"], http["name"]] == [INFERENCE_COMPONENT_SERVICE, "reef"]
+    assert not component.get("resources") and not component.get("depends_on")
+    assert http["depends_on"] == [INFERENCE_COMPONENT_SERVICE]
     assert compose["reef"]["environment"]["RAY_ADDRESS"] == "${RAY_ADDRESS:-}"
     pools = {
         name: set(service["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"])
@@ -139,9 +150,11 @@ def test_openclawrl_isolates_external_models_from_reef_training():
     assert judging["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
     assert judging["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
     assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
-    flags = dict(argument.removeprefix("--").split("=", 1) for argument in driver_arguments(config) if "=" in argument)
-    training_gpus = int(flags["actor-num-nodes"]) * int(flags["actor-num-gpus-per-node"])
-    rollout_gpus = int(flags["rollout-num-gpus"])
+    flags = slime_flags(config)
+    training_gpus = int(flags.get("actor-num-nodes", "1")) * int(flags["actor-num-gpus-per-node"])
+    # Slime starts no engine; the inference section sizes the serving engines.
+    assert flags["rollout-num-gpus"] == "0"
+    rollout_gpus = int(config["reef"]["inference_num_gpus"])
     assert (training_gpus, rollout_gpus, int(flags["num-gpus-per-node"])) == (4, 1, 5)
     assert training_gpus + rollout_gpus == len(pools["reef"])
 

@@ -33,7 +33,7 @@ from tests.support.harness_steps import (
 
 import reef.evaluation.harness as reef_evaluation_harness
 from reef.artifact import Artifact
-from reef.core.plugins import PluginConfigError, PluginReference
+from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -58,7 +58,7 @@ from reef.train.harness_backend.manifest import FailureManifest
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.tasks import prompt_of
 from reef.train.trainer import Trainer
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 
@@ -110,7 +110,7 @@ def custom_backend(tmp_path: Path, propose, *, binary: str, **fields) -> Harness
 
 
 def step(backend: HarnessBackend, state=None, *samples) -> TrainStepResult:
-    batch = TrainingBatch("demo:1", samples or (recorded_trajectory("a1", {"messages": []}, 0.0),))
+    batch = JobData("demo:1", samples or (recorded_trajectory("a1", {"messages": []}, 0.0),))
     return backend_step(backend, batch, backend.initial_state() if state is None else state)
 
 
@@ -262,8 +262,8 @@ def test_recipe_parses_and_validates_the_episode_knobs(tmp_path: Path, monkeypat
 
 
 def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, monkeypatch) -> None:
-    """The deployment's pipeline section sets the buffer and can swap in the record-driven stages; without it
-    the recipe batches reports. The old recipe keys are refused with the new place."""
+    """The deployment's pipeline section sets the buffer and the job size and can swap in the record-driven
+    stages; without it the recipe trains on reports. The old recipe keys are refused with the new place."""
     write_method(tmp_path, monkeypatch)
     proxy = InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
     binary = str(make_pi_binary(tmp_path))
@@ -283,23 +283,28 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
                 pipeline={
                     "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
                     "record2task": {"module": "reef.record2task.traces:InferenceTasks"},
-                    "task2batch": {"config": {"buffer_size": 6}},
+                    "task2job": {"config": {"buffer_size": 6}},
                 },
                 batch_size=2,
             ),
             runtime=proxy,
         )
     )
-    stages = (records.pipeline.record2record, records.pipeline.record2task, records.pipeline.task2batch)
-    assert [type(stage).__name__ for stage in stages] == ["InferenceRecord2Record", "InferenceTasks", "TraceBatches"]
-    # evolution.batch_size is the trainer's batch size, which it batches by.
-    assert (records.batch_size, records.pipeline.buffer_size) == (2, 6)
+    stages = (records.pipeline.record2record, records.pipeline.record2task, records.pipeline.task2job)
+    assert [type(stage).__name__ for stage in stages] == ["InferenceRecord2Record", "InferenceTasks", "TraceJobData"]
+    # evolution.batch_size is the default job_samples.
+    assert (records.job_samples, records.pipeline.buffer_size) == (2, 6)
 
     reported = trainer_of(from_config(config(), runtime=proxy))
-    stages = (reported.pipeline.record2record, reported.pipeline.record2task, reported.pipeline.task2batch)
-    assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceTasks", "TraceBatches"]
-    # The default buffer holds four batches.
-    assert (reported.batch_size, reported.pipeline.buffer_size) == (1, 4)
+    stages = (reported.pipeline.record2record, reported.pipeline.record2task, reported.pipeline.task2job)
+    assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceTasks", "TraceJobData"]
+    # The default buffer holds the data of four jobs.
+    assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 4)
+    # The stage config sets job_samples over evolution.batch_size.
+    sized = trainer_of(
+        from_config(config(pipeline={"task2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy)
+    )
+    assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 12)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         from_config(config({"batch_size": 2}))
@@ -311,21 +316,16 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     # A bad stage config fails when the scenario's pipeline builds.
     for stage_config, message in (
         ({"batch_size": 2}, "unknown config fields: batch_size"),
-        ({"buffer_size": 0}, "buffer_size must be positive"),
+        ({"buffer_size": 0}, "buffer_size must be None or a positive int"),
+        # The stage refuses a buffer that cannot hold one job's data.
+        ({"buffer_size": 1}, "buffer_size 1 is smaller than job_samples 2"),
     ):
         with pytest.raises(RecipeConfigError, match=message):
             trainer_of(
-                from_config(config(pipeline={"task2batch": {"config": stage_config}}, batch_size=2), runtime=proxy)
+                from_config(config(pipeline={"task2job": {"config": stage_config}}, batch_size=2), runtime=proxy)
             )
-    # The trainer refuses a buffer that cannot hold one batch.
-    with pytest.raises(PluginConfigError, match="buffer_size 1 is smaller than the batch size 2"):
-        trainer_of(
-            from_config(config(pipeline={"task2batch": {"config": {"buffer_size": 1}}}, batch_size=2), runtime=proxy)
-        )
     with pytest.raises(RecipeConfigError, match="batch_policy"):
-        trainer_of(
-            from_config(config(pipeline={"task2batch": {"config": {"batch_policy": "records"}}}), runtime=proxy)
-        )
+        trainer_of(from_config(config(pipeline={"task2job": {"config": {"batch_policy": "records"}}}), runtime=proxy))
 
 
 def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> None:
@@ -573,7 +573,7 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
         first = store.add_task(directory=write_task(root, "held-1"), split="eval")
         store.add_task(directory=write_task(root, "train-1"), split="train")
         backend = built.build_backend("s", releases_for(built), session.tasks)
-        batch = TrainingBatch("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+        batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         prepared = backend.prepare_step(batch, backend.initial_state(), 0)
         assert prepared.metrics["evaluation_task_count"] == 1
         # A task that the store gets after the build is in the next step's list.
@@ -795,7 +795,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
         tasks=("task one", "task two"),
         worker_executor=ExecutorSettings(workers=4),
     )
-    prepared = backend.prepare_step(TrainingBatch("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
     try:
         evaluation = backend.evaluate(prepared.candidate)
         assert len(list(barrier.iterdir())) == 4
@@ -815,7 +815,7 @@ def test_real_episodes_run_on_the_selected_worker_backend(tmp_path, workers, exp
     )
     assert backend.evaluator.worker_selection.settings.backend == expected
     assert backend.evaluator.worker_requirements.gpus_per_worker == 0
-    prepared = backend.prepare_step(TrainingBatch("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
     with caplog.at_level("INFO"):
         result = backend.evaluate(prepared.candidate)
     assert result.metrics["candidate_scores"] == (1.0, 1.0)
@@ -1149,7 +1149,7 @@ def test_a_recheck_runs_at_once_when_the_served_model_changes(tmp_path: Path) ->
 def test_min_win_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     """One win and no losses clears the plain majority rule but not a margin of 1."""
     backend, _ = harness_backend(tmp_path, lambda context: MARKER)
-    prepared = backend.prepare_step(TrainingBatch("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
     selection = ScoreComparisonPlugin(backend, min_win_margin=1)
     decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
     result = backend.settle_step(prepared, decision)
@@ -1164,7 +1164,9 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
     the rollback path."""
     proposals = iter((MARKER,))
     dispatcher = harness_dispatcher(
-        tmp_path, harness_recipe(tmp_path, lambda context: next(proposals, None), publish="review")
+        tmp_path,
+        harness_recipe(tmp_path, lambda context: next(proposals, None), publish="review"),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("review")
@@ -1199,7 +1201,9 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
 def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
     proposals = iter((MARKER,))
     dispatcher = harness_dispatcher(
-        tmp_path, harness_recipe(tmp_path, lambda context: next(proposals, None), publish="review")
+        tmp_path,
+        harness_recipe(tmp_path, lambda context: next(proposals, None), publish="review"),
+        hold_local_cycles=True,
     )
 
     async def run() -> None:
@@ -1229,10 +1233,6 @@ def test_pending_requires_durable_bytes() -> None:
     """Only a step with bytes to promote later can ask to be held back, so a no-artifact step is refused where
     it is built."""
     assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
-    assert TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path="/ckpt", pending=True).pending is True
-    # A version names saved weights, so a version without bytes is refused before the pending check.
-    with pytest.raises(ValueError, match="runtime_load_id names saved weights"):
-        TrainStepResult({}, {}, runtime_load_id="w1", pending=True)
     with pytest.raises(ValueError, match="pending step must carry durable bytes"):
         TrainStepResult({}, {}, pending=True)
     with pytest.raises(ValueError, match="pending must be a boolean"):
@@ -1243,7 +1243,7 @@ def test_pending_requires_durable_bytes() -> None:
 
 
 def test_a_publish_discards_the_backends_tree_and_the_release_keeps_the_source_tree(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: MARKER))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: MARKER), hold_local_cycles=True)
     try:
         scenario = dispatcher.get_or_create_scenario("render-cleanup")
         assert scenario is not None
@@ -1280,6 +1280,7 @@ def test_a_keyed_proposal_leaves_no_key_material_in_the_commit_history(tmp_path:
             repository,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+            hold_local_cycles=True,
         )
 
     first = dispatcher()

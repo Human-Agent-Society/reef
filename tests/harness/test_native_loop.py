@@ -51,7 +51,7 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.sandbox.process import LocalExecutor
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 NATIVE = get_adapter("native")
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.
@@ -387,8 +387,8 @@ def _backend(
     return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
 
 
-def batch() -> TrainingBatch:
-    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+def batch() -> JobData:
+    return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 def test_a_win_that_touches_a_loop_is_pending_whatever_review_kinds_lists(tmp_path: Path) -> None:

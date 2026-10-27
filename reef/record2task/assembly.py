@@ -13,8 +13,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
+from reef.core.job_data import TrajectoryItem
 from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord
 from reef.record2record import ReportContext

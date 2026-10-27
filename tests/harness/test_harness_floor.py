@@ -27,7 +27,7 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.train.harness_backend import TreeProposal
 from reef.train.harness_backend.capabilities import StepProgress
 from reef.train.harness_backend.manifest import advance
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch
+from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 PLAIN = TreePatch(changed_rules("no help\n"))
@@ -48,11 +48,11 @@ def _evaluation(scores: tuple[float | None, ...]) -> EvaluationResult:
     )
 
 
-def batch() -> TrainingBatch:
-    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+def batch() -> JobData:
+    return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
-def instruction(text: str = "add a rule", request_id: str = "req-1", requires: tuple = ()) -> TrainingBatch:
+def instruction(text: str = "add a rule", request_id: str = "req-1", requires: tuple = ()) -> JobData:
     request = TrainingRequest(text=text, session="s", release_id="rel-0", id=request_id, requires=requires)
     return replace(batch(), request=request)
 

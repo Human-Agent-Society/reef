@@ -68,13 +68,14 @@ cd recipes/sdpo/examples/sciknoweval
 ```
 
 `run.sh` starts the stack from `serve.yaml`, waits for it and runs the
-episode. The run's state goes to `work/`.
+episode. The stack takes eight GPUs: four for the actor and four for the
+serving engines. The run's state goes to `work/`.
 
 ## Results
 
 ![Test avg@8 against optimizer steps](results/2026-09-28-chemistry-qwen3-8b/learning_curve.png)
 
-One run of 100 steps with seed 42. The actor and the rollout engines ran on
+One run of 100 steps with seed 42. The actor and the serving engines ran on
 separate GPUs.
 
 Test accuracy goes from 41.2% to 66.2% in 15 steps and to 74.4% at step 75.

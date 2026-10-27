@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import (
     RecordingExperimentTracker,
-    RollbackRuntime,
+    RollbackComponent,
     dispatcher,
     inference,
     report,
@@ -27,9 +27,16 @@ from tests.support.runtime_stubs import runtime_bindings
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.jobs import SavedCheckpoint
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.jobs import JobLoopState
+
+
+def restorable(releases: list[dict]) -> list[dict]:
+    """The rows of ``releases`` that hold checkpoint bytes: the creation and each served checkpoint, newest first."""
+    return [release for release in releases if release["restorable"]]
 
 
 class BlockingBackend(InferenceHandler):
@@ -55,11 +62,15 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
     train(value, 3)
 
     before = value.list_releases("math")
-    assert len(before) == 4
-    assert all(version["restorable"] for version in before)
+    # Each job commits its submission, its checkpoint and its end; only the checkpoint holds bytes.
+    assert len(before) == 10
+    assert [version["restorable"] for version in before] == [version["checkpoint"] for version in before]
+    assert len(restorable(before)) == 4
     assert before[-1]["release_id"] == created
-    target_version = before[-2]["release_id"]
+    target_version = restorable(before)[-2]["release_id"]
     last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    runtime.restore_order.clear()
+    served_before = len(runtime.activated)
 
     published = value.rollback("math", target_version)
 
@@ -68,7 +79,8 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
         value.get_or_create_scenario("math").repository.resolve(published).local_path.joinpath("model.txt").read_text()
         == "w1"
     )
-    assert runtime.restored == ["w1"]
+    assert runtime.activated[served_before:] == ["w1"]
+    # The next job starts from the restored release, and the engine serves it once it is published.
     assert runtime.restore_order == ["training", "inference"]
     assert runtime.inference.inference_admission_status["open"]
     record = value.get_or_create_scenario("math").store.history()[-1]
@@ -76,7 +88,7 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
     assert record.rollback_target_release_id == target_version
     assert record.artifact_ref == published
     status = value.build_training_status()["scenarios"]["math"]
-    assert status["scenario_step"] == 4
+    assert status["scenario_step"] == 10
     assert status["last_committed_step"] == last_training_step
 
 
@@ -102,20 +114,19 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     with pytest.raises(RuntimeError, match="injected settlement failure"):
         value.rollback("math", created)
 
-    assert scenario.scenario_step == 1
+    assert scenario.scenario_step == 3
     assert scenario.store.durable
     recorded = scenario.store.history()[-1]
-    assert recorded.step == 2
+    assert recorded.step == 4
     assert recorded.operation == "rollback"
-    assert not scenario.runtime.inference_admission_status["open"]
 
     published = value.rollback("math", created)
 
     assert scenario.runtime.inference_admission_status["open"]
     assert published == recorded.artifact_ref
-    assert scenario.scenario_step == 2
+    assert scenario.scenario_step == 4
     assert scenario.store.history()[-1] == recorded
-    assert len(scenario.store.history()) == 2
+    assert len(scenario.store.history()) == 4
     # The tracker hears about the rollback on the report thread; wait for it rather than race it.
     value.registry.experiment_reports.flush()
     assert len(tracker.rollbacks) == 1
@@ -128,25 +139,21 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     train(value, 1)
     train(value, 2)
-    target_version = value.list_releases("math")[-2]["release_id"]
+    target_version = restorable(value.list_releases("math"))[-2]["release_id"]
 
     value.rollback("math", target_version)
-    # The engine serves the restored checkpoint under the version that the restore returned.
-    train(value, 4, "restored:w1")
-    # The step is visible before the tracker hears about the commit; wait for the event rather than race it.
-    for _ in range(1000):
-        if len(tracker.events) == 3:
-            break
-        time.sleep(0.001)
+    # The engine serves the restored checkpoint under the version that its weights name.
+    train(value, 3, "w1")
+    value.registry.experiment_reports.flush()
 
+    # Each job reports three commits; the rollback at step 7 starts the next segment.
     assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [
-        (0, 0),
-        (0, 1),
-        (3, 0),
+        *((0, run_step) for run_step in range(6)),
+        *((7, run_step) for run_step in range(3)),
     ]
     assert len(tracker.rollbacks) == 1
     rollback = tracker.rollbacks[0]
-    assert rollback.step == 3
+    assert rollback.step == 7
     assert rollback.run_segment == 0
     assert rollback.target_release_id == target_version
 
@@ -156,7 +163,7 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     value, _, backend_factory = dispatcher(tmp_path)
     train(value, 1)
     train(value, 2)
-    target_version = value.list_releases("math")[-2]["release_id"]
+    target_version = restorable(value.list_releases("math"))[-2]["release_id"]
     value.rollback("math", target_version)
 
     scenario = value.get_or_create_scenario("math")
@@ -168,10 +175,9 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DELETE FROM scenario_commit WHERE step = ?", (last_step,))
 
+    restarted_component = RollbackComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(RollbackRuntime(tmp_path / "restarted-export")),
-        ),
+        TestPolicyRecipe(**runtime_bindings(restarted_component, restarted_component.inference)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -192,24 +198,19 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         train(value, index)
     scenario = value.get_or_create_scenario("math")
 
-    version_one = scenario.releases()[-2]
+    version_one = restorable(scenario.releases())[-2]
     version_one_ref = scenario.repository.backend.resolve_release(version_one["release_id"])
     assert scenario.repository.resolve(version_one_ref).local_path.joinpath("model.txt").read_text() == "w1"
 
-    restarted_runtime = RollbackRuntime(tmp_path / "restarted-export")
+    restarted_component = RollbackComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(restarted_runtime)),
+        TestPolicyRecipe(**runtime_bindings(restarted_component, restarted_component.inference)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")
-    assert [version["operation"] for version in recovered.releases()] == [
-        "training",
-        "training",
-        "training",
-        "creation",
-    ]
+    assert [version["operation"] for version in recovered.releases()] == [*(["training"] * 9), "creation"]
 
 
 @pytest.mark.unit
@@ -253,8 +254,8 @@ def test_version_and_rollback_http_api(tmp_path) -> None:
             listed = await client.get("/reef/scenarios/math/releases")
             assert listed.status == 200
             listed_body = await listed.json()
-            assert len(listed_body["releases"]) == 3
-            target_version = listed_body["releases"][-2]["release_id"]
+            assert len(listed_body["releases"]) == 7
+            target_version = restorable(listed_body["releases"])[-2]["release_id"]
 
             rolled_back = await client.post(
                 "/reef/scenarios/math/rollback",
@@ -275,22 +276,29 @@ def test_version_and_rollback_http_api(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("component", ["training", "inference"])
-def test_rollback_restore_failure_keeps_requests_closed_and_head_unchanged(tmp_path, monkeypatch, component):
+def test_rollback_restore_failure_keeps_the_head_and_the_next_start_unchanged(tmp_path, monkeypatch, component):
     value, training, _ = dispatcher(tmp_path)
     created = value.get_or_create_scenario("math").releases()[0]["release_id"]
     train(value, 1)
     scenario = value.get_or_create_scenario("math")
     head = scenario.current_artifact_ref()
+    trainer_state = dict(scenario.trainer.state)
 
-    def fail_restore(artifact, *, scenario=None):
+    def fail_restore(*args, **kwargs):
         raise RuntimeError("restore failed")
 
-    target = training if component == "training" else training.inference
-    monkeypatch.setattr(target, "restore_checkpoint", fail_restore)
-    with pytest.raises(RuntimeError, match="restore failed"):
-        value.rollback("math", created)
-    assert not training.inference.inference_admission_status["open"]
-    assert scenario.current_artifact_ref() == head
+    if component == "training":
+        monkeypatch.setattr(training, "import_start", fail_restore)
+    else:
+        monkeypatch.setattr(training.inference, "activate_checkpoint", fail_restore)
+    try:
+        with pytest.raises(RuntimeError, match="restore failed"):
+            value.rollback("math", created)
+        assert scenario.current_artifact_ref() == head
+        assert scenario.trainer.state == trainer_state
+        assert len(scenario.store.history()) == 3
+    finally:
+        value.close()
 
 
 @pytest.mark.unit
@@ -321,18 +329,24 @@ def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
         train(value, 1)
         scenario = value.get_or_create_scenario("math")
         assert recorded.wait(5), "commit event was not reported"
-        (event,) = tracker.events
-        (commit,) = scenario.store.history()
-        assert event.metrics == commit.metrics
-        assert event.context.backend == "RuntimeCandidateBackend"
-        assert event.context.backend_config["runtime"] == "RollbackRuntime"
-        assert event.training_job_id == "job-0"
-        assert event.produced_runtime_load_id == "w1"
-        assert event.checkpoint_path == str(runtime.checkpoint_dir / "0")
-        if tracker_fails:
-            assert "experiment/run_id" not in commit.metrics
-        else:
-            assert commit.metrics["experiment/run_id"] == "run-0"
+        value.registry.experiment_reports.flush()
+        commits = scenario.store.history()
+        (job,) = runtime.submitted
+        # The job's submission, its checkpoint and its end each report one event.
+        assert [event.metrics for event in tracker.events] == [commit.metrics for commit in commits]
+        assert [event.training_job_id for event in tracker.events] == [job.job_id] * 3
+        assert [event.checkpoint_path for event in tracker.events] == [None, str(runtime.checkpoint_root / "1"), None]
+        for event in tracker.events:
+            assert event.context.backend == "stub"
+            assert event.context.backend_config == {
+                "job_plan": "fixed",
+                "parameters": {"method": {"objective": "sft"}},
+            }
+        for commit in commits:
+            if tracker_fails:
+                assert "experiment/run_id" not in commit.metrics
+            else:
+                assert commit.metrics["experiment/run_id"] == "run-0"
     finally:
         value.close()
 
@@ -358,14 +372,16 @@ def test_experiment_events_follow_settled_state_and_resumed_rollback(
     monkeypatch.setattr(tracker, "record_rollback", rollback)
     try:
         train(value, 1)
-        for _ in range(1000):
-            if observed:
-                break
-            time.sleep(0.001)
+        value.registry.experiment_reports.flush()
         trained = scenario.current_artifact_ref()
+        # Each event follows its own settled commit: the scenario is at that step or later.
+        assert [event_step for event_step, _, _ in observed] == [1, 2, 3]
+        assert all(scenario_step >= event_step for event_step, scenario_step, _ in observed)
+        assert observed[-1] == (3, 3, trained)
+        observed.clear()
         restored = value.rollback("math", initial.release_id)
         value.registry.experiment_reports.flush()
-        assert observed == [(1, 1, trained), (2, 2, restored), True]
+        assert observed == [(4, 4, restored), True]
     finally:
         value.close()
 
@@ -438,8 +454,9 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
             finally:
                 release.set()
         assert recorded.wait(5), "commit event was not reported"
-        (event,) = tracker.events
-        (commit,) = scenario.store.history()
+        value.registry.experiment_reports.flush()
+        event = tracker.events[0]
+        commit = scenario.store.history()[0]
         assert commit.metrics["experiment/run_id"] == "run-0"
         assert event.metrics == commit.metrics
         assert event.context.step == commit.step == 1
@@ -478,22 +495,41 @@ def test_slow_training_tracker_does_not_block_scenario_resolution(
             finally:
                 release.set()
         assert recorded.wait(5)
-        assert len(tracker.events) == 1
+        # The job's submission, its checkpoint and its end.
+        for _ in range(5000):
+            if len(tracker.events) == 3:
+                break
+            time.sleep(0.001)
+        assert len(tracker.events) == 3
     finally:
         release.set()
         value.close()
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("save_interval", [1, 2])
-def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, save_interval: int) -> None:
-    value, runtime, _ = dispatcher(tmp_path, save_interval=save_interval)
+@pytest.mark.parametrize("checkpoints", [0, 2])
+def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, monkeypatch, checkpoints: int) -> None:
+    value, runtime, _ = dispatcher(tmp_path)
+
+    def save_checkpoints(job):
+        saved = []
+        for step in range(checkpoints):
+            path = runtime.checkpoint_root / f"{len(runtime.submitted)}-{step}"
+            path.mkdir(parents=True)
+            (path / "model.txt").write_text(path.name)
+            saved.append(SavedCheckpoint(step, str(path), str(path)))
+        return tuple(saved)
+
+    monkeypatch.setattr(runtime, "train", save_checkpoints)
     try:
         scenario = value.get_or_create_scenario("math")
-        train(value, 1)
-        train(value, 2)
-        assert [record.checkpoint for record in scenario.store.history()] == [save_interval == 1, True]
-        assert scenario.trainer.state["steps"] == 2
-        assert runtime.trained == 2
+        train(value, 1, scenario.serving_runtime_load_id())
+        train(value, 2, scenario.serving_runtime_load_id())
+        assert [record.checkpoint for record in scenario.store.history()] == [False, *[True] * checkpoints, False] * 2
+        state = JobLoopState.from_dict(scenario.trainer.state)
+        assert state.finished_jobs == runtime.trained == 2
+        # Training is linear: the second job starts from the first job's last checkpoint.
+        expected_start = str(runtime.checkpoint_root / f"1-{checkpoints - 1}") if checkpoints else None
+        assert runtime.submitted[1].start == expected_start
     finally:
         value.close()

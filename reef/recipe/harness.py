@@ -55,13 +55,12 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.record2task.traces import TraceTasks
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.sandbox.config import build_executor
-from reef.sandbox.e2b import E2BExecutor, deployment_owner
+from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
-from reef.task2batch.traces import TraceBatches
+from reef.task2job.traces import TraceJobData
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import AgentExecution, HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Promoter, Proposer
@@ -86,11 +85,11 @@ def proposer_agent_settings(
 
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
     but the gateway's, and refuses to start where bwrap or pasta is missing;
-    ``sandbox: e2b`` runs it in an E2B cloud sandbox (``e2b_api_key``, else
-    ``E2B_API_KEY``; ``e2b_template``, else the harness's pinned binary, built on
-    first use) that reaches the gateway through a tunnel and nothing else of the
-    host, and carries the deployment that ``proposals_dir`` names, so a later
-    start stops the sandboxes a stopped run left; ``sandbox: none`` runs it
+    a cloud sandbox (``sandbox: e2b`` or ``sandbox: modal``, with that provider's
+    options in the section; its image is the harness's pinned binary, built on
+    first use, unless an option names one) runs it where it reaches the gateway
+    through a tunnel and nothing else of the host, and carries the deployment that
+    ``proposals_dir`` names, so a later start stops the sandboxes a stopped run left; ``sandbox: none`` runs it
     unisolated with the service's privileges, and must be chosen. Left empty
     (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is jailed where the host
     can, and off (the text proposer answers requests) where it cannot.
@@ -112,19 +111,16 @@ def proposer_agent_settings(
             "full network access, fed text from clients; use it only where you trust every client"
         )
         return LocalExecutor(), timeouts[0], timeouts[1]
-    if sandbox == "e2b":
+    if sandbox in REMOTE_EXECUTORS:
         try:
-            remote = E2BExecutor.from_config(
-                {key: section[key] for key in ("e2b_api_key", "e2b_api_key_env", "e2b_template") if key in section},
-                environ,
-            )
-            remote = replace(remote, timeout_s=timeouts[0], owner=deployment_owner(proposals_dir))
+            remote = remote_executor(sandbox, section, environ, timeout_s=timeouts[0], owner_anchor=proposals_dir)
             remote.preflight()
         except SandboxUnavailable as exc:
-            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is {sandbox}, but {exc}") from exc
         return remote, timeouts[0], timeouts[1]
     if sandbox not in ("", "bwrap"):
-        raise RecipeConfigError("evolution.proposer_agent.sandbox must be 'bwrap', 'e2b' or 'none'")
+        choices = ", ".join(f"'{name}'" for name in ("bwrap", *sorted(REMOTE_EXECUTORS), "none"))
+        raise RecipeConfigError(f"evolution.proposer_agent.sandbox must be one of {choices}")
     executor = SandboxExecutor(network="isolated")
     try:
         executor.preflight()
@@ -245,7 +241,7 @@ class HarnessEvolutionRecipe(Recipe):
     binary: str | None = None
     episode_timeout_s: float = 600.0
     episode_repeats: int = 1
-    #: The traces in one evolution step; the trainer makes a batch when the pipeline holds this many.
+    #: The default ``job_samples``: the fewest traces of one evolution step. The stage config can override it.
     batch_size: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
@@ -296,7 +292,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
+        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2job=TraceJobData)
 
     @property
     def harness_adapter(self) -> str | None:
@@ -702,7 +698,7 @@ class HarnessEvolutionRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
-            batch_size=self.batch_size,
+            default_job_samples=self.batch_size,
         )
 
     def build_backend(

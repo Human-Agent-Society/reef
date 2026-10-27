@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.batches import TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.job_data import TrajectoryItem
 from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import EVALUATION_SIDES, FailureObservation, HarnessCandidate, HarnessEpisodeEvaluator
@@ -57,7 +57,7 @@ from reef.train.harness_backend.records import PATCH_FILE, PROPOSER_FILE, StepRe
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.tasks import EvaluationTasks, source_of
 from reef.train.harness_backend.trials import EpisodeTrials
-from reef.train.types import TrainingBatch, TrainStepResult, trajectories
+from reef.train.types import JobData, TrainStepResult, trajectories
 
 #: How many proposals a step asks the proposer for: the first, and one retry with the validation problems.
 PROPOSAL_ATTEMPTS = 2
@@ -175,11 +175,11 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
     def close(self) -> None:
         self.evaluator.close()
 
-    def prepare_step(self, batch: TrainingBatch, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
+    def prepare_step(self, data: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
         self.progress = None
         self.failed_step = {}
         try:
-            prepared = self.prepare(batch, HarnessState.from_json(state))
+            prepared = self.prepare(data, HarnessState.from_json(state))
         except BaseException:
             if self.progress is not None:
                 # The failed row keeps the phase it reached and the record directory the attempt wrote.
@@ -194,15 +194,15 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             self.progress = replace(self.progress, phase="evaluating")
         return prepared
 
-    def prepare(self, batch: TrainingBatch, previous: HarnessState) -> PreparedStep:
+    def prepare(self, data: JobData, previous: HarnessState) -> PreparedStep:
         """The step's candidate, or the skip and its reason."""
-        samples = trajectories(batch)
+        samples = trajectories(data)
         if self.model_resolver is not None:
             self.models = self.model_resolver.resolve()
             self.evaluator.use_models(self.models)
         state = replace(previous, steps=previous.steps + 1)
         metrics: dict[str, Any] = {"steps": state.steps, "traces": len(samples)}
-        automatic = batch.request is None
+        automatic = data.request is None
         if automatic and self.limits.max_steps and state.steps > self.limits.max_steps:
             return skipped(state, metrics, f"step budget of {self.limits.max_steps} exhausted")
         if automatic and self.limits.max_failure_streak and state.failure_streak >= self.limits.max_failure_streak:
@@ -218,7 +218,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             metrics["step_record"] = str(step_dir)
         self.step_calls = StepCalls(self.limits.max_model_calls_per_step, [])
         self.progress = StepProgress(
-            request_id=None if batch.request is None else batch.request.id,
+            request_id=None if data.request is None else data.request.id,
             phase="proposing",
             started_at=time.time(),
             step_record=None if step_dir is None else str(step_dir),
@@ -238,7 +238,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
                 }
             )
             candidate = HarnessCandidate(
-                candidate_id=f"{batch.batch_id}:recheck",
+                candidate_id=f"{data.data_id}:recheck",
                 candidate_tree=target_tree,
                 current_tree=head_tree,
                 patch=head_tree.diff(target_tree),
@@ -262,7 +262,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
                 self.inbox_refuse(claimed.id, validation.message())
         else:
             proposal, validation = self.propose(
-                batch.request, samples, step_tasks.tasks, state, head_tree, step_dir, metrics
+                data.request, samples, step_tasks.tasks, state, head_tree, step_dir, metrics
             )
         if proposal is None:
             return skipped(state, metrics, "no proposal")
@@ -275,16 +275,16 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
         self.records.write(step_dir, PATCH_FILE, bounded(proposal.patch.to_json()))
         if not validation.passed:
             return skipped(state, metrics, validation.message())
-        if batch.request is not None:
-            added, refused = screened_requires(batch.request.requires, proposal.requires)
-            requires = merge_requires(batch.request.requires, added)
+        if data.request is not None:
+            added, refused = screened_requires(data.request.requires, proposal.requires)
+            requires = merge_requires(data.request.requires, added)
             if len(requires) > MAX_REQUIRES:
                 return skipped(state, metrics, f"proposal requires {len(requires)} items; at most {MAX_REQUIRES}")
-            metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
+            metrics["training_request"] = {"id": data.request.id, **data.request.to_dict(), "requires": requires}
             if refused:
                 metrics["training_request"]["refused_requires"] = refused
         candidate = HarnessCandidate(
-            candidate_id=f"{batch.batch_id}:candidate",
+            candidate_id=f"{data.data_id}:candidate",
             candidate_tree=head_tree.apply(proposal.patch),
             current_tree=head_tree,
             patch=proposal.patch,

@@ -1,4 +1,4 @@
-"""Selection policies: which held batch units go into a batch, and in what order."""
+"""Selection policies: which held record set units go into job data, and in what order."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ from reef.record2record.sets import RecordSetUnit
 
 
 class SelectionPolicy(ABC):
-    """Choose the units for one batch, and put them in batch order.
+    """Choose the units for one job's data, and put them in selection order.
 
     The stage chooses the policy. The pool applies it to the units that it holds.
     """
 
     @abstractmethod
     def select(self, candidates: Sequence[RecordSetUnit], max_unit_count: int) -> tuple[RecordSetUnit, ...]:
-        """Return at most ``max_unit_count`` units from ``candidates``, in batch order."""
+        """Return at most ``max_unit_count`` units from ``candidates``, in selection order."""
 
 
 class ArrivalOrder(SelectionPolicy):

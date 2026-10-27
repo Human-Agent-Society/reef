@@ -35,19 +35,22 @@ inference:
       max_new_tokens: 16384
 recipe:
   implementation: recipes.opd.recipe:OPDRecipe
-  config:
-    max-staleness: 0
 pipeline:
+  record2record:
+    config:
+      max_staleness: 0
   record2task:
     config:
       max_teacher_tokens: 32768
+  task2job:
+    config:
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
 training:
   backend: slime
-  colocate: false
   ready-timeout: 1800
   ray-address: local
   ray-namespace: reef-opd-engine
-  ray-actor-name: reef-opd-engine-bridge
   timeout-s: 7200
   config:
     checkpoint_dir: ${OPD_RUN_DIR:?}/checkpoints
@@ -130,8 +133,6 @@ training:
     - linear_proj
     - linear_fc1
     - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
 storage:
   artifact-repository: ${OPD_RUN_DIR:?}/artifacts.git
   artifact-work-dir: ${OPD_RUN_DIR:?}/artifact-work

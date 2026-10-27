@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest
@@ -184,9 +184,9 @@ class ProposalContext:
     names once the step is evaluated. ``tree`` is the head tree the patch
     applies to, and ``descriptor`` the adapter it renders for, which says the
     kinds and config targets a tree may hold there. ``samples`` are
-    the step's trace samples in batch order, and ``sources`` holds one
+    the step's trace samples in the order of its job data, and ``sources`` holds one
     ``SampleSource`` per sample in the same order; a sample's ``score`` is
-    ``None`` when the deployment batches unscored traffic. ``request`` is the
+    ``None`` when the deployment trains on unscored traffic. ``request`` is the
     training instruction this step answers, ``None`` for an automatic step.
     ``evaluation_tasks`` are the tasks this step's evaluation runs, the seed
     tasks first, then the promoted ones. ``models`` are the bindings the

@@ -77,7 +77,7 @@ population from the method state of the latest commit. It calls the binding
 not declare it: the harness under test must not propose its own
 improvements. The model sees every retained candidate's files and scores
 (the served candidate's alone in `incumbent_only` mode), the parent each
-came from, the current trace batch, the validation task names, and a guide
+came from, the traces of the current step, the validation task names, and a guide
 to the files the adapter takes. It returns one parent id and one complete
 tree as `files`, path to text. Reef validates the tree and states it as a
 patch against the served tree. A tree the population already

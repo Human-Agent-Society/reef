@@ -9,6 +9,40 @@ from typing import Any
 
 from reef.core.errors import DeployConfigError
 
+#: Native SGLang options that Reef sets itself for an engine it manages: model, placement, ports and identity.
+MANAGED_ENGINE_OPTIONS = frozenset(
+    {
+        "model",
+        "model-path",
+        "served-model-name",
+        "config",
+        "config-file",
+        "yaml-config",
+        "tp",
+        "tp-size",
+        "tensor-parallel-size",
+        "dp",
+        "dp-size",
+        "data-parallel-size",
+        "pp",
+        "pp-size",
+        "pipeline-parallel-size",
+        "nnodes",
+        "node-rank",
+        "dist-init-addr",
+        "port",
+        "host",
+        "base-gpu-id",
+        "gpu-id-step",
+        "nccl-port",
+        "api-key",
+        "trust-remote-code",
+        "enable-memory-saver",
+        "skip-server-warmup",
+        "enable-return-routed-experts",
+    }
+)
+
 
 def normalize_native_options(options: Any) -> dict[str, Any]:
     """Normalize flag spellings, preserving payload values and rejecting aliases."""

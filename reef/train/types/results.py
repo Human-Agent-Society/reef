@@ -9,56 +9,41 @@ from reef.artifact.artifact import Artifact
 
 @dataclass(frozen=True)
 class NoArtifactPublication:
-    pass
+    """The publication of a commit that publishes nothing. It has one value."""
 
 
 @dataclass(frozen=True)
 class SavedArtifactPublication:
-    """A materialized publication identified by its durable release.
+    """The publication of a commit that publishes durable bytes.
 
-    Engine-local ``runtime_load_id`` tokens deliberately stop at checkpoint
-    export; once bytes are materialized, the published version is the source
-    of identity. ``component`` names which component of a multi-component
-    release the artifact replaces; the committer carries the others forward.
+    Values: ``artifact`` is the release to publish, and ``component`` is None
+    or the non-empty name of the release component that ``artifact`` replaces;
+    the committer carries the other components forward. Purpose:
+    ``TrainStepResult.publication`` makes the value, and the scenario committer
+    publishes it. The published version, not a runtime load ID, names it.
     """
 
     artifact: Artifact
     component: str | None = None
 
 
-@dataclass(frozen=True)
-class DurableWeightsPublication:
-    """A backend train step whose weights are live and also saved on disk.
-
-    Values: ``checkpoint_path`` is the directory of the saved checkpoint, and
-    ``runtime_load_id`` is the version the engine serves from those weights.
-    The committer reads it and publishes ``checkpoint_path`` as an artifact
-    version of the surface's loader component, with ``runtime_load_id`` in its
-    metadata. Weights that were not saved are never published.
-    """
-
-    checkpoint_path: str
-    runtime_load_id: str
-
-
 # A closed sum type, deliberately not a base class: an empty base would be
 # instantiable and would leave every ``isinstance`` chain open, so a type
 # checker could not prove a new member is handled everywhere it must be.
-ArtifactPublication = NoArtifactPublication | SavedArtifactPublication | DurableWeightsPublication
+ArtifactPublication = NoArtifactPublication | SavedArtifactPublication
 
 
 @dataclass(frozen=True)
 class TrainStepResult:
-    """One training step's outcome, including what it wants published.
+    """One commit's worth of training: the trainer state to commit, its metrics and what it publishes.
 
-    The publication fields are a small ordered precedence rather than
-    independent flags: ``artifact`` (bytes already materialized) outranks
-    ``checkpoint_path`` (bytes the backend exported, still to be imported), and
-    ``runtime_load_id`` is the version those bytes serve under. Only saved bytes
-    are published, so ``runtime_load_id`` requires one of the two. Setting both
-    ``artifact`` and ``runtime_load_id`` is normal for a durable train step; the
-    version travels in the artifact's metadata. Combinations with no meaning
-    are rejected here instead of being silently dropped by ``publication``.
+    ``state`` is the trainer state the commit records, a mapping, or ``None``
+    for a commit outside a training step that keeps the current state; a
+    training step's result needs a mapping (``Trainer.prepare_commit``
+    refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
+    commit that publishes nothing, such as a job submission or a checkpoint
+    that evaluation did not select. ``training_job_id`` names the training job
+    the commit is about, if any.
 
     ``pending`` asks for the publication to be minted into the catalog without
     being served, for a person to promote later. It is a publication decision,
@@ -75,41 +60,31 @@ class TrainStepResult:
     state: Mapping[str, Any] | None
     metrics: Mapping[str, Any] = field(default_factory=dict)
     artifact: Artifact | None = None
-    runtime_load_id: str | None = None
-    checkpoint_path: str | None = None
     training_job_id: str | None = None
-    source_runtime_load_id: str | None = None
     pending: bool = False
     component: str | None = None
 
     def __post_init__(self) -> None:
-        if self.checkpoint_path is not None and self.runtime_load_id is None:
-            raise ValueError("checkpoint_path requires the runtime_load_id it was exported from")
-        if self.runtime_load_id is not None and self.artifact is None and self.checkpoint_path is None:
-            raise ValueError("runtime_load_id names saved weights: set artifact or checkpoint_path")
+        if self.state is not None and not isinstance(self.state, Mapping):
+            raise TypeError("state must be a mapping or None")
+        if not isinstance(self.metrics, Mapping):
+            raise TypeError("metrics must be a mapping")
         if self.component is not None:
             if not isinstance(self.component, str) or not self.component:
                 raise ValueError("component must be a non-empty string or None")
             if self.artifact is None:
                 raise ValueError("component names the artifact a step publishes; set artifact")
-        if self.training_job_id is not None:
-            if not isinstance(self.training_job_id, str) or not self.training_job_id:
-                raise ValueError("training_job_id must be a non-empty string or None")
-            if self.runtime_load_id is None:
-                raise ValueError("training_job_id requires the runtime_load_id produced by the job")
-        if self.source_runtime_load_id is not None and (
-            not isinstance(self.source_runtime_load_id, str) or not self.source_runtime_load_id
+        if self.training_job_id is not None and (
+            not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
-            raise ValueError("source_runtime_load_id must be a non-empty string or None")
+            raise ValueError("training_job_id must be a non-empty string or None")
         if not isinstance(self.pending, bool):
             raise ValueError("pending must be a boolean")
-        if self.pending and self.artifact is None and self.checkpoint_path is None:
-            raise ValueError("a pending step must carry durable bytes: set artifact or checkpoint_path")
+        if self.pending and self.artifact is None:
+            raise ValueError("a pending step must carry durable bytes: set artifact")
 
     @property
     def publication(self) -> ArtifactPublication:
         if self.artifact is not None:
             return SavedArtifactPublication(self.artifact, self.component)
-        if self.checkpoint_path is not None and self.runtime_load_id is not None:
-            return DurableWeightsPublication(self.checkpoint_path, self.runtime_load_id)
         return NoArtifactPublication()

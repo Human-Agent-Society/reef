@@ -89,7 +89,7 @@ described under Results.
 
 One detail is worth knowing because it affects cost. When the parent happens to
 be the tree currently being served, its minibatch is free: the engine has
-already batched that tree's real traffic, scores included, so there is nothing
+already collected that tree's real traffic, scores included, so there is nothing
 to re-run. Any other parent, and every child, runs as trial episodes on the
 evaluation's worker pool, because no traffic was ever served from it.
 

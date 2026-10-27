@@ -98,8 +98,8 @@ PUCT chooses G parents
   -> Reef stores exact tokens, response loss mask, and rollout log-probabilities
   -> sandbox executes each generated program; the official verifier gives rewards
   -> harness reports every reward against its exact inference receipt
-  -> TTTDRecord2Record waits for the complete G × R step; TTTDBatches removes constant groups
-  -> Slime prepares adaptive-beta entropic leave-one-out advantages from the reserved batch
+  -> TTTDRecord2Record waits for the complete G × R step; TTTDJobData removes constant groups
+  -> Slime prepares adaptive-beta entropic leave-one-out advantages from the reserved job data
   -> Slime applies frozen-base token KL and un-clipped importance sampling
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> valid children update the local PUCT archive
@@ -152,16 +152,18 @@ pip install -e .
 ```
 
 That runs `harbor/erdos_min_overlap` on the paper grid: 8 groups of 64
-rollouts, one optimizer step, thinking enabled, two GPUs. Nothing has to be
+rollouts, one optimizer step, thinking enabled, four GPUs (two train, two
+serve). Nothing has to be
 exported first except `TTTD_TASK` — `run.py`, `harness/harbor_agent.py`, and
 `serve.yaml` each write out the values they use.
 
 Reef starts and stops the shared Ray runtime automatically; no `ray start`
 or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
-`CUDA_VISIBLE_DEVICES=0,1`; override it at launch to choose different GPUs.
-`training.config.num_gpus` still sets Slime's model topology. To use an existing
-cluster, set `RAY_ADDRESS`; its nodes control GPU visibility and Reef leaves
-it running on exit. The local Slime driver does not reserve model GPUs itself.
+`CUDA_VISIBLE_DEVICES=0,1,2,3`; override it at launch to choose different GPUs.
+`training.config.num_gpus` sets the actor's GPUs and `inference.num-gpus` the
+engines'; training and serving never share a GPU. To use an existing cluster,
+set `RAY_ADDRESS`; its nodes control GPU visibility and Reef leaves it running
+on exit.
 
 We recommend allocating at least 256 GiB of host memory to the reference
 8 × 64 setup. With less memory, reduce evaluator concurrency or request a

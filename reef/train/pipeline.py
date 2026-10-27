@@ -1,38 +1,43 @@
-"""The training pipeline: records become batches through three stages.
+"""The training pipeline: records become job data through three stages.
 
 ::
 
-    record ─► record2record ─► record set ─► record2task ─► task ─► task2batch ─► batch ─► trainer
+    record ─► record2record ─► record set ─► record2task ─► task ─► task2job ─► job data ─► trainer
 
 ``TrainingPipeline`` holds a recipe's three stages and is the only object
-that the trainer gives records to and takes batches from. A recipe writes the
+that the trainer gives records to and takes job data from. A recipe writes the
 stages; it does not subclass the pipeline:
 
 * the record-to-record stage (:class:`~reef.record2record.Record2Record`)
-  decides which records train, in which record sets and batch units, and in
+  decides which records train, in which record sets and units, and in
   what order;
 * the record-to-task stage (:class:`~reef.record2task.Record2Task`) turns each
   record set into tasks;
-* the task-to-batch stage (:class:`~reef.task2batch.Task2Batch`) bounds
-  the sample buffer and shapes the samples of the selected batch units into a
-  batch.
+* the task-to-job stage (:class:`~reef.task2job.Task2Job`) bounds
+  the sample buffer and shapes the samples of the selected record set units into
+  one job's data.
 
 The pipeline owns what is the same for every recipe: it routes records, gives
 each record set's task result back to its stage, keeps the samples of held
 sets in the buffer, releases the oldest sets when the buffer is over the
-stage's ``buffer_size``, hands out one batch at a time until the trainer
-acknowledges or releases it, and runs the training modes and the training
-instructions. The pipeline does not know the batch size: the trainer passes
-it to ``ready`` and ``build_batch``. An automatic batch holds at least that
-many samples. It takes whole record sets, so it can hold more.
+stage's ``buffer_size``, hands out the data of one job at a time until the
+trainer acknowledges or releases it, and runs the training modes and the
+training instructions. ``ready`` and ``build_job_data`` take a sample count:
+the trainer asks for its stage's ``job_samples``, and a test or a tool may ask
+for another count. Automatic job data holds at least that many samples. It
+takes whole record sets, so it can hold more.
 
-A client can also upload an ATIF trajectory. It is not a record, so it does not
-go through the first two stages. It counts as one sample. A batch takes
-uploaded trajectories first.
+A client can also upload an ATIF trajectory. It is not a record, so the
+record-to-record stage never sees it; the record-to-task stage renders it into
+its training sample (``Record2Task.uploaded_sample``), which counts as one
+sample. Job data takes uploaded trajectories first.
 
-A task-to-batch stage can also make samples itself, from no record, such as
-the generated-task recipe's rollout episodes. While ``Task2Batch.own_batch``
-returns samples, the pipeline is ready, and its next batch holds exactly those.
+A task-to-job stage can also make samples itself, from no record, such as
+the generated-task recipe's rollout episodes. While ``Task2Job.own_job_data``
+returns samples, the pipeline is ready, and its next job data holds exactly
+those, unless automatic job data is also ready: held samples, such as
+uploaded trajectories, train first, so a recipe that trains both trains its
+held samples before its own.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from reef.core.job_data import JobOutcome
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -53,12 +59,11 @@ from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSet
 from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2task import NoTasks, Record2Task
 from reef.storage.trajectories import consumed_trajectory_id
-from reef.task2batch import NoBatches, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
-
+from reef.task2job import NoJobData, Task2Job
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
-PIPELINE_STAGES = ("record2record", "record2task", "task2batch")
+PIPELINE_STAGES = ("record2record", "record2task", "task2job")
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ class PipelineSpec:
 
     record2record: type[Record2Record] = NoRecordSets
     record2task: type[Record2Task] = NoTasks
-    task2batch: type[Task2Batch] = NoBatches
+    task2job: type[Task2Job] = NoJobData
 
 
 @dataclass(frozen=True)
@@ -86,7 +91,7 @@ class PipelineConfig:
 
     record2record: PluginReference
     record2task: PluginReference
-    task2batch: PluginReference
+    task2job: PluginReference
     environ: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -100,14 +105,14 @@ class PipelineConfig:
             raise PluginConfigError(
                 f"pipeline has unknown key(s) {', '.join(unknown)}; expected {', '.join(PIPELINE_STAGES)}"
             )
-        record2record, record2task, task2batch = (section.get(stage) for stage in PIPELINE_STAGES)
+        record2record, record2task, task2job = (section.get(stage) for stage in PIPELINE_STAGES)
         return cls(
             record2record=stage_reference(spec.record2record, record2record, "record2record")
             or Record2Record.reference(record2record, setting="pipeline.record2record"),
             record2task=stage_reference(spec.record2task, record2task, "record2task")
             or Record2Task.reference(record2task, setting="pipeline.record2task"),
-            task2batch=stage_reference(spec.task2batch, task2batch, "task2batch")
-            or Task2Batch.reference(task2batch, setting="pipeline.task2batch"),
+            task2job=stage_reference(spec.task2job, task2job, "task2job")
+            or Task2Job.reference(task2job, setting="pipeline.task2job"),
             environ=dict(environ),
         )
 
@@ -119,14 +124,14 @@ class PipelineConfig:
         record2task = Record2Task.referenced_class(self.record2task).from_config(
             self.record2task.config, context=context, record2record=record2record, environ=self.environ
         )
-        task2batch = Task2Batch.referenced_class(self.task2batch).from_config(
-            self.task2batch.config,
+        task2job = Task2Job.referenced_class(self.task2job).from_config(
+            self.task2job.config,
             context=context,
             record2record=record2record,
             record2task=record2task,
             environ=self.environ,
         )
-        return TrainingPipeline(context, record2record=record2record, record2task=record2task, task2batch=task2batch)
+        return TrainingPipeline(context, record2record=record2record, record2task=record2task, task2job=task2job)
 
 
 def stage_reference(default: type[Plugin], value: object, stage: str) -> PluginReference | None:
@@ -155,29 +160,31 @@ class InstructionFailure:
 
 
 class TrainingPipeline:
-    """Turn a scenario's records into typed training batches through a recipe's three stages.
+    """Turn a scenario's records into typed job data through a recipe's three stages.
 
     Without stages it is the no-update default: it reads records for audit
-    but never becomes ready and never produces a batch.
+    but never becomes ready and never produces job data.
 
     The samples of a held unit are the tasks of its record sets; an uploaded
     trajectory is one sample. In ``auto``, ``ready(sample_count)`` is True if
     and only if the held units and uploaded trajectories hold at least
-    ``sample_count`` samples. ``build_batch(sample_count)`` takes the uploaded
-    trajectories first, then whole units in selection order until the batch
+    ``sample_count`` samples. ``build_job_data(sample_count)`` takes the uploaded
+    trajectories first, then whole units in selection order until the data
     holds ``sample_count`` samples or the units run out. When ``buffer_size``
     is set, after it moves record sets, the unreserved units hold at most
     ``buffer_size`` samples, or are one unit: it releases the oldest ones
     beyond that and keeps the newest, so a unit larger than the buffer still
     trains.
 
-    The trainer-facing methods (``push``, ``ready``, ``build_batch``, and
-    the others) run on the trainer's thread under its lock and must not block
-    on network or model latency. Stages that call models run that work on a
+    The trainer-facing methods (``push``, ``ready``, ``build_job_data``, and
+    the others) run under the trainer's lock, whichever thread calls them (the
+    trainer's worker, admission's ``uploaded_sample``, the worker's
+    ``background_jobs_running``), and must not block on network or model
+    latency. Stages that call models run that work on a
     background worker and release it in ``close``, which the owning scenario
     calls when it drops the pipeline. State that lives only in memory is
     rebuilt after a restart: the trainer replays the records that no committed
-    batch consumed.
+    job data consumed.
     """
 
     def __init__(
@@ -186,7 +193,7 @@ class TrainingPipeline:
         *,
         record2record: Record2Record | None = None,
         record2task: Record2Task | None = None,
-        task2batch: Task2Batch | None = None,
+        task2job: Task2Job | None = None,
     ) -> None:
         self.context = context
         self.scenario = context.scenario
@@ -194,61 +201,66 @@ class TrainingPipeline:
         self.record2record = NoRecordSets() if record2record is None else record2record
         #: The record-to-task stage that turns each record set into tasks.
         self.record2task = NoTasks() if record2task is None else record2task
-        #: The task-to-batch stage that shapes the tasks of the selected units into a batch.
-        self.task2batch = NoBatches(context) if task2batch is None else task2batch
-        self.supported_training_modes = self.task2batch.supported_training_modes
+        #: The task-to-job stage that shapes the tasks of the selected units into job data.
+        self.task2job = NoJobData(context) if task2job is None else task2job
+        self.supported_training_modes = self.task2job.supported_training_modes
         # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
         if not context.manual_enabled:
             self.supported_training_modes = self.supported_training_modes - {"manual", "hybrid"}
         self.training_requests: dict[str, TrainingRequest] = {}
         self.consumed_requests: set[str] = set()
-        # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.
+        # The error of each buffered instruction whose step failed; its next job data is a skip row, not a run.
         self.failed_requests: dict[str, InstructionFailure] = {}
-        #: The batch handed out and not yet acknowledged. While it exists the
+        #: The job data handed out and not yet acknowledged. While it exists the
         #: pipeline is ready, hands out the same object, and must not
         #: reshuffle what it references.
-        self.pending: TrainingBatch | None = None
-        self.batch_number = 0
+        self.pending: JobData | None = None
+        self.data_number = 0
         #: Tasks by the ID of the record set that made them, until the set trains or ends.
         self.tasks: dict[Hashable, tuple[TrainDataItem, ...]] = {}
         #: Record sets pushed to the record-to-task stage that have no result yet, by set ID. Their records stay held.
         self.waiting_sets: dict[Hashable, RecordSet] = {}
-        #: Uploaded trajectories by trajectory ID, in upload order, until a batch consumes them.
+        #: Uploaded trajectories by trajectory ID, in upload order, until job data consumes them.
         self.uploaded_trajectories: dict[str, TrajectoryItem] = {}
-        #: The IDs of the uploaded trajectories in the handed out batch.
+        #: The IDs of the uploaded trajectories in the handed out job data.
         self.reserved_trajectory_ids: tuple[str, ...] = ()
-        #: The commit IDs of the uploaded trajectories that a batch consumed. A second read of one does not queue it.
+        #: The commit IDs of the uploaded trajectories that job data consumed. A second read of one does not queue it.
         self.consumed_trajectory_ids: set[str] = set()
-        #: Whether the handed out batch holds the task-to-batch stage's own samples (``Task2Batch.own_batch``).
+        #: Whether the handed out job data holds the task-to-job stage's own samples (``Task2Job.own_job_data``).
         self.pending_is_own = False
-        #: The IDs that consumed own batches listed, until their commit is durable.
+        #: The IDs that the stage's consumed own job data listed, until their commit is durable.
         self.consumed_own_ids: set[str] = set()
         self.buffer_release_warned = False
         self.set_training_mode(context.training_mode)
 
     @property
-    def output_schema(self) -> type[TrainingBatch]:
-        """The batch type ``build_batch`` returns; the trainer validates it."""
-        return self.task2batch.output_schema
+    def output_schema(self) -> type[JobData]:
+        """The job data type ``build_job_data`` returns; the trainer validates it."""
+        return self.task2job.output_schema
 
     @property
     def required_request_types(self) -> frozenset[RequestType]:
         """The kinds of record that the trainer gives the pipeline."""
-        return self.task2batch.required_request_types
+        return self.task2job.required_request_types
 
     @property
     def accepts_trajectories(self) -> bool:
         """Whether the trainer gives the pipeline uploaded trajectories."""
-        return self.task2batch.accepts_trajectories
+        return self.task2job.accepts_trajectories
+
+    @property
+    def accepts_imported_tasks(self) -> bool:
+        """Whether the recipe reads the scenario's imported tasks."""
+        return self.task2job.accepts_imported_tasks
 
     @property
     def buffer_size(self) -> int | None:
-        """The most samples that the held record sets keep, or None for every sample; the task-to-batch stage sets it."""
-        return self.task2batch.buffer_size
+        """The most samples that the held record sets keep, or None for every sample; the task-to-job stage sets it."""
+        return self.task2job.buffer_size
 
     @property
     def training_mode(self) -> str:
-        """The batching policy selected for this pipeline."""
+        """The training mode selected for this pipeline."""
         return self.context.training_mode
 
     @property
@@ -257,12 +269,12 @@ class TrainingPipeline:
         return self.context.experiment_logger
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future batches while preserving the held units and the reservation."""
+        """Select future job data while preserving the held units and the reservation."""
         if training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(
-                f"{type(self.task2batch).__name__} does not implement training_mode={training_mode!r}"
+                f"{type(self.task2job).__name__} does not implement training_mode={training_mode!r}"
             )
         self.context = replace(self.context, training_mode=training_mode)
         self.record2record.context_changed(self.context)
@@ -294,7 +306,7 @@ class TrainingPipeline:
         return dict(self.failed_requests)
 
     def mark_request_failed(self, request_id: str, error: str, metrics: Mapping[str, Any] | None = None) -> None:
-        """Record that the instruction's step failed; its next batch is consumed with a skip row."""
+        """Record that the instruction's step failed; its next job data is consumed with a skip row."""
         self.failed_requests[request_id] = InstructionFailure(error, dict(metrics or {}))
 
     def set_request_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
@@ -302,9 +314,9 @@ class TrainingPipeline:
         self.failed_requests = dict(failures)
 
     def discard_request(self, request_id: str) -> frozenset[str]:
-        """Consume one queued instruction without a batch; the committed row that names it is what recovery skips."""
+        """Consume one queued instruction without job data; the committed row that names it is what recovery skips."""
         if self.pending is not None and self.pending.request is not None and self.pending.request.id == request_id:
-            raise ValueError(f"training request {request_id!r} is reserved; release its batch first")
+            raise ValueError(f"training request {request_id!r} is reserved; release its job data first")
         if request_id not in self.training_requests:
             raise ValueError(f"unknown training request {request_id!r}")
         self.consume_request(request_id)
@@ -324,18 +336,18 @@ class TrainingPipeline:
             self.tasks.pop(set_id, None)
 
     def count_unit_samples(self, unit: RecordSetUnit) -> int:
-        """The samples of one held batch unit: the tasks of its record sets."""
+        """The samples of one held record set unit: the tasks of its record sets."""
         return sum(len(self.tasks[set_id]) for set_id in unit.set_ids())
 
     def count_held_samples(self) -> int:
-        """The samples that a batch can take now: those of the held units and the uploaded trajectories."""
+        """The samples that job data can take now: those of the held units and the uploaded trajectories."""
         pool = self.record2record.pool
         return sum(self.count_unit_samples(unit) for unit in pool.units()) + len(self.uploaded_trajectories)
 
     def release_over_buffer(self) -> None:
         """Release the oldest unreserved units while their samples are more than ``buffer_size``.
 
-        The reserved batch and the newest unreserved unit stay. Uploaded trajectories do not count: their store
+        The reserved job data and the newest unreserved unit stay. Uploaded trajectories do not count: their store
         keeps them. Without a ``buffer_size`` nothing is released.
         """
         buffer_size = self.buffer_size
@@ -395,64 +407,79 @@ class TrainingPipeline:
         self.record2record.push(item)
         self.move_record_sets()
 
-    def push_trajectory(self, trajectory_id: str, trajectory: TrajectoryItem) -> None:
-        """Read one uploaded trajectory. It waits here for a batch."""
+    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+        """The training sample of an uploaded trajectory (``Record2Task.uploaded_sample``); ``ValueError`` when the
+        recipe does not accept uploads or the trajectory cannot become a sample. Pure: admission calls it too."""
         if not self.accepts_trajectories:
-            raise ValueError(f"{type(self.task2batch).__name__} does not accept uploaded trajectories")
+            raise ValueError(f"{type(self.task2job).__name__} does not accept uploaded trajectories")
+        return self.record2task.uploaded_sample(trajectory)
+
+    def push_trajectory(self, trajectory_id: str, trajectory: TrajectoryItem) -> None:
+        """Read one uploaded trajectory as its training sample. It waits here for job data."""
         if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
-            self.uploaded_trajectories.setdefault(trajectory_id, trajectory)
+            self.uploaded_trajectories.setdefault(trajectory_id, self.uploaded_sample(trajectory))
+
+    def job_ended(self, outcome: JobOutcome) -> None:
+        """Give the task-to-job stage the outcome of a job whose end the trainer committed."""
+        self.task2job.job_ended(outcome)
 
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Give the stages the runtime load ID that serves the scenario now, for their staleness checks."""
+        """Give the record-to-record stage the runtime load ID that serves the scenario now, for its staleness check."""
         self.record2record.observe_serving_runtime_load_id(runtime_load_id)
-        self.task2batch.observe_serving_runtime_load_id(runtime_load_id)
 
-    # ------------------------------------------------------------ batch cycle
+    # --------------------------------------------------------- job data cycle
     #
-    # Batch when the held units and uploaded trajectories hold the trainer's
+    # Make job data when the held units and uploaded trajectories hold the trainer's
     # sample count (auto, hybrid) or an instruction is queued (manual, hybrid), hand
-    # the same batch out until it is acknowledged, then end the units and
+    # the same data out until it is acknowledged, then end the units and
     # trajectories it consumed.
 
     def advance(self) -> None:
-        """Advance background work and settle its results without reserving a training batch.
+        """Advance background work and settle its results without reserving job data.
 
-        Apply buffer limits and, without a pending batch, staleness checks.
+        Apply buffer limits and, without pending job data, staleness checks.
         This operation needs no backend sample count. Call it on the same
         serialized path as other pipeline operations; it starts no new thread.
         """
         # Background work, such as judgments or finished rounds, forms sets without a new record.
         self.record2record.advance(time.monotonic())
         self.move_record_sets()
-        self.task2batch.advance()
+        self.task2job.advance()
         if self.pending is None:
-            self.record2record.drop_stale_units(self.context.max_staleness)
+            self.record2record.drop_stale_units()
             self.forget_ended_sets()
 
-    def ready(self, sample_count: int) -> bool:
+    def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples.
 
-        The stage's own batch (``Task2Batch.own_batch``) makes the pipeline ready, whatever its sample count.
+        The stage's own job data (``Task2Job.own_job_data``) makes the pipeline ready, whatever its sample count.
+        With ``sample_count`` None, as for a stage that ``trains_own_job_data_only``, held samples never make
+        the pipeline ready.
         """
         self.advance()
-        if self.pending is not None or self.task2batch.own_batch() is not None:
+        if self.pending is not None or self.task2job.own_job_data() is not None:
             return True
+        return self.held_data_ready(sample_count)
+
+    def held_data_ready(self, sample_count: int | None) -> bool:
+        """Whether the training mode lets held samples and instructions make job data of ``sample_count`` samples."""
         if self.training_mode == "manual":
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:
             return True
-        return self.count_held_samples() >= sample_count
+        return sample_count is not None and self.count_held_samples() >= sample_count
 
-    def build_batch(self, sample_count: int) -> TrainingBatch:
-        """Return the handed out batch, or build one of at least ``sample_count`` samples when ``ready``."""
+    def build_job_data(self, sample_count: int | None) -> JobData:
+        """Return the handed out job data, or build data of at least ``sample_count`` samples when ``ready``."""
         if self.pending is None:
             if not self.ready(sample_count):
-                raise RuntimeError(f"scenario {self.scenario!r} has no batch ready")
-            self.batch_number += 1
-            own = self.task2batch.own_batch()
-            if own is not None:
-                # The stage's own samples train as one batch, however many they are.
-                self.pending = self.task2batch.make_batch(own, f"{self.scenario}:batch:{self.batch_number}")
+                raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
+            self.data_number += 1
+            own = self.task2job.own_job_data()
+            # Held samples go first; the stage's own samples wait while they are ready.
+            if own is not None and not self.held_data_ready(sample_count):
+                # The stage's own samples train as one job, however many they are.
+                self.pending = self.task2job.make_job_data(own, f"{self.scenario}:data:{self.data_number}")
                 self.pending_is_own = True
                 return self.pending
             # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
@@ -461,12 +488,14 @@ class TrainingPipeline:
                 if self.training_mode != "auto" and self.training_requests
                 else None
             )
-            # In manual mode an instruction runs alone; in hybrid it takes the samples that an automatic batch would.
-            batch_samples = 0 if request is not None and self.training_mode == "manual" else sample_count
+            # In manual mode an instruction runs alone; in hybrid it takes the samples that automatic job data would.
+            selected_samples = (
+                0 if sample_count is None or (request is not None and self.training_mode == "manual") else sample_count
+            )
             # Uploaded trajectories go first, in upload order. Whole record set units, in selection order, fill
-            # the rest of the batch until it holds ``batch_samples`` samples.
-            self.reserved_trajectory_ids = tuple(self.uploaded_trajectories)[:batch_samples]
-            missing = batch_samples - len(self.reserved_trajectory_ids)
+            # the rest of the data until it holds ``selected_samples`` samples.
+            self.reserved_trajectory_ids = tuple(self.uploaded_trajectories)[:selected_samples]
+            missing = selected_samples - len(self.reserved_trajectory_ids)
             units: list[RecordSetUnit] = []
             for unit in self.record2record.pool.ordered_units():
                 if missing <= 0:
@@ -479,29 +508,26 @@ class TrainingPipeline:
                 *(task for unit in selected for set_id in unit.set_ids() for task in self.tasks[set_id]),
             )
             if request is None:
-                self.pending = self.task2batch.make_batch(tasks, f"{self.scenario}:batch:{self.batch_number}")
+                self.pending = self.task2job.make_job_data(tasks, f"{self.scenario}:data:{self.data_number}")
             else:
-                batch = self.task2batch.make_batch(tasks, f"{self.scenario}:instruction:{request.id}")
-                self.pending = replace(batch, request=request)
+                data = self.task2job.make_job_data(tasks, f"{self.scenario}:instruction:{request.id}")
+                self.pending = replace(data, request=request)
         return self.pending
 
-    def acknowledge(self, batch_id: str, *, trained: bool = True) -> frozenset[str]:
-        """The training step consumed the batch: end its units and uploaded trajectories, and return the consumed IDs.
-
-        ``trained`` is False when the backend dropped the batch as stale, for
-        a record stage that paces work on what trained.
-        """
-        if self.pending is None or self.pending.batch_id != batch_id:
-            raise ValueError(f"unknown batch_id {batch_id!r}")
+    def acknowledge(self, data_id: str) -> frozenset[str]:
+        """The commit that submits the job data's job consumed it: end its units and uploaded trajectories, and
+        return the consumed IDs. The records are consumed whatever the job's outcome."""
+        if self.pending is None or self.pending.data_id != data_id:
+            raise ValueError(f"unknown data_id {data_id!r}")
         if self.pending_is_own:
-            # An own batch consumes no record: the stage names what the commit lists.
-            own_ids = self.task2batch.own_batch_done(trained=trained)
+            # The stage's own job data consumes no record: the stage names what the commit lists.
+            own_ids = self.task2job.own_job_data_submitted()
             self.consumed_own_ids |= own_ids
             self.pending = None
             self.pending_is_own = False
             return own_ids
         consumed_units = self.record2record.pool.consume_reserved()
-        consumed = self.record2record.consume(consumed_units, trained=trained)
+        consumed = self.record2record.consume(consumed_units)
         self.forget_ended_sets()
         for trajectory_id in self.reserved_trajectory_ids:
             self.uploaded_trajectories.pop(trajectory_id)
@@ -514,10 +540,10 @@ class TrainingPipeline:
         self.pending = None
         return consumed
 
-    def release_batch(self, batch_id: str) -> None:
-        """Forget the handed out batch without consuming anything; the next ``build_batch`` selects again."""
-        if self.pending is None or self.pending.batch_id != batch_id:
-            raise ValueError(f"unknown batch_id {batch_id!r}")
+    def release_job_data(self, data_id: str) -> None:
+        """Forget the handed out job data without consuming anything; the next ``build_job_data`` selects again."""
+        if self.pending is None or self.pending.data_id != data_id:
+            raise ValueError(f"unknown data_id {data_id!r}")
         self.pending = None
         self.pending_is_own = False
         self.reserved_trajectory_ids = ()
@@ -543,19 +569,18 @@ class TrainingPipeline:
         durable_own_ids = frozenset(self.consumed_own_ids & agent_record_ids)
         if durable_own_ids:
             self.consumed_own_ids -= durable_own_ids
-            self.task2batch.release_own_ids(durable_own_ids)
+            self.task2job.release_own_ids(durable_own_ids)
 
     def background_jobs_running(self) -> bool:
         """Return True while background work runs: a waiting set, or a record stage job such as a judgment.
 
         A finished job can make the pipeline ready without a new record.
-        While this is True, the training thread polls at a fixed interval.
-        Otherwise it sleeps until the next accepted record. The training
-        thread reads this between drains. It must not block.
+        While this is True, the scenario's worker polls at a fixed interval.
+        Otherwise it sleeps until the next accepted record. It must not block.
         """
         return (
             bool(self.waiting_sets)
-            or self.task2batch.background_jobs_running()
+            or self.task2job.background_jobs_running()
             or self.record2record.background_jobs_running()
         )
 
@@ -570,12 +595,12 @@ class TrainingPipeline:
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that callers need while waiting.
 
-        ``ready_samples`` against the trainer's ``batch_size`` says how close
-        the next batch is; ``buffer_size`` is the most samples the held record
-        sets keep, or None for every sample. A
-        caller waiting on a release needs it to tell a batch that is
-        still filling from one that never will: a scenario whose producer
-        stopped short sits below the batch size with nothing else to report.
+        ``ready_samples`` against the trainer's ``job_samples`` says how close
+        the next job's data is; ``buffer_size`` is the most samples the held
+        record sets keep, or None for every sample. A caller waiting on a
+        release needs it to tell job data that is still filling from data
+        that never will be: a scenario whose producer stopped short sits
+        below ``job_samples`` with nothing else to report.
         The stages add terminal outcomes that can never train, so a bounded
         external wait can fail explicitly.
         """
@@ -585,7 +610,7 @@ class TrainingPipeline:
         }
         if self.supported_training_modes & {"manual", "hybrid"}:
             state["buffered_requests"] = self.buffered_requests()
-        return {**state, **self.record2record.status(), **self.record2task.status(), **self.task2batch.status()}
+        return {**state, **self.record2record.status(), **self.record2task.status(), **self.task2job.status()}
 
     def close(self) -> None:
         """Close the stages; safe to call more than once.
@@ -599,6 +624,6 @@ class TrainingPipeline:
             try:
                 # A stage's own work, such as a rollout, can still save results through the record-to-task
                 # stage, so it closes first.
-                self.task2batch.close()
+                self.task2job.close()
             finally:
                 self.record2task.close()

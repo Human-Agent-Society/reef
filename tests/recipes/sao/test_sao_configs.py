@@ -3,21 +3,22 @@
 The SAO migration (commit 55e551d) removed ``--advantage-estimator=sao`` from
 Slime's argparse choices while the SAO config still passed it — the deployment
 could not boot, and nothing in CI noticed because no test ever
-re-parsed a cookbook YAML's flags. These tests close that hole: for each
-``training-*.yaml`` they materialize the slime-driver command exactly as
-``reef serve`` would, strip the driver/retention/loss-family options exactly as
-``reef.train.slime_backend.driver`` does, and then feed the remaining flags to the actual
-Slime argparse surface plus the recipe's ``validate_backend_args`` and the
-bridge preflight.
+re-parsed a cookbook YAML's flags. These tests close that hole: for each Slime
+deployment they build the Slime arguments exactly as ``reef serve`` and the
+HTTP service do (``SlimeDeployment.runtime_config`` and ``slime_arguments``),
+strip the retention and loss-family options exactly as
+``create_slime_component`` does, and then feed the remaining flags to the
+actual Slime argparse surface plus the recipe's ``validate_backend_args`` and
+``validate_slime_args``.
 
 Level of validation achieved on CPU (no Megatron, no sglang installed):
 
 * Every Slime-owned flag is parsed by the real parser — a typo, a removed
   flag, an invalid choice, or a bad value fails here.
-* Driver-level flags (``--ready-file``, ``--reef-checkpoint-*``, ``--sao-*``)
-  are parsed by the real driver/spec parsers.
-* The recipe's backend contract (``validate_backend_args``) and the bridge
-  preflight (``validate_bridge_args``) run on the parsed namespace, with the
+* Reef-level flags (``--reef-checkpoint-*``, ``--sao-*``) are parsed by the
+  real retention and loss-family parsers.
+* The recipe's backend contract (``validate_backend_args``) and the component
+  preflight (``validate_slime_args``) run on the parsed namespace, with the
   handful of ``slime_validate_args`` derivations they depend on simulated
   inline (each one cites the arguments.py logic it mirrors).
 * Megatron-native flags cannot be parsed without a GPU image; they are checked
@@ -28,12 +29,13 @@ Level of validation achieved on CPU (no Megatron, no sglang installed):
   to route them.
 
 Slime's parser transitively imports torch (megatron_utils.lora), so this
-  module skips where torch is unavailable; the main CPU CI gate installs CPU
-  torch and runs it.
+module skips where torch is unavailable, and the parse checks skip where Slime
+is not installed; the CI gate with the training dependencies runs them. The
+discovery and deployment checks need neither.
 
 Discovery covers both the generic presets under ``configs`` and every
-user-facing recipe under ``examples``.  A new example that launches the Reef
-Slime driver is therefore part of this contract automatically.
+user-facing recipe under ``examples``.  A new example that selects
+``training.backend: slime`` is therefore part of this contract automatically.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ import os
 import re
 import sys
 import types
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,7 +58,6 @@ pytest.importorskip("torch")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_ROOTS = (REPO_ROOT / "recipes", REPO_ROOT / "tutorials")
-SLIME_DRIVER_MODULE = "reef.service.training_driver"
 
 
 def _iter_config_files() -> list[Path]:
@@ -73,10 +75,9 @@ def _iter_config_files() -> list[Path]:
 def _discover_training_configs() -> list[Path]:
     configs = []
     for path in _iter_config_files():
-        text = path.read_text()
-        config = yaml.safe_load(text)
+        config = yaml.safe_load(path.read_text())
         training = config.get("training", {}) if isinstance(config, dict) else {}
-        if SLIME_DRIVER_MODULE in text or (isinstance(training, dict) and training.get("backend") == "slime"):
+        if isinstance(training, dict) and training.get("backend") == "slime":
             configs.append(path)
     return sorted(configs)
 
@@ -195,6 +196,8 @@ _CONFIG_ENV = {
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
     "SDFT_LR_DECAY_ITERS": "252",
     "SDFT_MODEL_PATH": "/root/models/Qwen2.5-7B-Instruct",
+    # Tinker deployments check their API key's variable when they resolve.
+    "TINKER_API_KEY": "config-test-key",
     "REEF_UPSTREAM_URL": "http://127.0.0.1:8000/v1",
     "REEF_UPSTREAM_MODEL": "config-test-model",
     "SAO_BATCH": "128",
@@ -260,6 +263,7 @@ def _install_slime_parser_stubs() -> None:
 
 def _build_slime_parser() -> argparse.ArgumentParser:
     _install_slime_parser_stubs()
+    pytest.importorskip("slime.utils.arguments")
     from slime.utils.arguments import get_slime_extra_args_provider
 
     from reef.train.slime_backend.reef_adapters.slime_arguments import add_reef_slime_arguments
@@ -270,25 +274,23 @@ def _build_slime_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _driver_tokens(config: dict) -> tuple[list[str], str]:
-    """Materialize the driver command and deployment recipe reference."""
+def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
+    """The Slime arguments the HTTP service builds, the recipe reference and its loss family."""
+    from reef.recipe.registry import recipe_class_for
+    from reef.service.deploy.deployment_config import selected_weight_training
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.train.slime_backend.launch import TEACHER_URL_ENV, SlimeDeployment, slime_arguments
 
-    services = {service["name"]: service for service in config["services"]}
-    from reef.service.deploy.process import _command_argv
-    from reef.service.training_driver import _resolve_training_recipe
-    from reef.train.slime_backend.launch import driver_arguments
-
-    tokens = _command_argv(config, services["slime-driver"]["command"])
-    module = SLIME_DRIVER_MODULE
-    assert module in tokens, f"slime-driver service must invoke {module}"
-    driver_env = services["slime-driver"].get("env") or {}
-    assert "REEF_TRAINING_RECIPE" not in driver_env
-    assert "REEF_TRAINING_LOSS" not in driver_env
     recipe = config["reef"]["recipe"]
-    return [
-        *driver_arguments(config, loss_family=_resolve_training_recipe(config)[0]),
-        *tokens[tokens.index(module) + 1 :],
-    ], recipe
+    recipe_type = recipe_class_for(recipe)
+    weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
+    assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
+    loss_family = weight_type.training_spec().loss_family.strip()
+    runtime = SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family=loss_family)
+    assert runtime["recipe"] == recipe
+    # The teacher's address reaches the HTTP service as an environment variable once its service is up.
+    environ = {TEACHER_URL_ENV: "http://127.0.0.1:30010"}
+    return slime_arguments(runtime["settings"], loss_family=loss_family, environ=environ), recipe, loss_family
 
 
 def _strip_sglang_flags(tokens: list[str]) -> list[str]:
@@ -307,25 +309,21 @@ def _strip_sglang_flags(tokens: list[str]) -> list[str]:
 
 
 def _parse_config(config_path: Path):
-    """Run one cookbook config through the driver's own argument pipeline.
+    """Run one cookbook config through the Slime component's own argument pipeline.
 
     Returns ``(args, spec, options, recipe)`` with ``args`` parsed by the real
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
-    from reef.service.training_driver import _driver_options, _resolve_training_recipe
-    from reef.train.slime_backend.driver import _retention_options
     from reef.train.slime_backend.loss_families import resolve_loss_family
+    from reef.train.slime_backend.reef_adapters.training_job.storage import retention_options
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
     _set_test_endpoints(config)
-    tokens, recipe = _driver_tokens(config)
-    _loss_family, resolved_recipe = _resolve_training_recipe(config)
-    spec = resolve_loss_family(_loss_family)
-    assert resolved_recipe == recipe
+    tokens, recipe, loss_family = _slime_tokens(config)
+    spec = resolve_loss_family(loss_family)
 
-    _, tokens = _driver_options(tokens)
-    _, tokens = _retention_options(tokens)
+    _, tokens = retention_options(tokens)
     options, tokens = spec.parse_driver_options(tokens)
     tokens = _strip_sglang_flags(tokens)
 
@@ -374,21 +372,11 @@ def _apply_validation_derivations(args) -> None:
         args.eps_clip_high = args.eps_clip
     # ppo implies a critic.
     args.use_critic = args.use_critic or args.advantage_estimator == "ppo"
-    # External-engine detection consulted by the bridge preflight.
-    args.rollout_external = args.rollout_external_engine_addrs is not None
-    # Colocation turns both offload phases on unless explicitly overridden.
-    # ``slime_validate_args`` applies these defaults after argparse, before
-    # Reef's bridge preflight sees the namespace.
-    if args.colocate:
-        if args.offload_train is None:
-            args.offload_train = True
-        if args.offload_rollout is None:
-            args.offload_rollout = True
-    else:
-        if args.offload_train is None:
-            args.offload_train = False
-        if args.offload_rollout is None:
-            args.offload_rollout = False
+    # Without --colocate, which Reef refuses, both offload phases default to off.
+    if args.offload_train is None:
+        args.offload_train = False
+    if args.offload_rollout is None:
+        args.offload_rollout = False
 
 
 @pytest.mark.unit
@@ -453,7 +441,7 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.service_config import service_config_from_mapping
-    from reef.train.deployment import inference_handler_factory_for
+    from reef.service.deploy.serving import inference_handler_factory_for
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
@@ -515,14 +503,14 @@ def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> 
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", TRAINING_CONFIGS, ids=_config_id)
 def test_cookbook_training_config_parses_and_validates(config_path: Path) -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+    from reef.train.slime_backend.reef_adapters.preflight import validate_slime_args
     from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
 
     args, spec, options, recipe = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)
-    # Match driver._serve: family projection can intentionally re-enable the
-    # Slime pre-train pass after the YAML's initial --disable flag.
+    # Match create_slime_component: family projection can intentionally re-enable
+    # the Slime pre-train pass after the YAML's initial --disable flag.
     configure_reef_loss_args(args)
 
     # Paths are representative placeholders; tokenizer compatibility has its
@@ -533,7 +521,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
         validate_tokenizers.assert_called_once_with(args.hf_checkpoint, args.distill_teacher_model_path)
     else:
         validate_tokenizers.assert_not_called()
-    validate_bridge_args(args, spec)
+    validate_slime_args(args, spec)
 
 
 @pytest.mark.unit

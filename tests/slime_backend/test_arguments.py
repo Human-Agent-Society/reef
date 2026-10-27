@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 
 import pytest
 
@@ -50,10 +51,7 @@ def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     assert args.megatron_to_hf_mode == "bridge"
     assert args.megatron_lora_rank == 4
     assert args.use_critic is True
-    assert args.check_lora_weight_equal is True
-    assert args.verify_lora_base_weights is True
     assert args.reef_executor_backend == "auto"
-    assert args.reef_rollout_executor_backend == "auto"
 
 
 @pytest.mark.unit
@@ -120,67 +118,52 @@ def test_loss_family_projection_uses_public_slime_primitives() -> None:
     assert not hasattr(neutral, "compute_advantages_and_returns")
 
 
-@pytest.mark.unit
-def test_keeping_the_lora_base_resident_needs_lora_and_colocation() -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
-
-    def args(**overrides):
-        values = {
-            "compute_advantages_and_returns": False,
-            "num_rollout": 1,
-            "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
-            "save": "/tmp/megatron",
-            "debug_train_only": False,
-            "debug_rollout_only": False,
-            "rollout_num_gpus": 1,
-            "rollout_external": False,
-            "colocate": True,
-            "offload_train": True,
-            "offload_rollout": True,
-            "megatron_lora_rank": 32,
-            "keep_lora_base_resident": True,
-            "save_interval": 1,
-        }
-        values.update(overrides)
-        return SlimeArguments(**values)
-
-    with pytest.raises(ValueError, match="requires LoRA training"):
-        validate_bridge_args(args(megatron_lora_rank=0), None)
-    with pytest.raises(ValueError, match="colocated training"):
-        validate_bridge_args(args(colocate=False, offload_rollout=False), None)
+def component_args(**overrides):
+    values = {
+        "compute_advantages_and_returns": False,
+        "num_rollout": 1,
+        "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
+        "save": "/tmp/megatron",
+        "debug_train_only": False,
+        "debug_rollout_only": False,
+        "colocate": False,
+        "offload_train": False,
+        "offload_rollout": False,
+        "release_train": False,
+        "megatron_lora_rank": 0,
+        **overrides,
+    }
+    return SlimeArguments(**values)
 
 
 @pytest.mark.unit
-def test_the_preflight_and_the_bridge_agree_on_what_a_lora_run_is() -> None:
-    """The preflight spells the predicate out; this pins it to the shared helper."""
-    from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
-    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+@pytest.mark.parametrize("overrides", [{}, {"megatron_lora_rank": 32}, {"offload_train": True}])
+def test_slime_args_accept_a_training_only_run(overrides) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_slime_args
 
-    def args(rank):
-        return SlimeArguments(
-            compute_advantages_and_returns=False,
-            num_rollout=1,
-            save_hf="/tmp/hf/checkpoint-{rollout_id}",
-            save="/tmp/megatron",
-            debug_train_only=False,
-            debug_rollout_only=False,
-            rollout_num_gpus=1,
-            rollout_external=False,
-            colocate=True,
-            offload_train=True,
-            offload_rollout=True,
-            megatron_lora_rank=rank,
-            keep_lora_base_resident=True,
-            save_interval=1,
-        )
+    validate_slime_args(component_args(**overrides), None)
 
-    for rank in (0, 32):
-        refused = False
-        try:
-            validate_bridge_args(args(rank), None)
-        except ValueError as exc:
-            refused = "requires LoRA training" in str(exc)
-        assert refused is not megatron_lora_enabled(args(rank))
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "refusal"),
+    [
+        # Training and serving never share GPUs, so nothing hands GPU memory over between them.
+        ({"colocate": True, "offload_train": True, "offload_rollout": True}, "remove --colocate"),
+        ({"offload_rollout": True}, "remove --offload-rollout"),
+        ({"debug_train_only": True}, "--debug-train-only"),
+        ({"debug_rollout_only": True}, "--debug-rollout-only"),
+        ({"num_rollout": 0}, "positive --num-rollout"),
+        ({"save_hf": "/tmp/hf/checkpoint"}, "{rollout_id}"),
+        # The workers keep running between jobs, so nothing releases and recreates them.
+        ({"release_train": True}, "remove --release-train"),
+    ],
+)
+def test_slime_args_refuse_what_the_training_component_cannot_run(overrides, refusal) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_slime_args
+
+    with pytest.raises(ValueError, match=re.escape(refusal)):
+        validate_slime_args(component_args(**overrides), None)
 
 
 @pytest.mark.unit
@@ -196,43 +179,6 @@ def test_finalize_arguments_requires_save(save: str | None) -> None:
     # Megatron checks --save-interval only with --save, and the bridge reads --save-interval.
     with pytest.raises(ValueError, match="requires --save"):
         finalize_reef_slime_args(slime_args(save=save), [])
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("overrides", "refusal"),
-    [
-        ({}, None),
-        ({"release_train": True}, "--release-train"),
-        # Each LoRA scenario restarts from its own last save.
-        ({"megatron_lora_rank": 32}, None),
-    ],
-)
-def test_a_checkpoint_interval_needs_workers_that_keep_their_state(overrides, refusal) -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
-
-    values = {
-        "compute_advantages_and_returns": False,
-        "num_rollout": 1,
-        "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
-        "save": "/tmp/megatron",
-        "debug_train_only": False,
-        "debug_rollout_only": False,
-        "rollout_num_gpus": 1,
-        "rollout_external": False,
-        "colocate": True,
-        "offload_train": True,
-        "offload_rollout": True,
-        "megatron_lora_rank": 0,
-        "keep_lora_base_resident": False,
-        "save_interval": 4,
-        **overrides,
-    }
-    if refusal is None:
-        validate_bridge_args(SlimeArguments(**values), None)
-    else:
-        with pytest.raises(ValueError, match=refusal):
-            validate_bridge_args(SlimeArguments(**values), None)
 
 
 @pytest.mark.unit

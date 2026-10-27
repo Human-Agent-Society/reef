@@ -375,7 +375,10 @@ def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, opt
 
 
 def meta_harness_dispatcher(tmp_path: Path, recipe: MetaHarnessRecipe, storage: Path | None = None) -> Dispatcher:
-    """A dispatcher whose base release is the recipe's seed, as a deployment's is."""
+    """A dispatcher whose base release is the recipe's seed, as a deployment's is.
+
+    The tests prepare and commit each step themselves, so the dispatcher runs no local cycle of its own.
+    """
     initial = tmp_path / "initial"
     if not initial.exists():
         recipe.seed.write(initial)
@@ -383,6 +386,7 @@ def meta_harness_dispatcher(tmp_path: Path, recipe: MetaHarnessRecipe, storage: 
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(storage),
+        hold_local_cycles=True,
     )
 
 

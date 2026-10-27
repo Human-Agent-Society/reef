@@ -1,4 +1,4 @@
-"""Record sets, batch units and their pool: the type definitions, selection order, reservations, and staleness."""
+"""Record sets, record set units and their pool: the type definitions, selection order, reservations, and staleness."""
 
 from __future__ import annotations
 
@@ -11,11 +11,13 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import RuntimeLoadSpan
-from reef.core.batches import TaskItem
+from reef.core.job_data import TaskItem
+from reef.core.plugins import PluginConfigError
 from reef.record2record import (
     ArrivalOrder,
     GroupKeyOrder,
     InferenceRecord2Record,
+    Record2RecordSettings,
     RecordSet,
     RecordSetUnit,
     RecordSetUnitPool,
@@ -202,15 +204,35 @@ def test_the_stage_drops_held_units_behind_the_serving_version_but_not_a_reserve
     stage.observe_serving_runtime_load_id("e:1")
     stage.observe_serving_runtime_load_id("e:2")
     stage.pool.reserve(stage.pool.ordered_units())
-    stage.drop_stale_units(0)
+    stage.drop_stale_units()
     assert len(stage.pool) == 2
 
     stage.pool.release_reservation()
-    stage.drop_stale_units(0)
+    stage.drop_stale_units()
     assert [held.unit_id for held in stage.pool.units()] == ["new"]
     assert stage.take_ended() == frozenset({"old"})
     assert "old" in stage.releasable_record_ids()
     assert set(stage.producing_runtime_load_ids) == {"new"}
+
+
+def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
+    assert Record2RecordSettings().max_staleness == 0
+    assert InferenceRecord2Record.from_config({}, context=PipelineContext("s"), environ={}).max_staleness == 0
+    with pytest.raises(ValueError, match="max_staleness must be a non-negative int"):
+        Record2RecordSettings(max_staleness=-1)
+    with pytest.raises(PluginConfigError, match="max_staleness must be a non-negative int"):
+        InferenceRecord2Record.from_config({"max_staleness": -1}, context=PipelineContext("s"), environ={})
+
+
+def test_a_stage_drops_only_the_units_more_than_its_configured_limit_behind() -> None:
+    stage = InferenceRecord2Record.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
+    for record_id, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3")):
+        stage.settle(single(record_id, stage.pool.next_arrival_index()), TaskStatus.READY, frozenset({version}))
+    for version in ("e:1", "e:2", "e:3"):
+        stage.observe_serving_runtime_load_id(version)
+    stage.drop_stale_units()
+    assert [held.unit_id for held in stage.pool.units()] == ["one-behind", "current"]
+    assert stage.take_ended() == frozenset({"two-behind"})
 
 
 def test_a_serving_version_of_another_incarnation_restarts_the_served_versions() -> None:
