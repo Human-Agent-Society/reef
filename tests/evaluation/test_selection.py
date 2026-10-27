@@ -16,6 +16,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.core.evaluation import CheckpointCandidate
+from reef.core.plugins import PluginConfigError
 from reef.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
@@ -28,8 +29,9 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin, ManualPromotionPlugin
 from reef.evaluation.harness import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
+from reef.inference.http import InferenceProxyRuntime
 from reef.train.backend import CandidateBackend
 from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
 from reef.train.types import JobData
@@ -247,3 +249,15 @@ def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
     plugin = Plugin(Backend())
     assert plugin.evaluate(candidate).evaluator == "held-out-suite"
     assert plugin.decide(candidate, plugin.evaluate(candidate)).selected is True
+
+
+def test_manual_promotion_holds_every_checkpoint_for_review() -> None:
+    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
+    plugin = ManualPromotionPlugin.from_config({}, runtime=runtime, scenario="s", environ={})
+    candidate = CheckpointCandidate(candidate_id="job:1", training_job_id="job", step=1, release_path="/r")
+    decision = plugin.evaluate_and_decide(candidate)
+    assert (decision.selected, decision.policy) == (False, "manual")
+    with pytest.raises(TypeError, match="evaluates a CheckpointCandidate"):
+        plugin.evaluate(UpdateCandidate("other"))
+    with pytest.raises(PluginConfigError, match="takes no config"):
+        ManualPromotionPlugin.from_config({"x": 1}, runtime=runtime, scenario="s", environ={})

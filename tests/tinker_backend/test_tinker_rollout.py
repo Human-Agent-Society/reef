@@ -271,3 +271,36 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
                 component.submit(TrainingJob("j", "tinker", None, JobData("d", items), parameters))
     finally:
         component.close()
+
+
+@pytest.mark.unit
+def test_an_evaluation_job_scores_its_start_and_trains_nothing(tmp_path, monkeypatch):
+    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
+
+    async def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
+        return grouped(tmp_path)
+
+    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
+    client = Client()
+    component = TinkerTrainingComponent(
+        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
+    )
+    try:
+        parameters = {
+            "method": TrainingMethod("task_group").to_dict(),
+            "rollout": ROLLOUT,
+            "evaluation_of": "job-3",
+        }
+        task = harbor_task(tmp_path, "add")
+        component.submit(TrainingJob("eval-0", "tinker", None, JobData("d", (task,)), parameters))
+        status = finished(component, "eval-0")
+        assert status.state == "finished" and status.checkpoints == () and client.trained == []
+        assert status.metrics["evaluation_of"] == "job-3"
+        assert (status.metrics["evaluation_reward_mean"], status.metrics["evaluation_tasks"]) == (0.5, 1)
+        trajectory = grouped(tmp_path).samples[0]
+        with pytest.raises(ValueError, match="its data must be tasks"):
+            component.submit(
+                TrainingJob("j", "tinker", None, JobData("d", (trajectory,)), {**parameters, "rollout": None})
+            )
+    finally:
+        component.close()

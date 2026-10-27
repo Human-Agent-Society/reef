@@ -42,6 +42,8 @@ from reef.core.evaluation import (
     UpdateCandidate,
 )
 from reef.core.plugins import Plugin, PluginConfigError
+from reef.evaluation.config import ConfiguredEvaluationPlugin
+from reef.runtime.interfaces import InferenceRuntime
 
 
 class SelectionPlugin(CandidateEvaluationPlugin, Plugin):
@@ -185,11 +187,39 @@ class AlwaysSelectCheckpointPlugin(AlwaysSelectMixin):
         return EvaluationResult(evaluator="training_job", evaluator_version="1", metrics={})
 
 
+class ManualPromotionPlugin(ConfiguredEvaluationPlugin):
+    """Hold every checkpoint for review: a person promotes each release (``POST /reef/scenarios/{s}/promote``).
+
+    ``evaluate`` measures nothing, as ``AlwaysSelectCheckpointPlugin`` does, and ``decide`` selects no candidate,
+    so each checkpoint is a pending release. A deployment names it in its ``evaluation`` section, which takes no
+    config. It takes a ``CheckpointCandidate`` and raises ``TypeError`` for another candidate.
+    """
+
+    @classmethod
+    def from_config(
+        cls, config: Mapping[str, Any], *, runtime: InferenceRuntime, scenario: str, environ: Mapping[str, str]
+    ) -> Self:
+        if config:
+            raise PluginConfigError(f"manual promotion takes no config, got {', '.join(sorted(map(str, config)))}")
+        return cls()
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        if not isinstance(candidate, CheckpointCandidate):
+            raise TypeError(f"{type(self).__name__} evaluates a CheckpointCandidate, got {type(candidate).__name__}")
+        return EvaluationResult(evaluator="manual_promotion", evaluator_version="1", metrics={})
+
+    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
+        return SelectionDecision(
+            selected=False, policy="manual", reason="a person promotes each release", evaluation=evaluation
+        )
+
+
 __all__ = [
     "AlwaysSelectCheckpointPlugin",
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
+    "ManualPromotionPlugin",
     "RegressionCheckMixin",
     "SelectionPlugin",
 ]

@@ -35,7 +35,7 @@ from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.task2job import NoJobData
 from reef.train.algos.registry import resolve_objective
-from reef.train.jobs import FixedJobPlan, JobLoop, JobPlan, JobRequest
+from reef.train.jobs import ArtifactEvaluation, FixedJobPlan, JobLoop, JobPlan, JobRequest
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -459,6 +459,14 @@ class WeightTrainingRecipe(Recipe):
         parameters["method"] = TrainingMethod(spec.objective).to_dict()
         return FixedJobPlan(JobRequest(parameters))
 
+    def artifact_evaluation(self, task_storage: TaskStorage | None) -> ArtifactEvaluation | None:
+        """The evaluation job of every artifact that the recipe's trainer publishes, or ``None`` for none.
+
+        ``task_storage`` opens the scenario's task stores, or is ``None`` for a trainer without a scenario
+        session. The default evaluates no artifact.
+        """
+        return None
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.job_parameters is not None and "method" in self.job_parameters:
@@ -608,7 +616,13 @@ class WeightTrainingRecipe(Recipe):
                 scenario,
                 records,
                 pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(self.training_component, self.job_plan(), evaluator, scenario=scenario),
+                job_loop=JobLoop(
+                    self.training_component,
+                    self.job_plan(),
+                    evaluator,
+                    scenario=scenario,
+                    artifact_evaluation=self.artifact_evaluation(task_storage),
+                ),
                 algorithm_state=algorithm_state,
                 report_type=self.report_type,
                 experiment_logger=experiment_logger,

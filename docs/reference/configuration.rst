@@ -1183,11 +1183,20 @@ The ``evaluation`` section
 
 Only weight-training recipes read this section; a deployment that pairs it
 with any other recipe fails at startup, because a harness recipe builds its
-evaluator in code. Absent by default, in which case Reef publishes every
-checkpoint that a training job saves, without an evaluation. When present,
-Reef calls the named class's ``from_config`` method once per scenario. The
-plugin then receives each saved but unpublished checkpoint as a
-``CheckpointCandidate`` and decides whether Reef publishes it.
+evaluator in code. Every checkpoint that a training job saves becomes a
+release. Absent by default, in which case Reef serves every release. When
+present, Reef calls the named class's ``from_config`` method once per
+scenario. The plugin then receives each saved checkpoint as a
+``CheckpointCandidate`` and decides whether Reef serves its release. A release
+that the plugin does not select is held for review, and a person serves it
+with ``POST /reef/scenarios/{scenario}/promote``.
+
+For fully manual promotion, name the built-in plugin that selects no release:
+
+.. code:: yaml
+
+   evaluation:
+     module: reef.evaluation.evaluators:ManualPromotionPlugin
 
 .. config::
 
@@ -1445,6 +1454,17 @@ is an SFT job. Each job starts from the last checkpoint of the job before it,
 so the RL jobs start from the SFT weights. Each train task trains in one task
 job; eval tasks never train. The training component must run task jobs, so the
 recipe requires the ``tinker`` training backend with a sampler.
+
+The recipe evaluates every artifact on the eval tasks. When the trainer
+decides a checkpoint, it also submits an evaluation job that starts from that
+checkpoint, rolls out every eval task with ``task_job_parameters``, and trains
+nothing (the Tinker job parameter ``evaluation_of``). The component runs it
+after the jobs before it. When it ends, the trainer commits its result in the
+commit metric ``artifact_evaluation``: the ``candidate_id`` of the checkpoint
+(``<training job>:<step>``, the ``selection.candidate_id`` of the release's
+commit), the job's ``event``, and its ``metrics``, such as
+``evaluation_reward_mean``. The evaluation decides nothing: the ``evaluation``
+section decides which release serves.
 
 .. code:: yaml
 
