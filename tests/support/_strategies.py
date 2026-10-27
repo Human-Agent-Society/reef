@@ -21,11 +21,15 @@ def _accepts(fn, name):
 
 
 class FunctionMethod(Method):
+    """A method made of ``fn(workspace, tools)``, the two parts of the step's context; a returned ``TreePatch``
+    applies to the head tree, and ``None`` returns an empty ``StepResult``."""
+
     def __init__(self, fn):
         self.fn = fn
 
-    def step(self, workspace, tools):
-        result = self.fn(workspace, tools)
+    def step(self, context):
+        workspace = context.workspace
+        result = self.fn(workspace, context.tools)
         if isinstance(result, TreePatch):
             workspace.write_tree(workspace.tree().apply(result))
             return StepResult()

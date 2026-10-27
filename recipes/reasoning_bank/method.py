@@ -29,7 +29,7 @@ from reef.core.prompts import untrusted_text
 from reef.core.trajectories import atif_messages
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.train.harness_backend import Method, StepResult, Tools, Trace, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult, Trace
 
 PROMPTS = Path(__file__).parent / "prompts"
 #: The judge's prompt; ``$trace`` is the run.
@@ -156,7 +156,7 @@ class ReasoningBank(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(ReasoningBankSettings.parse(config, plugin_class=cls))
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
         """Label each run among the traces, add its memory items to the bank, and write the bank as the tree's
         ``rb-*`` skills.
 
@@ -165,6 +165,7 @@ class ReasoningBank(Method):
         when the new tree fails ``tools.check``, neither changes, so no later step starts from a bank that
         cannot render.
         """
+        workspace, tools = context.workspace, context.tools
         settings = self.settings
         judge, extractor = tools.models[settings.judge_model], tools.models[settings.extract_model]
         bank_path = workspace.state / MEMORY_FILE

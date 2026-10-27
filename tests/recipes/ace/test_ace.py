@@ -25,7 +25,7 @@ from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.train.backend import ComponentReleases
-from reef.train.harness_backend import StepResult, Workspace
+from reef.train.harness_backend import StepContext, StepResult, Workspace
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
@@ -87,7 +87,8 @@ def ace_step(
         samples=samples,
         state_files=state,
     )
-    return workspace, ACE(settings).step(workspace, step_tools(workspace, ModelBindings(served=chat)))
+    tools = step_tools(workspace, ModelBindings(served=chat))
+    return workspace, ACE(settings).step(StepContext(workspace, tools))
 
 
 def test_two_steps_grow_the_playbook_that_pi_serves_with_no_episode(tmp_path: Path) -> None:

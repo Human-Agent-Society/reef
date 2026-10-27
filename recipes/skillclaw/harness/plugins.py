@@ -9,7 +9,7 @@ from __future__ import annotations
 from reef.core.job_data import TrajectorySample
 from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.run import EpisodeResult
-from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult
 
 from . import skillclaw
 
@@ -30,7 +30,8 @@ class NightMethod(Method):
     nothing leaves the served pool, and the step skips.
     """
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         samples = tuple(TrajectorySample(trace.trajectory()) for trace in workspace.traces())
         served = workspace.tree()
         patch = skillclaw.propose(served.files, samples, tools.models)

@@ -38,7 +38,7 @@ from reef.core.config import config_option
 from reef.core.plugins import ConfiguredPlugin, PluginSettings
 from reef.evaluation.harness import History
 from reef.harness.tree import HarnessTree, TreeKind
-from reef.train.harness_backend import Method, StepResult, Tools, Trace, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult, Tools, Trace, Workspace
 
 from .archive import Archive
 from .components import EVOLVABLE_KINDS, candidate_tree, texts_of
@@ -177,7 +177,8 @@ class GEPA(Method):
         )
         return cls(settings, feedback)
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         path = workspace.state / ARCHIVE_FILE
         tasks = workspace.tasks()
         head = workspace.tree()

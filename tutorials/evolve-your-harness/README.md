@@ -78,7 +78,7 @@ serve.yaml carries the endpoint (`inference.upstream-url: http://127.0.0.1:8000`
 
 ## The method
 
-A harness evolution method is a `Method` subclass that implements `step(workspace, tools)`, which runs once per evolve step. The workspace is the step's directory: `workspace.harness` holds the served tree, and the tree the method leaves there is the step's candidate. `RulesMethod.step` in `harness/plugins.py` is the whole method of the pi variant:
+A harness evolution method is a `Method` subclass that implements `step(context)`, which runs once per evolve step. `context.workspace` is the step's directory: `workspace.harness` holds the served tree, and the tree the method leaves there is the step's candidate. `context.tools` are the services Reef runs for the method, such as model calls. `RulesMethod.step` in `harness/plugins.py` is the whole method of the pi variant:
 
 1. `workspace.traces()` reads the step's traces, each with its task, the agent's reply, its score and the report's feedback; the method keeps the failing ones (score below 1.0). `workspace.request()` is the person's request on a step that answers one.
 2. One call through `tools.models.served` asks the served model to rewrite `rules.md`. The prompt is `harness/rules_prompt.md`. The call counts against the step's model-call budget and is kept in the step's record.

@@ -21,7 +21,7 @@ from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree import TreePatch
-from reef.train.harness_backend import Method, StepResult, Tools, Trace, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult, Trace
 
 from . import evolution, native_evolution
 
@@ -66,7 +66,8 @@ class RulesMethod(Method):
     fails, leaves the tree unchanged: the step skips, and its summary says why.
     """
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         traces = failing(workspace.traces())
         request = workspace.request()
         if not traces and request is None:
@@ -111,7 +112,8 @@ class NativeMethod(Method):
     says why.
     """
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         traces = failing(workspace.traces())
         if not traces:
             return StepResult("no failing trace to learn from")

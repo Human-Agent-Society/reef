@@ -16,7 +16,7 @@ from typing import Any
 
 from recipes.beta.reefine.agent import AgentExecution, answer_with_agent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, answer_request, learn_from_failures
-from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult
 
 
 class ReefineMethod(Method):
@@ -32,7 +32,8 @@ class ReefineMethod(Method):
     def __init__(self, agent: AgentExecution | None = None) -> None:
         self.agent = agent
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         head = workspace.tree()
         traces = workspace.traces()
         request = workspace.request()

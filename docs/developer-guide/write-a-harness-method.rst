@@ -17,17 +17,25 @@ A method is one class with one operation:
 
 .. code:: python
 
-   from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+   from reef.train.harness_backend import Method, StepContext, StepResult
 
 
    class MyMethod(Method):
-       def step(self, workspace: Workspace, tools: Tools) -> StepResult: ...
+       def step(self, context: StepContext) -> StepResult: ...
+
+The ``StepContext`` holds two things:
+
+- ``context.workspace``: the step's directory. The harness's components and
+  the step's material are files there, and the method reads them through the
+  workspace's readers. This page calls it ``workspace``.
+- ``context.tools``: the services that Reef runs for the method: model calls,
+  the tree check, and the evaluation of a tree on tasks. These are actions,
+  not files. This page calls them ``tools``.
 
 ``step`` edits ``workspace.harness``. The tree in that directory when ``step``
-returns is the step's candidate. ``tools`` calls models, checks trees, and
-scores trees on tasks. The ``StepResult`` says what the step did. The
-deployment names the class in ``evolution.method``. A method never subclasses
-the backend.
+returns is the step's candidate. The ``StepResult`` says what the step did.
+The deployment names the class in ``evolution.method``. A method never
+subclasses the backend.
 
 A small method
 --------------
@@ -40,7 +48,7 @@ traces that scored below 1, asks for new rules, and writes them to
 
    from reef.core.prompts import untrusted_text
    from reef.harness.tree import TreePatch
-   from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+   from reef.train.harness_backend import Method, StepContext, StepResult
 
    PROMPT = "Rewrite these agent rules so that the failing requests succeed. Reply with the rules alone."
 
@@ -48,7 +56,8 @@ traces that scored below 1, asks for new rules, and writes them to
    class Reflect(Method):
        """One model call per step: rewrite rules.md from the failing traces."""
 
-       def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+       def step(self, context: StepContext) -> StepResult:
+           workspace, tools = context.workspace, context.tools
            failing = [trace for trace in workspace.traces() if trace.score is not None and trace.score < 1.0]
            if not failing:
                return StepResult("no failing trace")  # harness/ is unchanged, so the step is skipped
@@ -76,7 +85,7 @@ One step runs in this order:
 
 #. Reef reads the head tree from the scenario's releases, chooses the step's
    evaluation tasks, and writes the step's workspace.
-#. Reef calls ``step(workspace, tools)``.
+#. Reef calls ``step(context)``.
 #. Reef reads the tree in ``harness/``. An unchanged tree skips the step. A
    tree that fails validation skips the step too, and the step's ``skipped``
    names the problems. There is no retry, so call ``tools.check`` before you
@@ -319,12 +328,12 @@ stays.
 
 
    class Counting(Method):
-       def step(self, workspace: Workspace, tools: Tools) -> StepResult:
-           path = workspace.state / "counts.json"
+       def step(self, context: StepContext) -> StepResult:
+           path = context.workspace.state / "counts.json"
            counts = json.loads(path.read_text()) if path.is_file() else {"steps": 0}
            counts["steps"] += 1
            path.write_text(json.dumps(counts))
-           ...  # this step's change to workspace.harness
+           ...  # this step's change to context.workspace.harness
            return StepResult(notes=counts)
 
 The files must be UTF-8 text, at most 16 MiB together. A ``state/`` that

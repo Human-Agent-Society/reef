@@ -34,7 +34,7 @@ from reef.core.prompts import untrusted_text
 from reef.evaluation.harness import CandidateRecord, EpisodeRecord, History
 from reef.harness.tree import HarnessTree, TreeKind, locate
 from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult, Tools, Workspace
 
 #: ``full_history`` branches from any candidate; ``incumbent_only``, the greedy control, from the served one.
 MODES = ("full_history", "incumbent_only")
@@ -164,7 +164,8 @@ class MetaHarness(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(MetaHarnessSettings.parse(config, plugin_class=cls))
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         settings = self.settings
         host = workspace.host()
         available = tuple(TreeKind(kind) for kind in host["kinds"])

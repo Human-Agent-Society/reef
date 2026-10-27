@@ -1,11 +1,13 @@
 """The method contract of harness evolution: what a method implements, and what each step gives it.
 
-A method is a :class:`Method`. Each step gives it a
-:class:`~reef.train.harness_backend.workspace.Workspace`, one directory per
-step, and :class:`Tools`. The method edits ``workspace.harness``; the tree it
-leaves there is the step's candidate, and an unchanged tree skips the step.
-It returns a :class:`StepResult` that describes what it did. A method never
-subclasses the backend.
+A method is a :class:`Method`. Each step gives it one :class:`StepContext`:
+the step's :class:`~reef.train.harness_backend.workspace.Workspace`, where the
+harness's components and the step's material are files, and the
+:class:`Tools`, the services that Reef runs for the method. The method edits
+``context.workspace.harness``; the tree it leaves there is the step's
+candidate, and an unchanged tree skips the step. It returns a
+:class:`StepResult` that describes what it did. A method never subclasses
+the backend.
 """
 
 from __future__ import annotations
@@ -119,18 +121,38 @@ class StepResult:
         object.__setattr__(self, "requires", tuple(parse_requires(list(self.requires))))
 
 
+@dataclass(frozen=True)
+class StepContext:
+    """What one step gives a method.
+
+    Values: ``workspace`` is the step's directories: the head tree in
+    ``harness/``, the material, the method's state, scratch and output. Data
+    and the harness's components are files there. ``tools`` are the services
+    that Reef runs for the method in this step: model calls, the call record,
+    the tree check and the evaluation.
+    Purpose: the backend makes one per step and passes it to ``Method.step``.
+    """
+
+    workspace: Workspace
+    tools: Tools
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.workspace, Workspace) or not isinstance(self.tools, Tools):
+            raise TypeError("StepContext needs a Workspace and Tools")
+
+
 class Method(ConfiguredPlugin, ABC):
     """Base class of a harness evolution method.
 
     Purpose: a deployment names the class in ``evolution.method``, the recipe
     builds it with ``from_config``, and the backend calls ``step`` once per
-    step. A method keeps what it learns across steps in ``workspace.state``;
-    the backend commits that directory with the step.
+    step. A method keeps what it learns across steps in the workspace's
+    ``state/``; the backend commits that directory with the step.
     """
 
     @abstractmethod
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
-        """Edit ``workspace.harness`` into this step's candidate, or leave it unchanged to skip the step."""
+    def step(self, context: StepContext) -> StepResult:
+        """Edit ``context.workspace.harness`` into this step's candidate, or leave it unchanged to skip the step."""
 
 
-__all__ = ["Method", "ModelCalls", "StepResult", "Tools"]
+__all__ = ["Method", "ModelCalls", "StepContext", "StepResult", "Tools"]

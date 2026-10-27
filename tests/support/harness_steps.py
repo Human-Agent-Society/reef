@@ -31,7 +31,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import CommittedReleases, ComponentReleases, ReleaseFiles
-from reef.train.harness_backend import Method, StepResult, Tools, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult, Workspace
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.harness_backend.tools import StepTools
@@ -173,7 +173,7 @@ class IdleMethod(Method):
     Purpose: ``evolution_config`` names it, for a test that builds a recipe from its config and never steps.
     """
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
         return StepResult()
 
 

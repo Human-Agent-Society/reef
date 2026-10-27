@@ -28,7 +28,7 @@ from reef.core.trajectories import atif_messages
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import TreePatch
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.train.harness_backend import Method, StepResult, Tools, Trace, Workspace
+from reef.train.harness_backend import Method, StepContext, StepResult, Trace
 
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 REFLECTOR_PROMPT = (PROMPTS_DIR / "reflector.md").read_text(encoding="utf-8")
@@ -248,7 +248,8 @@ class ACE(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(ACESettings.parse(config, plugin_class=cls))
 
-    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+    def step(self, context: StepContext) -> StepResult:
+        workspace, tools = context.workspace, context.tools
         settings = self.settings
         model = tools.models[settings.model]
         path = workspace.state / PLAYBOOK_FILE

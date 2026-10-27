@@ -27,7 +27,7 @@ from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples
-from reef.train.harness_backend import StepResult, Workspace
+from reef.train.harness_backend import StepContext, StepResult, Workspace
 
 PI = get_adapter("pi")
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes" / "reasoning_bank" / "examples" / "serve.yaml"
@@ -78,7 +78,7 @@ def run_step(
     )
     tools = step_tools(workspace, ModelBindings(served=MODEL, named={"judge": judge, "extract": extractor}))
     method = ReasoningBank.from_config({"judge_model": "judge", "extract_model": "extract", **config})
-    return workspace, method.step(workspace, tools)
+    return workspace, method.step(StepContext(workspace, tools))
 
 
 def bank_of(workspace: Workspace) -> list[dict[str, Any]]:

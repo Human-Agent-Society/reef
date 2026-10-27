@@ -51,7 +51,7 @@ from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
 from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.capabilities import PatchAdmission, StepProgress, StepProgressReader, StepRecords
-from reef.train.harness_backend.contract import Method, StepResult
+from reef.train.harness_backend.contract import Method, StepContext, StepResult
 from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.harness_backend.manifest import advance
 from reef.train.harness_backend.records import CALLS_FILE, RESULT_FILE, StepRecord, bounded
@@ -313,7 +313,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
             max_episodes=self.limits.max_episodes_per_step,
         )
         try:
-            result = self.method.step(workspace, tools)
+            result = self.method.step(StepContext(workspace, tools))
         finally:
             # Written even when the step raised: the calls before the failure are the step's record.
             self.records.write(workspace.root, CALLS_FILE, calls.entries)

@@ -28,7 +28,7 @@ from reef.harness.tree import TreePatch
 from reef.sandbox.e2b import E2BSession
 from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome, SandboxExecutor
 from reef.sandbox.remote import pack
-from reef.train.harness_backend import Tools, Workspace
+from reef.train.harness_backend import StepContext, Tools, Workspace
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.types import JobData
 
@@ -265,7 +265,7 @@ def test_off_pi_the_agent_stays_idle_and_the_served_model_answers(tmp_path) -> N
     workspace = step_workspace(tmp_path, adapter="dsh")
     served = Served(designed({"rules.md": "Run the tests first.\n"}), json.dumps(REVIEW))
     method = ReefineMethod(agent_of(tmp_path / "no-such-pi"))
-    result = method.step(workspace, step_tools(workspace, ModelBindings(served=served)))
+    result = method.step(StepContext(workspace, step_tools(workspace, ModelBindings(served=served))))
     assert workspace.tree() == TREE.apply(TreePatch({"rules.md": "Run the tests first.\n"}))
     assert result.notes["review"] == REVIEW and "This harness is" in served.prompts[1]
 

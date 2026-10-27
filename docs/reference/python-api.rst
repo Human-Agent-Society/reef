@@ -1417,10 +1417,10 @@ is the reference.
 
    from reef.evaluation.harness import EpisodeScorer, History, Promoter
    from reef.harness.tree import HarnessTree, TreePatch
-   from reef.train.harness_backend import Method, ModelCalls, StepResult, Tools, Trace, Workspace
+   from reef.train.harness_backend import Method, ModelCalls, StepContext, StepResult, Tools, Trace, Workspace
 
    class MyMethod(Method):
-       def step(self, workspace: Workspace, tools: Tools) -> StepResult: ...
+       def step(self, context: StepContext) -> StepResult: ...
 
    class MyScorer(EpisodeScorer):
        def score(self, task, result) -> float: ...
@@ -1439,9 +1439,12 @@ dataclass, which refuses an unknown key.
 
    * - Member
      - Contract
-   * - ``Method.step(workspace, tools)``
-     - edit ``workspace.harness`` into the step's candidate and return a
-       ``StepResult``; leave the tree unchanged to skip the step
+   * - ``Method.step(context)``
+     - edit ``context.workspace.harness`` into the step's candidate and
+       return a ``StepResult``; leave the tree unchanged to skip the step
+   * - ``StepContext``
+     - ``workspace``, the step's ``Workspace``, and ``tools``, the step's
+       ``Tools``; the backend makes one per step
    * - ``Workspace``
      - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
        paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
