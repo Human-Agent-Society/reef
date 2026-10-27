@@ -27,7 +27,7 @@ from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.evaluation import CheckpointCandidate
-from reef.core.job_data import JobData, JobOutcome, TaskItem, TrainDataItem
+from reef.core.job_data import JobData, JobOutcome, Sample, TaskSample
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.rollout import (
     HandedOutTasks,
@@ -38,21 +38,21 @@ from reef.recipe.generated_tasks.rollout import (
 )
 from reef.recipe.sft.processor import SFTJobData
 from reef.record2record import Record2Record
-from reef.record2task import Record2Task
+from reef.record2sample import Record2Sample
+from reef.sample2job import Sample2JobSettings
 from reef.storage.tasks import IMPORTED_TASK_STORE, StoredTask, TaskStorage, TaskStore
-from reef.task2job import Task2JobSettings
 from reef.train.jobs import ArtifactEvaluation, EvaluationJob, JobPlan, JobPlanContext, JobRequest
 
-#: The imported train tasks of one task job when ``pipeline.task2job.config.tasks_per_job`` is not set.
+#: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
 DEFAULT_TASKS_PER_JOB = 8
 
 
 @dataclass(frozen=True)
-class SFTThenRLJobSettings(Task2JobSettings):
-    """The config of ``SFTThenRLJobData``: the sample buffer of ``Task2JobSettings``, and ``tasks_per_job``.
+class SFTThenRLJobSettings(Sample2JobSettings):
+    """The config of ``SFTThenRLJobData``: the sample buffer of ``Sample2JobSettings``, and ``tasks_per_job``.
 
     Values: ``tasks_per_job`` is a positive int, the most imported train tasks of one task job. Purpose:
-    ``SFTThenRLJobData.from_config`` parses it from ``pipeline.task2job.config``.
+    ``SFTThenRLJobData.from_config`` parses it from ``pipeline.sample2job.config``.
     """
 
     tasks_per_job: int = config_option(DEFAULT_TASKS_PER_JOB, help="The most imported train tasks of one task job.")
@@ -63,9 +63,9 @@ class SFTThenRLJobSettings(Task2JobSettings):
             raise ValueError("tasks_per_job must be a positive int")
 
 
-def imported_task_item(store: TaskStore, stored: StoredTask) -> TaskItem:
+def imported_task_item(store: TaskStore, stored: StoredTask) -> TaskSample:
     """The task that a task job rolls out for the imported task ``stored``: its directory, named by its task name."""
-    return TaskItem(
+    return TaskSample(
         store.path(stored.files_digest),
         metadata={"task": {"name": stored.name, "files_digest": stored.files_digest, "split": stored.split}},
     )
@@ -85,7 +85,7 @@ class SFTThenRLJobData(SFTJobData):
     trained in the store once one of those IDs is durable. ``job_ended`` drops the ended job's tasks from the
     pool. A restart rebuilds the pool from the store, so a task whose submission did not commit trains again.
 
-    Purpose: the SFT-then-RL recipe's task-to-job stage (``pipeline.task2job``).
+    Purpose: the SFT-then-RL recipe's sample-to-job stage (``pipeline.sample2job``).
     """
 
     accepts_imported_tasks = True
@@ -97,7 +97,7 @@ class SFTThenRLJobData(SFTJobData):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         return cls(context, SFTThenRLJobSettings.parse(config, plugin_class=cls))
@@ -129,7 +129,7 @@ class SFTThenRLJobData(SFTJobData):
         batch = f"{self.scenario}:rollout:{uuid.uuid4().hex[:12]}"
         self.handed_out = HandedOutTasks(batch, tuple(f"{batch}/{task.task_id}" for task in taken), taken)
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         if self.handed_out is None:
             return None
         return tuple(task.item for task in self.handed_out.tasks)
@@ -170,8 +170,8 @@ class SFTThenRLJobPlan(JobPlan):
     """Give a job of trajectories the ``sft`` request and a task job the ``rl`` request.
 
     Values: ``sft`` and ``rl`` are ``JobRequest`` values. Operation: ``next_job(context)`` is ``rl`` when
-    ``context.data`` holds one or more items and every item is a ``TaskItem``, and ``sft`` when no item is a
-    ``TaskItem``; data that holds both kinds raises ``ValueError``. Purpose: ``SFTThenRLRecipe.job_plan`` makes
+    ``context.data`` holds one or more items and every item is a ``TaskSample``, and ``sft`` when no item is a
+    ``TaskSample``; data that holds both kinds raises ``ValueError``. Purpose: ``SFTThenRLRecipe.job_plan`` makes
     it, and the weight trainer's job loop asks it for each job.
     """
 
@@ -182,10 +182,10 @@ class SFTThenRLJobPlan(JobPlan):
         self.rl = rl
 
     def next_job(self, context: JobPlanContext) -> JobRequest:
-        tasks = sum(isinstance(item, TaskItem) for item in context.data.items)
+        tasks = sum(isinstance(item, TaskSample) for item in context.data.samples)
         if tasks == 0:
             return self.sft
-        if tasks == len(context.data.items):
+        if tasks == len(context.data.samples):
             return self.rl
         raise ValueError(f"job data {context.data.data_id!r} holds both trajectories and tasks")
 

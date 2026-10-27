@@ -11,7 +11,7 @@ from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.task_service_stubs import task_for
 
 from reef.core.evaluation import CheckpointCandidate
-from reef.core.job_data import JobData, JobOutcome, TaskItem, TrajectoryItem
+from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.core.tasks import write_harbor_task
 from reef.inference.http import InferenceProxyRuntime
@@ -24,7 +24,7 @@ from reef.recipe.sft_then_rl import (
     SFTThenRLJobSettings,
     SFTThenRLRecipe,
 )
-from reef.record2task import NoTasks
+from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
@@ -36,8 +36,8 @@ ROLLOUT = {"episodes_per_task": 2}
 RUNTIME = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
 
 
-def atif(session: str) -> TrajectoryItem:
-    return TrajectoryItem(
+def atif(session: str) -> TrajectorySample:
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.4",
             "session_id": session,
@@ -47,10 +47,10 @@ def atif(session: str) -> TrajectoryItem:
     )
 
 
-class RenderingTasks(NoTasks):
+class RenderingSamples(NoSamples):
     """Renders an uploaded trajectory as it is, so the test needs no tokenizer."""
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         return trajectory
 
 
@@ -67,13 +67,13 @@ def pipeline_for(storage: TaskStorage, *, tasks_per_job: int = 2, job_samples: i
     return TrainingPipeline(
         context,
         record2record=SFTRecord2Record(context),
-        record2task=RenderingTasks(),
-        task2job=SFTThenRLJobData(context, settings),
+        record2sample=RenderingSamples(),
+        sample2job=SFTThenRLJobData(context, settings),
     )
 
 
 def task_names(data: JobData) -> list[str]:
-    return [item.metadata["task"]["name"] for item in data.items if isinstance(item, TaskItem)]
+    return [item.metadata["task"]["name"] for item in data.samples if isinstance(item, TaskSample)]
 
 
 def test_held_trajectories_train_before_the_imported_train_tasks_and_each_task_trains_once(tmp_path: Path) -> None:
@@ -86,12 +86,12 @@ def test_held_trajectories_train_before_the_imported_train_tasks_and_each_task_t
 
     # Two uploads make SFT data ready, so they go first although tasks wait.
     sft = pipeline.build_job_data(2)
-    assert [type(item) for item in sft.items] == [TrajectoryItem, TrajectoryItem]
+    assert [type(item) for item in sft.samples] == [TrajectorySample, TrajectorySample]
     assert pipeline.acknowledge(sft.data_id) == {"trajectory:t1", "trajectory:t2"}
 
     first = pipeline.build_job_data(2)
     assert task_names(first) == ["task-a", "task-b"]
-    assert all(item.task_path.is_dir() for item in first.items if isinstance(item, TaskItem))
+    assert all(item.task_path.is_dir() for item in first.samples if isinstance(item, TaskSample))
     consumed = pipeline.acknowledge(first.data_id)
     assert all(identifier.startswith("rollout:support:rollout:") for identifier in consumed) and len(consumed) == 2
     pipeline.release_records(frozenset(consumed))
@@ -125,7 +125,7 @@ def test_the_plan_gives_a_task_job_the_rl_request_and_any_other_job_the_sft_requ
     def context(*items: Any) -> JobPlanContext:
         return JobPlanContext(JobData("support:data:1", items), 0, None)
 
-    task = TaskItem(tmp_path)
+    task = TaskSample(tmp_path)
     assert plan.next_job(context(atif("t1"))) is sft
     assert plan.next_job(context()) is sft, "an instruction without samples is not a task job"
     assert plan.next_job(context(task, replace(task, task_path=tmp_path / "b"))) is rl
@@ -149,7 +149,7 @@ def test_the_recipe_trains_sft_jobs_with_sft_and_task_jobs_with_task_group() -> 
         "rollout": ROLLOUT,
         "method": {"objective": "task_group", "learning_rate_schedule": None},
     }
-    assert built.pipeline_spec().task2job is SFTThenRLJobData and SFTThenRLJobData.accepts_imported_tasks
+    assert built.pipeline_spec().sample2job is SFTThenRLJobData and SFTThenRLJobData.accepts_imported_tasks
 
 
 @pytest.mark.parametrize(

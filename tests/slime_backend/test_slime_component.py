@@ -24,7 +24,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
 from reef.core.artifact_ref import RuntimeLoadSpan
-from reef.core.job_data import TaskItem
+from reef.core.job_data import TaskSample
 from reef.core.trajectories import trajectory_reward
 from reef.runtime.durable_files import write_json
 from reef.runtime.executor import ExecutorFuture, base
@@ -487,7 +487,7 @@ def test_a_job_with_parameters_slime_does_not_take_is_refused_and_records_nothin
 @pytest.mark.unit
 def test_a_job_of_tasks_is_refused_because_slime_rolls_no_task_out(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    tasks = JobData("tasks", (TaskItem(tmp_path / "task"),))
+    tasks = JobData("tasks", (TaskSample(tmp_path / "task"),))
     with pytest.raises(ValueError, match="does not roll tasks out"):
         stack.component.submit(TrainingJob("job-0", "slime", None, tasks, parameters(TrainingMethod("sft"))))
     with pytest.raises(KeyError):
@@ -598,7 +598,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
 def test_a_skipped_job_saves_no_checkpoint_and_the_next_job_continues_the_start(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     for step, data_id in ((0, "plain"), (1, "count-1")):
-        status = stack.run(TrainingMethod(SKIP_OBJECTIVE), step=step, batch=JobData(data_id, batch_for(step).items))
+        status = stack.run(TrainingMethod(SKIP_OBJECTIVE), step=step, batch=JobData(data_id, batch_for(step).samples))
         # A skip trains nothing and saves nothing, whatever state the objective proposed.
         assert (status.state, status.checkpoints, status.metrics) == ("finished", (), {"skipped": 1})
     assert (stack.group.train_calls, stack.group.saved) == ([], [])
@@ -773,7 +773,7 @@ def test_the_workers_receive_each_rows_producing_versions(tmp_path, stacks) -> N
         None,
         runtime_load_spans=(RuntimeLoadSpan(0, 1, "inc:6"), RuntimeLoadSpan(1, 3, "inc:7")),
     )
-    batch = JobData("mixed", (*batch_for(0).items, mixed))
+    batch = JobData("mixed", (*batch_for(0).samples, mixed))
     stack.run(TrainingMethod("sft"), step=0, batch=batch)
     (data,) = stack.processor.calls
     # Training metadata, not a check: a sample's version, or the versions of its token spans.

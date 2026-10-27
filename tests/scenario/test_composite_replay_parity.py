@@ -29,7 +29,7 @@ from tests.support.component_trainers import (
     _TwoTrainerRecipe,
 )
 
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDTasks
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
@@ -43,13 +43,13 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import JudgedTasks
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample import JudgedSamples
+from reef.record2sample.assembly import SampleAssemblySettings
+from reef.sample2job import Sample2Job
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2job import Task2Job
 from reef.train import ComponentTrainer, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 
 class _SessionJudging(RecordJudging):
@@ -77,7 +77,7 @@ class _SessionJudging(RecordJudging):
         return job
 
 
-class _SessionTasks(JudgedTasks):
+class _SessionSamples(JudgedSamples):
     """One-token stub samples; a turn marked declined is unusable."""
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
@@ -93,11 +93,11 @@ class _SessionTasks(JudgedTasks):
         )
 
 
-class SessionJobData(Task2Job):
+class SessionJobData(Sample2Job):
     """Batches the judged turns of ``_SessionJudging``."""
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 def session_pipeline(context: PipelineContext) -> TrainingPipeline:
@@ -105,8 +105,8 @@ def session_pipeline(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=JudgingRecord2Record(_SessionJudging(), JudgedAtOnce()),
-        record2task=_SessionTasks(),
-        task2job=SessionJobData(context, None, None),
+        record2sample=_SessionSamples(),
+        sample2job=SessionJobData(context, None, None),
     )
 
 
@@ -141,8 +141,8 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=record2record,
-        record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2job=TTTDJobData(context, record2record, None, None),
+        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
+        sample2job=TTTDJobData(context, record2record, None, None),
     )
 
 
@@ -223,7 +223,7 @@ def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     if result is None:
         return None
     batch = scenario.trainer_for(component).pending_job_data
-    sources = [tuple(item.source_agent_record_ids) for item in batch.items]
+    sources = [tuple(item.source_agent_record_ids) for item in batch.samples]
     scenario.commit(result, component=component)
     return sources
 

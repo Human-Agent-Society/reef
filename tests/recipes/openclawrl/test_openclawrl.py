@@ -12,7 +12,7 @@ from tests.support.runtime_stubs import job_sized_stages, runtime_bindings
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
 from recipes.openclawrl.prm import PRMJudge
-from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLTasks
+from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
@@ -104,8 +104,8 @@ def _processor(*, worker=None, ttl_s: float = 900.0, clients=None, **judging):
     return TrainingPipeline(
         context,
         record2record=stage,
-        record2task=OpenClawRLTasks(),
-        task2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
+        record2sample=OpenClawRLSamples(),
+        sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
 
 
@@ -133,8 +133,8 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
-    assert [trajectory_reward(sample) for sample in batch.items] == [1.0]
-    assert source_record_id(batch.items[0]) == "t1"
+    assert [trajectory_reward(sample) for sample in batch.samples] == [1.0]
+    assert source_record_id(batch.samples[0]) == "t1"
     processor.acknowledge(batch.data_id)
     assert not processor.ready(1)
     decision = processor.releasable_record_ids()
@@ -300,7 +300,7 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
         time.sleep(0.01)
     assert processor.ready(1), "worker judgment never landed"
     batch = processor.build_job_data(1)
-    sample = batch.items[0]
+    sample = batch.samples[0]
     assert trajectory_reward(sample) == 1.0
     # The RL-only anchor is the native ids verbatim, built without the
     # teacher (its construction cannot fail), for the Megatron teacher pass.
@@ -370,14 +370,16 @@ def test_the_pipeline_section_configures_the_stages() -> None:
                     "max_open_sessions": 16,
                 }
             },
-            "task2job": {"config": {"job_samples": 2, "buffer_size": 8, "prm_record_file": "/tmp/prm-records.jsonl"}},
+            "sample2job": {
+                "config": {"job_samples": 2, "buffer_size": 8, "prm_record_file": "/tmp/prm-records.jsonl"}
+            },
         }
     )
     built = recipe.build_pipeline(PipelineContext("s"))
     try:
         assert isinstance(built.record2record, OpenClawRLRecord2Record)
-        assert isinstance(built.record2task, OpenClawRLTasks)
-        assert isinstance(built.task2job, OpenClawRLJobData)
+        assert isinstance(built.record2sample, OpenClawRLSamples)
+        assert isinstance(built.sample2job, OpenClawRLJobData)
         judging = built.record2record.openclawrl_judging
         assert isinstance(judging.prm, PRMJudge)
         assert judging.prm.generate_url == "http://prm:23001/generate"
@@ -385,9 +387,9 @@ def test_the_pipeline_section_configures_the_stages() -> None:
         assert judging.max_hint_candidates == 2
         assert judging.index.ttl_s == 60.0 and judging.index.max_sessions == 16
         assert isinstance(built.record2record.worker, BackgroundJobWorker), "a PRM judge starts the judging worker"
-        assert (built.task2job.job_samples, built.buffer_size) == (2, 8)
-        assert built.task2job.openclawrl_judging is judging, "the job data reports what the record stage judged"
-        assert str(built.task2job.record_path) == "/tmp/prm-records.jsonl"
+        assert (built.sample2job.job_samples, built.buffer_size) == (2, 8)
+        assert built.sample2job.openclawrl_judging is judging, "the job data reports what the record stage judged"
+        assert str(built.sample2job.record_path) == "/tmp/prm-records.jsonl"
     finally:
         built.close()
 
@@ -398,14 +400,14 @@ def test_the_default_stages_are_correlate_only_and_buffer_four_jobs() -> None:
     assert isinstance(built.record2record, OpenClawRLRecord2Record)
     assert built.record2record.openclawrl_judging.prm is None and built.record2record.worker is None
     assert built.buffer_size == 64
-    assert isinstance(built.task2job, OpenClawRLJobData) and built.task2job.record_path is None
+    assert isinstance(built.sample2job, OpenClawRLJobData) and built.sample2job.record_path is None
     built.close()
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("key", "stage"),
-    [("batch_size", "task2job"), ("prm_timeout_s", "record2record"), ("prm-url", "record2record")],
+    [("batch_size", "sample2job"), ("prm_timeout_s", "record2record"), ("prm-url", "record2record")],
 )
 def test_a_stage_setting_in_the_recipe_config_is_refused(key: str, stage: str) -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
@@ -425,9 +427,9 @@ def test_the_retired_teacher_settings_are_refused() -> None:
         ({"record2record": {"config": {"prm_url": "http://prm:23001"}}}, "prm_tokenizer_path"),
         ({"record2record": {"config": {"prm_concurrency": 0}}}, "prm_concurrency must be positive"),
         ({"record2record": {"config": {"batch_size": 2}}}, "batch_size"),
-        ({"task2job": {"config": {"batch_size": 16}}}, "OpenClawRLJobData: unknown config fields: batch_size"),
-        ({"task2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
-        ({"task2job": {"config": {"prm_url": "http://prm:23001"}}}, "prm_url"),
+        ({"sample2job": {"config": {"batch_size": 16}}}, "OpenClawRLJobData: unknown config fields: batch_size"),
+        ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
+        ({"sample2job": {"config": {"prm_url": "http://prm:23001"}}}, "prm_url"),
     ],
 )
 def test_the_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, match: str) -> None:
@@ -560,8 +562,8 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     processor = TrainingPipeline(
         context,
         record2record=stage,
-        record2task=OpenClawRLTasks(),
-        task2job=OpenClawRLJobData(context, OpenClawRLJobSettings(prm_record_file=str(record)), stage),
+        record2sample=OpenClawRLSamples(),
+        sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(prm_record_file=str(record)), stage),
     )
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "that works")))

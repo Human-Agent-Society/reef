@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import Settings, config_metadata, config_option
-from reef.record2task.generator.service import HARBOR_ENVIRONMENTS
+from reef.record2sample.generator.service import HARBOR_ENVIRONMENTS
 from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
 

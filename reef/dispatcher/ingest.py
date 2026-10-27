@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import normalize_training_request_payload
@@ -145,7 +145,7 @@ def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitN
     return tuple(store.add_task(directory=directory, split=split) for directory in directories)
 
 
-def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, TrajectoryItem], ...]) -> bool:
+def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
     """Save uploaded ``(trajectory_id, trajectory)`` pairs in one transaction. Return True if one or more is new.
 
     An uploaded trajectory trains only through a recipe that accepts uploaded

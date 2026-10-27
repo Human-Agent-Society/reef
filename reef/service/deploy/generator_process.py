@@ -1,4 +1,4 @@
-"""Run the generator service (``reef.record2task.generator``) from the deployment ``reef serve`` resolved, or from a file."""
+"""Run the generator service (``reef.record2sample.generator``) from the deployment ``reef serve`` resolved, or from a file."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from pathlib import Path
 
 from aiohttp import web
 
-from reef.record2task.generator.designer import ReefDesigner
-from reef.record2task.generator.harbor import HarborRuns
-from reef.record2task.generator.service import (
+from reef.record2sample.generator.designer import ReefDesigner
+from reef.record2sample.generator.harbor import HarborRuns
+from reef.record2sample.generator.service import (
     GeneratorService,
     HarborChecks,
     JobRunner,

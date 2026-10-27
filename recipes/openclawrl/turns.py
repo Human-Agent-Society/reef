@@ -15,7 +15,7 @@ from typing import Any
 from recipes.openclawrl.sessions import Binding
 from reef.background_jobs import SupportsReceipt
 from reef.core.records_types import AgentRecord
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class TurnJudgment(SupportsReceipt):
     teacher_cands: tuple[Mapping[str, Any], ...] = ()
 
 
-def validate_teacher_cands(cands: tuple[Any, ...], sample: TrajectoryItem) -> tuple[dict[str, Any], ...] | None:
+def validate_teacher_cands(cands: tuple[Any, ...], sample: TrajectorySample) -> tuple[dict[str, Any], ...] | None:
     """Normalize candidate token sequences for the Megatron teacher pass.
 
     Alignment is exact by construction — every candidate ends with the

@@ -14,7 +14,7 @@ from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData, TaskItem, trajectories
+from reef.train.types import JobData, TaskSample, trajectories
 
 SFT_OBJECTIVE = "tests.slime_backend.test_slime_job_preparation:SampleSftObjective"
 TWO_EPOCH_OBJECTIVE = "tests.slime_backend.test_slime_job_preparation:TwoEpochObjective"
@@ -118,8 +118,8 @@ def test_preparation_keeps_the_objectives_policy_signals(batch, objective, advan
 @pytest.mark.parametrize(
     ("batch", "objective", "error", "message"),
     [
-        (JobData("task", (TaskItem(Path("tasks/example")),)), "sft", TypeError, "unsupported item"),
-        (JobData("task", (TaskItem(Path("tasks/example")),)), SFT_OBJECTIVE, TypeError, "unsupported item"),
+        (JobData("task", (TaskSample(Path("tasks/example")),)), "sft", TypeError, "unsupported sample"),
+        (JobData("task", (TaskSample(Path("tasks/example")),)), SFT_OBJECTIVE, TypeError, "unsupported sample"),
         (policy_batch(), "unknown", ValueError, "unknown objective"),
     ],
 )

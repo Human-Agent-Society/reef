@@ -202,7 +202,7 @@ instruction, a container, a verifier and a reference solution, a task any
 Harbor agent can run. SPADE is a task generator. The deployment selects it as
 the generator of the generated-task stages in its `pipeline` section, and the
 built-in generated-task recipe runs the tasks and trains on them. Writing, checking and running tasks is Reef's
-(`reef.record2task.generator`, the generator service `reef serve` starts beside the
+(`reef.record2sample.generator`, the generator service `reef serve` starts beside the
 HTTP service). The package holds the method: the Designer's adversarial
 experience section, the hint arm each task asks for, and the hint based regret
 reported against the Designer's receipt. The Designer's own training follows.

@@ -18,17 +18,17 @@ The three stages
 
 .. code:: text
 
-   record ─► record2record ─► record set ─► record2task ─► task ─► task2job ─► job data ─► trainer
+   record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data ─► trainer
 
 - The **record-to-record stage** (``Record2Record``, ``reef.record2record``)
   decides which records train, in which record sets and units, and in
   what order (see `Record sets and their units <#record-sets-and-their-units>`__).
-- The **record-to-task stage** (``Record2Task``, ``reef.record2task``) turns
-  one record set into tasks. A task is a ``TrainDataItem``: a ``TrajectoryItem``
-  that trains directly, or a ``TaskItem`` (a Harbor task) that an algorithm
+- The **record-to-sample stage** (``Record2Sample``, ``reef.record2sample``) turns
+  one record set into samples. A sample is a ``Sample``: a ``TrajectorySample``
+  that trains directly, or a ``TaskSample`` (a Harbor task) that an algorithm
   rolls out. Job data may mix both.
-- The **task-to-job stage** (``Task2Job``, ``reef.task2job``)
-  shapes the tasks of the selected record set units into one ``JobData``. Grouped
+- The **sample-to-job stage** (``Sample2Job``, ``reef.sample2job``)
+  shapes the samples of the selected record set units into one ``JobData``. Grouped
   recipes set ``group_id`` on each member. The stage also sets
   ``job_samples``, the fewest samples of one job, and ``buffer_size``, the
   most samples that wait for a job (see `Job size <#job-size>`__).
@@ -45,11 +45,11 @@ The pipeline moves values through the stages with the same two operations,
    * - ``Record2Record``
      - ``push(record)``
      - ``pull() -> tuple[RecordSet, ...]``
-   * - ``Record2Task``
+   * - ``Record2Sample``
      - ``push(record_set)``
-     - ``pull() -> tuple[(set_id, TaskResult), ...]``
-   * - ``Task2Job``
-     - ``make_job_data(tasks, data_id)``
+     - ``pull() -> tuple[(set_id, SampleResult), ...]``
+   * - ``Sample2Job``
+     - ``make_job_data(samples, data_id)``
      - ``JobData``
 
 When the pipeline looks for job data, it first calls the record stage's
@@ -64,12 +64,12 @@ Reef builds the stages in pipeline order with the class method ``from_config``
 and composes them into a ``TrainingPipeline``:
 
 - ``Record2Record.from_config(config, *, context, environ)``
-- ``Record2Task.from_config(config, *, context, record2record, environ)``
-- ``Task2Job.from_config(config, *, context, record2record, record2task, environ)``
+- ``Record2Sample.from_config(config, *, context, record2record, environ)``
+- ``Sample2Job.from_config(config, *, context, record2record, record2sample, environ)``
 
 A later stage receives the stages built before it. It reads a value that an
 earlier stage owns from that stage, so the value is configured once: TTTD's
-task-to-job stage reads the step grid from its record stage, and
+sample-to-job stage reads the step grid from its record stage, and
 OpenClaw-RL's reads the record stage's judging. ``config`` is the stage's own config. A stage
 declares its keys as a frozen settings dataclass that inherits
 ``reef.core.plugins.PluginSettings`` (fields made with
@@ -82,7 +82,7 @@ that extends it, and gives its ``max_staleness`` to ``Record2Record.__init__``
 (see `Staleness <#staleness>`__). Reading the
 deployment checks the stage classes; a bad config fails when the first
 scenario builds its pipeline. Without a record stage, the pipeline forms no
-record set and makes no tasks.
+record set and makes no samples.
 
 Nothing numeric lives in the stages. Advantages and the loss family are the
 step objective's. See `job data values <../reference/python-api.rst#job-data>`__ for
@@ -93,23 +93,23 @@ Record sets and their units
 
 The record stage forms two kinds of value. Each kind has an exact definition.
 
-A record set (``RecordSet``) is the unit that the record-to-task stage makes
-tasks from. A value is a record set if and only if it holds one or more
+A record set (``RecordSet``) is the unit that the record-to-sample stage makes
+samples from. A value is a record set if and only if it holds one or more
 records, and it holds each record that its records reference. A report and the inference records that it
 references form one record set. One judged record, or one inference record,
 also forms one. No record is in two record sets of one stage. Thus a report
 that references an inference of another record set ends without training.
 
-The record-to-task stage returns one ``TaskResult`` for each record set that
+The record-to-sample stage returns one ``SampleResult`` for each record set that
 the pipeline pushes. Its status settles all records of the set together:
 
-- ``READY``: one or more tasks. The records wait in one record set unit.
-- ``SKIPPED``: no task. The stage ends the records.
+- ``READY``: one or more samples. The records wait in one record set unit.
+- ``SKIPPED``: no sample. The stage ends the records.
 
 A unit is what one job's data takes all of or none of. A unit is a record set
 unit or one uploaded trajectory (see `Uploaded trajectories
 <#uploaded-trajectories>`__). The pipeline counts units in samples: a record
-set unit counts the tasks of its record sets, and an uploaded trajectory
+set unit counts the samples of its record sets, and an uploaded trajectory
 counts one.
 
 A record set unit (``RecordSetUnit``) holds one or more record sets that must
@@ -128,10 +128,10 @@ The trainer calls it on its own thread, under its lock; no call may block:
 - ``push(record)``: one record arrives. A TRAIN instruction stays in the
   pipeline. The pipeline pushes every other record to the record stage. It
   then moves the record sets: it pulls the sets that the record stage
-  formed, pushes each one to the record-to-task stage, pulls the results
+  formed, pushes each one to the record-to-sample stage, pulls the results
   that are ready, and gives each result back to the record stage
   (``settle``). A set without a result waits, and its records stay held (see
-  `Slow record-to-task work <#slow-record-to-task-work>`__).
+  `Slow record-to-sample work <#slow-record-to-sample-work>`__).
 - ``advance()``: advance the record stage's background work, move and settle
   record sets, and apply buffer and staleness limits. It needs no sample
   count and reserves no job data. Pending job data keeps its reservation while
@@ -143,7 +143,7 @@ The trainer calls it on its own thread, under its lock; no call may block:
 - ``build_job_data(sample_count)``: reserve whole record set units from the record
   stage, in its selection order, until the data holds at least
   ``sample_count`` samples,
-  and give their tasks to ``make_job_data``. Uploaded trajectories come first
+  and give their samples to ``make_job_data``. Uploaded trajectories come first
   (see `Uploaded trajectories <#uploaded-trajectories>`__). The trainer
   validates the job data against ``output_schema``. The same job data stays
   reserved until it is acknowledged or released.
@@ -154,7 +154,7 @@ The trainer calls it on its own thread, under its lock; no call may block:
   them again. A job that later fails does not give its records back: they
   never train again.
 
-A task-to-job stage can also make samples from no record and train them as
+A sample-to-job stage can also make samples from no record and train them as
 job data of its own. The pipeline drives this through the stage's optional
 hooks, whose defaults make no such samples:
 
@@ -190,7 +190,7 @@ Job size
 
 Reef submits one training job for each job's data. ``job_samples`` is the
 fewest samples that one job trains, a positive int. The deployment sets it in
-``pipeline.task2job.config.job_samples``. The training component then cuts the
+``pipeline.sample2job.config.job_samples``. The training component then cuts the
 job's data into optimizer batches by its own batch size: Slime's
 ``--global-batch-size`` or Tinker's ``batch_size``.
 
@@ -200,7 +200,7 @@ job's data into optimizer batches by its own batch size: Slime's
 - Harness evolution uses ``evolution.batch_size`` when the stage config sets
   no ``job_samples``.
 - A stage whose job data is one fixed unit, such as the TTTD and SDPO grid,
-  passes ``max_job_samples`` to ``Task2Job.__init__``. The stage refuses a
+  passes ``max_job_samples`` to ``Sample2Job.__init__``. The stage refuses a
   larger ``job_samples`` with ``PluginConfigError``.
 
 The pipeline is ready when it holds at least ``job_samples`` samples. It takes
@@ -220,7 +220,7 @@ samples. ``job_samples`` still counts samples, so the job's packs seldom fill
 whole steps. Set ``job_samples`` to the samples of many steps.
 
 The held units are a buffer of at most ``buffer_size`` samples. The
-``Task2Job`` sets it, and refuses one smaller than ``job_samples``. Without a ``buffer_size`` setting, it holds the data of four
+``Sample2Job`` sets it, and refuses one smaller than ``job_samples``. Without a ``buffer_size`` setting, it holds the data of four
 jobs: four times ``job_samples``. After each move of
 record sets, in every training mode, the pipeline releases the oldest
 unreserved units while their samples are more than ``buffer_size``. It
@@ -228,10 +228,10 @@ keeps the newest unit, so a unit larger than the buffer still trains. The
 record stage ends a released unit (``drop_held_unit``), and the pipeline logs
 one warning. Uploaded trajectories do not count toward the buffer.
 
-The pipeline also merges the record and task stages' ``status()`` and metrics.
+The pipeline also merges the record and sample stages' ``status()`` and metrics.
 ``background_jobs_running()`` is true while a set waits for its result or the
 record stage runs a background job, such as a judgment or a task-generation round. The trainer then polls ``ready()`` at a fixed
-interval. ``close()`` closes the record and task stages.
+interval. ``close()`` closes the record and sample stages.
 ``releasable_record_ids()`` returns
 the completed records that no held or waiting set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
@@ -252,11 +252,11 @@ units and uploaded trajectories) and ``buffer_size``; the trainer adds
 external runner must stop waiting (TTTD reports a complete mixed-artifact
 step as an invariant failure).
 
-Slow record-to-task work
+Slow record-to-sample work
 ------------------------
 
-Most record-to-task stages make the tasks of a set when the pipeline pushes
-it. They inherit ``ImmediateRecord2Task`` and implement ``make_tasks(record_set)``.
+Most record-to-sample stages make the samples of a set when the pipeline pushes
+it. They inherit ``ImmediateRecord2Sample`` and implement ``make_samples(record_set)``.
 
 A stage that needs slow work must not block the trainer. Its ``push`` submits
 the work to a worker that the stage owns, and its ``pull`` returns the result
@@ -273,14 +273,14 @@ A client can upload complete ATIF trajectories to ``POST /reef/trajectories``
 uploaded trajectory is not a record. Reef keeps it in the scenario's trajectory
 store, and the trainer gives it to the pipeline with ``push_trajectory``.
 
-A recipe takes uploads when its ``Task2Job`` sets ``accepts_trajectories``
+A recipe takes uploads when its ``Sample2Job`` sets ``accepts_trajectories``
 to True. The default is False. Admission refuses an upload with 400 when no
 trainer of the scenario accepts uploaded trajectories.
 
-The record-to-task stage turns each upload into its training sample with
-``Record2Task.uploaded_sample(trajectory)``. The default returns the trajectory
+The record-to-sample stage turns each upload into its training sample with
+``Record2Sample.uploaded_sample(trajectory)``. The default returns the trajectory
 as uploaded. A stage whose backend trains token-level data overrides it:
-``SFTTasks`` renders the conversation with the chat template and trains every
+``SFTSamples`` renders the conversation with the chat template and trains every
 agent turn that is not marked ``is_copied_context``. The method must be pure. Admission calls it from the request
 thread for each trajectory and each trainer that accepts uploads; a
 ``ValueError`` refuses the whole upload with 400, and the message names the
@@ -307,7 +307,7 @@ The record-to-record stage
 
 1. The stage reads each record (``push``) and forms record sets (``form``).
    The pipeline pulls them (``pull``).
-2. The record-to-task stage makes tasks from each record set.
+2. The record-to-sample stage makes samples from each record set.
 3. The stage holds the record sets that train in record set units in its
    ``pool``, places reports in their groups, and drops units that can no
    longer train. The selection policy orders the pool.
@@ -318,13 +318,13 @@ A record that the stage ends, for example a report in a taken slot or a unit
 that is too stale, appears in ``releasable_record_ids()``. The next commit
 names it, so the record never trains after a restart.
 
-Before exposing a record set to the task stage, ``Record2Record.form`` checks
+Before exposing a record set to the sample stage, ``Record2Record.form`` checks
 its inference responses for an engine abort. An abort rejects the entire set,
 including a report and all its referenced inferences. The stage uses its normal
 rejection and release lifecycle; it does not alter the stored responses or
 delete captured tensors. Retained records pass the same check during replay.
 A missing ``training`` block alone does not reject a record: some methods use
-records to generate tasks without captured policy tensors.
+records to generate samples without captured policy tensors.
 
 Staleness
 ~~~~~~~~~
@@ -399,7 +399,7 @@ Training modes
 
 ``training_mode`` is an attribute of each pipeline. The recipe passes its
 initial value through ``Trainer.build`` and ``PipelineContext``; it defaults
-to ``auto``. A ``Task2Job`` declares the modes it supports in
+to ``auto``. A ``Sample2Job`` declares the modes it supports in
 ``supported_training_modes``; the default is ``auto`` only. Record push,
 acknowledgement and buffer release use the same methods and buffers in every
 mode. ``GET /reef/status`` reports ``pending_instructions`` as the
@@ -409,7 +409,7 @@ storage.
 - ``auto`` makes job data when the held units and uploaded trajectories hold
   ``job_samples`` samples.
 - ``manual`` makes job data for a queued TRAIN instruction. The instruction's
-  data has no units, so ``make_job_data`` receives no tasks.
+  data has no units, so ``make_job_data`` receives no samples.
 - ``hybrid`` makes job data for either, and a queued instruction goes first.
   The instruction's data takes the units that automatic job data would.
 
@@ -420,7 +420,7 @@ the instruction to ``JobData.request``. Automatic job data gets the id
 instruction. ``make_job_data`` must not call models or perform training.
 
 The trainer gives TRAIN records to the pipeline when ``RequestType.TRAIN`` is
-in the ``Task2Job``'s ``required_request_types``. The pipeline queues them
+in the ``Sample2Job``'s ``required_request_types``. The pipeline queues them
 FIFO regardless of the selected mode; ``auto`` leaves the queue for a mode that
 takes it. The pipeline takes records normally in manual mode, so changing to auto
 or hybrid can train on data already collected. In manual mode, as in the other
@@ -465,13 +465,13 @@ A reported-feedback recipe writes:
 
 - a ``ReportRecord2Record`` subclass as its record stage, with its
   ``ReportGrouping`` (below);
-- ``make_sample(context) -> TrainDataItem`` on a ``ReportTasks`` subclass,
-  its record-to-task stage: assemble an ATIF trajectory or Harbor task
+- ``make_sample(context) -> Sample`` on a ``ReportSamples`` subclass,
+  its record-to-sample stage: assemble an ATIF trajectory or Harbor task
   directly. Use ``context.require_score()`` when the method needs a reward.
   The stage attaches the source and report ids to the returned item.
-- ``make_job_data(tasks, data_id)`` on a ``Task2Job`` subclass: assemble
-  the flat tuple of selected tasks into job data with the ID ``data_id``.
-  The pipeline tracks consumption by record set unit, including tasks that the
+- ``make_job_data(samples, data_id)`` on a ``Sample2Job`` subclass: assemble
+  the flat tuple of selected samples into job data with the ID ``data_id``.
+  The pipeline tracks consumption by record set unit, including samples that the
   recipe removes from training.
 
 A report that ends after it was a record set owns its referenced inference
@@ -517,8 +517,8 @@ A computed-feedback recipe writes a ``RecordJudging``: correlation in
 ``tracked_record``, and ``retire`` operations, ``async judge``, and ``expire``
 for tracked records that time out. The recipe's record stage is a
 ``JudgingRecord2Record`` with the judging and the worker that runs
-``judge``. Its record-to-task stage is a ``JudgedTasks`` with
-``make_sample(record, judgment)``, and its ``Task2Job`` supplies
+``judge``. Its record-to-sample stage is a ``JudgedSamples`` with
+``make_sample(record, judgment)``, and its ``Sample2Job`` supplies
 ``make_job_data``. The stage holds judged records until job data uses them.
 
 Task generation contract
@@ -528,13 +528,13 @@ A deployment can train on tasks that a task generator makes. The deployment
 selects the built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, configures its stages in
 the ``pipeline`` section, and names a ``TaskGenerator`` class in
-``pipeline.record2task.config.generator`` (see `generated tasks
+``pipeline.record2sample.config.generator`` (see `generated tasks
 <../reference/configuration.rst#generated-tasks>`__). The recipe does not
 depend on the generator's method, so a team can replace the generator without
 a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
 ``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
-``TaskGenerationRequest`` in ``reef.record2task.generator``. Reef calls its class method
+``TaskGenerationRequest`` in ``reef.record2sample.generator``. Reef calls its class method
 ``from_config(config, *, scenario, environ)`` once for each scenario. The
 generator gets what it needs from its ``config`` and from these calls only:
 
@@ -576,8 +576,8 @@ oracle passed the same verifier, so the timeout is the agent's.
 The recipe splits the work across its stages. A round is not a record set,
 and it does not train. The record stage (``GeneratedTaskRecord2Record``)
 decides when a round is due, holds the source sessions, and
-gives the round number and its sessions to the record-to-task stage
-(``GeneratedTaskTasks``). That stage runs the round's generation on its own
+gives the round number and its sessions to the record-to-sample stage
+(``GeneratedTaskSamples``). That stage runs the round's generation on its own
 ``BackgroundJobWorker``, outside the trainer lock, and tells the record stage
 when the round ends. One generation runs at a time.
 
@@ -603,7 +603,7 @@ weights, and trains on their episodes. ``GeneratedTaskJobData`` drives the
 loop through the stage's own-job-data hooks:
 
 1. When no tasks are handed out, the stage takes up to ``tasks_per_step``
-   tasks from its task pool as the next job's data: the ``TaskItem`` values.
+   tasks from its task pool as the next job's data: the ``TaskSample`` values.
 2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
    tells the component how many episodes of each task to run, and with which
    agent and sandbox. The Tinker component runs them, assembles one sample
@@ -614,7 +614,7 @@ loop through the stage's own-job-data hooks:
    in the task store once that commit is durable. The tasks stay in the pool
    until the job ends.
 4. When the commit of the job's end is durable, the trainer gives the job's
-   outcome to the stage (``Task2Job.job_ended``). The tasks leave the pool.
+   outcome to the stage (``Sample2Job.job_ended``). The tasks leave the pool.
    The stage gives each trained task without a result its rewards from
    ``rollout_rewards``. A task without rewards, for example in a job that
    failed or that a rollback cancelled, gets an infrastructure-failure
@@ -666,7 +666,7 @@ sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
 generation from its saved candidates.
 
-The record-to-task stage keeps its tasks in the task store ``generated-tasks``
+The record-to-sample stage keeps its tasks in the task store ``generated-tasks``
 of the scenario session (see `Where the stages live`_). It records each
 publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
@@ -675,14 +675,14 @@ tasks of both splits is rejected. The store also keeps each train task's first
 rollout result, the generations whose results the generator received, and the
 tasks that trained.
 
-After a restart, the record-to-task stage continues with the next generation number.
+After a restart, the record-to-sample stage continues with the next generation number.
 It puts the train tasks that did not train back in the task pool and sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
 A task whose episodes were running at the stop has no result, so it runs again.
 ``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the task pool size.
 
-Container operations run in the generator service, ``reef.record2task.generator``.
-The record-to-task stage calls this service over HTTP. The task store is the
+Container operations run in the generator service, ``reef.record2sample.generator``.
+The record-to-sample stage calls this service over HTTP. The task store is the
 source of each task; the service's tasks root holds staged copies. Staging the
 same task again under its name returns the staged copy, so episodes that a stop
 interrupted, or a service that restarted with an empty tasks root, can still
@@ -697,20 +697,20 @@ A record's path to a job
 .. code:: text
 
    report -> record2record: validate references, filter -> record set
-       -> record2task: make_sample -> TrainDataItem -> record2record: group -> record set unit
-       -> task2job: make_job_data -> job data -> acknowledge
+       -> record2sample: make_sample -> Sample -> record2record: group -> record set unit
+       -> sample2job: make_job_data -> job data -> acknowledge
 
    computed record -> record2record: observe/track -> dispatch -> async judge -> judged set
-       -> record2task: make_sample -> TrainDataItem -> record2record: record set unit
-       -> task2job: make_job_data -> job data -> acknowledge
+       -> record2sample: make_sample -> Sample -> record2record: record set unit
+       -> sample2job: make_job_data -> job data -> acknowledge
 
-   uploaded trajectory -> TrajectoryItem -> task2job: make_job_data -> job data -> acknowledge
+   uploaded trajectory -> TrajectorySample -> sample2job: make_job_data -> job data -> acknowledge
 
 Where the stages live
 ---------------------
 
-Each stage has its own package: ``reef/record2record/``, ``reef/record2task/``,
-and ``reef/task2job/``. The pipeline lives in ``reef/train/pipeline.py``, and
+Each stage has its own package: ``reef/record2record/``, ``reef/record2sample/``,
+and ``reef/sample2job/``. The pipeline lives in ``reef/train/pipeline.py``, and
 the context that the stages read in ``reef/pipeline_context.py``. A stage that
 saves generated tasks opens a store with
 ``context.task_storage.open(name, split=...)`` (see `Task stores
@@ -718,14 +718,14 @@ saves generated tasks opens a store with
 each component opens its store names under its component name.
 ``task_storage`` is ``None`` if the trainer has no scenario session. The stage
 packages also hold shared implementations: ``SampleAssembly``
-(``reef/record2task/assembly.py``), and ``DistillTasks``
-(``reef/record2task/distill.py``) with ``DistillJobData``
-(``reef/task2job/distill.py``) for the distilling recipes. ``DistillTasks``
+(``reef/record2sample/assembly.py``), and ``DistillSamples``
+(``reef/record2sample/distill.py``) with ``DistillJobData``
+(``reef/sample2job/distill.py``) for the distilling recipes. ``DistillSamples``
 emits the student's rollout plus the teacher sequence: the request that the
 recipe composes from the recorded request and the report's
 ``teacher_context`` (its ``teacher_request`` override), rendered with the
 served model's chat template. A method's own stages live in
-``recipes/<name>/processor.py`` (the record-to-task and task-to-job classes)
+``recipes/<name>/processor.py`` (the record-to-sample and sample-to-job classes)
 and ``recipes/<name>/recipe.py`` (the record stage); harness evolution's live
 in ``reef/train/cordis_backend/processor.py``. Recipe-specific correlation and
 model clients belong beside the method's stages.
@@ -733,11 +733,11 @@ model clients belong beside the method's stages.
 Compatibility
 -------------
 
-A recipe's processor class becomes a ``Task2Job`` with its ``make_job_data``,
+A recipe's processor class becomes a ``Sample2Job`` with its ``make_job_data``,
 named in the recipe's ``pipeline_spec()``; the trainer drives a
 ``TrainingPipeline`` instead of a ``DataProcessor``. Reported-feedback recipes
 must replace ``judge`` and ``ReportDecision`` with ``make_sample`` returning
-``TrainDataItem`` on a ``ReportTasks`` subclass. Remove ``WAIT``/``NEVER`` branches: invalid
+``Sample`` on a ``ReportSamples`` subclass. Remove ``WAIT``/``NEVER`` branches: invalid
 references fail admission, and training contract failures must raise. Existing
 stored records replay through the new contract; legacy reports with invalid
 references or eligibility flags fail explicitly and need correction before replay.

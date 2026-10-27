@@ -64,8 +64,8 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/sandbox/` | Shared execution and isolation through Harbor environments, file transfer, and process/session cleanup |
 | `reef/record2record/` | The record-to-record stage: which records Reef uses and in what order (report grouping, judging, eligibility checks, selection order) |
 | `reef/background_jobs.py` | A worker that runs asynchronous jobs, such as judge calls, off the trainer thread |
-| `reef/record2task/` | The record-to-task stage: one record set into tasks (`Record2Task`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
-| `reef/task2job/` | The task-to-job stage: the tasks of the selected record sets into one training job's data (`Task2Job`), and the job size `job_samples` |
+| `reef/record2sample/` | The record-to-sample stage: one record set into samples (`Record2Sample`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
+| `reef/sample2job/` | The sample-to-job stage: the samples of the selected record sets into one training job's data (`Sample2Job`), and the job size `job_samples` |
 | `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |

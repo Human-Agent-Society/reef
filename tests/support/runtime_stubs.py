@@ -146,9 +146,9 @@ def job_sized_stages(
 ) -> PipelineConfig:
     """The stages of ``spec`` configured by a deployment ``pipeline`` section, with ``job_samples`` set.
 
-    A weight recipe needs ``pipeline.task2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
+    A weight recipe needs ``pipeline.sample2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
     """
     stages = {key: dict(value) for key, value in (section or {}).items()}
-    task2job = stages.setdefault("task2job", {})
-    task2job["config"] = {"job_samples": job_samples, **task2job.get("config", {})}
+    sample2job = stages.setdefault("sample2job", {})
+    sample2job["config"] = {"job_samples": job_samples, **sample2job.get("config", {})}
     return PipelineConfig.from_setting(stages, spec=spec, environ={})

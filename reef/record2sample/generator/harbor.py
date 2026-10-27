@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, primary_reward
-from reef.record2task.generator.designer import SKILL_PATTERN, HarborReply
+from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
 CATEGORIES = (

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.job_data import JobData, TaskItem, TrajectoryItem
+from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.harness.client.tasks import EpisodeRow, TaskLab
 from reef.runtime.interfaces import TrainingMethod
@@ -70,11 +70,11 @@ class AgentLab(TaskLab):
         return EpisodeRow(rewards={"reward": self.rewards[task_path.name]})
 
 
-def harbor_task(root: Path, name: str) -> TaskItem:
+def harbor_task(root: Path, name: str) -> TaskSample:
     path = root / name
     path.mkdir(parents=True)
     (path / "task.toml").write_text('version = "1.0"\n')
-    return TaskItem(path, metadata={"task": {"name": name}})
+    return TaskSample(path, metadata={"task": {"name": name}})
 
 
 @pytest.mark.unit
@@ -179,7 +179,7 @@ def finished(component, job_id):
 
 
 def grouped(tmp_path: Path) -> TaskRollouts:
-    def sample(name: str, reward: float) -> TrajectoryItem:
+    def sample(name: str, reward: float) -> TrajectorySample:
         training = {"tokens": [1, 2, 3, 7, 8], "loss_mask": [1, 1], "rollout_log_probs": [-0.1, -0.2]}
         trajectory = {
             "schema_version": "ATIF-v1.6",
@@ -187,7 +187,7 @@ def grouped(tmp_path: Path) -> TaskRollouts:
             "steps": [{"step_id": 1}],
             "extra": {"reef": {"training": training, "reward": reward}},
         }
-        return TrajectoryItem(trajectory, group_id=name)
+        return TrajectorySample(trajectory, group_id=name)
 
     return TaskRollouts((sample("add", 1.0), sample("add", 0.0)), {"add": (1.0, 0.0)})
 

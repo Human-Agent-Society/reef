@@ -1,7 +1,7 @@
 """TTT-Discover's pipeline stages: the step barrier, the grouped policy samples, and the step data.
 
 ``TTTDRecord2Record`` owns the step grid (``groups_per_step`` x
-``rollouts_per_group``). ``TTTDTasks`` and ``TTTDJobData`` read the grid from
+``rollouts_per_group``). ``TTTDSamples`` and ``TTTDJobData`` read the grid from
 the record stage that they receive, so the deployment writes it once, in
 ``pipeline.record2record.config``.
 """
@@ -26,10 +26,10 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2job import Task2Job, Task2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
+from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +143,8 @@ class TTTDRecord2Record(ReportRecord2Record):
         return cls(context, TTTDGridSettings.parse(config, plugin_class=cls))
 
 
-class TTTDTasks(ReportTasks):
-    """One rollout as one task, checked against the record stage's step grid, with its grid coordinates.
+class TTTDSamples(ReportSamples):
+    """One rollout as one sample, checked against the record stage's step grid, with its grid coordinates.
 
     Config: the sample-assembly keys of ``SampleAssemblySettings``.
     """
@@ -171,7 +171,7 @@ class TTTDTasks(ReportTasks):
             )
         return cls(settings, record2record)
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed: Any = context.parsed_report
         if parsed is None:
             raise ValueError("TTTD requires the recipe's report schema")
@@ -191,7 +191,7 @@ class TTTDTasks(ReportTasks):
         )
 
 
-class TTTDJobData(Task2Job):
+class TTTDJobData(Sample2Job):
     """One complete TTTD step, one job's data: the step's grid, without its constant-reward groups.
 
     TTT-Discover samples ``groups_per_step`` parents and exactly
@@ -213,7 +213,7 @@ class TTTDJobData(Task2Job):
     The grid comes from the record stage. ``max_job_samples`` is the grid,
     so the trainer refuses a larger ``job_samples``, and one job's data is
     exactly one step. Config: ``buffer_size`` and ``job_samples``
-    (``Task2JobSettings``); set ``job_samples`` to the grid.
+    (``Sample2JobSettings``); set ``job_samples`` to the grid.
     """
 
     def __init__(
@@ -236,17 +236,17 @@ class TTTDJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2record, TTTDRecord2Record):
             raise PluginConfigError(
                 f"{cls.__name__} needs TTTDRecord2Record as record2record, not {type(record2record).__name__}"
             )
         return cls(context, record2record, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         steps = {item.metadata["tttd"]["step"] for item in items}
         if len(steps) != 1:
             raise RuntimeError("TTTDJobData creates exactly one complete step per job")
@@ -297,7 +297,7 @@ class TTTDJobData(Task2Job):
         )
         return replace(
             data,
-            items=tuple(
+            samples=tuple(
                 replace(sample, group_id=str(index)) for index, group in enumerate(training_groups) for sample in group
             ),
         )

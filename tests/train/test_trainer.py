@@ -10,9 +10,9 @@ from tests.support._grouped_pg import grouped_policy_pipeline
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
-import reef.record2task.assembly as reported_module
-from recipes.sao import SAOJobData, SAOTasks
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDTasks
+import reef.record2sample.assembly as reported_module
+from recipes.sao import SAOJobData, SAOSamples
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
@@ -29,7 +29,7 @@ from reef.evaluation import (
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
@@ -38,7 +38,7 @@ from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData, TrainStepResult, TrajectoryItem
+from reef.train.types import JobData, TrainStepResult, TrajectorySample
 
 NUM_GPUS = 0
 
@@ -47,8 +47,8 @@ def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
-        task2job=SAOJobData(context, None, None),
+        record2sample=SAOSamples(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        sample2job=SAOJobData(context, None, None),
     )
 
 
@@ -168,7 +168,7 @@ def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
     processor.push(inference("good"))
     processor.push(report("bad-r", "bad", 0.1))
     processor.push(report("good-r", "good", 1.0))
-    assert [trajectory_reward(sample) for sample in processor.build_job_data(2).items] == [0.1, 1.0]
+    assert [trajectory_reward(sample) for sample in processor.build_job_data(2).samples] == [0.1, 1.0]
 
 
 @pytest.mark.unit
@@ -180,7 +180,7 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
     assert batch.data_id == "math:data:1"
-    (item,) = batch.items
+    (item,) = batch.samples
     assert source_record_id(item) == "i1"
     assert trajectory_reward(item) == 0.8
     assert item.training["tokens"] == [1, 2]
@@ -213,7 +213,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     processor.push(final_report)
 
     batch = processor.build_job_data(1)
-    (item,) = batch.items
+    (item,) = batch.samples
     assert source_record_id(item) == "r1"
     assert trajectory_reward(item) == 0.75
     assert item.training["tokens"] == [10, 20, 11, 21]
@@ -240,7 +240,7 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
     processor_type,
     monkeypatch,
 ) -> None:
-    assembled_samples: list[TrajectoryItem] = []
+    assembled_samples: list[TrajectorySample] = []
     assembler = reported_module.make_multi_turn_policy_trajectory
 
     def record_assembly(*args, **kwargs):
@@ -269,16 +269,16 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
         processor = TrainingPipeline(
             context,
             record2record=tttd_record2record,
-            record2task=TTTDTasks(SampleAssemblySettings(), tttd_record2record),
-            task2job=TTTDJobData(context, tttd_record2record, None, None),
+            record2sample=TTTDSamples(SampleAssemblySettings(), tttd_record2record),
+            sample2job=TTTDJobData(context, tttd_record2record, None, None),
         )
     else:
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
             record2record=ExclusiveReportRecord2Record(context),
-            record2task=SAOTasks(SampleAssemblySettings()),
-            task2job=SAOJobData(context, None, None),
+            record2sample=SAOSamples(SampleAssemblySettings()),
+            sample2job=SAOJobData(context, None, None),
         )
     processor.push(training_inference("i1", [10, 20], [1], [-0.1]))
     multi_turn_report = report("r1", ("i1", "i2"), 1.0, **metadata)
@@ -341,7 +341,7 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
     assert processor.releasable_record_ids() == frozenset({"r2"})
 
     batch = processor.build_job_data(1)
-    assert trajectory_reward(batch.items[0]) == 1.0
+    assert trajectory_reward(batch.samples[0]) == 1.0
     processor.acknowledge(batch.data_id)
     assert not processor.ready(1)
     assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
@@ -451,7 +451,7 @@ def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 8)
     assert trainer.run_once() is not None
     data = trainer.pending_job_data
-    assert data is not None and len(data.items) == 2
+    assert data is not None and len(data.samples) == 2
     # The trainer stops reading records once it holds one job's data.
     assert trainer.pipeline_status() == {"ready_samples": 2, "buffer_size": 8, "job_samples": 2}
 
@@ -465,7 +465,7 @@ def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -
 def test_the_stage_config_sets_job_samples_over_the_default() -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         return PipelineConfig.from_setting(
-            {"task2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(task2job=ThresholdJobData), environ={}
+            {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
         ).build(context)
 
     trainer = Trainer.build(
@@ -480,7 +480,7 @@ def test_the_stage_config_sets_job_samples_over_the_default() -> None:
 
 @pytest.mark.unit
 def test_a_training_trainer_without_job_samples_is_refused() -> None:
-    with pytest.raises(PluginConfigError, match=r"set pipeline\.task2job\.config\.job_samples"):
+    with pytest.raises(PluginConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
         Trainer.build(
             "math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline, candidate_backend=_PreparingBackend()
         )
@@ -499,7 +499,7 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
 ) -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         stage = ThresholdJobData(context, buffer_size, None, max_job_samples=max_job_samples)
-        return threshold_pipeline(context, task2job=stage)
+        return threshold_pipeline(context, sample2job=stage)
 
     with pytest.raises(PluginConfigError, match=message):
         Trainer.build(
@@ -748,7 +748,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
     first_result = first.run_once(0)
     assert first_result is not None
-    assert source_record_id(first.pending_job_data.items[0]) == "i1"
+    assert source_record_id(first.pending_job_data.samples[0]) == "i1"
     prepared = first.prepare_commit(first_result)
     first.commit(prepared)
     assert first.state == {"steps": 1}
@@ -772,7 +772,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     assert second.state == {"steps": 1}
     second_result = second.run_once(1)
     assert second_result is not None
-    assert source_record_id(second.pending_job_data.items[0]) == "i2"
+    assert source_record_id(second.pending_job_data.samples[0]) == "i2"
     prepared = second.prepare_commit(second_result)
     second.commit(prepared)
     assert second.run_once(2) is None
@@ -826,7 +826,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         assert second.state == {"steps": 1}
         second_result = second.run_once(1)
         assert second_result is not None
-        assert source_record_id(second.pending_job_data.items[0]) == second_inference.agent_record_id
+        assert source_record_id(second.pending_job_data.samples[0]) == second_inference.agent_record_id
         prepared = second.prepare_commit(second_result)
         second.commit(prepared)
         assert second_store.count("math") == 4
@@ -882,7 +882,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     [job] = component.submitted
     assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
-    assert [trajectory_reward(item) for item in job.data.items] == [0.2, 0.8]
+    assert [trajectory_reward(item) for item in job.data.samples] == [0.2, 0.8]
     prepared = prepare_slime_job(job.data, TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
@@ -907,7 +907,7 @@ def test_sao_processor_defaults_action_mask_for_assembled_episodes() -> None:
 
     assert processor.ready(1)
     batch = processor.build_job_data(1)
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert sample.training.get("turn_count", 1) > 1
     assert tuple(sample.training.get("action_mask", [])) == tuple(sample.training.get("loss_mask", []))
     assert any(tuple(sample.training.get("action_mask", [])))
@@ -930,7 +930,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     )
     processor.push(report("r1", "i1", 1.0))
     batch = processor.build_job_data(1)
-    assert len(batch.items) == 1
+    assert len(batch.samples) == 1
     prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     with pytest.raises(ValueError):
@@ -963,7 +963,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         assert trainer.pipeline_status()["record_data_incomplete"] is True
         result = trainer.run_once(0)
         assert result is not None
-        assert source_record_id(trainer.pending_job_data.items[0]) == "i3"
+        assert source_record_id(trainer.pending_job_data.samples[0]) == "i3"
         prepared = trainer.prepare_commit(result)
         assert "r2" in prepared.consumed_ids
         assert prepared.metrics["records/data_incomplete"] == 1

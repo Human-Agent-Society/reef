@@ -18,7 +18,7 @@ import pytest
 from tests.recipes.sdft.test_sdft_pipeline import CountingTokenizer, _inference
 from tests.support.runtime_stubs import runtime_bindings
 
-from recipes.sdpo import SDPOJobData, SDPORecipe, SDPORecord2Record, SDPOReport, SDPOTasks
+from recipes.sdpo import SDPOJobData, SDPORecipe, SDPORecord2Record, SDPOReport, SDPOSamples
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOGridSettings, SDPOTeacherSettings
 from recipes.sdpo.slime import SdpoAlgorithm, SdpoSettings
 from reef.core import AgentRecord, RequestType
@@ -71,12 +71,12 @@ def processor(**config: Any) -> TrainingPipeline:
         return settings_type(**{key: value for key, value in config.items() if key in names})
 
     record2record = SDPORecord2Record(context, _settings(SDPOGridSettings))
-    record2task = SDPOTasks(_settings(SDPOTeacherSettings), record2record)
+    record2sample = SDPOSamples(_settings(SDPOTeacherSettings), record2record)
     return TrainingPipeline(
         context,
         record2record=record2record,
-        record2task=record2task,
-        task2job=SDPOJobData(context, _settings(SDPODemonstrationSettings), record2task),
+        record2sample=record2sample,
+        sample2job=SDPOJobData(context, _settings(SDPODemonstrationSettings), record2sample),
     )
 
 
@@ -144,13 +144,13 @@ def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokeni
     batch = target.build_job_data(4)
     assert isinstance(batch, JobData)
     assert batch.data_id == "science:data:1"
-    assert [s.training["distill_sample_weight"] for s in batch.items] == [0.0, 1.0, 0.0, 0.0]
+    assert [s.training["distill_sample_weight"] for s in batch.samples] == [0.0, 1.0, 0.0, 0.0]
     # The demonstration is the sibling's recorded response with its thinking block removed.
     assert tokenizer.calls[1][0][-1]["content"].endswith(
         "Correct solution:\n\nAnswer from s0g0r0\n\nCorrectly solve the original question."
     )
     assert "Correct solution" not in tokenizer.calls[0][0][-1]["content"]
-    for sample in batch.items:
+    for sample in batch.samples:
         assert list(sample.training["teacher_tokens"][-3:]) == list(sample.training["tokens"][-3:])
         assert list(sample.training["loss_mask"]) == [1, 1, 1]
 
@@ -161,7 +161,7 @@ def test_a_rollout_reads_its_own_success_only_when_allowed(tokenizer: SDPOTokeni
     push(target, 0, score=1.0)
     push(target, 1, score=0.0)
     batch = target.build_job_data(2)
-    assert [s.training["distill_sample_weight"] for s in batch.items] == [1.0, 1.0]
+    assert [s.training["distill_sample_weight"] for s in batch.samples] == [1.0, 1.0]
     assert "Answer from s0g0r0" in tokenizer.calls[0][0][-1]["content"]
 
 
@@ -174,8 +174,8 @@ def test_first_report_wins_a_retry_slot(tokenizer: SDPOTokenizer) -> None:
         target.build_job_data(2)
     push(target, 1, score=0.0)
     batch = target.build_job_data(2)
-    assert len(batch.items) == 2
-    assert all(sample.training["distill_sample_weight"] == 0.0 for sample in batch.items)
+    assert len(batch.samples) == 2
+    assert all(sample.training["distill_sample_weight"] == 0.0 for sample in batch.samples)
 
 
 @pytest.mark.unit
@@ -206,7 +206,7 @@ def test_environment_feedback_is_opt_in(tokenizer: SDPOTokenizer, include_feedba
     push(target, 0, feedback="The tool call is missing a required argument.")
     push(target, 1)
     batch = target.build_job_data(2)
-    assert [s.training["distill_sample_weight"] for s in batch.items] == [float(include_feedback), 0.0]
+    assert [s.training["distill_sample_weight"] for s in batch.samples] == [float(include_feedback), 0.0]
     assert ("missing a required argument" in tokenizer.calls[0][0][-1]["content"]) == include_feedback
 
 
@@ -222,7 +222,7 @@ def test_solution_can_take_priority_over_feedback_and_prompt_truncates_right(tok
     push(target, 1, feedback="Do not include this feedback when a solution exists.")
     batch = target.build_job_data(2)
     assert "Do not include" not in tokenizer.calls[1][0][-1]["content"]
-    assert list(batch.items[1].training["teacher_tokens"]) == [100, 101, 1, 2, 3]
+    assert list(batch.samples[1].training["teacher_tokens"]) == [100, 101, 1, 2, 3]
 
 
 @pytest.mark.unit
@@ -250,7 +250,7 @@ def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
 
 
 #: The deployment's ``pipeline`` section with only the required key.
-PIPELINE = {"record2task": {"config": {"tokenizer_path": "/models/test"}}}
+PIPELINE = {"record2sample": {"config": {"tokenizer_path": "/models/test"}}}
 
 
 @pytest.mark.unit
@@ -259,14 +259,14 @@ def test_sdpo_recipe_trains_samples_from_the_paper_grid(tokenizer: SDPOTokenizer
     assert recipe.report_type is SDPOReport
     assert resolve_objective(recipe.training_spec().objective).rollout_unit == "sample"
     pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
-    record2record, record2task, task2job = pipeline.record2record, pipeline.record2task, pipeline.task2job
+    record2record, record2sample, sample2job = pipeline.record2record, pipeline.record2sample, pipeline.sample2job
     assert isinstance(record2record, SDPORecord2Record)
-    assert isinstance(record2task, SDPOTasks)
-    assert isinstance(task2job, SDPOJobData)
+    assert isinstance(record2sample, SDPOSamples)
+    assert isinstance(sample2job, SDPOJobData)
     assert record2record.step_grouping.groups_per_step == 32 and record2record.step_grouping.rollouts_per_group == 8
-    assert (record2task.max_teacher_prompt_tokens, record2task.max_teacher_tokens) == (10240, 18432)
-    assert task2job.allow_own_success_as_demonstration is False
-    assert task2job.max_job_samples == 256, "a batch is at most one grid of 32 groups of 8 rollouts"
+    assert (record2sample.max_teacher_prompt_tokens, record2sample.max_teacher_tokens) == (10240, 18432)
+    assert sample2job.allow_own_success_as_demonstration is False
+    assert sample2job.max_job_samples == 256, "a batch is at most one grid of 32 groups of 8 rollouts"
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
         recipe_from({"pipeline": PIPELINE, "optimization": {"divergence": "forward"}})
 
@@ -279,7 +279,7 @@ def test_the_pipeline_section_configures_each_stage_and_later_stages_read_earlie
         {
             "pipeline": {
                 "record2record": {"config": {"groups_per_step": 4, "rollouts_per_group": 2}},
-                "record2task": {
+                "record2sample": {
                     "config": {
                         "tokenizer_path": "/models/test",
                         "max_teacher_prompt_tokens": 2048,
@@ -287,19 +287,19 @@ def test_the_pipeline_section_configures_each_stage_and_later_stages_read_earlie
                         "enable_thinking": True,
                     }
                 },
-                "task2job": {"config": {"success_reward_threshold": 1.0, "include_environment_feedback": True}},
+                "sample2job": {"config": {"success_reward_threshold": 1.0, "include_environment_feedback": True}},
             }
         }
     )
     pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
-    record2task, task2job = pipeline.record2task, pipeline.task2job
-    assert isinstance(record2task, SDPOTasks) and isinstance(task2job, SDPOJobData)
+    record2sample, sample2job = pipeline.record2sample, pipeline.sample2job
+    assert isinstance(record2sample, SDPOSamples) and isinstance(sample2job, SDPOJobData)
     # The tasks read the grid from the record stage; the batches read the renderer and windows from the tasks.
-    assert (record2task.groups_per_step, record2task.rollouts_per_group) == (4, 2)
-    assert task2job.renderer is record2task.renderer
-    assert (task2job.max_teacher_prompt_tokens, task2job.max_teacher_tokens) == (2048, 4096)
-    assert task2job.enable_thinking is True
-    assert (task2job.success_reward_threshold, task2job.include_environment_feedback) == (1.0, True)
+    assert (record2sample.groups_per_step, record2sample.rollouts_per_group) == (4, 2)
+    assert sample2job.renderer is record2sample.renderer
+    assert (sample2job.max_teacher_prompt_tokens, sample2job.max_teacher_tokens) == (2048, 4096)
+    assert sample2job.enable_thinking is True
+    assert (sample2job.success_reward_threshold, sample2job.include_environment_feedback) == (1.0, True)
 
 
 @pytest.mark.unit
@@ -315,7 +315,7 @@ def test_the_recipe_refuses_stage_settings_in_the_wrong_place() -> None:
         recipe_from(
             {
                 "pipeline": {
-                    "record2task": {"config": {"tokenizer_path": "/models/test", "success_reward_threshold": 1}}
+                    "record2sample": {"config": {"tokenizer_path": "/models/test", "success_reward_threshold": 1}}
                 }
             }
         ).build_pipeline(context)
@@ -323,7 +323,7 @@ def test_the_recipe_refuses_stage_settings_in_the_wrong_place() -> None:
         recipe_from({}).build_pipeline(context)
     with pytest.raises(RecipeConfigError, match="max_teacher_prompt_tokens"):
         recipe_from(
-            {"pipeline": {"record2task": {"config": {"tokenizer_path": "/models/test", "max_teacher_tokens": 0}}}}
+            {"pipeline": {"record2sample": {"config": {"tokenizer_path": "/models/test", "max_teacher_tokens": 0}}}}
         ).build_pipeline(context)
 
 

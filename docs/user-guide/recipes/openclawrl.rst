@@ -87,8 +87,8 @@ Configuration
 The deployment's ``pipeline`` section configures the recipe's three stages.
 The recipe's own classes are the defaults, so the section needs no
 ``module``. The record-to-record stage correlates sessions and runs the PRM
-judge. The task-to-job stage sets the job size and writes the PRM record
-file. The record-to-task stage takes no config. ``job_samples`` is the judged
+judge. The sample-to-job stage sets the job size and writes the PRM record
+file. The record-to-sample stage takes no config. ``job_samples`` is the judged
 turns of one job. Slime's ``--global-batch-size``,
 ``training.config.global_batch_size`` in the example, is the judged turns of
 one optimizer step.
@@ -102,7 +102,7 @@ one optimizer step.
        config:
          prm_url: http://127.0.0.1:23001
          prm_tokenizer_path: /models/prm
-     task2job:
+     sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
    training:
@@ -122,9 +122,9 @@ one optimizer step.
    pipeline.record2record.config.prm_concurrency | 8 | turns judged at once
    pipeline.record2record.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
    pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
-   pipeline.task2job.config.job_samples | required | judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+   pipeline.sample2job.config.job_samples | required | judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
-   pipeline.task2job.config.prm_record_file | "" | judged population, one JSON line per job; empty disables it
+   pipeline.sample2job.config.prm_record_file | "" | judged population, one JSON line per job; empty disables it
 
 Reef checks the stage config when it loads the recipe. An unknown key or an
 invalid value stops the deployment at startup. A stage key in

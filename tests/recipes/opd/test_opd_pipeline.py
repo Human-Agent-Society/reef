@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from tests.support.runtime_stubs import runtime_bindings
 
-from recipes.opd import OpdObjective, OPDRecipe, OPDSettings, OPDTasks
+from recipes.opd import OpdObjective, OPDRecipe, OPDSamples, OPDSettings
 from recipes.opd.slime import OpdSettings
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -15,7 +15,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.registry import build_recipe
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.runtime.interfaces import TrainingMethod
-from reef.task2job import DistillJobData
+from reef.sample2job import DistillJobData
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -32,8 +32,8 @@ def opd_pipeline(max_teacher_tokens: int = 0) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=OPDTasks(OPDSettings(max_teacher_tokens=max_teacher_tokens)),
-        task2job=DistillJobData(context, 1, None),
+        record2sample=OPDSamples(OPDSettings(max_teacher_tokens=max_teacher_tokens)),
+        sample2job=DistillJobData(context, 1, None),
     )
 
 
@@ -110,8 +110,8 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     assert (spec.objective, spec.loss_family) == ("opd", "opd")
     pipeline = recipe.build_pipeline(PipelineContext("math", TeacherContextReport))
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
-    assert isinstance(pipeline.record2task, OPDTasks)
-    assert isinstance(pipeline.task2job, DistillJobData)
+    assert isinstance(pipeline.record2sample, OPDSamples)
+    assert isinstance(pipeline.sample2job, DistillJobData)
     assert OpdObjective.rollout_unit == "sample"
     with pytest.raises(ValueError, match="epochs"):
         OpdObjective().validate_scheduling(StepScheduling(epochs=2))

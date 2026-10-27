@@ -47,8 +47,9 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
-# E2B cloud sandboxes for evaluation episodes and the agent proposer.
+# Cloud sandboxes for evaluation episodes and the agent proposer: E2B, and Modal.
 e2b = ["e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
+modal = ["modal>=1.6"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [

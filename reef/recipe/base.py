@@ -26,14 +26,14 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.record2task import Record2Task
+from reef.record2sample import Record2Sample
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingMethod
 from reef.runtime.jobs import TrainingComponent
+from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
-from reef.task2job import NoJobData
 from reef.train.algos.registry import resolve_objective
 from reef.train.jobs import ArtifactEvaluation, FixedJobPlan, JobLoop, JobPlan, JobRequest
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
@@ -130,10 +130,10 @@ class Recipe:
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """Directories that belong to one scenario alone, archived when the scenario is deleted.
 
-        The record-to-task stage names them.
+        The record-to-sample stage names them.
         """
-        stage = self.stages().record2task
-        return Record2Task.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
+        stage = self.stages().record2sample
+        return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
@@ -592,9 +592,9 @@ class WeightTrainingRecipe(Recipe):
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
-        if type(self).pipeline_spec().task2job is NoJobData:
+        if type(self).pipeline_spec().sample2job is NoJobData:
             raise TypeError(
-                f"{type(self).__name__} declares no task2job: return a PipelineSpec with a Task2Job subclass "
+                f"{type(self).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
                 f"from pipeline_spec() or override build() for bespoke trainer wiring"
             )
         if not spec.objective:
@@ -610,7 +610,7 @@ class WeightTrainingRecipe(Recipe):
             if self.candidate_evaluation is None
             else build_candidate_evaluation(self.candidate_evaluation, runtime=self.runtime, scenario=scenario)
         )
-        # A weight trainer's job size has no default: the deployment sets pipeline.task2job.config.job_samples.
+        # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
         try:
             return Trainer.build(
                 scenario,

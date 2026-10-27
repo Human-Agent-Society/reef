@@ -93,9 +93,9 @@ Two other extension points have separate names and purposes:
   takes a ``JobLoop`` as ``job_loop`` instead (see `Training jobs and
   components`_); a trainer takes one or the other, not both.
   ``Trainer.build(..., default_job_samples=...)`` takes the default
-  ``job_samples`` of the task-to-job stage: a harness recipe passes
+  ``job_samples`` of the sample-to-job stage: a harness recipe passes
   ``evolution.batch_size``, and a weight recipe passes none, so its
-  deployment sets ``pipeline.task2job.config.job_samples``.
+  deployment sets ``pipeline.sample2job.config.job_samples``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -254,8 +254,8 @@ default class of each pipeline stage (see `Pipeline stages
        def pipeline_spec(cls) -> PipelineSpec:
            return PipelineSpec(
                record2record=MyMethodRecord2Record,
-               record2task=MyMethodTasks,
-               task2job=MyMethodJobData,
+               record2sample=MyMethodTasks,
+               sample2job=MyMethodJobData,
            )
 
 ``frozen=True`` is required by the base. ``kw_only=True`` keeps later fields
@@ -565,12 +565,12 @@ Task stores
 ~~~~~~~~~~~
 
 A ``TaskStore`` holds published Harbor tasks, each in the ``train`` or
-``eval`` split. A record-to-task stage that generates tasks saves them in a
+``eval`` split. A record-to-sample stage that generates tasks saves them in a
 task store before any rollout. Thus generation and rollout can recover
 independently after a restart. A caller can also add a task directory with
 ``add_task``. The contract and its values are in ``reef.storage.tasks``.
 
-To open a store, call ``task_storage.open(name)``. Each record-to-task stage
+To open a store, call ``task_storage.open(name)``. Each record-to-sample stage
 uses its own ``name``.
 
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
@@ -924,13 +924,13 @@ Pipeline stages
 .. code:: python
 
    from reef.record2record import GroupDecision, RecordJudging, ReportContext, ReportGrouping, ReportRecord2Record
-   from reef.record2task import JudgedTasks, ReportTasks, SkippedReport
-   from reef.task2job import DistillJobData, Task2Job
+   from reef.record2sample import JudgedSamples, ReportSamples, SkippedReport
+   from reef.sample2job import DistillJobData, Sample2Job
 
 A training pipeline (``reef.train.pipeline.TrainingPipeline``) turns durable
 records into typed job data through three stages. A recipe names a default class
 for each in ``pipeline_spec()`` (``PipelineSpec(record2record=...,
-record2task=..., task2job=...)``):
+record2sample=..., sample2job=...)``):
 
 - ``record2record``: the record-to-record stage
   (``reef.record2record``). It decides which records train and in what order:
@@ -940,26 +940,26 @@ record2task=..., task2job=...)``):
   ``Record2RecordSettings`` (see `the staleness check
   <../developer-guide/processors.rst#staleness>`__). Without
   one, the pipeline forms no record set and nothing trains.
-- ``record2task``: the record-to-task stage
-  (``reef.record2task.Record2Task``). It turns each record set into tasks
-  (``TrainDataItem`` values). Reported feedback supplies a ``make_sample`` hook
-  on ``ReportTasks`` that assembles valid reports; computed feedback supplies
-  a ``JudgedTasks`` after an asynchronous ``judge`` derives new feedback.
+- ``record2sample``: the record-to-sample stage
+  (``reef.record2sample.Record2Sample``). It turns each record set into samples
+  (``Sample`` values). Reported feedback supplies a ``make_sample`` hook
+  on ``ReportSamples`` that assembles valid reports; computed feedback supplies
+  a ``JudgedSamples`` after an asynchronous ``judge`` derives new feedback.
   The pipeline pushes each record set (``push``) and pulls the results
-  (``pull``). Most stages inherit ``ImmediateRecord2Task`` and implement
-  ``make_tasks``; a stage with slow work returns a result later (see `slow
-  record-to-task work <../developer-guide/processors.rst#slow-record-to-task-work>`__).
-  ``uploaded_sample(trajectory) -> TrajectoryItem`` turns an uploaded ATIF
+  (``pull``). Most stages inherit ``ImmediateRecord2Sample`` and implement
+  ``make_samples``; a stage with slow work returns a result later (see `slow
+  record-to-sample work <../developer-guide/processors.rst#slow-record-to-sample-work>`__).
+  ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
   ``ValueError`` to refuse the upload (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
-- ``task2job``: the task-to-job stage (``reef.task2job.Task2Job``).
-  Its ``make_job_data(tasks, data_id)`` shapes the tasks of the selected
+- ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
+  Its ``make_job_data(samples, data_id)`` shapes the samples of the selected
   sets into one job's data with the ID ``data_id``. The pipeline assigns the
   ID. Automatic job data gets ``<scenario>:data:<number>``. An instruction's
   data gets ``<scenario>:instruction:<request id>``. The number counts the
   job data of one pipeline. It is not a training step.
-  ``Task2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
+  ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
   sets the most samples that wait for a job and the fewest samples of one
   job. A ``job_samples`` of ``None`` takes ``context.default_job_samples``; a
   ``buffer_size`` of ``None`` holds the data of four jobs
@@ -968,7 +968,7 @@ record2task=..., task2job=...)``):
   ``max_job_samples`` (an SDPO or TTTD grid). A stage with the class
   attribute ``trains_own_job_data_only`` takes neither size.
   ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose
-  other stage has no ``job_samples``. ``Task2JobSettings`` parses the
+  other stage has no ``job_samples``. ``Sample2JobSettings`` parses the
   ``buffer_size`` and ``job_samples`` keys, and a stage with more keys
   extends it. See `Job size <../developer-guide/processors.rst#job-size>`__.
 
@@ -976,8 +976,8 @@ Reef builds the stages for each scenario, in this order, with the class
 methods below; a later stage receives the stages built before it:
 
 - ``Record2Record.from_config(config, *, context, environ)``
-- ``Record2Task.from_config(config, *, context, record2record, environ)``
-- ``Task2Job.from_config(config, *, context, record2record, record2task, environ)``
+- ``Record2Sample.from_config(config, *, context, record2record, environ)``
+- ``Sample2Job.from_config(config, *, context, record2record, record2sample, environ)``
 
 ``config`` is the stage's config from the deployment's ``pipeline`` section;
 ``environ`` holds the environment the deployment was read with. A stage
@@ -990,7 +990,7 @@ fails when the first scenario builds its pipeline. A later stage that needs an
 earlier stage as a specific class checks it with ``isinstance`` and raises
 ``PluginConfigError`` otherwise. A value that several stages need
 belongs to the first of them; later stages read it from the stage object
-they receive. A ``Record2Task`` that keeps
+they receive. A ``Record2Sample`` that keeps
 per-scenario state also implements ``scenario_state_dirs(config, scenario)``,
 so a scenario delete archives it. Reef owns replay, retention, deduplication, pending job data,
 and exactly-once consumption; the method implements only the hooks below.
@@ -999,14 +999,14 @@ network or model latency. Reports must reference existing inference records
 in the same scenario.
 
 ``TrainingPipeline.training_mode`` selects automatic, instruction-triggered or
-combined training. A ``Task2Job`` declares ``supported_training_modes``. In
+combined training. A ``Sample2Job`` declares ``supported_training_modes``. In
 ``manual`` an instruction's data has no tasks; in ``hybrid`` it takes the sets
 that automatic job data would. Record push, acknowledgement, retention, buffer release
 and background derivation are shared. See
 `Training pipeline <../developer-guide/processors.rst>`__ for the instruction queue and job data contract.
 
 Every stage gets the scenario's experiment logger as
-``context.experiment_logger`` (``self.experiment_logger`` on a ``Task2Job``).
+``context.experiment_logger`` (``self.experiment_logger`` on a ``Sample2Job``).
 Log finite numeric metrics under the method's namespace; stage code never
 imports W&B, and the logger is a no-op when tracking is off.
 
@@ -1020,10 +1020,10 @@ A reported-feedback recipe implements these hooks:
 
    * - Hook
      - Contract
-   * - ``ReportTasks.make_sample(context) -> TrainDataItem | SkippedReport``
+   * - ``ReportSamples.make_sample(context) -> Sample | SkippedReport``
      - Assemble one valid report and its resolved inferences; raise on data errors. Return
        ``SkippedReport(reason)`` for a valid report that cannot train; the stage releases it.
-   * - ``Task2Job.make_job_data(tasks, data_id) -> JobData``
+   * - ``Sample2Job.make_job_data(samples, data_id) -> JobData``
      - Shape the flat tuple of selected tasks into job data with the ID ``data_id``.
 
 The recipe owns the report policy. Its record stage is a subclass of
@@ -1056,14 +1056,14 @@ record-to-record stage and reads only records:
 and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or
 raises if the training method cannot use the supplied feedback.
 
-``make_sample`` returns a trajectory or task directly. ``ReportTasks`` adds the
+``make_sample`` returns a trajectory or task directly. ``ReportSamples`` adds the
 report id and ordered references to ``source_agent_record_ids``. Grouping and
 consumption state stay in the stage; recipes never receive buffered report objects.
 ``placement`` returns ``(None, None)`` by default. A group key collects reports,
 and a slot deduplicates retries within that group (None uses the report id).
-This collection group differs from ``TrajectoryItem.group_id``: TTTD waits for
+This collection group differs from ``TrajectorySample.group_id``: TTTD waits for
 a complete step, then trains several comparison groups within it.
-``make_job_data`` receives tasks in group/arrival order. Acknowledgement consumes
+``make_job_data`` receives samples in group/arrival order. Acknowledgement consumes
 all selected reports, even when the recipe omits constant-reward groups from
 its output. Reports arriving after reservation remain for later job data.
 ``output_schema`` declares the job data type. On the stage, ``exclusive_sources``
@@ -1080,7 +1080,7 @@ Computed feedback
 Use this engine when later traffic completes an earlier record and judging it
 calls a model or another slow service. The recipe writes a ``RecordJudging``.
 Its record stage is a ``JudgingRecord2Record(judging, worker)``,
-its record-to-task stage is a ``JudgedTasks``, and its ``Task2Job`` shapes
+its record-to-sample stage is a ``JudgedSamples``, and its ``Sample2Job`` shapes
 the judged samples into job data.
 
 +------------------------------------------+-----------------------------------+
@@ -1095,10 +1095,10 @@ the judged samples into job data.
 | ``RecordJudging.expire(now)``            | optionally return receipts whose  |
 |                                          | completion window ended           |
 +------------------------------------------+-----------------------------------+
-| ``JudgedTasks.make_sample(record,``      | a ``TrajectoryItem``, or ``None`` |
-| ``judgment)``                            | to retire the record              |
+| ``JudgedSamples.make_sample(record,``    | a ``TrajectorySample``, or        |
+| ``judgment)``                            | ``None`` to retire the record     |
 +------------------------------------------+-----------------------------------+
-| ``make_job_data(tasks, data_id)``        | the declared job data type        |
+| ``make_job_data(samples, data_id)``      | the declared job data type        |
 +------------------------------------------+-----------------------------------+
 | ``required_request_types``               | optionally restrict which record  |
 |                                          | types reach the pipeline          |
@@ -1121,10 +1121,10 @@ Task generation
 
    from reef.core.tasks import HarborTask
    from reef.recipe.generated_tasks import TaskGenerator, GeneratedTaskResult, TaskValidationResult
-   from reef.record2task.generator import TaskGenerationRequest
+   from reef.record2sample.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in
-``pipeline.record2task.config.generator``. Subclasses implement:
+``pipeline.record2sample.config.generator``. Subclasses implement:
 
 - the class method ``from_config(config, *, scenario, environ)``, which returns
   the generator of one scenario;
@@ -1172,7 +1172,7 @@ its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
 - ``validate`` receives the ``HarborTask`` instead of a directory path.
 - Import ``TaskValidationResult`` from ``reef.recipe.generated_tasks``.
 
-Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe runs the tasks and trains, so the processor half of the method is
+Name the class in ``pipeline.record2sample.config.generator`` and use the generated-task recipe. The recipe runs the tasks and trains, so the processor half of the method is
 not needed.
 
 Job data
@@ -1182,29 +1182,29 @@ Job data
 
    from pathlib import Path
    from reef.train.types import (
-       TaskItem, TrainDataItem, JobData, TrajectoryItem,
+       TaskSample, Sample, JobData, TrajectorySample,
        trajectories, trajectory_groups,
    )
 
-``TrainDataItem = TrajectoryItem | TaskItem``. Every processor returns a frozen
-``JobData(data_id, items, request=None)`` with an ordered tuple of items.
+``Sample = TrajectorySample | TaskSample``. Every processor returns a frozen
+``JobData(data_id, samples, request=None)`` with an ordered tuple of samples.
 The same job data may contain both kinds. ``request`` is keyword-only and carries
 an optional explicit training instruction; request-only job data may be empty.
 The pipeline returns the same pending job data until its id is acknowledged.
 Reef submits one training job for each value. The training component cuts the
-items into its own optimizer batches.
+samples into its own optimizer batches.
 
 .. code:: python
 
    data = JobData(
        "scenario:data:1",
        (
-           TrajectoryItem(atif_document, source_agent_record_ids=("inference-1", "report-1")),
-           TaskItem(Path("tasks/example"), source_agent_record_ids=("record-2",)),
+           TrajectorySample(atif_document, source_agent_record_ids=("inference-1", "report-1")),
+           TaskSample(Path("tasks/example"), source_agent_record_ids=("record-2",)),
        ),
    )
 
-A ``TrajectoryItem.trajectory`` is an
+A ``TrajectorySample.trajectory`` is an
 `ATIF document <https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__
 as a JSON-compatible mapping. All shipped processors and recipes use this
 representation. The item checks the envelope; consumers validate the fields
@@ -1227,24 +1227,25 @@ Reef-specific fields live inside ``trajectory.extra.reef``:
 other extensions. Training arrays are JSON lists, and runtime load spans are
 objects with ``start``, ``end`` and ``runtime_load_id``.
 
-``TrajectoryItem.group_id`` is an optional string, scoped to the job data.
+``TrajectorySample.group_id`` is an optional string, scoped to the job data.
 None means an independent trajectory. Group-relative policy algorithms require
-an explicit id on every trajectory and contiguous items for each group, so
+an explicit id on every trajectory and contiguous samples for each group, so
 advantages and rows stay aligned. TTTD and CORAL preserve their existing group
 barriers and ordering. SAO and OpenClaw-RL explicitly schedule each trajectory
 independently, even when group metadata is present. ``trajectory_groups(data)`` reads these comparison groups;
-``trajectories(data)`` reads ATIF items in flat item order.
+``trajectories(data)`` reads the trajectory samples in order.
 
-A ``TaskItem`` names a `Harbor task directory <https://www.harborframework.com/docs/tasks>`__
+A ``TaskSample`` names a `Harbor task directory <https://www.harborframework.com/docs/tasks>`__
 with ``task_path: Path``: the directory contains the instruction, environment
 and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
 It performs no file I/O or rollout. Algorithms supporting tasks own validation,
-environment execution and conversion to trajectories. Current built-in policy
-and harness backends explicitly reject task items; accepting the container
-contract does not imply that every algorithm supports every item kind.
+environment execution and conversion to trajectories. The Tinker component
+rolls task samples out in task jobs; the Slime component and the harness
+backends refuse them. Accepting ``JobData`` does not imply that every algorithm
+supports both sample kinds.
 
-Both item kinds may carry ``source_agent_record_ids``. These record derivation
+Both sample kinds may carry ``source_agent_record_ids``. These record derivation
 inputs; processor acknowledgement remains authoritative for consumption,
 including inputs removed by a recipe's existing group rules.
 
@@ -1254,9 +1255,9 @@ The ``reef.core.trajectories`` helpers construct and consume ATIF:
 methods, including external ATIF without captured records; and
 ``trajectory_reward`` reads a finite policy reward. Policy assembly uses
 ``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from
-``reef.record2task.samples`` to add exact captured tensors. Missing required
+``reef.record2sample.samples`` to add exact captured tensors. Missing required
 tensors fail at the training boundary; these helpers do not invent tokens or
-log probabilities from text. Both job data readers reject unsupported item kinds
+log probabilities from text. Both job data readers reject unsupported sample kinds
 instead of silently filtering mixed job data.
 
 Completed text-only streaming responses contribute their aggregated
@@ -1266,7 +1267,7 @@ are reused as context without duplicating those steps. An explicit
 ``training.response_message`` takes precedence over the stream summary.
 
 Migration: the former policy/trace sample types and their batch subclasses are
-removed. Construct ATIF items directly and return ``JobData(id, items)``.
+removed. Construct ATIF trajectory samples directly and return ``JobData(id, samples)``.
 Use ``group_id`` on each member for grouped job data. Read captured tensors from
 ``item.training`` and rewards through ``trajectory_reward(item)``.
 ``output_schema`` defaults to ``JobData``. Keep job data serializable, with
@@ -1428,7 +1429,7 @@ builds the class with no arguments and refuses a non-empty ``config``.
 +========================+==========================================================+
 | ``nodes``              | the tree as ``(kind, config)`` pairs                     |
 +------------------------+----------------------------------------------------------+
-| ``samples``            | the job data's ATIF ``TrajectoryItem`` values            |
+| ``samples``            | the job data's ATIF ``TrajectorySample`` values          |
 +------------------------+----------------------------------------------------------+
 | ``models``             | the method's only path to a model: ``models.served`` is  |
 |                        | the model under test, ``models["teacher"]`` comes from   |
@@ -1614,7 +1615,7 @@ Neither inherits from the other, and no trainer holds a serving engine.
   each job's data into optimizer batches by its own batch size, from its
   training options (Slime's ``--global-batch-size``, Tinker's
   ``batch_size``). Reef does not read that size; the deployment sets the job
-  size in ``pipeline.task2job.config.job_samples``.
+  size in ``pipeline.sample2job.config.job_samples``.
 * An ``InferenceRuntime`` executes requests, manages admission, and loads
   published releases. It loads a release when a
   scenario starts, when a release is committed, and when one is rolled back.
@@ -1796,11 +1797,11 @@ A failed job ends like a finished one. Reef consumed the records of its data whe
 it submitted the job, so they do not train again.
 
 Once the commit of a job's end is durable, the trainer calls
-``Task2Job.job_ended(outcome)`` with ``last_job``. The default does nothing.
+``Sample2Job.job_ended(outcome)`` with ``last_job``. The default does nothing.
 A trainer that starts with no running job calls it again for the last job
 that ended, before any other call to a new stage. The stage takes it as the
 end of the last job that it may have handed out.
-A stage whose job data holds ``TaskItem`` values (Harbor tasks) reads each
+A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component
 reports ``rollout_rewards``, the rewards of each task's episodes, by task
 name. A component that cannot roll out tasks refuses such a job in

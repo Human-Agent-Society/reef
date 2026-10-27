@@ -15,7 +15,7 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 from . import skillclaw
 
@@ -26,7 +26,7 @@ class NightProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,

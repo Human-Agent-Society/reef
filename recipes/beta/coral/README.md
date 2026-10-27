@@ -124,8 +124,8 @@ From a report to a gradient:
 2. **Sample assembly.** The report's ordered inference references are
    materialized back into tokens, loss mask, and the rollout-time log
    probabilities reef stored with each INFERENCE record. An attempt is a
-   multi-call trajectory, so `CoralTasks` turns multi-turn assembly on by
-   default (`pipeline.record2task.config.accept_multi_turn_policy_samples`).
+   multi-call trajectory, so `CoralSamples` turns multi-turn assembly on by
+   default (`pipeline.record2sample.config.accept_multi_turn_policy_samples`).
 3. **Version guards.** An attempt whose calls span a weight update is
    rejected: its rollout log probs belong to two policies and cannot support
    one importance ratio. A group whose members trained on different

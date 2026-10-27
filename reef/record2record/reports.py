@@ -121,7 +121,7 @@ class ReportCandidate(RecordSet):
 
     Values: a record set whose records are the inferences of ``context``, in
     reference order, and then the report. ``set_id`` is the report ID.
-    Purpose: the report stage forms it, and ``ReportTasks.make_tasks`` reads it.
+    Purpose: the report stage forms it, and ``ReportSamples.make_samples`` reads it.
     """
 
     context: ReportContext

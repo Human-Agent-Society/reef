@@ -7,18 +7,18 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
-from reef.record2task import ReportTasks, SkippedReport
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.distill import recorded_sample, teacher_overflow
+from reef.record2sample import ReportSamples, SkippedReport
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.distill import recorded_sample, teacher_overflow
 
 
 @dataclass(frozen=True)
 class OPDSettings(SampleAssemblySettings):
-    """The config of ``OPDTasks``: the teacher's window and the sample assembly. OPD loads no tokenizer."""
+    """The config of ``OPDSamples``: the teacher's window and the sample assembly. OPD loads no tokenizer."""
 
     max_teacher_tokens: int = config_option(
         0, help="The longest teacher sequence the trainer scores; a longer report is skipped. 0 is no limit."
@@ -30,15 +30,15 @@ class OPDSettings(SampleAssemblySettings):
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
 
 
-class OPDTasks(ReportTasks):
-    """One report, one task: the student's policy tensors, and the same captured ids as the teacher sequence.
+class OPDSamples(ReportSamples):
+    """One report, one sample: the student's policy tensors, and the same captured ids as the teacher sequence.
 
     Re-rendering the messages can change the sampled prefix, for example a
     thinking switch or a prefill. A teacher with the student's tokenizer
     instead reads the exact prompt and response ids that the inference
     engine recorded, so this stage loads no tokenizer. A sequence longer
     than ``max_teacher_tokens`` is skipped and counted in
-    ``teacher_overflow_reports``, as in ``DistillTasks``.
+    ``teacher_overflow_reports``, as in ``DistillSamples``.
     """
 
     def __init__(self, settings: OPDSettings) -> None:
@@ -61,7 +61,7 @@ class OPDTasks(ReportTasks):
     def operational_metrics(self) -> Mapping[str, float | int]:
         return {"teacher_overflow_reports": self.overflow_count}
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         report = context.parsed_report
         if not isinstance(report, TeacherContextReport):
             raise ValueError("OPD requires TeacherContextReport")
@@ -76,4 +76,4 @@ class OPDTasks(ReportTasks):
         return sample.with_training(teacher_tokens=teacher_tokens)
 
 
-__all__ = ["OPDSettings", "OPDTasks"]
+__all__ = ["OPDSamples", "OPDSettings"]

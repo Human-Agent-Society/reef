@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.core.job_data import JobData, TaskItem, trajectories
+from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
@@ -100,7 +100,7 @@ class TinkerTrainingComponent(LocalJobComponent):
     start.
 
     A job's data is trajectories, which it trains as they are, or Harbor
-    tasks (``TaskItem``), a task job. A task job needs the ``rollout``
+    tasks (``TaskSample``), a task job. A task job needs the ``rollout``
     parameter (``RolloutSettings``) and a ``sampler``: before it trains, the
     component runs the tasks' episodes on the sampler of the job's start
     (``reef.train.tinker_backend.rollout``) and trains the samples of their
@@ -216,8 +216,8 @@ class TinkerTrainingComponent(LocalJobComponent):
             if not (Path(job.start) / MANIFEST).is_file():
                 raise ValueError(f"the job's start {job.start} holds no Tinker checkpoint manifest")
             self._validated(TinkerCheckpoint.read(Path(job.start)))
-        tasks = [item for item in job.data.items if isinstance(item, TaskItem)]
-        if tasks and len(tasks) != len(job.data.items):
+        tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
+        if tasks and len(tasks) != len(job.data.samples):
             raise ValueError("a Tinker job trains either trajectories or tasks, not both")
         if tasks:
             self.check_task_jobs(job.parameters)
@@ -252,12 +252,12 @@ class TinkerTrainingComponent(LocalJobComponent):
         record = directory / ROLLOUTS_FILE
         kept = read_json(record)
         if kept is not None:
-            samples = JobData.from_dict(kept["samples"]).items
+            samples = JobData.from_dict(kept["samples"]).samples
             rewards = {name: tuple(values) for name, values in kept["rewards"].items()}
             return TaskRollouts(trajectories(JobData(job.data.data_id, samples)), rewards)
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
-        tasks = tuple(item for item in job.data.items if isinstance(item, TaskItem))
+        tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
         rollouts = asyncio.run(
             roll_out(
                 tasks,

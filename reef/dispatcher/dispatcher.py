@@ -16,7 +16,7 @@ from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
 from reef.dispatcher.errors import TrainingErrors
@@ -327,8 +327,8 @@ class Dispatcher(ScenarioLifecycle):
             pipeline = current.trainer.pipeline
             return {
                 "scenario": scenario,
-                # The key keeps its name for callers; the value names the recipe's task-to-job stage.
-                "processor": type(pipeline.task2job).__name__,
+                # The key keeps its name for callers; the value names the recipe's sample-to-job stage.
+                "processor": type(pipeline.sample2job).__name__,
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
@@ -394,7 +394,7 @@ class Dispatcher(ScenarioLifecycle):
             return stored
 
     def accept_trajectories(
-        self, scenario: str, trajectories: tuple[tuple[str, TrajectoryItem], ...], *, release_id: str | None = None
+        self, scenario: str, trajectories: tuple[tuple[str, TrajectorySample], ...], *, release_id: str | None = None
     ) -> None:
         """Save uploaded ``(trajectory_id, trajectory)`` pairs in one transaction, then wake their consumer."""
         if not trajectories:

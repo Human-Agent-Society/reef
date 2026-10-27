@@ -45,7 +45,7 @@ from reef.harness.tree.render import render_composition
 from reef.sandbox.process import EpisodeExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 from . import components, reflection
 from .archive import Archive
@@ -186,7 +186,7 @@ class GEPAProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -286,7 +286,7 @@ class GEPAProposer(Proposer):
         nodes: tuple[tuple[str, object], ...],
         parent: int,
         parent_texts: Mapping[str, str],
-        samples: Sequence[TrajectoryItem],
+        samples: Sequence[TrajectorySample],
         models: ModelBindings,
     ) -> list[_Example]:
         """The parent's minibatch: free from traffic, or re-run on the parent."""
@@ -435,7 +435,7 @@ def _scores(values: Any) -> list[float]:
     return [0.0 if value is None else float(value) for value in values]
 
 
-def _traffic(samples: Sequence[TrajectoryItem]) -> list[tuple[TrajectoryItem, tuple[str, str]]]:
+def _traffic(samples: Sequence[TrajectorySample]) -> list[tuple[TrajectorySample, tuple[str, str]]]:
     """Each sample as its prompt and the answer the served composition gave.
 
     A recorded request with no user message carries no task to re-run, so it

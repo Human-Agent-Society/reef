@@ -5,7 +5,7 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
 - ``recipe`` — the TTT-Discover recipe class, its ``WeightTrainingSpec``, and
   its default pipeline stages.
 - ``processor`` — the pipeline stages: ``TTTDRecord2Record`` owns the step
-  grid and its barrier, ``TTTDTasks`` makes the grouped policy samples, and
+  grid and its barrier, ``TTTDSamples`` makes the grouped policy samples, and
   ``TTTDJobData`` makes one batch from one complete step.
 - ``report`` — the method-specific grouped rollout wire contract.
 - ``objective`` — the backend-agnostic training objective (adaptive-entropic
@@ -19,7 +19,7 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
 """
 
 from recipes.tttd.objective import TttdObjective
-from recipes.tttd.processor import TTTDGridSettings, TTTDJobData, TTTDRecord2Record, TTTDTasks
+from recipes.tttd.processor import TTTDGridSettings, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from recipes.tttd.recipe import TTTDRecipe
 from recipes.tttd.report import TTTDGroupedRolloutReport
 from reef.train.algos.registry import register_loss_family_ref
@@ -33,6 +33,6 @@ __all__ = [
     "TTTDJobData",
     "TTTDRecipe",
     "TTTDRecord2Record",
-    "TTTDTasks",
+    "TTTDSamples",
     "TttdObjective",
 ]

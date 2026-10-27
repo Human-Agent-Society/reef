@@ -1,4 +1,4 @@
-"""Record sets and record set units: the input of the record-to-task stage, and the unit that job data takes.
+"""Record sets and record set units: the input of the record-to-sample stage, and the unit that job data takes.
 
 Notation: ``refs(r)`` is the set of records that a record ``r`` references.
 """
@@ -14,7 +14,7 @@ from reef.core.records_types import AgentRecord
 
 @dataclass(frozen=True, kw_only=True)
 class RecordSet(ABC):
-    """The records that the record-to-task stage makes tasks from, together.
+    """The records that the record-to-sample stage makes tasks from, together.
 
     Values: ``X`` is a record set if and only if ``records(X)`` is not empty and
     ``refs(r) ⊆ records(X)`` for each record ``r`` in ``records(X)``. ``set_id``
@@ -23,7 +23,7 @@ class RecordSet(ABC):
     sets of one stage (``Record2Record.form``).
 
     Purpose: the record stage forms it, and the pipeline pushes it to the
-    record-to-task stage. Its one result settles all records of the set together.
+    record-to-sample stage. Its one result settles all records of the set together.
     """
 
     set_id: Hashable

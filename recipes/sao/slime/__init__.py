@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
@@ -87,7 +87,7 @@ class SaoSchedule:
         return SaoStepPlan(self.critic_steps_per_actor, rollout_index >= self.critic_only_steps)
 
 
-def sao_sample_row(sample: TrajectoryItem) -> list[Any]:
+def sao_sample_row(sample: TrajectorySample) -> list[Any]:
     """Shape one Reef sample into SAO's 8-element wire row.
 
     The first five columns are the shared policy 5-tuple; SAO appends the

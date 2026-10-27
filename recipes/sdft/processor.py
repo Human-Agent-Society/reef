@@ -9,7 +9,7 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
-from reef.record2task.distill import DistillSettings, DistillTasks, normalize_messages_for_template
+from reef.record2sample.distill import DistillSamples, DistillSettings, normalize_messages_for_template
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
 DEFAULT_CONTEXT_TEMPLATE = (
@@ -21,7 +21,7 @@ CONTEXT_PLACEHOLDER = "{context}"
 
 @dataclass(frozen=True)
 class SDFTSettings(DistillSettings):
-    """The config of ``SDFTTasks``: the shared distillation settings and the demonstration block's template."""
+    """The config of ``SDFTSamples``: the shared distillation settings and the demonstration block's template."""
 
     context_template: str = config_option(
         DEFAULT_CONTEXT_TEMPLATE, help="The text added to the final user message; {context} marks the demonstration."
@@ -33,8 +33,8 @@ class SDFTSettings(DistillSettings):
             raise ValueError(f"context_template must contain {CONTEXT_PLACEHOLDER}")
 
 
-class SDFTTasks(DistillTasks):
-    """One rollout and its demonstration, one training task.
+class SDFTSamples(DistillSamples):
+    """One rollout and its demonstration, one training sample.
 
     The teacher reads the student's request with the demonstration block
     appended to its final user message, as ``main.py`` of the reference
@@ -73,4 +73,4 @@ class SDFTTasks(DistillTasks):
         return [*rendered, {"role": "user", "content": block}], tools
 
 
-__all__ = ["CONTEXT_PLACEHOLDER", "DEFAULT_CONTEXT_TEMPLATE", "SDFTSettings", "SDFTTasks"]
+__all__ = ["CONTEXT_PLACEHOLDER", "DEFAULT_CONTEXT_TEMPLATE", "SDFTSamples", "SDFTSettings"]

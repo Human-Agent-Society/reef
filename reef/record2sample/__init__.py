@@ -1,29 +1,29 @@
-"""Record to task: the stage that turns one record set into tasks.
+"""Record to sample: the stage that turns one record set into samples.
 
 Reef reuses records in a pipeline of three stages::
 
-    record ─► record2record ─► record set ─► record2task ─► task ─► task2job ─► job data
+    record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data
 
 ``reef.record2record`` decides which records Reef uses and forms record sets.
-This package turns each set into tasks. A task is a ``TrainDataItem``: a
-``TrajectoryItem`` that trains directly, or a ``TaskItem`` that the algorithm
-rolls out. A recipe's ``Task2Job`` (``reef.task2job``) shapes the
-tasks into job data, and ``reef.train.pipeline.TrainingPipeline`` drives the
+This package turns each set into samples. A sample is a ``Sample``: a
+``TrajectorySample`` that trains directly, or a ``TaskSample`` that the algorithm
+rolls out. A recipe's ``Sample2Job`` (``reef.sample2job``) shapes the
+samples into job data, and ``reef.train.pipeline.TrainingPipeline`` drives the
 three stages.
 
-Entry point: ``Record2Task`` in ``base.py``. The recipe's ``pipeline_spec()``
+Entry point: ``Record2Sample`` in ``base.py``. The recipe's ``pipeline_spec()``
 names the class, and ``from_config`` builds it for each scenario.
 
 Implementations:
 
-* ``ReportTasks`` (``reports.py``): one valid report and its inference
-  records into one task. A recipe writes ``make_sample``.
-* ``JudgedTasks`` (``judged.py``): one judged record into one task. A recipe
+* ``ReportSamples`` (``reports.py``): one valid report and its inference
+  records into one sample. A recipe writes ``make_sample``.
+* ``JudgedSamples`` (``judged.py``): one judged record into one sample. A recipe
   writes ``make_sample``.
-* ``DistillTasks`` (``distill.py``): one report into one distillation task,
+* ``DistillSamples`` (``distill.py``): one report into one distillation sample,
   the student's sample plus the teacher sequence. ``TeacherRenderer`` renders
   the teacher's request with the served model's chat template.
-* ``GeneratedTaskTasks`` (in the built-in recipe ``reef.recipe.generated_tasks``):
+* ``GeneratedTaskSamples`` (in the built-in recipe ``reef.recipe.generated_tasks``):
   new Harbor tasks from a description and, optionally, from recorded sessions.
   Each round generates and checks tasks. Their rollout episodes are not
   records: ``GeneratedTaskJobData`` turns them into samples.
@@ -44,16 +44,16 @@ The modules in this directory depend only on ``reef.core``,
 them without the generator service.
 """
 
-from reef.record2task.base import ImmediateRecord2Task, NoTasks, Record2Task, TaskResult
-from reef.record2task.judged import JudgedTasks
-from reef.record2task.reports import ReportTasks, SkippedReport
+from reef.record2sample.base import ImmediateRecord2Sample, NoSamples, Record2Sample, SampleResult
+from reef.record2sample.judged import JudgedSamples
+from reef.record2sample.reports import ReportSamples, SkippedReport
 
 __all__ = [
-    "ImmediateRecord2Task",
-    "JudgedTasks",
-    "NoTasks",
-    "Record2Task",
-    "ReportTasks",
+    "ImmediateRecord2Sample",
+    "JudgedSamples",
+    "NoSamples",
+    "Record2Sample",
+    "ReportSamples",
+    "SampleResult",
     "SkippedReport",
-    "TaskResult",
 ]
