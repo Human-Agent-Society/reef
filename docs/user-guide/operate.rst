@@ -141,7 +141,7 @@ A Slime deployment bounds its checkpoints on disk with options in ``training.opt
 
 Retention never deletes the checkpoint that the next job starts from. When storage cannot hold the next checkpoint, the job fails. The service log names the error, and the commit that ends the job records it in the ``training_job`` metric. A failed job ends like a finished one. Reef consumed the records of its data when it submitted the job, so they do not train again. The next job starts from the last saved checkpoint.
 
-``--critic-save-interval`` (default 1) in ``training.options`` sets how many jobs pass between two critic checkpoints.
+``--critic-save-interval`` (default 1) in ``training.options`` sets how many saved Slime rollouts pass between two critic checkpoints.
 
 Track experiments with W&B
 --------------------------

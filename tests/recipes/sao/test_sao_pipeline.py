@@ -404,7 +404,7 @@ class _SAOComponent(StubTrainingComponent):
 
     ``payloads`` lists the prepared Slime payload of each job. Each job saves
     one checkpoint whose metrics carry SAO's async telemetry, as a real SAO
-    backend reports it (the shapes are asserted in test_sao_bridge).
+    backend reports it (the shapes are asserted in test_sao_slime_component).
     """
 
     def __init__(self, checkpoint_root: Path) -> None:

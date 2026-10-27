@@ -375,11 +375,14 @@ class SaoAlgorithm(SlimeAlgorithm):
         )
 
     def rollout_metrics(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
-        """Telemetry of one job's data: its policy lag, its queue age and the share of response tokens it trains.
+        """Telemetry of one rollout's data: its producing-version spread, its queue age and its trained token share.
 
-        A sample's policy lag is how many versions its producing version is
-        behind the newest producing version in the job's data, counted in the
-        serving incarnation of that newest one.
+        A sample's producing-version spread is how many versions its producing
+        version (``incarnation:sequence``) is behind the newest producing
+        version of the same serving incarnation in the data. It measures how
+        far apart the data's samples were produced, not how far they are
+        behind the weights that train on them. A sample whose version has no
+        sequence does not count.
         """
         metrics: dict[str, Any] = {}
         versions = [
@@ -390,9 +393,16 @@ class SaoAlgorithm(SlimeAlgorithm):
             if sep and head and tail.isdigit()
         ]
         if versions:
-            incarnation, newest = max(versions, key=lambda version: version[1])
-            lags = [newest - step for head, step in versions if head == incarnation]
-            metrics.update({"sao/policy_lag_max": max(lags), "sao/policy_lag_mean": sum(lags) / len(lags)})
+            newest: dict[str, int] = {}
+            for incarnation, sequence in versions:
+                newest[incarnation] = max(sequence, newest.get(incarnation, sequence))
+            spreads = [newest[incarnation] - sequence for incarnation, sequence in versions]
+            metrics.update(
+                {
+                    "sao/producing_version_spread_max": max(spreads),
+                    "sao/producing_version_spread_mean": sum(spreads) / len(spreads),
+                }
+            )
         ages = [
             max(0.0, time.time() - float(value))
             for value in rollout_data.get("rollout_created_ats") or []

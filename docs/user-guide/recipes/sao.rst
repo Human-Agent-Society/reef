@@ -132,8 +132,9 @@ rollout adds one ``training`` entry to the scenario's version chain:
    # {"scenario": "sao-smoke", "releases": [{"operation": "training", "current": true, ...}, ...]}
 
 The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
-critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
-``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
+critic ``grad_norm``, and the asynchrony metrics
+``sao/producing_version_spread_*``, ``sao/queue_age_s_*``, and
+``sao/effective_token_rate``.
 
 CEO-Bench
 ~~~~~~~~~

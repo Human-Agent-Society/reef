@@ -102,13 +102,6 @@ def test_the_deployment_refuses_what_slime_cannot_train_or_serve(tmp_path, infer
         deployment_config(tmp_path, inference=inference, training=training)
 
 
-@pytest.mark.parametrize("value", [0, -1])
-def test_runtime_config_refuses_a_train_timeout_that_is_not_positive(tmp_path, value):
-    settings = {**settings_of(deployment_config(tmp_path)), "train_timeout_s": value}
-    with pytest.raises(ValueError, match="train_timeout_s"):
-        SlimeDeployment().runtime_config(settings, loss_family="sao")
-
-
 @pytest.fixture
 def created_components(monkeypatch):
     """Replace the Slime component; record the settings the factory gives it and the components it built."""
@@ -128,7 +121,7 @@ def test_the_factory_builds_only_the_training_component(tmp_path, created_compon
     component = runtime_factory({**runtime, "train_timeout_s": 600}, MODEL, {}, {})
     assert component is created_components["components"][0]
     (settings,) = created_components["settings"]
-    assert (settings.loss_family, settings.ray_address, settings.train_rpc_timeout_s) == (
+    assert (settings.loss_family, settings.ray_address, settings.train_timeout_s) == (
         "sao",
         "ray://head:10001",
         600,
@@ -138,7 +131,15 @@ def test_the_factory_builds_only_the_training_component(tmp_path, created_compon
     assert "--global-batch-size=4" in settings.arguments and "--rollout-num-gpus=0" in settings.arguments
     # Without a configured timeout the component keeps its default worker timeout.
     runtime_factory(runtime, MODEL, {}, {})
-    assert created_components["settings"][1].train_rpc_timeout_s == slime_component.DEFAULT_TRAIN_RPC_TIMEOUT_S
+    assert created_components["settings"][1].train_timeout_s == slime_component.DEFAULT_TRAIN_TIMEOUT_S
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_the_factory_refuses_a_train_timeout_that_is_not_positive(tmp_path, created_components, value):
+    runtime = SlimeDeployment().runtime_config(settings_of(deployment_config(tmp_path)), loss_family="sao")
+    with pytest.raises(ValueError, match="train_timeout_s must be positive"):
+        runtime_factory({**runtime, "train_timeout_s": value}, MODEL, {}, {})
+    assert created_components["settings"] == []
 
 
 def test_the_factory_needs_a_ray_cluster(tmp_path, created_components, monkeypatch):

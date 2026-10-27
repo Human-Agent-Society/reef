@@ -12,7 +12,6 @@ from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
-MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
 CRITIC_ARGS_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.configure_critic_objective"
 REEF_ROLLOUT_DATA_KEYS = (
     "producing_runtime_load_spans",
@@ -43,16 +42,17 @@ def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> No
     ):
         if value:
             raise ValueError(f"training and serving use separate GPUs; remove {name}")
+    if args.release_train:
+        raise ValueError("the training workers keep running between jobs; remove --release-train")
 
 
-def configure_megatron_runtime(args: SlimeArguments) -> None:
-    """Install Reef's worker initialization through Slime's public hook."""
+def configure_critic_args_hook(args: SlimeArguments) -> None:
+    """Install Reef's critic argument hook through Slime's public hook, after a user's own hook.
+
+    ``finalize_reef_slime_args`` installs the Megatron init hook.
+    """
     if args.loss_family is None:
         return
-    current = args.custom_megatron_init_path
-    if current and current != MEGATRON_INIT_PATH:
-        args.reef_chained_megatron_init_path = current
-    args.custom_megatron_init_path = MEGATRON_INIT_PATH
     critic_hook = args.custom_critic_args_hook_path
     if critic_hook and critic_hook != CRITIC_ARGS_HOOK_PATH:
         args.reef_chained_critic_args_hook_path = critic_hook

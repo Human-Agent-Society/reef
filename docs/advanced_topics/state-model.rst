@@ -35,10 +35,9 @@ the selected model or harness content, and ``runtime_load_id`` names a concrete
 serving-engine weight load. Every release refers to durable bytes: Reef serves
 only weights that a training job saved and that passed candidate evaluation.
 
-The training component decides which checkpoints a job saves. The Slime
-component saves one checkpoint at the end of each job. A Tinker job saves a
-checkpoint every ``save_interval`` optimizer steps when the job's parameters
-set it, and one when the job ends. Each saved checkpoint becomes a candidate.
+The training component decides which checkpoints a job saves. A Slime or
+Tinker job saves a checkpoint every ``save_interval`` optimizer steps when
+the job's parameters set it, and one when the job ends. Each saved checkpoint becomes a candidate.
 A selected candidate becomes a release. Reef commits a rejected candidate
 without a release, and serving stays on the previous release. The next job
 starts from the newest saved checkpoint whether or not it was selected:

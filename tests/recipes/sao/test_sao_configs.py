@@ -314,8 +314,8 @@ def _parse_config(config_path: Path):
     Returns ``(args, spec, options, recipe)`` with ``args`` parsed by the real
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
-    from reef.train.slime_backend.component import retention_options
     from reef.train.slime_backend.loss_families import resolve_loss_family
+    from reef.train.slime_backend.reef_adapters.training_job.storage import retention_options
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)

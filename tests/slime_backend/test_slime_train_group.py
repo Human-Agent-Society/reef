@@ -25,7 +25,7 @@ def _worker(rank):
         init=_RemoteMethod(0),
         pop_metrics=_RemoteMethod({"rank": rank}),
         save_model=_RemoteMethod(f"saved-{rank}"),
-        set_rollout_manager=_RemoteMethod({"dp_size": 2, "cp_size": 1}),
+        parallel_layout=_RemoteMethod({"dp_size": 2, "cp_size": 1}),
     )
 
 
@@ -46,7 +46,7 @@ def ray_group(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(actor_group.ray, "kill", lambda actor, *, no_restart: killed.append((actor, no_restart)))
     monkeypatch.setattr(actor_group.time, "sleep", lambda duration: None)
     group = SlimeTrainGroup(
-        args=SimpleNamespace(),
+        args=SimpleNamespace(reef_executor_backend="auto", reef_train_executor_options={}),
         num_nodes=1,
         num_gpus_per_node=2,
         pg=placement,
@@ -62,12 +62,11 @@ def test_train_group_methods_fan_out(ray_group) -> None:
     group, workers, *_ = ray_group
 
     assert isinstance(group.executor, SlimeRayExecutor)
-    # No serving engine attaches: the workers only report their parallel layout, which the batch split reads.
-    assert group.set_rollout_manager(None) == [{"dp_size": 2, "cp_size": 1}] * 2
+    # The start read the workers' parallel layout, which the batch split reads.
     assert group.train_parallel_config == {"dp_size": 2, "cp_size": 1}
     assert group.save_model(4, force_sync=True) == ["saved-0", "saved-1"]
     for worker in workers:
-        assert worker.set_rollout_manager.calls == [((None,), {})]
+        assert worker.parallel_layout.calls == [((), {})]
         assert worker.save_model.calls == [((4,), {"force_sync": True})]
     metrics = group.async_pop_metrics()
     assert isinstance(metrics, ExecutorFuture)
@@ -77,10 +76,13 @@ def test_train_group_methods_fan_out(ray_group) -> None:
 @pytest.mark.unit
 def test_workers_that_disagree_on_the_parallel_layout_are_refused(ray_group) -> None:
     group, workers, *_ = ray_group
-    workers[1].set_rollout_manager.result = {"dp_size": 1, "cp_size": 2}
+    group.release()
+    workers[1].parallel_layout.result = {"dp_size": 1, "cp_size": 2}
 
     with pytest.raises(RuntimeError, match="disagree on training parallel config"):
-        group.set_rollout_manager(None)
+        group.create()
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = group.executor
 
 
 @pytest.mark.unit

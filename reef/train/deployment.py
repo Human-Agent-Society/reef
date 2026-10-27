@@ -5,69 +5,38 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal, get_args
 
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import runtime_factory_for
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.executor.config import role_executor_settings, select_executor
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
 NO_INFERENCE_BACKEND = "none"
 
-# These alter engine creation or topology outside Reef's inference request.
-# Reject argparse abbreviations as well as full names, even for omitted values.
-INFERENCE_LAUNCH_OPTIONS = frozenset(
-    {
-        "rollout-num-gpus",
-        "rollout-num-gpus-per-engine",
-        "rollout-external",
-        "rollout-external-engine-addrs",
-        "prefill-num-servers",
-    }
-)
-# Training and serving never share GPUs; these native options would make them.
-PLACEMENT_OPTIONS = frozenset({"colocate", "offload-rollout"})
-
-
-def refuse_serving_options(training_options: Mapping[str, Any]) -> None:
-    """Refuse native training options that would configure serving engines or share GPUs with them.
-
-    Serving engines are configured by the ``inference`` section alone, and
-    training and serving never share GPUs. Raise ``DeployConfigError`` for an
-    option (or an abbreviation of one) that does either.
-    """
-    for name in training_options:
-        if (
-            name.startswith(("sglang-", "router-"))
-            or "sglang".startswith(name)
-            or "router".startswith(name)
-            or any(flag.startswith(name) for flag in INFERENCE_LAUNCH_OPTIONS)
-        ):
-            raise DeployConfigError(
-                f"training.options.{name} configures inference; use inference.num-gpus, "
-                "inference.tensor-parallel-size or inference.options instead"
-            )
-        if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
-            raise DeployConfigError(f"training.options.{name} shares GPUs between training and serving; remove it")
-
-
-def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None:
-    """Default the named execution roles to Ray and refuse any other executor for them."""
-    execution = config.setdefault("execution", {})
-    for role in roles:
-        execution.setdefault(role, "ray")
-        if select_executor(role_executor_settings(config, role), role=role).settings.backend != "ray":
-            raise DeployConfigError(f"automatic {backend} training requires execution.{role}.backend: ray")
+#: Who serves a deployment's checkpoints: inference engines, or the training backend itself.
+DefaultServing = Literal["engines", "trainer"]
 
 
 class TrainingDeployment(ABC):
-    """Lightweight integration definition; preparation never allocates model resources."""
+    """Lightweight integration definition; preparation never allocates model resources.
+
+    ``default_serving`` is the serving of a deployment that names none and
+    sets no engine setting: ``engines`` or ``trainer``. A subclass that sets
+    another value is refused when the class is defined.
+    """
 
     requires_local_model: bool = True
     supports_teacher_engine: bool = False
-    #: The serving of a deployment that names none and sets no engine setting: ``engines`` or ``trainer``.
-    default_serving: str = "engines"
+    default_serving: DefaultServing = "engines"
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.default_serving not in get_args(DefaultServing):
+            raise TypeError(
+                f"{cls.__name__}.default_serving must be one of {get_args(DefaultServing)}, "
+                f"got {cls.default_serving!r}"
+            )
 
     @abstractmethod
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

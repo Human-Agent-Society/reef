@@ -178,7 +178,7 @@ tests/slime_backend/test_score_centering.py
 tests/slime_backend/test_score_centering_parity.py
 tests/slime_backend/test_slime_algorithm_contract.py
 tests/slime_backend/test_slime_component.py
-tests/slime_backend/test_slime_step_preparation.py
+tests/slime_backend/test_slime_job_preparation.py
 tests/slime_backend/test_teacher_engine.py
 tests/storage/test_postgres_records.py
 tests/storage/test_record_store_contract.py

@@ -351,30 +351,7 @@ def test_lora_hf_bootstrap_loads_wrapped_base_and_skips_adapters(monkeypatch: py
 
 
 @pytest.mark.unit
-def test_updater_and_policy_gradient_hooks_replace_only_worker_globals(monkeypatch: pytest.MonkeyPatch) -> None:
-    actor = _stub_module(monkeypatch, "slime.backends.megatron_utils.actor")
-    delta = _stub_module(
-        monkeypatch,
-        "slime.backends.megatron_utils.update_weight.update_weight_from_disk_delta",
-    )
-    updater_types = {
-        name: type(name, (), {})
-        for name in (
-            "ReefUpdateWeightFromDisk",
-            "ReefUpdateWeightFromDiskDelta",
-            "ReefUpdateWeightFromDistributed",
-            "ReefUpdateWeightFromTensor",
-        )
-    }
-    _stub_module(
-        monkeypatch,
-        "reef.train.slime_backend.reef_adapters.weight_updaters",
-        **updater_types,
-    )
-    worker_hooks._install_versioned_updaters()
-    assert actor.UpdateWeightFromTensor is updater_types["ReefUpdateWeightFromTensor"]
-    assert delta.UpdateWeightFromDiskDelta is updater_types["ReefUpdateWeightFromDiskDelta"]
-
+def test_policy_gradient_hook_replaces_only_worker_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     loaded: list[str] = []
     misc = importlib.import_module("slime.utils.misc")
     monkeypatch.setattr(
@@ -471,7 +448,7 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
         "_install_rollout_logging",
         "_install_critic_metrics",
         "_install_critic_hf_bootstrap",
-        "_install_versioned_updaters",
+        "_install_lora_hf_bootstrap",
     ):
         monkeypatch.setattr(worker_hooks, name, lambda *_, name=name: calls.append(name))
     monkeypatch.setattr(worker_hooks, "_install_pg_primitive", lambda _args: calls.append("pg"))

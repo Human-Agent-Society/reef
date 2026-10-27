@@ -157,7 +157,7 @@ def test_named_role_selectors_share_one_configuration_contract():
 @pytest.mark.parametrize("cli", [False, True])
 def test_slime_component_honors_the_training_role_and_explicit_flag_precedence(cli):
     pytest.importorskip("ray")
-    from reef.train.slime_backend.component import configure_executors
+    from reef.train.slime_backend.reef_adapters.startup import configure_executors
 
     config = {
         "executors": {"special": {"backend": "custom:Training", "options": {"queue": "gpu"}}},

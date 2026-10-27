@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from argparse import Namespace
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -51,22 +51,6 @@ def validate_megatron_lora_args(args: Namespace) -> None:
         )
 
 
-def scenario_adapter_name(scenario: str, runtime_load_id: str) -> str:
-    """The engine adapter name for one scenario's publication at ``runtime_load_id``.
-
-    The same lossless ``adapter_name(scenario, version)`` the serving side
-    uses for durable adapters, with the serving runtime load ID as the
-    version component: the training side knows it at publication time, and
-    the live artifact Reef commits carries the same token. Every scenario's
-    every publication therefore has its own engine name; nothing is ever
-    overwritten in place.
-    """
-
-    from reef.surface.adapter import adapter_name
-
-    return adapter_name(scenario, runtime_load_id)
-
-
 def megatron_lora_enabled(args: Namespace) -> bool:
     """Return whether the Reef/Slime Megatron actor uses LoRA."""
 
@@ -94,7 +78,7 @@ def sglang_lora_target_modules(args: Namespace) -> list[str]:
 
 
 def build_sglang_lora_config(args: Namespace) -> dict[str, Any]:
-    """Build the PEFT-compatible config sent with an online adapter update."""
+    """Build the PEFT ``adapter_config.json`` values of the actor's LoRA adapter."""
 
     return {
         "peft_type": "LORA",
@@ -111,17 +95,6 @@ def is_lora_weight_name(name: str) -> bool:
     """Return whether an exported HF tensor belongs to the LoRA adapter."""
 
     return ".lora_A." in name or ".lora_B." in name
-
-
-def lora_engine_identity(engine: Any) -> str:
-    """Return a stable identity for one Ray rollout-engine incarnation."""
-
-    actor_id = getattr(engine, "_actor_id", None)
-    if actor_id is None:
-        return f"object:{id(engine)}"
-    as_hex = getattr(actor_id, "hex", None)
-    value = as_hex() if callable(as_hex) else str(actor_id)
-    return f"actor:{value}"
 
 
 def is_megatron_lora_parameter(name: str) -> bool:
@@ -143,51 +116,6 @@ def zero_megatron_lora_adapters(model: Sequence[torch.nn.Module]) -> int:
     if zeroed == 0:
         raise RuntimeError("Megatron LoRA is enabled but the model has no adapter parameters to reset")
     return zeroed
-
-
-def validate_sglang_base_checksum_response(
-    response: Any,
-    *,
-    engine_index: int,
-    tie_word_embeddings: bool,
-) -> str:
-    """Validate a frozen-base checksum without rejecting configured tied heads."""
-
-    if not isinstance(response, Mapping) or response.get("success") is not True:
-        raise RuntimeError(f"SGLang engine {engine_index} base checksum failed: {response!r}")
-    checksum = response.get("per_engine_checksum")
-    if not isinstance(checksum, str) or not checksum:
-        raise RuntimeError(f"SGLang engine {engine_index} returned no base checksum: {response!r}")
-
-    ranks = response.get("ranks")
-    rank_payloads = ranks if isinstance(ranks, list) else [ranks]
-    tensor_checksums: dict[str, str] = {}
-    for rank_payload in rank_payloads:
-        if not isinstance(rank_payload, Mapping):
-            continue
-        checksums = rank_payload.get("checksums")
-        if isinstance(checksums, Mapping):
-            tensor_checksums.update((str(name), str(value)) for name, value in checksums.items())
-
-    embed = {value for name, value in tensor_checksums.items() if name.endswith("embed_tokens.weight")}
-    lm_head = {value for name, value in tensor_checksums.items() if name.endswith("lm_head.weight")}
-    if not embed:
-        raise RuntimeError(f"SGLang engine {engine_index} checksum omitted embed_tokens")
-    if tie_word_embeddings:
-        if lm_head and not (embed & lm_head):
-            raise RuntimeError(
-                f"SGLang engine {engine_index} is configured with tied embeddings but "
-                "embed_tokens/lm_head checksums differ"
-            )
-    else:
-        if not lm_head:
-            raise RuntimeError(f"SGLang engine {engine_index} checksum omitted untied lm_head")
-        if embed & lm_head:
-            raise RuntimeError(
-                f"SGLang engine {engine_index} has identical untied embed_tokens/lm_head checksums: "
-                f"{sorted(embed & lm_head)}"
-            )
-    return checksum
 
 
 def replace_adapter_task_weights_from_backup(adapter_tasks, backup_weights):

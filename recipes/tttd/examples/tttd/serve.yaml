@@ -99,8 +99,6 @@ training:
       - linear_proj
       - linear_fc1
       - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
     optimizer: "adam"
     lr: "4e-5"
     lr-decay-style: "constant"

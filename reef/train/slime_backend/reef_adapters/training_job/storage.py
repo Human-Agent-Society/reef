@@ -3,13 +3,14 @@ and restart-safe tombstone reclamation."""
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import math
 import os
 import re
 import shutil
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
@@ -71,12 +72,41 @@ class RetentionConfig:
         )
 
 
-def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
-    """Whether the commit at ``rollout_id`` writes the critic checkpoint.
+def retention_options(arguments: Sequence[str]) -> tuple[RetentionConfig, list[str]]:
+    """Split Reef's ``--reef-checkpoint-*`` options from ``arguments``; return their config and the other arguments.
 
-    Every ``interval``-th commit does, counting from the first; ``interval``
-    1 is every commit. The training component saves on this cadence and the
-    storage requires the critic asset on the same commits.
+    The sizes take a unit (``size_bytes``). An option that is not given keeps
+    its ``RetentionConfig`` default. Raise ``ValueError`` for a config that
+    ``RetentionConfig`` refuses.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
+    parser.add_argument("--reef-checkpoint-policy", dest="policy")
+    parser.add_argument("--reef-checkpoint-max-storage-fraction", dest="max_storage_fraction", type=float)
+    parser.add_argument("--reef-checkpoint-min-free-space-fraction", dest="min_free_space_fraction", type=float)
+    parser.add_argument("--reef-checkpoint-max-storage", dest="max_storage_bytes", type=size_bytes)
+    parser.add_argument("--reef-checkpoint-min-free-space", dest="min_free_space_bytes", type=size_bytes)
+    options, remaining = parser.parse_known_args(list(arguments))
+    return RetentionConfig(**vars(options)), remaining
+
+
+def size_bytes(value: str) -> int:
+    """The positive byte count of a size with a unit: ``B``, decimal ``KB`` to ``TB``, or binary ``KiB`` to ``TiB``."""
+    match = re.fullmatch(r"(\d+)\s*(B|[KMGT]i?B)", value.strip(), re.IGNORECASE)
+    if match is None:
+        raise argparse.ArgumentTypeError("size must include a unit such as GB or GiB")
+    unit = match[2].upper()
+    size = int(match[1]) * (1024 if "I" in unit else 1000) ** "BKMGT".index(unit[0])
+    if size <= 0:
+        raise argparse.ArgumentTypeError("size must be positive")
+    return size
+
+
+def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
+    """Whether the saved rollout ``rollout_id`` includes the critic checkpoint.
+
+    Every ``interval``-th rollout does, counting from rollout 0; ``interval``
+    1 is every rollout. The training component saves the critic on this
+    cadence, and the storage requires the critic asset on the same rollouts.
     """
     return (rollout_id + 1) % interval == 0
 
@@ -180,7 +210,7 @@ class CheckpointStorage:
             yield plan
 
     def complete(self, job_id: str, rollout_id: int, *, reward: float | None) -> None:
-        # The critic asset is required at completion time on the commits the
+        # The critic asset is required at completion time on the rollouts the
         # critic's cadence saves it — the component saves it before completing —
         # so a failed critic save cannot be recorded as a durable checkpoint.
         for path in self.required_assets(rollout_id):
@@ -441,8 +471,8 @@ class CheckpointStorage:
         return paths
 
     def required_assets(self, rollout_id: int) -> tuple[Path, ...]:
-        """The assets a commit at ``rollout_id`` must have written: the pair,
-        plus the critic checkpoint on the commits its cadence saves it.
+        """The assets the saved rollout ``rollout_id`` must have written: the pair,
+        plus the critic checkpoint on the rollouts its cadence saves it.
 
         :meth:`asset_paths` stays the full set the store owns, so a critic
         checkpoint from a denser earlier cadence is still recognized and

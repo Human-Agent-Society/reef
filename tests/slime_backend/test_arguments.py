@@ -51,8 +51,6 @@ def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     assert args.megatron_to_hf_mode == "bridge"
     assert args.megatron_lora_rank == 4
     assert args.use_critic is True
-    assert args.check_lora_weight_equal is True
-    assert args.verify_lora_base_weights is True
     assert args.reef_executor_backend == "auto"
 
 
@@ -131,6 +129,7 @@ def component_args(**overrides):
         "colocate": False,
         "offload_train": False,
         "offload_rollout": False,
+        "release_train": False,
         "megatron_lora_rank": 0,
         **overrides,
     }
@@ -156,6 +155,8 @@ def test_slime_args_accept_a_training_only_run(overrides) -> None:
         ({"debug_rollout_only": True}, "--debug-rollout-only"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/tmp/hf/checkpoint"}, "{rollout_id}"),
+        # The workers keep running between jobs, so nothing releases and recreates them.
+        ({"release_train": True}, "remove --release-train"),
     ],
 )
 def test_slime_args_refuse_what_the_training_component_cannot_run(overrides, refusal) -> None:

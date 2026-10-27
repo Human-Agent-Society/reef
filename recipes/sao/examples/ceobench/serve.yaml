@@ -140,8 +140,6 @@ training:
       - linear_proj
       - linear_fc1
       - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
     recompute-granularity: "full"
     recompute-method: "uniform"
     recompute-num-layers: "1"

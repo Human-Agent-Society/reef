@@ -16,7 +16,7 @@ class _Worker:
     def __init__(self, rank):
         self.rank = rank
         self.init_calls = []
-        self.manager_calls = []
+        self.layout_calls = 0
         self.train_calls = []
         self.save_calls = []
         self.shutdown_calls = 0
@@ -28,8 +28,8 @@ class _Worker:
             raise RuntimeError("worker init failed")
         return args.start_ids[self.rank]
 
-    def set_rollout_manager(self, manager):
-        self.manager_calls.append(manager)
+    def parallel_layout(self):
+        self.layout_calls += 1
         return {"dp_size": 2, "cp_size": 1}
 
     def train(self, rollout_id, data, *, external_data):
@@ -78,10 +78,10 @@ class CpuSlimeExecutor(Executor):
 def make_group():
     groups = []
 
-    def make(*, role="actor", train_rpc_timeout_s=14400, **overrides):
+    def make(*, role="actor", train_timeout_s=14400, **overrides):
         values = {
             "reef_executor_backend": f"{__name__}:CpuSlimeExecutor",
-            "release_train": False,
+            "reef_train_executor_options": {},
             "save": "checkpoint-root",
             "load": "initial-checkpoint",
             "ckpt_step": 3,
@@ -107,7 +107,7 @@ def make_group():
             num_gpus_per_actor=0.4,
             with_ref=True,
             with_opd_teacher=True,
-            train_rpc_timeout_s=train_rpc_timeout_s,
+            train_timeout_s=train_timeout_s,
         )
         groups.append(group)
         return group
@@ -118,45 +118,29 @@ def make_group():
 
 
 @pytest.mark.unit
-def test_custom_executor_factory_recreates_workers_with_checkpoint_and_manager(make_group) -> None:
-    group = make_group(release_train=True)
-    manager = object()
+def test_custom_executor_starts_the_workers_once_and_reads_their_parallel_layout(make_group) -> None:
+    group = make_group()
 
-    assert group.create(rollout_manager=manager) == [4, 4]
+    assert group.create() == [4, 4]
     assert group.train_parallel_config == {"dp_size": 2, "cp_size": 1}
-    first = group.executor
-    assert isinstance(first, CpuSlimeExecutor)
-    assert first.launch_options["pg"] == "shared-placement"
-    assert first.launch_options["num_gpus_per_actor"] == 0.4
-    for worker in first.workers:
+    executor = group.executor
+    assert isinstance(executor, CpuSlimeExecutor)
+    assert executor.launch_options["pg"] == "shared-placement"
+    assert executor.launch_options["num_gpus_per_actor"] == 0.4
+    for worker in executor.workers:
         assert worker.init_calls == [("initial-checkpoint", "actor", True, True)]
-        assert worker.manager_calls == [manager]
+        assert worker.layout_calls == 1
     assert group.create() is None
     assert len(group.args.launches) == 1
 
     assert group.save_model(4, force_sync=True) == [0, 1]
     group.release()
     group.release()
-    assert [worker.shutdown_calls for worker in first.workers] == [1, 1]
+    assert [worker.shutdown_calls for worker in executor.workers] == [1, 1]
+    # Released workers stay released: a group never starts its workers again on its own.
     with pytest.raises(RuntimeError, match="not running"):
-        _ = group.executor
-
-    assert resolve(group.async_train(5, "batch")) == [
-        {"rank": 0, "external_data": None},
-        {"rank": 1, "external_data": None},
-    ]
-    assert group.create() is None
-    second = group.executor
-    assert second is not first
-    assert len(group.args.launches) == 2
-    for worker in second.workers:
-        assert worker.init_calls == [("checkpoint-root", "actor", True, True)]
-        assert worker.manager_calls == [manager]
-        assert worker.train_calls == [(5, "batch", None)]
-    assert group.args.ckpt_step is None
-    assert group.args.finetune is False
-    assert group.args.no_load_optim is False
-    assert group.args.no_load_rng is False
+        group.async_train(5, "batch")
+    assert len(group.args.launches) == 1
 
 
 @pytest.mark.unit
@@ -193,8 +177,8 @@ def test_invalid_critic_rank_count_is_rejected_before_any_worker_is_called(make_
 
 
 @pytest.mark.unit
-def test_failed_save_does_not_repoint_checkpoint_resume_parameters(make_group) -> None:
-    group = make_group(release_train=True, fail_save_rank=1)
+def test_a_save_leaves_the_checkpoint_load_arguments_as_they_are(make_group) -> None:
+    group = make_group(fail_save_rank=1)
     group.create()
     before = (
         group.args.load,
@@ -249,10 +233,9 @@ def test_create_train_groups_releases_actor_when_critic_setup_fails(
         use_critic=True,
         start_rollout_id=None,
     ).args
-    manager = object()
 
     def prepare_critic(config):
-        assert all(worker.manager_calls == [manager] for worker in config.launches[0].workers)
+        assert all(worker.layout_calls == 1 for worker in config.launches[0].workers)
         if failure == "critic_config":
             raise ValueError("invalid critic configuration")
         critic = SimpleNamespace(**vars(config))
@@ -268,7 +251,6 @@ def test_create_train_groups_releases_actor_when_critic_setup_fails(
             train_groups.create_train_groups(
                 args,
                 {"actor": "shared-placement", "critic": "shared-placement"},
-                manager,
                 actor_cls=_Worker,
             )
 
@@ -284,16 +266,17 @@ def test_create_train_groups_releases_actor_when_critic_setup_fails(
 
 
 @pytest.mark.parametrize("invalid", [None, {"dp_size": 99}])
-def test_attachment_rejects_missing_or_inconsistent_training_layout(make_group, monkeypatch, invalid):
+def test_a_start_refuses_a_missing_or_inconsistent_parallel_layout(make_group, monkeypatch, invalid):
     group = make_group()
 
-    def attach(worker, inference):
+    def layout(worker):
         return {"dp_size": 2, "cp_size": 1} if worker.rank == 0 else invalid
 
-    monkeypatch.setattr(_Worker, "set_rollout_manager", attach)
+    monkeypatch.setattr(_Worker, "parallel_layout", layout)
     with pytest.raises(RuntimeError, match="training parallel config"):
-        group.create(rollout_manager=object())
-    assert group._executor is None
+        group.create()
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = group.executor
 
 
 def test_failure_observer_follows_recreated_training_workers(make_group):
@@ -303,7 +286,7 @@ def test_failure_observer_follows_recreated_training_workers(make_group):
         def on_executor_failure(self, failure):
             failures.append(failure)
 
-    group = make_group(release_train=True)
+    group = make_group()
     group.register_failure_listener(Observer())
     group.create()
     first = group.executor
@@ -332,23 +315,21 @@ def test_actor_and_critic_use_job_timeout_without_changing_initialization(make_g
         start_rollout_id=None,
     ).args
     monkeypatch.setattr(train_groups, "prepare_critic_args", lambda config: SimpleNamespace(**vars(config)))
-    # The Slime component starts its groups with no rollout manager and attaches none.
     groups = train_groups.create_train_groups(
         args,
         {"actor": "actor-pg", "critic": "critic-pg"},
-        None,
         actor_cls=_Worker,
-        train_rpc_timeout_s=timeout,
+        train_timeout_s=timeout,
     )
     try:
         for group in groups:
-            group.set_rollout_manager(None)
+            assert group is not None
             group.save_model(4, force_sync=True)
-            assert all(worker.manager_calls == [None] for worker in group.executor.workers)
             assert all(worker.save_calls == [(4, True)] for worker in group.executor.workers)
+            # Starting the workers waits the startup budget; a job's calls wait the job timeout.
             assert group.executor.rpc_waits == [
                 ("init", 14400),
-                ("set_rollout_manager", 14400),
+                ("parallel_layout", 14400),
                 ("save_model", timeout),
             ]
     finally:

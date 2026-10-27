@@ -18,8 +18,54 @@ from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, http_readiness_command
 from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
+from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.jobs import TrainingComponent
-from reef.train.deployment import TrainingDeployment, refuse_serving_options, require_ray_roles
+from reef.train.deployment import TrainingDeployment
+
+# These alter engine creation or topology outside Reef's inference request.
+# Reject argparse abbreviations as well as full names, even for omitted values.
+INFERENCE_LAUNCH_OPTIONS = frozenset(
+    {
+        "rollout-num-gpus",
+        "rollout-num-gpus-per-engine",
+        "rollout-external",
+        "rollout-external-engine-addrs",
+        "prefill-num-servers",
+    }
+)
+# Training and serving never share GPUs; these native options would make them.
+PLACEMENT_OPTIONS = frozenset({"colocate", "offload-rollout"})
+
+
+def refuse_serving_options(training_options: Mapping[str, Any]) -> None:
+    """Refuse native training options that would configure serving engines or share GPUs with them.
+
+    Serving engines are configured by the ``inference`` section alone, and
+    training and serving never share GPUs. Raise ``DeployConfigError`` for an
+    option (or an abbreviation of one) that does either.
+    """
+    for name in training_options:
+        if (
+            name.startswith(("sglang-", "router-"))
+            or "sglang".startswith(name)
+            or "router".startswith(name)
+            or any(flag.startswith(name) for flag in INFERENCE_LAUNCH_OPTIONS)
+        ):
+            raise DeployConfigError(
+                f"training.options.{name} configures inference; use inference.num-gpus, "
+                "inference.tensor-parallel-size or inference.options instead"
+            )
+        if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
+            raise DeployConfigError(f"training.options.{name} shares GPUs between training and serving; remove it")
+
+
+def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None:
+    """Default the named execution roles to Ray and refuse any other executor for them."""
+    execution = config.setdefault("execution", {})
+    for role in roles:
+        execution.setdefault(role, "ray")
+        if select_executor(role_executor_settings(config, role), role=role).settings.backend != "ray":
+            raise DeployConfigError(f"automatic {backend} training requires execution.{role}.backend: ray")
 
 
 def global_batch_size(options: Mapping[str, Any]) -> int:
@@ -89,7 +135,8 @@ def slime_arguments(settings: Mapping[str, Any], *, loss_family: str, environ: M
     return [*native_arguments(training_options), *native_arguments({"rollout-num-gpus": 0})]
 
 
-#: The teacher engine's service name; its endpoint reaches the driver as ``${endpoints.distill-teacher}``.
+#: The teacher engine's service name; the HTTP service, where Slime trains, reads its endpoint as
+#: ``${endpoints.distill-teacher}``.
 TEACHER_SERVICE = "distill-teacher"
 #: SGLang options the teacher section sets itself or that would change which model it serves.
 TEACHER_RESERVED_OPTIONS = MANAGED_ENGINE_OPTIONS | {
@@ -183,8 +230,6 @@ class SlimeDeployment(TrainingDeployment):
         return {TEACHER_URL_ENV: f"${{endpoints.{TEACHER_SERVICE}}}"}
 
     def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
-        if settings["train_timeout_s"] is not None and settings["train_timeout_s"] <= 0:
-            raise ValueError("reef.train_timeout_s must be positive when set")
         return {
             "type": self.runtime_type,
             "loss_family": loss_family,
@@ -209,17 +254,14 @@ class SlimeRuntimeFactory(RuntimeFactory):
         self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
     ) -> TrainingComponent:
         from reef.train.slime_backend.component import SlimeSettings, create_slime_component
-        from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S
+        from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_TIMEOUT_S
 
         settings = config["settings"]
         ray_address = config["ray_address"]
         if not isinstance(ray_address, str) or not ray_address.strip():
             raise RuntimeConfigError("Slime trains on a Ray cluster: set training.ray-address or RAY_ADDRESS")
-        train_timeout_seconds = config.get("train_timeout_s")
-        if train_timeout_seconds is None:
-            train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S
-        else:
-            train_rpc_timeout_s = float(train_timeout_seconds)
+        # SlimeSettings checks that the timeout is positive.
+        train_timeout_s = config["train_timeout_s"]
         return create_slime_component(
             SlimeSettings(
                 arguments=tuple(slime_arguments(settings, loss_family=config["loss_family"], environ=environ)),
@@ -228,7 +270,7 @@ class SlimeRuntimeFactory(RuntimeFactory):
                 execution=config["execution"],
                 ray_address=ray_address,
                 namespace=config["namespace"],
-                train_rpc_timeout_s=train_rpc_timeout_s,
+                train_timeout_s=DEFAULT_TRAIN_TIMEOUT_S if train_timeout_s is None else float(train_timeout_s),
             )
         )
 

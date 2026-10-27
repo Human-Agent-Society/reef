@@ -18,7 +18,6 @@ class SlimeArguments(Namespace):
     compute_advantages_and_returns: bool
     debug_train_only: bool
     debug_rollout_only: bool
-    rollout_external: bool
     colocate: bool
     offload_train: bool
     offload_rollout: bool
@@ -43,11 +42,11 @@ class SlimeArguments(Namespace):
     custom_megatron_init_path: str | None
     custom_critic_args_hook_path: str | None = None
     no_save_optim: bool = False
-    release_train: bool = False
-    # Scenario versions between two saved training checkpoints (Megatron and HF export).
-    save_interval: int
+    # Refused by validate_slime_args: the component never releases its workers between jobs.
+    release_train: bool
     custom_model_provider_path: str | None
     custom_rollout_data_keys: tuple[str, ...] | list[str] | None = ()
+    rollout_data_transport: str
     megatron_config_path: str | None
     disable_param_buffers_cpu_backup: bool
     override_opt_param_scheduler: bool

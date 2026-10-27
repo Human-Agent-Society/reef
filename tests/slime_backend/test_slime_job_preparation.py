@@ -1,4 +1,4 @@
-"""Slime step preparation: one job's batch and objective into Slime's training payload rows."""
+"""Slime job preparation: one job's data and objective into Slime's training payload rows."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TaskItem, trajectories
 
-SFT_OBJECTIVE = "tests.slime_backend.test_slime_step_preparation:SampleSftObjective"
-TWO_EPOCH_OBJECTIVE = "tests.slime_backend.test_slime_step_preparation:TwoEpochObjective"
+SFT_OBJECTIVE = "tests.slime_backend.test_slime_job_preparation:SampleSftObjective"
+TWO_EPOCH_OBJECTIVE = "tests.slime_backend.test_slime_job_preparation:TwoEpochObjective"
 
 
 class SampleSftObjective(TrainingObjective):

@@ -133,8 +133,6 @@ training:
     - linear_proj
     - linear_fc1
     - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
 storage:
   artifact-repository: ${OPD_RUN_DIR:?}/artifacts.git
   artifact-work-dir: ${OPD_RUN_DIR:?}/artifact-work

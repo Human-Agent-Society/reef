@@ -64,7 +64,7 @@ def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
         assert settings.arguments == ("--global-batch-size=8", "--rollout-num-gpus=0")
         assert (settings.loss_family, settings.recipe) == ("sao", "recipes.sao.recipe:SAORecipe")
         assert (settings.ray_address, settings.namespace) == ("ray://head:10001", "training-cluster")
-        assert settings.train_rpc_timeout_s == 14400.0
+        assert settings.train_timeout_s == 14400.0
         # The deployment's execution section selects the workers' executors.
         assert settings.execution == {"execution": {"training": {"backend": "ray", "options": {"queue": "gpu"}}}}
     finally:

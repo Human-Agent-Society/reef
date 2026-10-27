@@ -226,7 +226,8 @@ HTTP service's process. It owns one Ray session, the training GPUs it
 reserves there, and Slime's actor (and critic) workers. It starts no serving
 engine, and training and serving never share GPUs. The component therefore
 refuses ``--colocate``, ``--offload-rollout`` and
-``--keep-lora-base-resident``.
+``--keep-lora-base-resident``. Its workers keep running between jobs, so it
+also refuses ``--release-train``.
 
 A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of
 training). Without the job parameter ``save_interval``, the job is one
@@ -238,9 +239,19 @@ the PEFT adapter. A job's ``method`` parameter selects the loss family and
 learning-rate schedule. The actor workers switch to it when they receive the
 job's data.
 
+The job's last checkpoint records the objective's state after the job's
+data. An earlier checkpoint records the state of the job's start, because
+the objective computes its state for the whole data. When the objective
+skips the job's data, the job saves no checkpoint, so the next job continues
+the start's weights and objective state. The Tinker component does the same.
+
 Slime continues from its workers' own weights. A job therefore starts from
-the component's latest checkpoint. ``import_start`` refuses every release, so
-a Slime scenario cannot roll back. Because the workers hold one set of
+the component's latest checkpoint. A ``None`` start names the weights that
+the workers loaded at startup, which they hold only until they save their
+first rollout. The component checks the start when Reef submits the job and
+again when the job runs: a queued job whose start an earlier job moved past
+fails. ``import_start`` refuses every release, so a Slime scenario cannot
+roll back. Because the workers hold one set of
 weights, a Slime deployment trains one scenario. After a restart, the workers
 load the latest checkpoint again. A restarted job continues after its last
 recorded checkpoint. A restart can also stop a job after Megatron saved a

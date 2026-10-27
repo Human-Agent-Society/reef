@@ -26,12 +26,16 @@ from torch_memory_saver import torch_memory_saver
 
 from reef.train.slime_backend.distill.teacher import TEACHER_TAG
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY
+from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
     megatron_lora_enabled,
     zero_megatron_lora_adapters,
 )
-from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_lora_adapter_to_path
+from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import (
+    export_lora_adapter_tensors,
+    save_lora_adapter_to_path,
+)
 from reef.train.slime_backend.reef_adapters.megatron.scheduler_resume import restore_scheduler_progress
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     _loss_family_spec,
@@ -66,10 +70,11 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     def init(self, args, role, with_ref=False, with_opd_teacher=False):
         result = super().init(args, role, with_ref=with_ref, with_opd_teacher=with_opd_teacher)
         if isinstance(result, int):
-            restore_scheduler_progress(args, result, getattr(self, "opt_param_scheduler", None))
-        updater = getattr(self, "weight_updater", None)
-        if updater is not None:
-            updater.tie_word_embeddings = bool(getattr(self.hf_config, "tie_word_embeddings", False))
+            restore_scheduler_progress(args, result, self.opt_param_scheduler)
+        # A LoRA actor's save converts its adapter through Megatron Bridge; the critic saves no adapter.
+        self.lora_weight_iterator: MegatronToHfWeightIterator | None = None
+        if role == "actor" and megatron_lora_enabled(args):
+            self.lora_weight_iterator = MegatronToHfWeightIterator(args, self.model, None, None)
         # The loss families whose actor init hook ran; a family runs its hook on its first job.
         self.initialized_loss_families = {args.loss_family}
         if role == "actor":
@@ -113,9 +118,12 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         if self.opt_param_scheduler is not None:
             self.opt_param_scheduler.num_steps = 0
 
-    def set_rollout_manager(self, inference: Any) -> dict[str, Any]:
-        """Set Slime's rollout manager (None: the component starts no engines) and return the training topology."""
-        self.rollout_manager = inference
+    def parallel_layout(self) -> dict[str, Any]:
+        """Return this rank's training parallel layout, which the component's batch split reads.
+
+        The layout is Slime's ``train_parallel_config``: the data-parallel and
+        context-parallel sizes and the virtual-pipeline microbatch grouping.
+        """
         return dict(self.train_parallel_config)
 
     def train_actor(self, rollout_id, rollout_data, external_data=None):
@@ -166,11 +174,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         return rollout_data
 
     def pop_metrics(self) -> dict[str, float]:
-        metrics = drain_worker_metrics()
-        updater = getattr(self, "weight_updater", None)
-        if updater is not None:
-            metrics.update(updater.pop_metrics())
-        return metrics
+        return drain_worker_metrics()
 
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         # Not ``@timer``: Slime's own ``save_model`` carries that decorator, and
@@ -204,15 +208,15 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 maybe_finalize_async_save(blocking=True)
 
             if self.args.save_hf is not None and self.role == "actor":
+                if self.lora_weight_iterator is None:
+                    raise RuntimeError("a LoRA actor saves its adapter, but it built no adapter export")
                 output_dir = Path(self.args.save_hf.format(rollout_id=rollout_id))
                 context = torch_memory_saver.disable() if self.args.offload_train else nullcontext()
                 with context:
-                    save_lora_adapter_to_path(
-                        self.args,
-                        output_dir,
-                        self.weight_updater.export_lora_adapter_tensors(),
-                        rollout_id=rollout_id,
+                    adapter_tensors = export_lora_adapter_tensors(
+                        self.lora_weight_iterator, self.weights_backuper.get("actor")
                     )
+                    save_lora_adapter_to_path(self.args, output_dir, adapter_tensors, rollout_id=rollout_id)
         finally:
             if self.args.offload_train:
                 self.sleep()

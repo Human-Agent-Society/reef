@@ -470,16 +470,16 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
     monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
 
-    manager = object.__new__(module.TrainingBatchProcessor)
-    manager.args = types.SimpleNamespace(
+    args = types.SimpleNamespace(
         global_batch_size=2,
         rollout_data_transport="object-store",
         custom_rollout_data_keys=(
             "producing_runtime_load_spans",
             "producing_runtime_load_ids",
         ),
+        reef_rollout_tensor_dtypes={},
     )
-    manager.train_parallel_config = {"dp_size": 2}
+    manager = module.TrainingBatchProcessor(args, {"dp_size": 2})
     spans = [
         [{"start": 0, "end": 1, "runtime_load_id": "engine:1"}],
         [{"start": 0, "end": 1, "runtime_load_id": "engine:2"}],
@@ -511,10 +511,13 @@ def _manager_for_schedule(monkeypatch: pytest.MonkeyPatch, *, global_batch_size:
     monkeypatch.setattr(sys.modules["slime.utils.dp_schedule"], "build_dp_schedule", _round_robin_dp_schedule)
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
     monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
-    manager = object.__new__(module.TrainingBatchProcessor)
-    manager.args = types.SimpleNamespace(global_batch_size=global_batch_size, rollout_data_transport="object-store")
-    manager.train_parallel_config = {"dp_size": 2}
-    return manager
+    args = types.SimpleNamespace(
+        global_batch_size=global_batch_size,
+        rollout_data_transport="object-store",
+        custom_rollout_data_keys=(),
+        reef_rollout_tensor_dtypes={},
+    )
+    return module.TrainingBatchProcessor(args, {"dp_size": 2})
 
 
 @pytest.mark.unit
@@ -556,7 +559,9 @@ def test_dp_packaging_trains_a_partial_last_step(monkeypatch: pytest.MonkeyPatch
 
 def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
     _, module = _load_manager_module(monkeypatch)
-    processor = module.TrainingBatchProcessor(types.SimpleNamespace(), {"dp_size": 1})
+    processor = module.TrainingBatchProcessor(
+        types.SimpleNamespace(custom_rollout_data_keys=(), reef_rollout_tensor_dtypes={}), {"dp_size": 1}
+    )
     assert processor.train_parallel_config == {"dp_size": 1}
     for name in ("inference_url", "pause_generation_for_update", "dispose", "shutdown"):
         assert not hasattr(processor, name)

@@ -212,7 +212,8 @@ The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask
 removed), `train_rollout_logprob_abs_diff` (the mean per-token gap between the
 engine's and the trainer's log-probabilities, the quantity DIS masks on),
 `critic/explained_variance` (meaningful only with more than one sample per
-step), actor and critic `grad_norm`, and the asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
+step), actor and critic `grad_norm`, and the asynchrony telemetry
+`sao/producing_version_spread_*`, `sao/queue_age_s_*`, and
 `sao/effective_token_rate`. Set `observability.wandb.enabled: true` in
 `serve.yaml` and export `WANDB_API_KEY` to keep them per committed step;
 `observability.wandb.directory` is where the run files go.

@@ -36,8 +36,6 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     parser.add_argument("--megatron-lora-alpha", type=int, default=None)
     parser.add_argument("--megatron-lora-dropout", type=float, default=0.0)
     parser.add_argument("--megatron-lora-target-modules", type=str, nargs="+", default=None)
-    parser.add_argument("--check-lora-weight-equal", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--verify-lora-base-weights", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--critic-steps-per-actor",
         type=int,
@@ -60,8 +58,8 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         type=int,
         default=1,
         help=(
-            "Commits between critic checkpoints (weights and optimizer). 1 saves at every commit; "
-            "a larger value trades a warmer value head after a restart for cheaper commits."
+            "Saved rollouts between critic checkpoints (weights and optimizer). 1 saves the critic with every "
+            "rollout; a larger value trades a warmer value head after a restart for cheaper saves."
         ),
     )
     parser.add_argument(
@@ -115,7 +113,8 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
     explicitly_resident = "--no-offload-train" in arguments
     save = args.save
     if not isinstance(save, str) or not save.strip():
-        # Megatron requires --save-interval only with --save, and the component reads both.
+        # The component saves a Megatron checkpoint in --save after every rollout. Megatron also
+        # requires --save-interval with --save, but the component does not read it.
         raise ValueError("the Slime training component requires --save for Megatron recovery checkpoints")
     if explicitly_enabled_critic:
         args.use_critic = True

@@ -70,7 +70,7 @@ def _patched_megatron_model(model):
 
 
 class MegatronToHfWeightIterator:
-    """Adapt Megatron Bridge's lazy conversion stream to Slime's updater."""
+    """Convert a rank's Megatron weights to Hugging Face tensors through Megatron Bridge, in size-bounded chunks."""
 
     def __init__(self, args, model, model_name, quantization_config, **_kwargs):
         from megatron.bridge import AutoBridge

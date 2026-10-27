@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, finished
+from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import JobStatus, TrainingJob
@@ -158,7 +158,7 @@ def test_sao_row_versions_must_match_the_shared_producing_versions() -> None:
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_reports_lag_queue_age_and_effective_tokens() -> None:
+def test_sao_rollout_metrics_reports_version_spread_queue_age_and_effective_tokens() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
@@ -171,21 +171,21 @@ def test_sao_rollout_metrics_reports_lag_queue_age_and_effective_tokens() -> Non
 
     metrics = sao.rollout_metrics(rollout_data)
 
-    # The lag counts versions behind the newest producing version in the job's data.
-    assert metrics["sao/policy_lag_max"] == 2
-    assert metrics["sao/policy_lag_mean"] == 1.0
+    # The spread counts versions behind the newest producing version in the rollout's data.
+    assert metrics["sao/producing_version_spread_max"] == 2
+    assert metrics["sao/producing_version_spread_mean"] == 1.0
     assert metrics["sao/effective_token_rate"] == 5 / 6
     assert metrics["sao/queue_age_s_max"] >= 0.0
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_skip_the_lag_of_versions_without_a_sequence() -> None:
+def test_sao_rollout_metrics_skip_the_spread_of_versions_without_a_sequence() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="no-sequence")]))
 
     metrics = sao.rollout_metrics(rollout_data)
 
-    assert "sao/policy_lag_max" not in metrics
+    assert "sao/producing_version_spread_max" not in metrics
     assert metrics["sao/effective_token_rate"] == 1.0
 
 
@@ -199,17 +199,18 @@ class SaoStack:
         critic: bool = True,
         critic_steps_per_actor: int | None = 2,
         critic_only_steps: int = 0,
-        critic_save: str | None = None,
         critic_save_interval: int = 1,
         rank_metrics=None,
     ) -> None:
         template = str(tmp_path / "hf" / "{rollout_id}")
+        critic_root = tmp_path / "megatron-critic" if critic else None
+        storage = checkpoint_storage(tmp_path, critic_root=critic_root, critic_save_interval=critic_save_interval)
         args = SlimeArguments(
             loss_family="sao",
             global_batch_size=2,
             save_hf=template,
             start_rollout_id=0,
-            critic_save=critic_save,
+            critic_save=None if critic_root is None else str(critic_root),
             critic_save_interval=critic_save_interval,
             critic_steps_per_actor=critic_steps_per_actor,
             num_critic_only_steps=critic_only_steps,
@@ -217,9 +218,9 @@ class SaoStack:
             score_centering=False,
             reef_rollout_tensor_dtypes={},
         )
-        self.actor = FakeTrainGroup(template, rank_metrics=rank_metrics)
+        self.actor = FakeTrainGroup(template, megatron_root=storage.megatron_root, rank_metrics=rank_metrics)
         self.actor.train_result = [{"values": [0.25]}]
-        self.critic = FakeTrainGroup(None) if critic else None
+        self.critic = None if critic_root is None else FakeTrainGroup(None, megatron_root=critic_root)
         if self.critic is not None:
             self.critic.train_result = [{"values": [0.25]}]
         self.critic_external_data: list[object] = []
@@ -228,7 +229,7 @@ class SaoStack:
             self.actor,
             self.critic,
             batch_processor=RecordingBatchProcessor(),
-            storage=None,
+            storage=storage,
             lora=False,
             loss_family="sao",
         )
@@ -336,8 +337,8 @@ def test_a_sao_checkpoint_carries_the_backend_and_worker_metrics(tmp_path, sao_s
         "values",
         "sao/critic_updates",
         "sao/actor_trained",
-        "sao/policy_lag_max",
-        "sao/policy_lag_mean",
+        "sao/producing_version_spread_max",
+        "sao/producing_version_spread_mean",
         "sao/queue_age_s_max",
         "sao/queue_age_s_mean",
         "sao/effective_token_rate",
@@ -349,7 +350,7 @@ def test_a_sao_checkpoint_carries_the_backend_and_worker_metrics(tmp_path, sao_s
 def test_a_sao_rollout_saves_the_critic_alongside_the_actor(tmp_path, sao_stacks, critic_only_steps) -> None:
     # The warmup steps are exactly the ones whose lost progress the paper's
     # cold-start concern is about: a warmup rollout persists the critic too.
-    stack = sao_stacks(tmp_path, critic_only_steps=critic_only_steps, critic_save=str(tmp_path / "megatron-critic"))
+    stack = sao_stacks(tmp_path, critic_only_steps=critic_only_steps)
 
     stack.run()
 
@@ -360,25 +361,16 @@ def test_a_sao_rollout_saves_the_critic_alongside_the_actor(tmp_path, sao_stacks
 
 @pytest.mark.unit
 def test_the_sao_critic_save_interval_skips_the_rollouts_in_between(tmp_path, sao_stacks) -> None:
-    stack = sao_stacks(tmp_path, critic_save=str(tmp_path / "megatron-critic"), critic_save_interval=2)
+    stack = sao_stacks(tmp_path, critic_save_interval=2)
 
-    stack.run()
+    stack.run(0)
+    stack.run(1)
 
-    assert stack.actor.saved == [(0, True)]
-    assert stack.critic.saved == []
+    assert stack.actor.saved == [(0, True), (1, True)]
+    # The second rollout is the first that the cadence saves the critic on.
+    assert stack.critic.saved == [(1, True)]
     with pytest.raises(ValueError, match="critic_save_interval"):
-        SaoStack(tmp_path / "again", critic_save=str(tmp_path / "c"), critic_save_interval=0)
-
-
-@pytest.mark.unit
-def test_sao_without_a_critic_root_keeps_the_actor_only_save(tmp_path, sao_stacks) -> None:
-    # Without a distinct critic root the critic's Megatron save would land in the actor's tree.
-    stack = sao_stacks(tmp_path, critic_save=None)
-
-    stack.run()
-
-    assert stack.actor.saved == [(0, True)]
-    assert stack.critic.saved == []
+        SaoStack(tmp_path / "again", critic_save_interval=0)
 
 
 @pytest.mark.unit
@@ -472,11 +464,11 @@ def critic_prep_args(**overrides):
 
 @pytest.mark.unit
 def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args()
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
 
     # Role-separated lambda policy: adaptive lambda off, lambd = critic lambda.
@@ -488,7 +480,7 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
 
 @pytest.mark.unit
 def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_has_its_own(tmp_path) -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     critic_save, critic_init = tmp_path / "megatron-critic", tmp_path / "critic-init"
@@ -498,7 +490,7 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     # No checkpoint of its own yet: the value model trained on an earlier
     # episode is loaded, weights and optimizer, and saves go to the save root.
     args = critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
     assert (critic_args.load, critic_args.save) == (str(critic_init), str(critic_save))
     assert (critic_args.no_load_optim, critic_args.finetune) == (False, False)
@@ -520,11 +512,11 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
 
 @pytest.mark.unit
 def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(critic_lr=5e-6, lr=1e-6)
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.lr == 5e-6
@@ -533,11 +525,11 @@ def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
 
 @pytest.mark.unit
 def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(lr=1e-6)
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.lr == 1e-6
@@ -550,7 +542,7 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
     The critic is the policy's size; without adapters it would train every
     parameter and could not sit beside a LoRA actor of the same model.
     """
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
@@ -564,7 +556,7 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
         custom_model_provider_path=REEF_MODEL_PROVIDER_PATH,
         reef_chained_model_provider_path=None,
     )
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.megatron_lora_rank == 32
@@ -576,11 +568,11 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("provider", [None, "recipes.sao.examples.servelearnbench.long_context.provide_model"])
 def test_prepare_critic_args_without_lora_preserves_the_user_provider(provider) -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path=provider)
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.megatron_lora_rank == 0
@@ -641,7 +633,7 @@ def test_prepare_critic_args_first_boot_keeps_the_inherited_load_fallback(tmp_pa
 def test_megatron_config_critic_role_pins_lambda(tmp_path) -> None:
     # The --megatron-config-path role surgery must still apply SAO's
     # critic-role lambda policy even with a megatron config.
-    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.preflight import configure_critic_args_hook
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     _install_slime_parser_stubs()
@@ -652,7 +644,7 @@ def test_megatron_config_critic_role_pins_lambda(tmp_path) -> None:
     )
 
     args = critic_prep_args(megatron_config_path=str(config_path))
-    configure_megatron_runtime(args)
+    configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.sao_length_adaptive_lambda is False
