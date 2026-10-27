@@ -161,25 +161,35 @@ class SFTTasks(ReportTasks):
         return sequence_ids, len(sequence_ids) - len(prompt_ids)
 
     def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
-        """Render an uploaded ATIF conversation with the chat template, with every agent turn trained.
+        """Render an uploaded ATIF conversation with the chat template, with every generated agent turn trained.
 
-        The tokens are the conversation up to its last agent turn; the steps after it train nothing and are left
-        out. The loss mask covers the tokens after the first agent turn's generation prompt: 1 on each agent
-        turn's tokens, 0 on the system, user and tool tokens between agent turns. ``ValueError``: the trajectory
-        has no agent step, or it starts with one; the chat template does not render each turn as a prefix of the
-        whole conversation (a template that drops earlier turns' reasoning does not); or the sample is longer
-        than ``max_tokens``.
+        An agent step with ``is_copied_context: true`` (ATIF's mark for a step copied from earlier context) is
+        context: it renders, and it trains nothing. Every other agent step trains. The tokens are the conversation
+        up to its last trained turn; the steps after it train nothing and are left out. The loss mask covers the
+        tokens after the first trained turn's generation prompt: 1 on each trained turn's tokens, 0 on everything
+        between them. ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step
+        that trains, or its first trained step has no step before it; the chat template does not render each
+        trained turn as a prefix of the whole conversation (a template that drops earlier turns' reasoning does
+        not); or the sample is longer than ``max_tokens``.
         """
+        steps = trajectory.trajectory.get("steps") or []
         conversation = normalize_messages_for_template(atif_messages(trajectory.trajectory))
+        # atif_messages turns each agent step into exactly one assistant message, in step order.
+        copied = [step.get("is_copied_context", False) for step in steps if step["source"] == "agent"]
+        if any(not isinstance(value, bool) for value in copied):
+            raise ValueError("ATIF is_copied_context must be a boolean")
         agent_turns = [index for index, message in enumerate(conversation) if message["role"] == "assistant"]
-        if not agent_turns:
-            raise ValueError("an uploaded trajectory needs one or more agent steps to train")
-        if agent_turns[0] == 0:
+        trained = [index for index, is_copied in zip(agent_turns, copied, strict=True) if not is_copied]
+        if not trained:
+            raise ValueError(
+                "an uploaded trajectory needs one or more agent steps to train; copied context steps train nothing"
+            )
+        if trained[0] == 0:
             raise ValueError("an uploaded trajectory needs a system or user step before its first agent step")
-        conversation = conversation[: agent_turns[-1] + 1]
+        conversation = conversation[: trained[-1] + 1]
         tokens = self.render(conversation, None, add_generation_prompt=False)
         spans: list[tuple[int, int]] = []
-        for index in agent_turns:
+        for index in trained:
             # The turn's tokens are those between its generation prompt and its end, both prefixes of the whole.
             prompt_ids = self.render(conversation[:index], None, add_generation_prompt=True)
             turn_ids = self.render(conversation[: index + 1], None, add_generation_prompt=False)

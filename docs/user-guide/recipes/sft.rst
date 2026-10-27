@@ -115,15 +115,31 @@ every agent turn at once. Upload it as an ATIF trajectory
 
 - The steps become chat messages: an ``agent`` step is an assistant turn with
   its tool calls, and each observation result is a tool message.
+- An agent step with ``is_copied_context: true``, ATIF's mark for a step
+  copied from earlier context, is context only: it renders, and it trains
+  nothing. Every other agent turn trains.
 - The tokens are the conversation, rendered with the chat template, up to the
-  last agent turn. Steps after the last agent turn are left out.
-- The loss mask selects the tokens of every agent turn. System, user and tool
-  tokens get no loss.
+  last trained agent turn. Steps after it are left out.
+- The loss mask selects the tokens of every trained agent turn. System, user,
+  tool and copied context tokens get no loss.
+
+For example, to keep an earlier answer as context and train only the last one:
+
+.. code:: json
+
+   {"steps": [
+     {"step_id": 1, "source": "user", "message": "What is 37 + 45?"},
+     {"step_id": 2, "source": "agent", "message": "82", "is_copied_context": true},
+     {"step_id": 3, "source": "user", "message": "Show the sum."},
+     {"step_id": 4, "source": "agent", "message": "37 + 45 = 82."}
+   ]}
 
 Reef renders each trajectory when it accepts the upload. It refuses the whole
 upload with 400, naming the trajectory, when one cannot train:
 
-- it has no agent step, or an agent step is its first step;
+- it has no agent step that trains (all its agent steps are copied context),
+  or its first trained agent step has no step before it;
+- ``is_copied_context`` is not a boolean;
 - the chat template does not render each turn as a prefix of the whole
   conversation. A template that removes the reasoning of earlier turns, for
   example, does not; set ``chat_template_kwargs`` so that it keeps them, or

@@ -417,10 +417,42 @@ def test_an_uploaded_trajectory_trains_every_agent_turn_and_masks_the_rest(token
 
 
 @pytest.mark.unit
+def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnTokenizer) -> None:
+    tasks = SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH))
+    ask, look, observation, answer = (
+        TurnTokenizer.text_ids({"content": "Boil?"}),
+        TurnTokenizer.text_ids({"content": "Look", "tool_calls": [{"function": {"name": "search"}}]}),
+        TurnTokenizer.text_ids({"content": "100"}),
+        TurnTokenizer.text_ids({"content": "100 C"}),
+    )
+
+    # The copied turn is context: in the tokens, before the prompt that the loss mask starts after.
+    sample = tasks.uploaded_sample(_uploaded(ASK, {**CALL, "is_copied_context": True}, ANSWER))
+    assert sample.training["tokens"] == [
+        *ask,
+        GENERATION_PROMPT,
+        *look,
+        END_OF_TURN,
+        *observation,
+        GENERATION_PROMPT,
+        *answer,
+        END_OF_TURN,
+    ]
+    assert sample.training["loss_mask"] == [1] * (len(answer) + 1)
+
+    # A copied turn after the last trained one trains nothing either, so the sample ends before it.
+    sample = tasks.uploaded_sample(_uploaded(ASK, CALL, {**ANSWER, "is_copied_context": True}))
+    assert sample.training["tokens"] == [*ask, GENERATION_PROMPT, *look, END_OF_TURN]
+    assert sample.training["loss_mask"] == [1] * (len(look) + 1)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("steps", "reason"),
     [
         ((ASK, THANKS), "needs one or more agent steps"),
+        ((ASK, {**ANSWER, "is_copied_context": True}), "copied context steps train nothing"),
+        ((ASK, {**ANSWER, "is_copied_context": "yes"}), "is_copied_context must be a boolean"),
         ((ANSWER, THANKS), "needs a system or user step before its first agent step"),
         (({"step_id": 1, "message": "no source"},), "string source"),
         ((ASK, {**CALL, "tool_calls": [{"tool_call_id": "c1"}]}), "tool_calls must be objects"),

@@ -24,7 +24,7 @@ class SFTRecipe(WeightTrainingRecipe):
 
     The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTTasks``, and
     ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTTasks``
-    renders each one with every agent turn trained. The ``pipeline`` section of the deployment configures
+    renders each one with every agent turn trained, except ``is_copied_context`` steps. The ``pipeline`` section of the deployment configures
     the stages:
 
     * ``pipeline.record2task.config``: ``tokenizer_path`` (required),

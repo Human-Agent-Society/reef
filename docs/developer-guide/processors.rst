@@ -267,7 +267,7 @@ The record-to-task stage turns each upload into its training sample with
 ``Record2Task.uploaded_sample(trajectory)``. The default returns the trajectory
 as uploaded. A stage whose backend trains token-level data overrides it:
 ``SFTTasks`` renders the conversation with the chat template and trains every
-agent turn. The method must be pure. Admission calls it from the request
+agent turn that is not marked ``is_copied_context``. The method must be pure. Admission calls it from the request
 thread for each trajectory and each trainer that accepts uploads; a
 ``ValueError`` refuses the whole upload with 400, and the message names the
 trajectory. The pipeline calls it again when it reads the upload. A

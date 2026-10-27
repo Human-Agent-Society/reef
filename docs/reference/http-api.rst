@@ -342,7 +342,8 @@ after training. The same ID with a different trajectory returns 409. An
 invalid upload returns 400 and saves nothing. The recipe also checks each
 trajectory: a trajectory that it cannot turn into a training sample refuses
 the upload with 400, and the message names the trajectory. The SFT recipe
-renders each upload with every agent turn trained (`SFT
+renders each upload with every agent turn trained, except the steps marked
+``is_copied_context: true`` (`SFT
 <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
 
 Each uploaded trajectory counts as one sample toward the pipeline's
