@@ -1189,8 +1189,8 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
     assert trainer.pipeline.training_mode == "hybrid"
-    # Each report is one batch: the deployment sets evolution.batch_size 1.
-    assert trainer.batch_size == 1
+    # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
+    assert trainer.job_samples == 1
     trainer.close()
     records.close()
 

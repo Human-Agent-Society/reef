@@ -69,7 +69,7 @@ When a session's next state arrives, the finished turn is judged
 through an independently deployed PRM. The PRM votes on
 whether the message shows acceptance, and on acceptance it also proposes a
 hindsight hint, a short instruction that would have produced this reply if
-the user had given it up front. Judged turns are batched for training
+the user had given it up front. Judged turns go into job data for training
 directly.
 
 OpenClaw-RL trains with two signals, reinforcement learning and on-policy
@@ -87,9 +87,11 @@ Configuration
 The deployment's ``pipeline`` section configures the recipe's three stages.
 The recipe's own classes are the defaults, so the section needs no
 ``module``. The record-to-record stage correlates sessions and runs the PRM
-judge. The task-to-batch stage writes the PRM record file. The record-to-task
-stage takes no config. The batch size is Slime's ``--global-batch-size``,
-``training.config.global_batch_size`` in the example.
+judge. The task-to-job stage sets the job size and writes the PRM record
+file. The record-to-task stage takes no config. ``job_samples`` is the judged
+turns of one job. Slime's ``--global-batch-size``,
+``training.config.global_batch_size`` in the example, is the judged turns of
+one optimizer step.
 
 .. code:: yaml
 
@@ -100,6 +102,9 @@ stage takes no config. The batch size is Slime's ``--global-batch-size``,
        config:
          prm_url: http://127.0.0.1:23001
          prm_tokenizer_path: /models/prm
+     task2job:
+       config:
+         job_samples: ${training.config.global_batch_size}
    training:
      config:
        global_batch_size: 16
@@ -116,9 +121,10 @@ stage takes no config. The batch size is Slime's ``--global-batch-size``,
    pipeline.record2record.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
    pipeline.record2record.config.prm_concurrency | 8 | turns judged at once
    pipeline.record2record.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
-   training.config.global_batch_size | judged turns per batch and per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
-   pipeline.task2batch.config.prm_record_file | "" | judged population, one JSON line per batch; empty disables it
-   recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   pipeline.task2job.config.job_samples | required | judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+   training.config.global_batch_size | judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
+   pipeline.task2job.config.prm_record_file | "" | judged population, one JSON line per job; empty disables it
 
 Reef checks the stage config when it loads the recipe. An unknown key or an
 invalid value stops the deployment at startup. A stage key in
@@ -129,7 +135,7 @@ The values above are the defaults. The example's ``serve.yaml`` overrides
 several of them. It points ``prm_url`` and ``prm_tokenizer_path`` at the
 example's independently deployed PRM engine. It raises ``prm_timeout_s`` to
 3600 because a thinking model can spend minutes on a single vote. It sets
-``prm_record_file``, so each batch writes one line with its ``batch_id``, the
+``prm_record_file``, so each job writes one line with its ``data_id``, the
 reward split, and the judge counters.
 
 Reef coordinates inference and training only. OpenClawRL's example Compose

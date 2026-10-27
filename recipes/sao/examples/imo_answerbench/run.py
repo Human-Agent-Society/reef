@@ -42,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 TASKS = ["imo-4", "imo-8", "imo-12"]
 AGENT = {"name": "harness:HarborAgent", "model_name": MODEL}
 #: Ceiling on waiting for one task's six training steps (checkpoint saves
-#: and weight publishes included) before moving on with a warning.
+#: and weight publishes included) before failing the run.
 TRAIN_DRAIN_TIMEOUT_S = 1800
 
 #: The service is gone or rejecting requests; waiting cannot help.
@@ -84,13 +84,12 @@ def wait_for_training(expected: int) -> None:
     while time.time() < deadline:
         trained = training_release_count()
         if trained == _SERVICE_GONE:
-            print("    WARNING: the Reef service is not reachable; skipping the training drain")
-            return
+            raise RuntimeError("The Reef service is not reachable during the training drain")
         if trained is not None and trained >= expected:
             print(f"    trained: {trained}/{expected} rollouts committed")
             return
         time.sleep(10)
-    print(f"    WARNING: only {trained}/{expected} rollouts trained within {TRAIN_DRAIN_TIMEOUT_S}s")
+    raise TimeoutError(f"Only {trained}/{expected} rollouts trained within {TRAIN_DRAIN_TIMEOUT_S}s")
 
 
 async def main():
@@ -101,4 +100,5 @@ async def main():
         wait_for_training(expected=(position + 1) * ROLLOUTS)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

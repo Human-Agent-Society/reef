@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import runtime_bindings
 
 reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef checkout")
 
@@ -29,20 +29,20 @@ EXAMPLE = Path(__file__).resolve().parents[3] / "recipes" / "beta" / "coral" / "
 
 
 def coral_recipe(config):
-    return _recipe_cls().from_environment({}, config=config, **runtime_bindings(StubTrainingRuntime()))
+    return _recipe_cls().from_environment({}, config=config, **runtime_bindings())
 
 
 def test_training_spec_binds_processor_and_grouped_machinery():
     recipe_cls = _recipe_cls()
     spec = recipe_cls.training_spec()
     stages = recipe_cls.pipeline_spec()
-    from recipes.beta.coral.processor import CoralBatches, CoralTasks
+    from recipes.beta.coral.processor import CoralJobData, CoralTasks
     from recipes.beta.coral.recipe import CoralRecord2Record
 
-    assert (stages.record2record, stages.record2task, stages.task2batch) == (
+    assert (stages.record2record, stages.record2task, stages.task2job) == (
         CoralRecord2Record,
         CoralTasks,
-        CoralBatches,
+        CoralJobData,
     )
     assert spec.objective == "tttd"
     assert spec.loss_family == "tttd"
@@ -54,7 +54,7 @@ def test_importing_the_recipe_registers_the_reused_objective():
 
 
 def test_example_pipeline_section_builds_the_coral_stages():
-    from recipes.beta.coral.processor import CoralBatches, CoralTasks
+    from recipes.beta.coral.processor import CoralJobData, CoralTasks
     from recipes.beta.coral.recipe import CoralGrouping, CoralRecord2Record
 
     deployment = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
@@ -65,7 +65,7 @@ def test_example_pipeline_section_builds_the_coral_stages():
     assert pipeline.record2record.grouping.group_size == 2
     assert isinstance(pipeline.record2task, CoralTasks)
     assert pipeline.record2task.assembly.settings.accept_multi_turn_policy_samples
-    assert isinstance(pipeline.task2batch, CoralBatches)
+    assert isinstance(pipeline.task2job, CoralJobData)
 
 
 def test_default_group_size_is_four():
@@ -84,7 +84,7 @@ def test_group_size_in_the_recipe_config_is_refused(key):
     ("pipeline", "message"),
     [
         ({"record2record": {"config": {"group_size": 1}}}, "at least two"),
-        ({"task2batch": {"config": {"group_size": 2}}}, "CoralBatches: unknown config fields: group_size"),
+        ({"task2job": {"config": {"group_size": 2}}}, "CoralJobData: unknown config fields: group_size"),
         ({"record2task": {"config": {"group_size": 2}}}, "group_size"),
     ],
 )

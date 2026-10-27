@@ -16,13 +16,12 @@ import yaml
 from tests.support._training_deployment import LocalDeployment
 
 from reef.runtime.deployment import RuntimeConfigError
-from reef.service.assembly import _connect_training_runtime, _training_recipe
+from reef.service.assembly import _training_recipe, connect_training_component
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.train.runtime_backend import RuntimeCandidateBackend
 
 BACKEND = "tests.support._training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -43,7 +42,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         "training.backend": BACKEND,
         "training.options.lora-rank": "16",
         "training.options.checkpoint-layers": "false",
-        "recipe.config.max-staleness": "2",
+        "pipeline.record2record.config.max_staleness": "2",
     }
     file_config, _ = resolve_deployment_config(deployment(), overrides, tmp_path / "serve.yaml")
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
@@ -52,22 +51,15 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime, inference = _connect_training_runtime(settings, model_path=settings.model_path)
+        runtime, inference = connect_training_component(settings, model_path=settings.model_path, loss_family="sao")
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
         assert runtime.config["label"] == "001"
         assert "max_staleness" not in runtime.config
         inference.shutdown()
-        runtime.shutdown()
+        runtime.close()
         assert runtime.closed
-
-
-def test_a_backend_without_remote_engines_refuses_an_inference_remote_section(tmp_path):
-    raw = deployment()
-    raw["inference"]["remote"] = {"url": "https://gpu-host.example"}
-    with pytest.raises(DeployConfigError, match="does not support remote engines"):
-        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 @pytest.mark.parametrize("options", [{"lora-rank": 0}, {"unknown": 1}, {"type": "ray_training"}, {"connect": "x"}])
@@ -85,8 +77,9 @@ def test_invalid_options_fail_before_constructing_runtime(tmp_path, options):
     [
         {"training.ray-address": "auto"},
         {"execution.training.backend": "ray"},
-        {"inference.backend": "sglang"},
-        {"inference.tensor-parallel-size": "2"},
+        # The backend serves its own releases; Reef's engines are not that serving.
+        {"inference.serving": "trainer", "inference.backend": "sglang"},
+        {"inference.serving": "trainer", "inference.tensor-parallel-size": "2"},
         {"recipe.runtime.type": "ray_training"},
     ],
 )
@@ -109,37 +102,64 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
         training.training_deployment_for("unavailable")
 
 
-def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
-    from tests.support._training_deployment import runtime_factory
+def test_a_component_factory_that_builds_no_training_component_is_refused(monkeypatch):
+    from tests.support._training_deployment import component_factory
 
     from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(base_url="http://unused")
     closed = []
     monkeypatch.setattr(runtime, "shutdown", lambda: closed.append(True))
-    monkeypatch.setattr(type(runtime_factory), "__call__", lambda *args: runtime)
-    with pytest.raises(TypeError, match="TrainingRuntime"):
-        _connect_training_runtime(ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo")
+    monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
+    with pytest.raises(TypeError, match="must build a TrainingComponent"):
+        connect_training_component(
+            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", loss_family="sao"
+        )
     assert closed == [True]
 
 
-def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_path):
+def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanup(tmp_path):
     from recipes.sao.recipe import SAORecipe
     from reef.storage.sqlite import SQLiteRecordStore
 
-    config, _ = resolve_deployment_config(deployment(), None, tmp_path / "serve.yaml")
-    recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {}, None)
+    config, _ = resolve_deployment_config(
+        {**deployment(), "pipeline": {"task2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
+    )
+    recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = SQLiteRecordStore()
     try:
         trainer = recipe.build("scenario", records)
-        assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
-        assert trainer.candidate_backend.inference_runtime is recipe.runtime
-        assert trainer.candidate_backend.training_runtime is recipe.training_runtime
-        assert trainer.candidate_backend.experiment_config()["runtime"] == "LocalRuntime"
+        assert trainer.candidate_backend is None
+        assert trainer.job_loop.component is recipe.training_component
+        assert type(recipe.training_component).__name__ == "LocalRuntime"
+        # The deployment's pipeline section sets the job size.
+        assert trainer.job_samples == 2
     finally:
         recipe.runtime.shutdown()
-        recipe.training_runtime.shutdown()
+        recipe.training_component.close()
         records.close()
+
+
+def test_a_failed_recipe_build_closes_the_component_and_shuts_down_its_runtime(tmp_path, monkeypatch):
+    from tests.support.runtime_stubs import StubInferenceRuntime
+
+    from recipes.sao.recipe import SAORecipe
+
+    raw = deployment()
+    marker = tmp_path / "runtime"
+    raw["training"]["options"]["marker"] = str(marker)
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    shutdowns = []
+    monkeypatch.setattr(StubInferenceRuntime, "shutdown", lambda runtime: shutdowns.append(runtime))
+
+    def refuse(cls, *args, **kwargs):
+        raise ValueError("bad recipe config")
+
+    monkeypatch.setattr(SAORecipe, "from_resolved_config", classmethod(refuse))
+    with pytest.raises(ValueError, match="bad recipe config"):
+        _training_recipe(SAORecipe, service_config_from_mapping(config), {})
+    assert Path(f"{marker}.closed").exists()
+    assert len(shutdowns) == 1
 
 
 def test_in_process_serving_boots_on_cpu_without_loading_slime_or_ray(tmp_path):

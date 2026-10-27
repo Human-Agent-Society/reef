@@ -1,8 +1,8 @@
-"""The bridge-side check of the sampler's recorded top-K, vectorized with torch.
+"""The training component's check of the sampler's recorded top-K, vectorized with torch.
 
-The bridge imports this module when score centering is on, just before it
-tensorizes the payload, so the driver-side modules stay importable without
-torch. The check costs a few tensor operations per sample instead of Python
+The training component imports this module when score centering is on, just
+before it tensorizes the payload, so the driver-side modules stay importable
+without torch. The check costs a few tensor operations per sample instead of Python
 work per recorded entry, which grows with ``positions * top_k``.
 """
 

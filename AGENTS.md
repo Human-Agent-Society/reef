@@ -56,6 +56,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/evaluation/` | Candidate evaluation: running and scoring evaluation episodes, deciding whether a candidate is published, and plugin configuration |
 | `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
 | `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
+| `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
 | `reef/surface/` | Delivery of published artifacts |
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
@@ -64,7 +65,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/record2record/` | The record-to-record stage: which records Reef uses and in what order (report grouping, judging, eligibility checks, selection order) |
 | `reef/background_jobs.py` | A worker that runs asynchronous jobs, such as judge calls, off the trainer thread |
 | `reef/record2task/` | The record-to-task stage: one record set into tasks (`Record2Task`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
-| `reef/task2batch/` | The task-to-batch stage: the tasks of the selected record sets into one batch (`Task2Batch`) |
+| `reef/task2job/` | The task-to-job stage: the tasks of the selected record sets into one training job's data (`Task2Job`), and the job size `job_samples` |
 | `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |
@@ -339,8 +340,12 @@ pre-commit run --files path/to/changed_file.py
 
 # Full checks before requesting review for Python changes.
 pre-commit run --all-files
-.venv/bin/python -m pytest tests/
+.venv/bin/python -m pytest tests/ -n 8 --dist loadfile
 ```
+
+Run the full suite in parallel, as CI does: `-n 8 --dist loadfile` keeps each
+file in one worker. `pytest-xdist` ships in the `dev` extra. Use `-n 0` for a
+serial run when you diagnose a failure.
 
 The full suite needs training dependencies even for collection. Some tests
 skip unavailable optional runtimes; others import Slime and torch directly.
@@ -350,7 +355,7 @@ CI uses `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` for
 Git LFS test isolation. Record skipped or unavailable checks honestly.
 
 For full-suite coverage on Python 3.12, use
-`.venv/bin/python -m pytest tests --cov=reef --cov-report=term`.
+`.venv/bin/python -m pytest tests -n 8 --dist loadfile --cov=reef --cov-report=term`.
 The configured coverage floor applies to the whole package, not a focused run.
 
 Pre-commit includes repository-wide Python design, statement, and README

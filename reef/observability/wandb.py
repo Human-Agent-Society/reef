@@ -19,7 +19,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, encode_artifact_ref
+from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
 from reef.observability.base import (
     ExperimentLogger,
     ExperimentTracker,
@@ -521,12 +521,6 @@ class WandbExperimentTracker(ExperimentTracker):
     def _event_metadata(self, event: TrainingExperimentEvent, run_id: str) -> dict[str, Any]:
         source = event.context.source_artifact_ref
         produced = event.produced_artifact_ref
-        source_weight = event.source_runtime_load_id
-        if source_weight is None and isinstance(source, LiveWeightArtifactRef):
-            source_weight = source.runtime_load_id
-        produced_weight = event.produced_runtime_load_id
-        if produced_weight is None and isinstance(produced, LiveWeightArtifactRef):
-            produced_weight = produced.runtime_load_id
         return {
             "step": event.context.step,
             "run_segment": event.context.run_segment,
@@ -539,8 +533,6 @@ class WandbExperimentTracker(ExperimentTracker):
             "outcome": event.outcome,
             "source_release_id": source.release_id,
             "produced_release_id": produced.release_id,
-            "source_runtime_load_id": source_weight,
-            "produced_runtime_load_id": produced_weight,
             "checkpoint_path": event.checkpoint_path,
         }
 

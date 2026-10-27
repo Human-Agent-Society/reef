@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from reef.core.artifact_ref import LiveWeightArtifactRef
+from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import RollbackExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.observability.operations import OperationMetrics
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
@@ -70,12 +70,7 @@ def _context(
         scenario=scenario,
         recipe="openclawrl",
         step=step,
-        source_artifact_ref=LiveWeightArtifactRef(
-            content_id="math",
-            release_id="artifact:7",
-            parent_release_id="artifact:6",
-            runtime_load_id="engine:7",
-        ),
+        source_artifact_ref=ArtifactRef(content_id="math", release_id="artifact:7", parent_release_id="artifact:6"),
         run_segment=run_segment,
         run_step=run_step,
         backend="ExampleTrainingBackend",
@@ -92,17 +87,10 @@ def _event(
 ) -> TrainingExperimentEvent:
     return TrainingExperimentEvent(
         context=_context(scenario=scenario, step=step, run_segment=run_segment, run_step=run_step),
-        produced_artifact_ref=LiveWeightArtifactRef(
-            content_id="math",
-            release_id="artifact:8",
-            parent_release_id="artifact:7",
-            runtime_load_id="engine:8",
-        ),
+        produced_artifact_ref=ArtifactRef(content_id="math", release_id="artifact:8", parent_release_id="artifact:7"),
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
         training_job_id="job-7",
-        source_runtime_load_id="engine:7",
-        produced_runtime_load_id="engine:8",
         checkpoint_path="/checkpoints/hf/7",
     )
 
@@ -161,11 +149,10 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
             "model": "Qwen/test",
             "run_segment": 0,
             "source_artifact": {
-                "kind": "live_weights",
+                "kind": "artifact",
                 "content_id": "math",
                 "release_id": "artifact:7",
                 "parent_release_id": "artifact:6",
-                "runtime_load_id": "engine:7",
             },
         },
         "backend": {},
@@ -182,8 +169,7 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     assert "selection/label" not in logged
     assert logged["reef/source_release_id"] == "artifact:7"
     assert logged["reef/produced_release_id"] == "artifact:8"
-    assert logged["reef/source_runtime_load_id"] == "engine:7"
-    assert logged["reef/produced_runtime_load_id"] == "engine:8"
+    assert not {"reef/source_runtime_load_id", "reef/produced_runtime_load_id"} & logged.keys()
     assert logged["reef/training_job_id"] == "job-7"
     assert logged["reef/checkpoint_path"] == "/checkpoints/hf/7"
     assert client.runs[0].artifacts == []

@@ -182,13 +182,11 @@ def test_worker_role_does_not_observe_versions_and_the_observer_installs_once(mo
 
 @pytest.mark.unit
 def test_chat_client_refuses_a_response_whose_stamps_include_unknown() -> None:
-    from reef.artifact import Artifact, LiveWeightArtifactRef
+    from reef.artifact import Artifact, ArtifactRef
     from reef.inference.vllm.chat import VLLMGenerateClient
 
     artifact = Artifact(
-        LiveWeightArtifactRef(
-            content_id="live", release_id="live:engine:1", parent_release_id="checkpoint", runtime_load_id="engine:1"
-        ),
+        ArtifactRef(content_id="live", release_id="live:engine:1", parent_release_id="checkpoint"),
         None,
     )
     response = {

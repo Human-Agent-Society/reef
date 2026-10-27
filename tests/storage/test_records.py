@@ -8,7 +8,8 @@ from dataclasses import replace
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from reef.artifact import ArtifactRef, LiveWeightArtifactRef
+from tests.support.consumption_receipts import write_consumption_receipt
+from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.storage.records import RecordConflict
@@ -99,12 +100,7 @@ def test_inference_data_can_record_release_id() -> None:
 @pytest.mark.unit
 def test_agent_record_persists_across_store_restarts(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
-    artifact = LiveWeightArtifactRef(
-        "artifact-1",
-        "version-1",
-        "initial",
-        runtime_load_id="weights-1",
-    )
+    artifact = ArtifactRef("artifact-1", "version-1", "initial")
     original = AgentRecord.create(
         agent_record_id="persisted",
         scenario="math",
@@ -158,7 +154,7 @@ def test_reads_and_retries_leave_store_ready_for_external_and_local_writes(tmp_p
         with pytest.raises(RecordConflict):
             first.append(replace(original, payload={"value": "changed"}))
 
-        second.record_consumption("math", frozenset({"a"}), receipt_id="skip", metadata={})
+        write_consumption_receipt(second, "math", frozenset({"a"}), receipt_id="skip", metadata={})
         assert first.get("math", "a") == original
         first.append(item("c", "math"))
         assert [record.agent_record_id for record in second.replay("math")] == ["a", "b", "c"]
@@ -276,7 +272,7 @@ def test_legacy_schema_migrates_consumption_and_backfills_utf8_body_sizes(tmp_pa
         assert records.replay("math") == (retired.item, item("live", "math"))
 
     with SQLiteRecordStore(database) as records:
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 200.0)
+        monkeypatch.setattr("time.time", lambda: 200.0)
         expected_bytes = len((payload_json + references_json + artifact_json).encode("utf-8"))
         expected_bytes += len(b'{"value":"live"}[]')
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:

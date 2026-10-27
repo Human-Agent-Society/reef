@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any
 
-from recipes.sao.slime.utils.data_builder import build_sao_rollout_data, sao_sample_row
-from recipes.sao.slime.utils.schedule import DEFAULT_CRITIC_STEPS_PER_ACTOR, SaoSchedule
+from reef.core.job_data import TrajectoryItem
+from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
+from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
 
 _logger = logging.getLogger(__name__)
 
@@ -22,6 +23,12 @@ DEFAULT_LAMBDA_ALPHA = 1.5
 # Paper: value targets use lambda=1 (Monte-Carlo returns) while the policy's
 # advantages may use the length-adaptive lambda (arXiv:2607.07508, Section 4).
 DEFAULT_CRITIC_LAMBDA = 1.0
+# Paper default: K critic updates per actor update.
+DEFAULT_CRITIC_STEPS_PER_ACTOR = 2
+ROW_SHAPE = (
+    "[source_id, tokens, loss_mask, rollout_log_probs, reward, action_mask, "
+    "producing_runtime_load_id, rollout_created_at]"
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +38,135 @@ class SaoSettings:
     length_adaptive_lambda: bool = False
     lambda_alpha: float = DEFAULT_LAMBDA_ALPHA
     critic_lambda: float = DEFAULT_CRITIC_LAMBDA
+    freeze_critic_attention: bool = False
+
+
+@dataclass(frozen=True)
+class SaoStepPlan:
+    """What one training step does: the critic updates, then the actor trains or waits.
+
+    Values: ``critic_updates`` is an integer >= 1 and ``train_actor`` a bool.
+    Purpose: :meth:`SaoSchedule.plan` makes one per rollout.
+    :meth:`SaoAlgorithm.train` runs the critic ``critic_updates`` times, then
+    the actor once if ``train_actor`` is true.
+    """
+
+    critic_updates: int
+    train_actor: bool
+
+    def __post_init__(self) -> None:
+        if self.critic_updates < 1:
+            raise ValueError("critic_updates must be >= 1")
+
+
+@dataclass(frozen=True)
+class SaoSchedule:
+    """The critic and actor cadence of one run.
+
+    Values: ``critic_steps_per_actor`` (the paper's K) is an integer >= 1 and
+    ``critic_only_steps`` an integer >= 0.
+    Purpose: :meth:`SaoAlgorithm.bind` makes one from the driver flags and
+    :meth:`SaoAlgorithm.train` asks it for each rollout's plan. For a rollout
+    index ``i >= 0``, ``plan(i)`` is ``SaoStepPlan(K, i >= critic_only_steps)``:
+    every step updates the critic K times, and the actor trains once the
+    critic-only warmup is over.
+    """
+
+    critic_steps_per_actor: int = DEFAULT_CRITIC_STEPS_PER_ACTOR
+    critic_only_steps: int = 0
+
+    def __post_init__(self) -> None:
+        if self.critic_steps_per_actor < 1:
+            raise ValueError("critic_steps_per_actor (K) must be >= 1")
+        if self.critic_only_steps < 0:
+            raise ValueError("critic_only_steps must be >= 0")
+
+    def plan(self, rollout_index: int) -> SaoStepPlan:
+        if rollout_index < 0:
+            raise ValueError("rollout_index must be >= 0")
+        return SaoStepPlan(self.critic_steps_per_actor, rollout_index >= self.critic_only_steps)
+
+
+def sao_sample_row(sample: TrajectoryItem) -> list[Any]:
+    """Shape one Reef sample into SAO's 8-element wire row.
+
+    The first five columns are the shared policy 5-tuple; SAO appends the
+    action mask (for skip-observation GAE), producing runtime load ID, and
+    creation time, which the 5-tuple has no slots for. Outbound mirror of
+    :func:`build_sao_rollout_data`.
+    """
+    return [
+        source_record_id(sample),
+        list(sample.training.get("tokens", [])),
+        list(sample.training.get("loss_mask", [])),
+        list(sample.training.get("rollout_log_probs", [])),
+        trajectory_reward(sample),
+        list(sample.training.get("action_mask", [])),
+        sample.training.get("runtime_load_id", None),
+        sample.training.get("rollout_created_at", None),
+    ]
+
+
+def build_sao_rollout_data(
+    payload: Mapping[str, Any],
+    samples: Sequence,
+    spec: SlimeAlgorithm,
+) -> dict:
+    """Validate and convert Reef SAO rows into Slime's external rollout payload.
+
+    SAO's wire row keeps the policy 5-tuple as its prefix and appends the
+    action mask, producing version, and creation time: ``[source_id, tokens,
+    loss_mask, rollout_log_probs, reward, action_mask, producing_runtime_load_id,
+    rollout_created_at]``. The shared policy builder assembles the 5-tuple
+    columns; this builder validates the appended columns and attaches them.
+    Each SAO sample is one independently scheduled rollout, so there is no
+    comparison-group barrier and ``advantages`` are never shipped — the value
+    model computes them from the critic's own forward pass inside the
+    skip-observation GAE (the spec declares them forbidden;
+    ``to_slime_rollout_data`` enforces it).
+    """
+    base_rows: list[list[Any]] = []
+    action_masks: list[list[int]] = []
+    producing_runtime_load_ids: list[str | None] = []
+    rollout_created_ats: list[float | None] = []
+
+    for sample_index, row in enumerate(samples):
+        if not isinstance(row, Sequence) or isinstance(row, str | bytes) or len(row) != 8:
+            raise ValueError(f"SAO sample {sample_index} must be {ROW_SHAPE}")
+        (
+            source_id,
+            row_tokens,
+            row_loss_mask,
+            row_log_probs,
+            reward,
+            row_action_mask,
+            producing_runtime_load_id,
+            rollout_created_at,
+        ) = row
+        row_tokens, row_loss_mask, row_log_probs, row_action_mask, reward = validate_policy_columns(
+            f"SAO sample {sample_index}",
+            row_tokens,
+            row_loss_mask,
+            row_log_probs,
+            reward,
+            action_mask=row_action_mask,
+            require_log_probs=True,
+        )
+        if row_action_mask is None:
+            raise RuntimeError("validated SAO sample has no action mask")
+
+        base_rows.append([source_id, row_tokens, row_loss_mask, row_log_probs, reward])
+        action_masks.append(row_action_mask)
+        producing_runtime_load_ids.append(
+            None if producing_runtime_load_id is None else str(producing_runtime_load_id)
+        )
+        rollout_created_ats.append(None if rollout_created_at is None else float(rollout_created_at))
+
+    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)
+    data["action_masks"] = action_masks
+    data["producing_runtime_load_ids"] = producing_runtime_load_ids
+    data["rollout_created_ats"] = rollout_created_ats
+    return data
 
 
 @register_loss_family
@@ -89,7 +225,7 @@ class SaoAlgorithm(SlimeAlgorithm):
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         if not getattr(args, "use_critic", False):
             raise RuntimeError(
-                f"{source} requires a value model; pass --use-critic on the Slime driver so the critic group is created"
+                f"{source} requires a value model; set training.options.use-critic so Slime creates the critic group"
             )
 
         eps_low = getattr(args, "eps_clip", None)
@@ -161,6 +297,12 @@ class SaoAlgorithm(SlimeAlgorithm):
                 f"(arXiv:2607.07508). Default {DEFAULT_CRITIC_LAMBDA}."
             ),
         )
+        parser.add_argument(
+            "--sao-freeze-critic-attention",
+            dest="freeze_critic_attention",
+            action="store_true",
+            help="Freeze critic self-attention, including dense models. MoE critics already freeze it by default.",
+        )
         options, remaining = parser.parse_known_args(list(arguments))
         return SaoSettings(**vars(options)), remaining
 
@@ -170,6 +312,7 @@ class SaoAlgorithm(SlimeAlgorithm):
         args.sao_length_adaptive_lambda = settings.length_adaptive_lambda
         args.sao_lambda_alpha = settings.lambda_alpha
         args.sao_critic_lambda = settings.critic_lambda
+        args.sao_freeze_critic_attention = settings.freeze_critic_attention
 
     # --- stage 2: shape row ---
 
@@ -188,8 +331,9 @@ class SaoAlgorithm(SlimeAlgorithm):
 
         Two things: (1) freeze the attention stack for an MoE value model
         (SAO Section 4) — an MoE critic trains only its experts, layernorms,
-        and value head while attention is held fixed; a dense critic trains
-        everything. (2) Project the critic-role GAE lambda: value targets use
+        and value head while attention is held fixed. Dense critics freeze
+        attention only with --sao-freeze-critic-attention.
+        (2) Project the critic-role GAE lambda: value targets use
         ``lambda_critic`` (default 1, Monte-Carlo returns) while the policy's
         advantages may use the length-adaptive lambda. Both roles run the same
         ``sao_advantages`` hook, so the separation lives entirely
@@ -205,7 +349,7 @@ class SaoAlgorithm(SlimeAlgorithm):
 
     def bind(self, config=None, *, critic_steps_per_actor=None, critic_only_steps=0):
         if config is not None and not isinstance(config, SaoSettings):
-            raise TypeError("sao bridge algorithm config must be SaoSettings")
+            raise TypeError("sao algorithm config must be SaoSettings")
         bound = SaoAlgorithm()
         if critic_steps_per_actor is None:
             critic_steps_per_actor = DEFAULT_CRITIC_STEPS_PER_ACTOR
@@ -215,7 +359,7 @@ class SaoAlgorithm(SlimeAlgorithm):
     def train(self, rollout_id, refs, *, actor_group, critic_group, resolve):
         if critic_group is None:
             raise RuntimeError(
-                "SAO requires a value model, but the bridge was booted without one; start the driver with --use-critic"
+                "SAO requires a value model, but Slime started without one; set training.options.use-critic"
             )
         plan = self._schedule.plan(rollout_id)
         critic_values = None
@@ -230,27 +374,35 @@ class SaoAlgorithm(SlimeAlgorithm):
             actor_trained=plan.train_actor,
         )
 
-    def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
-        head, sep, tail = serving_version.rpartition(":")
-        serving_step = int(tail) if sep and tail.isdigit() else None
+    def rollout_metrics(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
+        """Telemetry of one rollout's data: its producing-version spread, its queue age and its trained token share.
+
+        A sample's producing-version spread is how many versions its producing
+        version (``incarnation:sequence``) is behind the newest producing
+        version of the same serving incarnation in the data. It measures how
+        far apart the data's samples were produced, not how far they are
+        behind the weights that train on them. A sample whose version has no
+        sequence does not count.
+        """
         metrics: dict[str, Any] = {}
-        if serving_step is not None and head:
-            steps = [
-                step
-                for token in rollout_data.get("producing_runtime_load_ids") or []
-                if token is not None and (step := _runtime_load_id_sequence(str(token), head)) is not None
-            ]
-            future_steps = [step for step in steps if step > serving_step]
-            if future_steps:
-                _logger.warning(
-                    "dropping %d producing weight step(s) %s ahead of serving step %d from sao policy-lag stats",
-                    len(future_steps),
-                    sorted(set(future_steps)),
-                    serving_step,
-                )
-            lags = [serving_step - step for step in steps if step <= serving_step]
-            if lags:
-                metrics.update({"sao/policy_lag_max": max(lags), "sao/policy_lag_mean": sum(lags) / len(lags)})
+        versions = [
+            (head, int(tail))
+            for token in rollout_data.get("producing_runtime_load_ids") or []
+            if token is not None
+            for head, sep, tail in (str(token).rpartition(":"),)
+            if sep and head and tail.isdigit()
+        ]
+        if versions:
+            newest: dict[str, int] = {}
+            for incarnation, sequence in versions:
+                newest[incarnation] = max(sequence, newest.get(incarnation, sequence))
+            spreads = [newest[incarnation] - sequence for incarnation, sequence in versions]
+            metrics.update(
+                {
+                    "sao/producing_version_spread_max": max(spreads),
+                    "sao/producing_version_spread_mean": sum(spreads) / len(spreads),
+                }
+            )
         ages = [
             max(0.0, time.time() - float(value))
             for value in rollout_data.get("rollout_created_ats") or []
@@ -265,27 +417,25 @@ class SaoAlgorithm(SlimeAlgorithm):
         return metrics
 
 
-def _runtime_load_id_sequence(token: str, incarnation: str) -> int | None:
-    head, sep, tail = token.rpartition(":")
-    return int(tail) if sep and head == incarnation and tail.isdigit() else None
-
-
 def _apply_attention_freeze(critic_args: Namespace) -> None:
     """Freeze the critic's attention stack for an MoE value model (SAO Section 4).
 
     An MoE critic trains only its experts, layernorms, and value head while
-    attention is held fixed. A dense critic is the fallback: no patterns, every
-    parameter trains. The patterns ride the critic's own
+    attention is held fixed. Dense critics can opt into the same freeze;
+    otherwise every parameter trains. The patterns ride the critic's own
     ``freeze_params_name_list`` and never affect the actor.
     """
     is_moe_critic = bool(getattr(critic_args, "num_experts", 0))
-    patterns = [CRITIC_ATTENTION_PARAM_PATTERN] if is_moe_critic else []
+    explicit_freeze = getattr(critic_args, "sao_freeze_critic_attention", False)
+    patterns = [CRITIC_ATTENTION_PARAM_PATTERN] if is_moe_critic or explicit_freeze else []
     if not patterns:
         return
     # The backend forbids setting both freeze and only-train lists; if the run
     # already pins the critic to an only-train list, respect it rather than
     # crash at validation, and say so.
     if getattr(critic_args, "only_train_params_name_list", None):
+        if explicit_freeze:
+            raise ValueError("--sao-freeze-critic-attention conflicts with --only-train-params-name-list")
         _logger.warning(
             "critic has only_train_params_name_list set; skipping SAO attention freeze to avoid conflicting with it"
         )
@@ -295,7 +445,7 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
         if pattern not in existing:
             existing.append(pattern)
     critic_args.freeze_params_name_list = existing
-    _logger.info("SAO: freezing MoE critic attention via patterns %s", patterns)
+    _logger.info("SAO: freezing critic attention via patterns %s", patterns)
 
 
-__all__ = ["SaoAlgorithm", "SaoSettings"]
+__all__ = ["SaoAlgorithm", "SaoSchedule", "SaoSettings", "SaoStepPlan", "build_sao_rollout_data", "sao_sample_row"]

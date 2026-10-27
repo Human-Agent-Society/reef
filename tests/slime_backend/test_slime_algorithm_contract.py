@@ -13,8 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from recipes.sao.slime import CRITIC_ATTENTION_PARAM_PATTERN
-from recipes.sao.slime.utils import schedule as sao_runtime
+from recipes.sao.slime import CRITIC_ATTENTION_PARAM_PATTERN, SaoSchedule
 from reef.train.algos.registry import register_loss_family_ref
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, resolve_objective_paths
 from reef.train.slime_backend.loss_families import (
@@ -321,33 +320,37 @@ def test_sao_algo_owns_critic_actor_schedule() -> None:
 
 @pytest.mark.unit
 def test_sao_schedule_supports_warmup_and_validates_configuration() -> None:
-    schedule = sao_runtime.SaoSchedule(critic_steps_per_actor=2, critic_only_steps=2)
+    schedule = SaoSchedule(critic_steps_per_actor=2, critic_only_steps=2)
 
     assert schedule.plan(0).train_actor is False
     assert schedule.plan(1).train_actor is False
     assert schedule.plan(2).train_actor is True
     with pytest.raises(ValueError, match="critic_steps_per_actor"):
-        sao_runtime.SaoSchedule(critic_steps_per_actor=0)
+        SaoSchedule(critic_steps_per_actor=0)
     with pytest.raises(ValueError, match="critic_only_steps"):
-        sao_runtime.SaoSchedule(critic_only_steps=-1)
+        SaoSchedule(critic_only_steps=-1)
     with pytest.raises(ValueError, match="rollout_index"):
         schedule.plan(-1)
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_handles_policy_versions_and_clock_skew() -> None:
+def test_sao_rollout_metrics_measure_the_spread_to_the_newest_version_and_clamp_clock_skew() -> None:
     sao = resolve_loss_family("sao")
+    # The spread counts versions behind the newest producing version of the same serving incarnation,
+    # so a sample of another incarnation counts against its own newest version; a malformed ID does not count.
     rollout_data = {
-        "producing_runtime_load_ids": ["inc:3"],
-        "rollout_created_ats": [time.time() - 2.5],
-        "response_lengths": [4],
-        "loss_masks": [[1, 1, 1, 0]],
+        "producing_runtime_load_ids": ["inc:3", "inc:7", "old:1", "malformed", None],
+        "rollout_created_ats": [time.time() - 2.5, time.time() + 60.0],
+        "response_lengths": [4, 4],
+        "loss_masks": [[1, 1, 1, 0], [1, 1, 1, 1]],
     }
-    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:7")
-    assert metrics["sao/policy_lag_max"] == 4
-    assert metrics["sao/policy_lag_mean"] == 4.0
-    assert metrics["sao/effective_token_rate"] == 3 / 4
+    metrics = sao.rollout_metrics(rollout_data)
+    assert metrics["sao/producing_version_spread_max"] == 4
+    assert metrics["sao/producing_version_spread_mean"] == pytest.approx(4 / 3)
+    assert metrics["sao/effective_token_rate"] == 7 / 8
     assert metrics["sao/queue_age_s_max"] >= 2.0
+    # A creation time ahead of this clock counts as age zero, not a negative age.
+    assert 1.0 <= metrics["sao/queue_age_s_mean"] < metrics["sao/queue_age_s_max"]
 
 
 @pytest.mark.unit
@@ -648,11 +651,14 @@ def test_objective_resolution_propagates_nested_import_failures(monkeypatch, err
 
 
 @pytest.mark.unit
-def test_family_utils_modules_stay_driver_side() -> None:
-    # utils/ is the driver-side half of a family package: importable without
-    # the GPU stack, so no torch/megatron/slime imports at any scope.
+def test_family_spec_modules_stay_driver_side() -> None:
+    # The spec module is the driver-side half of a family package: the driver
+    # imports it without the GPU stack, so no torch/megatron/slime imports at
+    # any scope. Every other module of the package is worker side, reached
+    # only through objective.py's hooks.
     offenders: list[str] = []
-    for path in [p for p in _family_source_files() if p.parent.name == "utils"]:
+    for family in _BUNDLED_FAMILIES:
+        path = _family_package_dir(family) / "__init__.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             targets: list[str] = []

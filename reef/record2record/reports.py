@@ -1,10 +1,10 @@
-"""Report record sets and their batch units: reports and the inference records that they reference.
+"""Report record sets and their record set units: reports and the inference records that they reference.
 
 ``ReportRecord2Record`` reads inference and report records. It validates each report,
 filters the reports that are not training data, and forms one
 ``ReportCandidate`` per report for the pipeline to make tasks from. It then places
 each report that has tasks in its group (``ReportGrouping``) and holds singleton
-reports and ready groups in its pool, as ``ReportSet`` batch units. It owns
+reports and ready groups in its pool, as ``ReportSet`` record set units. It owns
 deduplication, group slots, consumption, and record release. No inference is in
 two candidates: a report that references an inference of another candidate ends.
 """
@@ -19,11 +19,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Self
 
-from reef.core.plugins import NoSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.pipeline_context import PipelineContext
-from reef.record2record.base import Record2Record, UnitDropReason
+from reef.record2record.base import Record2Record, Record2RecordSettings, UnitDropReason
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder
 from reef.record2record.sets import RecordSet, RecordSetUnit
 
@@ -99,10 +98,10 @@ class ReportGrouping:
         return True
 
     def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        """Return the batching group and retry slot of a report that has tasks. The default is an independent report.
+        """Return the training group and retry slot of a report that has tasks. The default is an independent report.
 
         These coordinates belong to the record stage, separately from an item's
-        comparison group. For example, TTTD batches a whole step containing
+        comparison group. For example, TTTD trains a whole step containing
         several comparison groups. A None slot uses the report ID.
         """
         return None, None
@@ -153,10 +152,10 @@ class ReportEntry:
 class ReportSet(RecordSetUnit):
     """A singleton report or a ready group.
 
-    Values: a batch unit whose record sets are the candidates of ``entries``,
+    Values: a record set unit whose record sets are the candidates of ``entries``,
     in arrival order. A singleton has one entry and no ``group_key``. A group
     has the ``group_key`` of each of its entries.
-    Purpose: the report stage holds it in its pool until a batch takes it.
+    Purpose: the report stage holds it in its pool until job data takes it.
     """
 
     entries: tuple[ReportEntry, ...]
@@ -180,7 +179,7 @@ class ReportStatus(Enum):
     FORMED = "formed"
     #: The report has tasks and waits in the pool, by itself or in a group.
     HELD = "held"
-    #: A committed batch trained on the report. Its record is releasable.
+    #: Committed job data trained on the report. Its record is releasable.
     TRAINED = "trained"
     #: The report ended without training. Its record is releasable.
     ENDED = "ended"
@@ -208,14 +207,17 @@ class ReportGroup:
 
 
 class ReportRecord2Record(Record2Record):
-    """Form report sets, and hold singleton reports and ready groups until a batch uses them.
+    """Form report sets, and hold singleton reports and ready groups until job data uses them.
 
     Invalid references raise immediately. Deduplication, consumed-source
     tracking, and group slots preserve retry behavior. Release keeps every
     live report and the inference records that it references.
 
     * ``exclusive_sources``: a report that ends owns its referenced inference records outright.
-    * ``ordered_groups``: batch ready groups in group-key order instead of arrival order.
+    * ``ordered_groups``: select ready groups in group-key order instead of arrival order.
+    * ``max_staleness``: the staleness limit of ``Record2Record``.
+
+    Config: ``Record2RecordSettings``.
     """
 
     def __init__(
@@ -225,8 +227,9 @@ class ReportRecord2Record(Record2Record):
         *,
         exclusive_sources: bool = False,
         ordered_groups: bool = False,
+        max_staleness: int = 0,
     ) -> None:
-        super().__init__(GroupKeyOrder() if ordered_groups else ArrivalOrder())
+        super().__init__(GroupKeyOrder() if ordered_groups else ArrivalOrder(), max_staleness=max_staleness)
         self.scenario = context.scenario
         self.report_type = context.report_type
         self.admitted_report_type = context.admitted_report_type
@@ -237,7 +240,7 @@ class ReportRecord2Record(Record2Record):
         self.inferences: dict[str, AgentRecord] = {}
         #: Every report the stage read, by ID, until its release.
         self.reports: dict[str, ReportState] = {}
-        #: Inference records that a committed batch consumed, until their release.
+        #: Inference records that committed job data consumed, until their release.
         self.trained_sources: set[str] = set()
         #: Inference records that ended reports own. They are released once no live report references them.
         self.owned_sources: set[str] = set()
@@ -246,8 +249,8 @@ class ReportRecord2Record(Record2Record):
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         """Every valid report trains by itself. A subclass with a grouping or settings overrides it."""
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context, ReportGrouping())
+        settings = Record2RecordSettings.parse(config, plugin_class=cls)
+        return cls(context, ReportGrouping(), max_staleness=settings.max_staleness)
 
     def context_changed(self, context: PipelineContext) -> None:
         self.admitted_report_type = context.admitted_report_type
@@ -402,12 +405,12 @@ class ReportRecord2Record(Record2Record):
     # ------------------------------------------------------------ consumption
 
     def reserved_report_ids(self) -> set[str]:
-        """Return the IDs of the reports in the reserved batch."""
+        """Return the IDs of the reports in the reserved job data."""
         return {
             entry.report_id for report_set in report_units(self.pool.reserved_units()) for entry in report_set.entries
         }
 
-    def consume(self, units: tuple[RecordSetUnit, ...], *, trained: bool) -> frozenset[str]:
+    def consume(self, units: tuple[RecordSetUnit, ...]) -> frozenset[str]:
         trained_reports: set[str] = set()
         trained_sources: set[str] = set()
         changed_groups: set[Hashable] = set()
@@ -442,7 +445,7 @@ class ReportRecord2Record(Record2Record):
         """Find completed records with no remaining live dependents.
 
         The releasable-source set is recomputed here every time: a source is
-        releasable while an ended report owns it (or a batch consumed it)
+        releasable while an ended report owns it (or job data consumed it)
         and no live report references it. Live claims and ownership both
         move between reads, so the answer is never latched at event time.
         """
@@ -465,7 +468,7 @@ class ReportRecord2Record(Record2Record):
         return self.grouping.status()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        """Unconsumed reports, excluding the reserved batch."""
+        """Unconsumed reports, excluding the reserved job data."""
         reserved = self.reserved_report_ids()
         waiting = [
             state.record for record_id, state in self.reports.items() if state.live and record_id not in reserved
@@ -480,18 +483,19 @@ class ReportRecord2Record(Record2Record):
 
 
 class ExclusiveReportRecord2Record(ReportRecord2Record):
-    """Every valid report trains by itself, and a report that ends owns its inference records outright. No config.
+    """Every valid report trains by itself, and a report that ends owns its inference records outright.
 
-    Use it when each report has its own inferences, as one scored rollout or one distillation sample does.
+    Config: ``Record2RecordSettings``. Use it when each report has its own
+    inferences, as one scored rollout or one distillation sample does.
     """
 
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, ReportGrouping(), exclusive_sources=True)
+    def __init__(self, context: PipelineContext, *, max_staleness: int = 0) -> None:
+        super().__init__(context, ReportGrouping(), exclusive_sources=True, max_staleness=max_staleness)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context)
+        settings = Record2RecordSettings.parse(config, plugin_class=cls)
+        return cls(context, max_staleness=settings.max_staleness)
 
 
 def report_candidate(record_set: RecordSet) -> ReportCandidate:

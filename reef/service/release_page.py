@@ -280,7 +280,7 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
             f'<p class="origin"><span>An agent\'s proposal <span class="id">{escape(proposal.get("id"))}</span>'
             f'</span><span>Session <span class="id">{escape(proposal.get("session"))}</span></span></p>'
         )
-    return "<p>A failure in the batch; no request asked for this step.</p>"
+    return "<p>A failure in the job data; no request asked for this step.</p>"
 
 
 def _design(metrics: Mapping[str, Any]) -> str:

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Mapping
 
-from reef.artifact.artifact import Artifact, ArtifactRef, LiveWeightArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.repository import Repository
 from reef.core.errors import ReefError
 
@@ -22,9 +21,8 @@ class ArtifactReleaseChain:
     artifact operation.
     """
 
-    def __init__(self, repository: Repository, *, process_id: str | None = None) -> None:
+    def __init__(self, repository: Repository) -> None:
         self._repository = repository
-        self._process_id = process_id or uuid.uuid4().hex
 
     @property
     def repository(self) -> Repository:
@@ -44,17 +42,6 @@ class ArtifactReleaseChain:
 
     def resolve(self, ref: ArtifactRef) -> Artifact:
         return self._repository.resolve(ref)
-
-    def prepare_live(self, *, step: int, runtime_load_id: str) -> tuple[ArtifactRef, LiveWeightArtifactRef]:
-        """Build a live child of the durable checkpoint without moving a head."""
-        expected = self.current
-        ref = LiveWeightArtifactRef(
-            content_id=f"weights:{self._process_id}:{runtime_load_id}:{step}",
-            release_id=f"live:{self._process_id}:{runtime_load_id}:{step}",
-            parent_release_id=self.checkpoint.release_id,
-            runtime_load_id=runtime_load_id,
-        )
-        return expected, ref
 
     def advance(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
         self._repository.advance_current(ref, expected=expected)

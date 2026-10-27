@@ -1,4 +1,4 @@
-"""The dispatcher: the process-wide owner of every scenario and its training threads."""
+"""The dispatcher: the process-wide owner of every scenario and its training workers."""
 
 from __future__ import annotations
 
@@ -9,34 +9,35 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Lock, Thread
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
-from reef.core.batches import TrajectoryItem
-from reef.core.errors import ScenarioBusy, ScenarioCapacityFull, UnknownScenario
+from reef.core.errors import ScenarioCapacityFull, UnknownScenario
+from reef.core.job_data import TrajectoryItem
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
-from reef.dispatcher.errors import TrainingErrors, error_text
+from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.status import TrainingStatus
-from reef.dispatcher.training_loop import DispatchedTrainingLoop, in_flight_job_marker
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
+from reef.runtime.deployment import close_runtimes
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class BackgroundThreads:
-    """The dispatcher's own threads besides the training thread and the local workers."""
+    """The dispatcher's own threads besides the local workers."""
 
     preload_thread: Thread | None = None
     metrics_thread: Thread | None = None
@@ -47,11 +48,11 @@ class Dispatcher(ScenarioLifecycle):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
-    ``TrainingRuntime``. It trains more than one only when that runtime
-    time-slices them (``concurrent_training_scenarios``).
-    :class:`ScenarioRegistry` refuses any other weight-training scenario.
-    The training thread (:class:`DispatchedTrainingLoop`) runs weight training.
-    Each local backend runs on its own worker thread (:class:`LocalTrainingWorkers`).
+    training component. It trains more than one only when the serving
+    runtime serves each scenario its own weights
+    (``shared_by_training_scenarios``). :class:`ScenarioRegistry` refuses any
+    other weight-training scenario. Each trainer that trains runs on its own
+    worker thread (:class:`LocalTrainingWorkers`).
     The dispatcher owns the runtimes of its recipe and closes them after all scenarios.
     It unloads an idle scenario (see :meth:`scenario_is_idle`) after
     ``scenario_idle_unload_seconds``. It also unloads one when scenario
@@ -104,10 +105,8 @@ class Dispatcher(ScenarioLifecycle):
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
-        training_ready = Event()
-        self.local_workers = LocalTrainingWorkers(self.registry, self.errors, training_ready, held=hold_local_cycles)
-        self.training_loop = DispatchedTrainingLoop(self.registry, self.errors, self.local_workers, training_ready)
-        self.training_status = TrainingStatus(recipe, self.registry, self.errors, self.training_loop)
+        self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
+        self.training_status = TrainingStatus(recipe, self.registry, self.errors)
         if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
@@ -179,7 +178,7 @@ class Dispatcher(ScenarioLifecycle):
         The method holds the scenario's lock, so no accept or commit runs
         meanwhile. It does these steps:
 
-        - The training thread and the local workers drop the scenario.
+        - The workers drop the scenario, and a training job it runs is cancelled.
         - The loaded instance closes.
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
@@ -192,22 +191,13 @@ class Dispatcher(ScenarioLifecycle):
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            loaded = self.registry.get_optional(scenario)
-            if (loaded is not None and loaded.is_job_reserved) or self.training_job_in_flight(scenario):
-                # The backend's job would outlive its scenario. Nothing could commit or acknowledge the job.
-                # Its marker would keep inference admission closed for every scenario on the runtime.
-                raise ScenarioBusy(
-                    f"cannot delete scenario {scenario!r} while its training job is out; "
-                    "retry once the job has committed or been rejected"
-                )
             dropped = self.registry.remove(scenario)
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)
             if dropped is not None:
                 for component_trainer in dropped.trainers:
-                    backend = component_trainer.trainer.candidate_backend
-                    if backend is not None:
-                        backend.retire_scenario(scenario)
+                    # Nothing would read the job's checkpoints once its scenario is gone.
+                    component_trainer.trainer.cancel_job()
                 dropped.close()
             self.local_workers.close_replaced_instances(scenario)
             archived = [*self.archive_scenario_state(scenario), *self.registry.archive_registration(scenario)]
@@ -215,16 +205,11 @@ class Dispatcher(ScenarioLifecycle):
         return {"scenario": scenario, "archived": archived}
 
     def scenario_loaded(self, instance: Scenario) -> None:
-        """Start the training thread when the registry loads a scenario that trains weights.
-
-        The registry calls this method on every resolution path (get_or_create,
-        require, preload), so no entry point has to start the thread itself.
-        """
-        if instance.training_runtime is not None:
-            self.training_loop.start()
+        """The registry calls this when it loads a scenario: its weight trainers resume their jobs and records."""
+        self.local_workers.resume(instance)
 
     def close_replaced(self, instance: Scenario) -> None:
-        """Close a reloaded scenario's old instance once no local cycle or dispatched turn runs on it."""
+        """Close a reloaded scenario's old instance once no local cycle runs on it."""
         self.local_workers.close_replaced(instance)
 
     def scenario_is_idle(self, current: Scenario) -> bool:
@@ -238,10 +223,10 @@ class Dispatcher(ScenarioLifecycle):
         - No reload or close of an instance waits.
 
         A weight-training scenario is never idle, because only a delete
-        releases its runtime binding. The caller holds the lock and the
+        releases its training component binding. The caller holds the lock and the
         cycle lock of the scenario, so no record or cycle starts meanwhile.
         """
-        if current.training_runtime is not None or not current.store.durable:
+        if current.training_component is not None or not current.store.durable:
             return False
         if current.operations.active_count() > 0:
             return False
@@ -283,24 +268,6 @@ class Dispatcher(ScenarioLifecycle):
         while not self.local_workers.closed.wait(min(idle_seconds, self.idle_unload_check_seconds)):
             for name in self.registry.unused_since(time.monotonic() - idle_seconds):
                 self.unload_if_idle(name)
-
-    def training_job_in_flight(self, scenario: str) -> bool:
-        """Whether the training runtime's durable job marker names a job of ``scenario`` still out.
-
-        A loaded instance knows its own reserved batch. The marker also covers
-        a scenario that was rebuilt after a failed turn, and a scenario that
-        is not loaded yet. The backend can still hold the job of each one.
-        Every job's marker names the scenario that owns the job.
-        """
-        try:
-            marker = in_flight_job_marker(self.recipe.training_runtime)
-        except Exception as exc:
-            # A runtime that does not answer cannot say whether a job is out; a blind delete could orphan one.
-            raise ScenarioBusy(
-                f"cannot delete scenario {scenario!r}: the training runtime does not say whether its job is out "
-                f"({error_text(exc)}); retry once it answers"
-            ) from exc
-        return marker is not None and marker.get("scenario") == scenario
 
     def archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
@@ -360,8 +327,8 @@ class Dispatcher(ScenarioLifecycle):
             pipeline = current.trainer.pipeline
             return {
                 "scenario": scenario,
-                # The key keeps its name for callers; the value names the recipe's task-to-batch stage.
-                "processor": type(pipeline.task2batch).__name__,
+                # The key keeps its name for callers; the value names the recipe's task-to-job stage.
+                "processor": type(pipeline.task2job).__name__,
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
@@ -439,16 +406,36 @@ class Dispatcher(ScenarioLifecycle):
             if ingest.append_trajectories(current, trajectories):
                 self.process_accepted_records(current)
 
+    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
+        """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's imported tasks, then wake
+        their consumers. Return the published tasks (``ingest.append_tasks``)."""
+        if not directories:
+            raise ValueError("an upload must hold one or more tasks")
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            published = ingest.append_tasks(current, directories, split)
+            self.local_workers.wake(current)
+            return published
+
+    def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
+        """The scenario's imported tasks in publication order, each with whether it trained."""
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            store = current.store.tasks.open(IMPORTED_TASK_STORE)
+            trained = store.trained_task_names()
+            return tuple((task, task.name in trained) for task in store.tasks())
+
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""
-        # Every component's trainer sees the record. A dispatched backend wakes the
-        # training thread, and a local backend wakes its own worker. A trainer
-        # without a backend only advances its record cursor, here.
+        # Every component's trainer sees the record. A trainer that trains wakes its
+        # worker. A trainer that trains nothing only advances its record cursor, here.
         self.local_workers.wake(current)
-        if current.training_runtime is not None:
-            return
         for component_trainer in current.trainers:
-            if component_trainer.trainer.candidate_backend is None:
+            if not component_trainer.trainer.trains:
                 current.prepare_training_step(component_trainer.component)
 
     # -- Preload ---------------------------------------------------------
@@ -489,9 +476,6 @@ class Dispatcher(ScenarioLifecycle):
             metrics.update(current.operations.snapshot())
             metrics["training/failed_attempts_total"] = self.errors.failure_count(current.name)
             metrics["training/error"] = int(self.errors.has_error(current.name))
-            if current.training_runtime is not None:
-                storage_status, _ = self.training_loop.drain_state()
-                metrics["training/checkpoint_storage_blocked"] = int(storage_status is not None)
             current.trainer.pipeline.experiment_logger.log(metrics, namespace="operations")
         except Exception as exc:
             logger.warning("operational metrics unavailable for scenario %r (%s)", current.name, type(exc).__name__)
@@ -514,7 +498,7 @@ class Dispatcher(ScenarioLifecycle):
         The rows of such a cycle wait for the next start. A stopping service
         removes its routes before it closes this dispatcher. A harness
         cycle's model calls use those routes. A call that fails comes back as
-        a skip, and a skip would consume the batch.
+        a skip, and a skip would consume the job data.
         """
         self.local_workers.stop()
 
@@ -523,12 +507,10 @@ class Dispatcher(ScenarioLifecycle):
         if self.local_workers.closed.is_set():
             return
         local_workers = self.local_workers.begin_close()
-        self.training_loop.ready.set()
         if self.background_threads.preload_thread is not None:
             self.background_threads.preload_thread.join()
         if self.background_threads.idle_unload_thread is not None:
             self.background_threads.idle_unload_thread.join()
-        self.training_loop.join()
         for worker in local_workers:
             worker.thread.join()
         if self.background_threads.metrics_thread is not None:
@@ -548,14 +530,7 @@ class Dispatcher(ScenarioLifecycle):
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        if self.recipe.runtime is not None:
-            self.recipe.runtime.pause_admission()
-        for component in (self.recipe.training_runtime, self.recipe.runtime):
-            if component is not None:
-                try:
-                    component.shutdown()
-                except BaseException as exc:
-                    errors.append(exc)
+        errors.extend(close_runtimes(self.recipe.training_component, self.recipe.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:

@@ -9,9 +9,7 @@ from typing import Any
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.sft.processor import SFTRecord2Record, SFTTasks
-from reef.task2batch import DistillBatches
-from reef.train.algos import StepScheduling
+from reef.recipe.sft.processor import SFTJobData, SFTRecord2Record, SFTTasks
 from reef.train.pipeline import PipelineSpec
 
 
@@ -24,16 +22,20 @@ class SFTRecipe(WeightTrainingRecipe):
     an imported dataset example. SDFT uses the same report contract. Thus the
     two methods can train on the same reports.
 
-    The recipe binds the objective, the step schedule, and the report
-    contract. Its stages are ``SFTRecord2Record``, ``SFTTasks``, and
-    ``DistillBatches``. The ``pipeline`` section of the deployment configures
+    The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTTasks``, and
+    ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTTasks``
+    renders each one with every agent turn trained, except ``is_copied_context`` steps. The ``pipeline`` section of the deployment configures
     the stages:
 
     * ``pipeline.record2task.config``: ``tokenizer_path`` (required),
       ``target``, and ``max_tokens``.
-    * ``pipeline.task2batch.config.buffer_size``: the most samples that wait
-      for a batch. A batch holds the Slime ``--global-batch-size`` of
-      samples, the samples in one optimizer step.
+    * ``pipeline.task2job.config.job_samples`` (required): the fewest
+      samples of one job. Slime cuts a job's data into optimizer steps of
+      ``--global-batch-size`` samples.
+    * ``pipeline.task2job.config.buffer_size``: the most samples that wait
+      for a job.
+    * ``recipe.config.job_parameters``: the parameters of every job, for
+      example ``scheduling.packing_length`` to count steps in packs of tokens.
 
     Configure the optimizer in ``training.options``.
     """
@@ -47,15 +49,13 @@ class SFTRecipe(WeightTrainingRecipe):
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
         return WeightTrainingSpec(
-            # The Slime bridge does not import this recipe. A dotted reference imports the objective there.
+            # The Slime component does not import this recipe. A dotted reference imports the objective there.
             objective="reef.recipe.sft:SftObjective",
-            # Each sample is one unit. The backend sets the step size.
-            scheduling=StepScheduling(unit="sample"),
         )
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2batch=DistillBatches)
+        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2job=SFTJobData)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

@@ -44,7 +44,6 @@ from reef.artifact.artifact import (
     ArtifactRef,
     ArtifactSourceError,
     ArtifactValidator,
-    LiveWeightArtifactRef,
 )
 from reef.artifact.composite import compose_release
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
@@ -93,7 +92,6 @@ __all__ = [
     "GitVersionSource",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
-    "LiveWeightArtifactRef",
     "PEFTValidator",
     "RegistrationAwareRepositoryBackendFactory",
     "ReleaseNotRestorable",

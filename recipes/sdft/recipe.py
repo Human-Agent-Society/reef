@@ -11,8 +11,7 @@ from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.task2batch import DistillBatches
-from reef.train.algos import StepScheduling
+from reef.task2job import DistillJobData
 from reef.train.pipeline import PipelineSpec
 
 
@@ -28,11 +27,11 @@ class SDFTRecipe(WeightTrainingRecipe):
 
     The recipe binds the objective, the step schedule, and the report
     contract. Its stages are ``ExclusiveReportRecord2Record``, ``SDFTTasks``, and
-    ``DistillBatches``; the deployment's ``pipeline`` section gives their config.
+    ``DistillJobData``; the deployment's ``pipeline`` section gives their config.
     ``pipeline.record2task.config`` takes ``tokenizer_path`` (required: the
     served model's tokenizer renders the teacher prompt),
-    ``max_teacher_tokens``, and ``context_template``. A batch holds the Slime
-    driver's ``--global-batch-size`` of samples; each sample is its own DP
+    ``max_teacher_tokens``, and ``context_template``. A batch holds Slime's
+    ``--global-batch-size`` of samples; each sample is its own DP
     unit.
 
     Objective settings such as the KL direction belong to the training
@@ -49,15 +48,11 @@ class SDFTRecipe(WeightTrainingRecipe):
     def training_spec(cls) -> WeightTrainingSpec:
         return WeightTrainingSpec(
             objective="sdft",
-            # Each sample is its own DP unit; the backend's configured step size applies.
-            scheduling=StepScheduling(unit="sample"),
         )
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(
-            record2record=ExclusiveReportRecord2Record, record2task=SDFTTasks, task2batch=DistillBatches
-        )
+        return PipelineSpec(record2record=ExclusiveReportRecord2Record, record2task=SDFTTasks, task2job=DistillJobData)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

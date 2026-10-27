@@ -9,11 +9,11 @@ shared identities and wire types defined here.
 
 The admission bar is concrete: a type belongs here only when at least two
 packages that do not depend on each other need it, and it carries no I/O.
-``batches`` and ``evaluation`` hold the values and candidate contracts shared
+``job_data`` and ``evaluation`` hold the values and candidate contracts shared
 by runtimes and training; ``requirements`` validates training-request requirements
 and reads their release-chain records.
 ``training_request`` validates TRAIN bodies at admission and holds the queued
-instruction carried by a training batch.
+instruction carried by a job's data.
 Anything with one consumer stays in that consumer — the ``x-reef-*`` header
 parsing and the HTTP report envelope live in ``service/wire.py`` — while the
 typed report *body* is ``reports/`` here because four packages parse it.
@@ -25,7 +25,7 @@ so identity can be shared without pulling in storage, and
 ``tests/contributing/test_dependency_boundaries.py``.
 """
 
-from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans
+from reef.core.artifact_ref import ArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
@@ -33,7 +33,6 @@ from reef.core.reports import ReportBase, ReportValidationError
 __all__ = [
     "AgentRecord",
     "ArtifactRef",
-    "LiveWeightArtifactRef",
     "ReefError",
     "ReportBase",
     "ReportValidationError",

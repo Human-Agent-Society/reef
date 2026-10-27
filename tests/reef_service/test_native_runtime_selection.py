@@ -1,265 +1,96 @@
-"""Native runtime construction respects the separately selected inference implementation."""
+"""The HTTP service builds Slime's training component, then the runtime that serves its checkpoints."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
-from tests.runtime.test_executor_runtime import Coordinator
+from tests.support.runtime_stubs import StubTrainingComponent
 
-from reef.inference.http import InferenceProxyRuntime
-from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.inference.sglang.runtime import SGLangInferenceRuntime
-from reef.inference.vllm.chat import VLLMInferenceHandler
-from reef.inference.vllm.runtime import VLLMInferenceRuntime
-from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, RuntimeRegistry
-from reef.service.assembly import _connect_training_runtime
+from reef.inference.null import NullInferenceRuntime
+from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory
+from reef.service.assembly import connect_training_component
 from reef.service.deploy.service_config import ServiceConfig
-from reef.train.runtime import ExecutorTrainingRuntime
-from reef.train.slime_backend.runtime import SlimeTrainingRuntime
+
+# The Slime component module imports Ray; the base installation has none.
+slime_component = pytest.importorskip("reef.train.slime_backend.component", exc_type=ImportError)
 
 
-@pytest.mark.parametrize("failure", [TimeoutError("outer wait expired"), ValueError("invalid job"), None])
-def test_slime_job_result_and_outer_timeout_keep_transport_semantics(monkeypatch, failure):
-    from reef.runtime.executor import connection
-    from reef.runtime.executor.ray import RayExecutor
-    from reef.runtime.interfaces import TrainingJobResult
+class ClosingComponent(StubTrainingComponent):
+    """A stub component that records whether the factory released it."""
 
-    actor = object()
-    monkeypatch.setattr(connection.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(
-        connection,
-        "_require_ray",
-        lambda: SimpleNamespace(
-            is_initialized=lambda: True,
-            get_actor=lambda *args, **kwargs: actor,
-            exceptions=SimpleNamespace(RayActorError=RuntimeError),
-        ),
-    )
-    calls = []
-    result = TrainingJobResult(
-        outcome="checkpoint", runtime_load_id="v1", training_job_id="job", checkpoint_path="checkpoint"
-    )
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
 
-    def rpc(self, rank, method, *, args, timeout):
-        calls.append((rank, method, args, timeout))
-        if failure is not None:
-            raise failure
-        return result
+    def close(self) -> None:
+        self.closed = True
+        super().close()
 
-    monkeypatch.setattr(RayExecutor, "rpc", rpc)
-    runtime = SlimeTrainingRuntime(train_timeout_s=43200, batch_size=1)
+
+@pytest.fixture
+def created(monkeypatch):
+    """The settings each Slime component was created from, and the components, without Ray or GPUs."""
+    calls: list[tuple[slime_component.SlimeSettings, ClosingComponent]] = []
+
+    def create(settings):
+        component = ClosingComponent()
+        calls.append((settings, component))
+        return component
+
+    monkeypatch.setattr(slime_component, "create_slime_component", create)
+    return calls
+
+
+def training_settings(**changes) -> ServiceConfig:
+    values = {
+        "recipe": "recipes.sao.recipe:SAORecipe",
+        "training_backend": "slime",
+        "inference_backend": "none",
+        "inference_num_gpus": 0,
+        "ray_address": "ray://head:10001",
+        "ray_namespace": "training-cluster",
+        "train_timeout_s": 14400,
+        "training_backend_options": {"global-batch-size": 8},
+        "execution_config": {"execution": {"training": {"backend": "ray", "options": {"queue": "gpu"}}}},
+    }
+    return ServiceConfig(**{**values, **changes})
+
+
+def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
+    component, runtime = connect_training_component(training_settings(), model_path="model", loss_family="sao")
     try:
-        if failure is None:
-            assert runtime.execute_training_job({"job": "payload"}) is result
-        else:
-            with pytest.raises(type(failure)) as error:
-                runtime.execute_training_job({"job": "payload"})
-            if isinstance(failure, TimeoutError):
-                assert "training.timeout-s" in str(error.value)
-                assert str(failure) in str(error.value)
-                assert error.value.__cause__ is failure
-            else:
-                assert error.value is failure
-        assert len(calls) == 1
-        assert calls[0][:3] == (0, "execute_training_job", ({"job": "payload"},))
-        assert calls[0][3] == 43200
+        [(settings, built)] = created
+        assert component is built
+        assert isinstance(runtime, NullInferenceRuntime)
+        assert settings.arguments == ("--global-batch-size=8", "--rollout-num-gpus=0")
+        assert (settings.loss_family, settings.recipe) == ("sao", "recipes.sao.recipe:SAORecipe")
+        assert (settings.ray_address, settings.namespace) == ("ray://head:10001", "training-cluster")
+        assert settings.train_timeout_s == 14400.0
+        # The deployment's execution section selects the workers' executors.
+        assert settings.execution == {"execution": {"training": {"backend": "ray", "options": {"queue": "gpu"}}}}
     finally:
         runtime.shutdown()
+        component.close()
 
 
-def test_slime_runtime_uses_the_selected_inference_factory(monkeypatch):
-    coordinator = Coordinator()
-    connections = []
-
-    def connect(**kwargs):
-        connections.append(kwargs)
-        return coordinator
-
-    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", connect)
-    selected = InferenceProxyRuntime(base_url="http://other-inference")
-    received = []
-
-    class OtherInference(RuntimeFactory):
-        kind = "other"
-
-        def __call__(self, config, model_path, recipe_config, environ):
-            received.append((config, model_path, recipe_config))
-            return selected
-
-    monkeypatch.setattr("reef.runtime.deployment._runtime_kinds", {"other": OtherInference()})
-    training, inference = RuntimeRegistry().build(
-        {
-            "type": "slime_training",
-            "inference_runtime": "other",
-            "actor_name": "separate-trainer",
-            "namespace": "training-cluster",
-            "train_timeout_s": 14400,
-            "batch_size": 4,
-        },
-        model_path="model",
-        recipe_config={"method": "custom"},
-        environ={},
-    )
-    assert isinstance(training, SlimeTrainingRuntime)
-    assert training.batch_size == 4
-    assert inference is selected
-    assert received[0][0]["control"] is coordinator
-    assert received[0][1:] == ("model", {"method": "custom"})
-    assert connections[0]["actor_name"] == "separate-trainer"
-    assert connections[0]["namespace"] == "training-cluster"
-    assert connections[0]["train_timeout_s"] == 14400
-    assert "inference_handler_factory" not in received[0][0]
-    inference.shutdown()
-    assert coordinator.shutdown_events == []
-    training.shutdown()
-    assert coordinator.shutdown_events == ["shutdown"]
+def test_slime_requires_a_ray_cluster_before_creating_the_component(created, monkeypatch):
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    with pytest.raises(RuntimeConfigError, match=r"training\.ray-address or RAY_ADDRESS"):
+        connect_training_component(training_settings(ray_address=None), model_path="model", loss_family="sao")
+    assert created == []
 
 
-def test_sglang_runtime_selects_its_native_request_handler(monkeypatch):
-    coordinator = Coordinator()
-    requests = []
-    handler = InferenceProxyRuntime(base_url="http://router").inference_handler
+def test_a_serving_factory_that_builds_no_inference_runtime_releases_both_components(created, monkeypatch):
+    built: list[ClosingComponent] = []
 
-    def from_config(cls, upstream_url, *, model_path, timeout_s, **config):
-        requests.append((upstream_url, model_path, timeout_s, config))
-        return handler
-
-    monkeypatch.setattr(SGLangInferenceHandler, "from_config", classmethod(from_config))
-    runtime = RuntimeRegistry().build(
-        {
-            "type": "sglang",
-            "control": coordinator,
-            "inference_timeout_s": 42,
-            "inference_handler_config": {"trust_remote_code": True},
-        },
-        model_path="selected-model",
-        environ={},
-    )
-    assert isinstance(runtime, SGLangInferenceRuntime)
-    assert runtime.inference_handler is handler
-    assert requests == [("http://router", "selected-model", 42, {"trust_remote_code": True})]
-    assert not runtime.inference_admission_status["open"]
-    runtime.shutdown()
-    assert coordinator.shutdown_events == []
-
-
-def test_vllm_runtime_selects_its_native_request_handler(monkeypatch):
-    coordinator = Coordinator()
-    requests = []
-    handler = InferenceProxyRuntime(base_url="http://router").inference_handler
-
-    def from_config(cls, upstream_url, *, model_path, timeout_s, **config):
-        requests.append((upstream_url, model_path, timeout_s, config))
-        return handler
-
-    monkeypatch.setattr(VLLMInferenceHandler, "from_config", classmethod(from_config))
-    runtime = RuntimeRegistry().build(
-        {
-            "type": "vllm",
-            "control": coordinator,
-            "inference_timeout_s": 42,
-            "inference_handler_config": {"tool_call_parser": "hermes"},
-        },
-        model_path="selected-model",
-        environ={},
-    )
-    assert isinstance(runtime, VLLMInferenceRuntime)
-    assert runtime.inference_handler is handler
-    assert requests == [("http://router", "selected-model", 42, {"tool_call_parser": "hermes"})]
-    assert not runtime.inference_admission_status["open"]
-    runtime.shutdown()
-    assert coordinator.shutdown_events == []
-
-
-def test_automatic_service_assembly_uses_both_native_runtime_implementations(monkeypatch):
-    coordinator = Coordinator()
-    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", lambda **kwargs: coordinator)
-    handler = InferenceProxyRuntime(base_url="http://router").inference_handler
-    received = []
-
-    def from_config(cls, upstream_url, *, model_path, timeout_s, **config):
-        received.append(config)
-        return handler
-
-    monkeypatch.setattr(SGLangInferenceHandler, "from_config", classmethod(from_config))
-    settings = ServiceConfig(
-        recipe="recipe",
-        training_backend="slime",
-        inference_backend="sglang",
-        ray_address="auto",
-        inference_handler_config={"trust_remote_code": True},
-        training_backend_options={"global-batch-size": 8},
-    )
-    training, inference = _connect_training_runtime(settings, model_path="model")
-    try:
-        assert isinstance(training, SlimeTrainingRuntime)
-        # The deployment reads the batch size from the training options and gives it to the runtime.
-        assert training.batch_size == 8
-        assert isinstance(inference, SGLangInferenceRuntime)
-        assert inference.inference_handler is handler
-        assert received == [{"trust_remote_code": True}]
-    finally:
-        inference.shutdown()
-        training.shutdown()
-
-
-def test_slime_runtime_requires_explicit_inference_selection_before_connecting(monkeypatch):
-    def connect(**kwargs):
-        pytest.fail("invalid runtime configuration must not connect to Ray")
-
-    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", connect)
-    with pytest.raises(RuntimeConfigError, match="inference_runtime"):
-        RuntimeRegistry().build({"type": "slime_training"}, model_path="model", environ={})
-
-
-def test_slime_runtime_requires_a_batch_size_before_connecting(monkeypatch):
-    def connect(**kwargs):
-        pytest.fail("invalid runtime configuration must not connect to Ray")
-
-    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", connect)
-    with pytest.raises(RuntimeConfigError, match="batch_size"):
-        RuntimeRegistry().build(
-            {"type": "slime_training", "inference_runtime": "sglang"}, model_path="model", environ={}
-        )
-
-
-def test_failed_inference_construction_releases_the_training_connection(monkeypatch):
-    coordinator = Coordinator()
-    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", lambda **kwargs: coordinator)
-    with pytest.raises(RuntimeConfigError, match="unknown runtime type"):
-        RuntimeRegistry().build(
-            {"type": "slime_training", "inference_runtime": "unavailable", "batch_size": 1},
-            model_path="model",
-            environ={},
-        )
-    assert coordinator.shutdown_events == ["shutdown"]
-
-
-def test_an_inference_factory_returning_a_pair_releases_all_connections(monkeypatch):
-    coordinator = Coordinator()
-    other_coordinator = Coordinator()
-    stopped = []
-    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", lambda **kwargs: coordinator)
-
-    class OtherInference(InferenceProxyRuntime):
-        def shutdown(self):
-            stopped.append("inference")
-            super().shutdown()
-
-    class WrongInferenceFactory(RuntimeFactory):
-        kind = "wrong-pair"
+    class WrongServingFactory(RuntimeFactory):
+        kind = "none"
 
         def __call__(self, config, model_path, recipe_config, environ):
-            return ExecutorTrainingRuntime(other_coordinator, batch_size=1), OtherInference(base_url="http://other")
+            built.append(ClosingComponent())
+            return built[-1]
 
-    monkeypatch.setattr("reef.runtime.deployment._runtime_kinds", {"wrong-pair": WrongInferenceFactory()})
-    with pytest.raises(RuntimeConfigError, match="must return an InferenceRuntime"):
-        RuntimeRegistry().build(
-            {"type": "slime_training", "inference_runtime": "wrong-pair", "batch_size": 1},
-            model_path="model",
-            environ={},
-        )
-    assert coordinator.shutdown_events == ["shutdown"]
-    assert other_coordinator.shutdown_events == ["shutdown"]
-    assert stopped == ["inference"]
+    monkeypatch.setattr("reef.runtime.deployment._runtime_kinds", {"none": WrongServingFactory()})
+    with pytest.raises(TypeError, match="built a training component: a runtime serves"):
+        connect_training_component(training_settings(), model_path="model", loss_family="sao")
+    [(_, component)] = created
+    assert component.closed and built[0].closed

@@ -27,6 +27,7 @@ from reef.harness.client.tasks import (
     bound_agent,
     episode_reward,
     main,
+    rewards_of,
     task_identity,
 )
 
@@ -594,3 +595,14 @@ def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef:
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-tag-batch"] == "tasks:generated-tasks:1" and headers["x-reef-tag-task_use"] == "use-t1-0"
     assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == labels and ran.is_reported
+
+
+def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
+    def episode(reward: float | None, error: str = "") -> TaskEpisode:
+        return TaskEpisode(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
+
+    assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
+    assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)
+    assert (
+        episode(None, "the sandbox is gone").is_infrastructure_failure and not episode(0.0).is_infrastructure_failure
+    )

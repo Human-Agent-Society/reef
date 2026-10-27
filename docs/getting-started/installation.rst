@@ -36,7 +36,7 @@ methods under ``recipes/``, and the harness evolution demo under
 GPU image, for weight training
 ------------------------------
 
-Weight training runs Ray, a Slime driver, and Reef together, against
+Weight training runs Ray, Slime, SGLang, and Reef together, against
 CUDA-specific builds of torch, SGLang, Megatron-Core, and FlashAttention. The
 supported way to get them is the image:
 

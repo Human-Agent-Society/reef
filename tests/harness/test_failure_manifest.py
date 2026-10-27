@@ -13,7 +13,7 @@ import pytest
 from tests.reef_service.test_harness_recipe import MODEL, RULES, batch, evaluate, make_binary, run_backend_step
 from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
-from reef.artifact import LiveWeightArtifactRef
+from reef.artifact import ArtifactRef
 from reef.evaluation.harness import FailureObservation
 from reef.harness.adapters import get_adapter
 from reef.storage.commits import CommitRecord
@@ -235,8 +235,8 @@ def test_manifest_recovers_through_the_commit_history(tmp_path: Path) -> None:
             CommitRecord(
                 scenario="demo",
                 step=1,
-                artifact_ref=LiveWeightArtifactRef(
-                    content_id="live:1", release_id="live:demo:w1:1", parent_release_id="base", runtime_load_id="w1"
+                artifact_ref=ArtifactRef(
+                    content_id="content:1", release_id="release:demo:1", parent_release_id="base"
                 ),
                 checkpoint=False,
                 algorithm_state=dict(first.state),
@@ -261,11 +261,10 @@ def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Pa
             "scenario": "demo",
             "step": 1,
             "artifact_ref": {
-                "kind": "live_weights",
-                "content_id": "live:1",
-                "release_id": "live:demo:w1:1",
+                "kind": "artifact",
+                "content_id": "content:1",
+                "release_id": "release:demo:1",
                 "parent_release_id": "base",
-                "runtime_load_id": "w1",
             },
             "checkpoint": False,
             "algorithm_state": {"steps": 1, "entries": []},

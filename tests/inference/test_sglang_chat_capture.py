@@ -9,7 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
-from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef
 from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.runtime.interfaces import inference_aborted
@@ -235,12 +235,7 @@ def _artifact(tmp_path) -> Artifact:
 
 def _live_artifact() -> Artifact:
     return Artifact(
-        LiveWeightArtifactRef(
-            content_id="live-test",
-            release_id="live:engine:6",
-            parent_release_id="checkpoint",
-            runtime_load_id="engine:6",
-        ),
+        ArtifactRef(content_id="live-test", release_id="live:engine:6", parent_release_id="checkpoint"),
         None,
     )
 

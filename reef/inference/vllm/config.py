@@ -56,9 +56,6 @@ class VLLMConfig(EngineConfig):
     #: Where each engine's port probe starts on its host.
     engine_port_base: int = 15000
     env_vars: dict[str, str] = field(default_factory=dict)
-    offload: bool = False
-    shared_gpus: int = 0
-    check_weights: bool = False
     pause_mode: str = "in_place"
     health_enabled: bool = False
     health_interval: float = 30
@@ -86,8 +83,6 @@ class VLLMConfig(EngineConfig):
             raise ValueError(
                 "serving more than one vLLM engine requires router_url, the endpoint balancing across them"
             )
-        if self.check_weights:
-            raise ValueError("vLLM has no weights checker; set check_weights to false")
         options = {key.replace("-", "_"): value for key, value in self.options.items()}
         if reserved := RESERVED_OPTIONS.intersection(options):
             raise ValueError(f"Reef derives these vLLM options from its own settings: {sorted(reserved)}")

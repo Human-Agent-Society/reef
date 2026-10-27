@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.records_types import AgentRecord
 from reef.record2record import JudgedSet, RecordSet
 from reef.record2task.base import ImmediateRecord2Task, TaskResult
