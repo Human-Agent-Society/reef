@@ -598,7 +598,7 @@ class OwnJobData(RecordingJobData):
     def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
         return self.samples
 
-    def own_job_data_done(self) -> frozenset[str]:
+    def own_job_data_submitted(self) -> frozenset[str]:
         self.batches_done += 1
         self.samples = None
         return frozenset({f"own:{self.batches_done}"})

@@ -26,6 +26,7 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
@@ -34,7 +35,7 @@ from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.jobs import JobLoop, TrainingMetricsSelectPlugin
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TrainStepResult, TrajectoryItem
@@ -497,9 +498,8 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
     buffer_size, max_job_samples, message
 ) -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        built = threshold_pipeline(context, buffer_size=buffer_size)
-        built.task2job.max_job_samples = max_job_samples
-        return built
+        stage = ThresholdJobData(context, buffer_size, None, max_job_samples=max_job_samples)
+        return threshold_pipeline(context, task2job=stage)
 
     with pytest.raises(PluginConfigError, match=message):
         Trainer.build(
@@ -854,7 +854,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
                 scenario,
                 records,
                 pipeline_factory=grouped_policy_pipeline,
-                job_loop=JobLoop(component, self.job_plan(), TrainingMetricsSelectPlugin(), scenario=scenario),
+                job_loop=JobLoop(component, self.job_plan(), AlwaysSelectCheckpointPlugin(), scenario=scenario),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
                 default_job_samples=1,

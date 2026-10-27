@@ -218,7 +218,7 @@ Runtime contracts have no direct imports of concrete inference or training
 code; the deployment registry resolves the selected factory explicitly.
 
 In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
-``JobLoop``, the recipe's ``JobPlan`` and the ``CheckpointCandidate``;
+``JobLoop``, the recipe's ``JobPlan`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
 definitions; and ``backend.py`` holds ``CandidateBackend``, the candidate

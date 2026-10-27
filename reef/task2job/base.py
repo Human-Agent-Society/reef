@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, TrainDataItem
+from reef.core.job_data import JobData, JobOutcome, TrainDataItem
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
@@ -67,18 +67,21 @@ class Task2JobSettings(PluginSettings):
 class Task2Job(ABC, Plugin):
     """The task-to-job stage: bound the sample buffer, and shape the samples of the selected record set units into one job's data.
 
-    Values: ``job_samples`` is None or a positive int: the configured value,
-    or else ``context.default_job_samples``. It is None only for a trainer
-    that trains nothing. ``buffer_size`` is None or a positive int: the
-    configured size, or else ``DEFAULT_BUFFER_JOBS * job_samples``; None holds
-    every sample. ``max_job_samples`` is None or a positive int, the most
-    samples one job's data may hold; None sets no limit. The constructor
-    refuses other values.
+    Values: for a stage that ``trains_own_job_data_only``, ``job_samples`` and
+    ``buffer_size`` are None: its jobs are its own samples, which wait in the
+    stage, not in a buffer. For any other stage, ``job_samples`` is None or a
+    positive int: the configured value, or else ``context.default_job_samples``;
+    it is None only for a trainer that trains nothing. ``buffer_size`` is None
+    or a positive int: the configured size, or else ``DEFAULT_BUFFER_JOBS *
+    job_samples``; None holds every sample. ``max_job_samples`` is None or a
+    positive int, the most samples one job's data may hold; None sets no limit.
+    ``buffer_size`` is at least ``job_samples``, and ``job_samples`` at most
+    ``max_job_samples``, when both are set. The constructor refuses other
+    values with ``PluginConfigError``.
     Purpose: the pipeline is ready when its held samples are at least
     ``job_samples``, and it keeps at most ``buffer_size`` samples of held
     record sets. The pipeline takes whole record set units, so one job's data
-    can hold more than ``job_samples``. The trainer refuses a ``buffer_size``
-    below ``job_samples`` and a ``job_samples`` above ``max_job_samples``.
+    can hold more than ``job_samples``.
     A recipe implements ``make_job_data``. It runs on the trainer thread
     without network or model calls. The class attributes declare what the
     pipeline and the trainer need to know about the recipe's job data.
@@ -97,24 +100,54 @@ class Task2Job(ABC, Plugin):
     #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
     #: when no trainer of the scenario accepts uploaded trajectories.
     accepts_trajectories: bool = False
+    #: Whether every job of the stage trains only the samples it makes itself (``own_job_data``), so it has no
+    #: buffer and no ``job_samples``.
+    trains_own_job_data_only: bool = False
 
-    def __init__(self, context: PipelineContext, buffer_size: int | None, job_samples: int | None) -> None:
+    def __init__(
+        self,
+        context: PipelineContext,
+        buffer_size: int | None,
+        job_samples: int | None,
+        *,
+        max_job_samples: int | None = None,
+    ) -> None:
         require_optional_positive(buffer_size, "buffer_size")
         require_optional_positive(job_samples, "job_samples")
+        require_optional_positive(max_job_samples, "max_job_samples")
         self.context = context
         self.scenario = context.scenario
-        #: The fewest samples one job trains; None only for a trainer that trains nothing.
-        self.job_samples = context.default_job_samples if job_samples is None else job_samples
+        stage = type(self).__name__
+        #: The fewest samples one job trains; None for a stage that trains only its own job data, and for a
+        #: trainer that trains nothing.
+        self.job_samples: int | None
         #: The most samples that the buffer holds; None holds every sample.
         self.buffer_size: int | None
-        if buffer_size is not None:
-            self.buffer_size = buffer_size
-        elif self.job_samples is not None:
-            self.buffer_size = DEFAULT_BUFFER_JOBS * self.job_samples
-        else:
+        if self.trains_own_job_data_only:
+            if buffer_size is not None or job_samples is not None:
+                raise PluginConfigError(
+                    f"{stage} trains only its own job data: it takes no buffer_size or job_samples"
+                )
+            self.job_samples = None
             self.buffer_size = None
+        else:
+            self.job_samples = context.default_job_samples if job_samples is None else job_samples
+            if buffer_size is not None:
+                self.buffer_size = buffer_size
+            elif self.job_samples is not None:
+                self.buffer_size = DEFAULT_BUFFER_JOBS * self.job_samples
+            else:
+                self.buffer_size = None
         #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed unit sets it.
-        self.max_job_samples: int | None = None
+        self.max_job_samples = max_job_samples
+        if self.job_samples is not None and self.buffer_size is not None and self.buffer_size < self.job_samples:
+            raise PluginConfigError(
+                f"{stage} buffer_size {self.buffer_size} is smaller than job_samples {self.job_samples}"
+            )
+        if self.job_samples is not None and max_job_samples is not None and self.job_samples > max_job_samples:
+            raise PluginConfigError(
+                f"{stage} holds at most {max_job_samples} samples in one job's data, not job_samples {self.job_samples}"
+            )
 
     @classmethod
     def from_config(
@@ -163,34 +196,29 @@ class Task2Job(ABC, Plugin):
         """Return samples that the stage made itself and that train now as one job, or None.
 
         While the value is not None, the pipeline is ready and its next job data holds exactly these samples. It
-        stays the same until ``own_job_data_done``.
+        stays the same until ``own_job_data_submitted``.
         """
         return None
 
-    def own_job_data_done(self) -> frozenset[str]:
-        """The step trained the stage's own job data.
+    def own_job_data_submitted(self) -> frozenset[str]:
+        """The trainer prepared the commit that submits the stage's own job data as a job.
 
-        Return the IDs that the step's commit lists for it; the pipeline gives them back to
-        ``release_own_ids`` once the commit is durable.
+        Return the IDs that the commit lists for it; the pipeline gives them back to ``release_own_ids`` once the
+        commit is durable. The job trains after this; its end arrives through ``job_ended``.
         """
         return frozenset()
 
     def release_own_ids(self, ids: frozenset[str]) -> None:
-        """The commit that listed these IDs of ``own_job_data_done`` is durable. The default does nothing."""
+        """The commit that listed these IDs of ``own_job_data_submitted`` is durable. The default does nothing."""
         return
 
-    def job_ended(self, outcome: Mapping[str, Any]) -> None:
+    def job_ended(self, outcome: JobOutcome) -> None:
         """A training job ended and the commit of its end is durable; the default does nothing.
 
-        ``outcome`` is ``JobLoopState.last_job``: ``job_id``, ``backend``, ``event`` (``finished`` or
-        ``failed``), the component's ``metrics`` and, for a failed job, ``error``. A stage that hands out
-        tasks reads their results from it. A trainer that starts with no running job calls it again for the
-        last job that ended, so a call for an end that the stage already took must change nothing.
+        A stage that hands out tasks reads their results from ``outcome``. A trainer that starts with no running
+        job calls it again for the last job that ended, before any other call of a new stage, so a stage that
+        starts in that process takes it as the end of the last job it may have handed out.
         """
-        return
-
-    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """The version that the scenario serves now, for a stage that checks its own samples for staleness."""
         return
 
     def background_jobs_running(self) -> bool:

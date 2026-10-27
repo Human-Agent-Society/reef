@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from reef.core.evaluation import CheckpointCandidate
 from reef.evaluation import (
     CandidateEvaluator,
     ConfiguredEvaluationPlugin,
@@ -11,7 +12,6 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.train.jobs import CheckpointCandidate
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class CheckpointEvaluator(ConfiguredEvaluationPlugin):
         return EvaluationResult(
             evaluator="external_checkpoint",
             evaluator_version="1",
-            metrics={"score": self.score, "checkpoint_path": candidate.checkpoint_path},
+            metrics={"score": self.score, "release_path": candidate.release_path},
             metadata={"scenario": self.scenario, "token_present": self.token is not None},
         )
 

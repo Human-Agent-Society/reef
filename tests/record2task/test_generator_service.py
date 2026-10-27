@@ -22,8 +22,7 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.harness.client.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner
-from reef.recipe.generated_tasks.processor import rewards_of
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner, rewards_of
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2task.generator import (
     Designer,

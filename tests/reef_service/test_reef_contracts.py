@@ -1122,7 +1122,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
-    dispatcher.registry.get("math").commit(TrainStepResult(state="no artifact"))
+    dispatcher.registry.get("math").commit(TrainStepResult(state={"label": "no artifact"}))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head: there is no candidate to publish.
     assert dispatcher.get_or_create_scenario("math").scenario_step == 1
@@ -1132,7 +1132,9 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
         version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
-        dispatcher.registry.get(scenario).commit(TrainStepResult(state=version, artifact=Artifact.local(candidate)))
+        dispatcher.registry.get(scenario).commit(
+            TrainStepResult(state={"version": version}, artifact=Artifact.local(candidate))
+        )
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
     assert dispatcher.get_or_create_scenario("code").scenario_step == 2
@@ -1159,7 +1161,9 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
     candidate.mkdir()
 
     with pytest.raises(ArtifactPublicationError, match="repository failed"):
-        dispatcher.registry.get("chat").commit(TrainStepResult(state="new", artifact=Artifact.local(candidate)))
+        dispatcher.registry.get("chat").commit(
+            TrainStepResult(state={"label": "new"}, artifact=Artifact.local(candidate))
+        )
 
     assert (
         runtime.repository.current_artifact,

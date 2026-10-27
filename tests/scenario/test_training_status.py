@@ -17,12 +17,14 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact.memory import InMemoryRepositoryBackend
+from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, RunningJob, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, RunningJob
 
 pytestmark = pytest.mark.unit
 
@@ -138,9 +140,9 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
 
 
 def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer() -> None:
-    finished = {"job_id": "job-2", "backend": "stub", "event": "finished", "metrics": {}}
+    finished = JobOutcome("job-2", "stub", "finished")
     running = JobLoopState(job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished)
-    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), TrainingMetricsSelectPlugin(), scenario="s")
+    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), AlwaysSelectCheckpointPlugin(), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]

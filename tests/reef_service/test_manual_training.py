@@ -21,6 +21,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import WeightTrainingRecipe
@@ -30,7 +31,7 @@ from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.task2job import Task2Job
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import InferenceTasks
-from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainDataItem
@@ -1012,7 +1013,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest()),
-                TrainingMetricsSelectPlugin(),
+                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,

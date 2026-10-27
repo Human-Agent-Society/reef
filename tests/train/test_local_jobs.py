@@ -276,7 +276,8 @@ def test_cancelled_running_job_stops_and_keeps_the_cancelled_result(tmp_path, ma
     wait_ended(component, "b")
     status = component.status("a")
     assert (status.state, status.error, status.metrics) == ("failed", "cancelled", {})
-    assert [checkpoint.step for checkpoint in status.checkpoints] == [1]
+    # The save after the cancel is dropped: the checkpoint list stays as the cancel's result found it.
+    assert status.checkpoints == ()
 
 
 @pytest.mark.unit

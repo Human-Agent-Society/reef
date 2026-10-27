@@ -40,11 +40,10 @@ from typing import Any, Self
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord
 from reef.core.config import config_option
-from reef.core.job_data import TaskItem
+from reef.core.job_data import JobOutcome, TaskItem
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
-from reef.harness.client.tasks import TaskEpisode
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
 from reef.recipe.generated_tasks.results import (
@@ -80,15 +79,6 @@ DEFAULT_SPLIT_SEED = 0
 DEFAULT_GENERATION_ATTEMPTS = 3
 DEFAULT_GENERATION_DEADLINE_SECONDS = 1800.0
 DELIVERY_RECEIPT = "delivery"
-
-
-def rewards_of(episodes: tuple[TaskEpisode, ...]) -> tuple[float, ...]:
-    """The rewards of the episodes that ran. An episode that ran without a reward counts as 0."""
-    return tuple(
-        episode.reward if episode.reward is not None else 0.0
-        for episode in episodes
-        if not episode.is_infrastructure_failure
-    )
 
 
 def split_source_ids(task: HarborTask) -> tuple[str, ...]:
@@ -341,7 +331,7 @@ class DeliveryJob(SupportsReceipt):
     """A job that sends the generator the results it has not received.
 
     Values: ``receipt`` is ``DELIVERY_RECEIPT``.
-    Purpose: ``GeneratedTaskTasks`` submits it at a start and after each rollout batch; its worker runs it.
+    Purpose: ``GeneratedTaskTasks`` submits it at a start and after each task job's end; its worker runs it.
     """
 
 
@@ -933,14 +923,14 @@ class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
         except TaskStoreError:
             logger.exception("the result of generated-task %s conflicts with the task store", result.task_name)
         except Exception:
-            # The episodes still train; the next job saves the result again before it delivers.
+            # The task still trained; the next job's end saves the result again before it delivers.
             logger.exception(
                 "the result of generated-task %s was not saved on scenario %r", result.task_name, self.scenario
             )
             self.unsaved_results.put(result)
 
     def save_unsaved_results(self) -> None:
-        """Save the results that an episode run could not save; one that still fails waits for the next job."""
+        """Save the results that an earlier job's end could not save; one that still fails waits for the next job."""
         unsaved: list[TaskRolloutResult] = []
         while not self.unsaved_results.empty():
             unsaved.append(self.unsaved_results.get_nowait())
@@ -992,6 +982,9 @@ class GeneratedTaskJobData(Task2Job):
     the generator.
     """
 
+    #: The tasks wait in the task pool, not in a buffer, and a job trains ``tasks_per_step`` tasks.
+    trains_own_job_data_only = True
+
     @classmethod
     def from_config(
         cls,
@@ -1020,10 +1013,7 @@ class GeneratedTaskJobData(Task2Job):
         record2record: GeneratedTaskRecord2Record,
         record2task: GeneratedTaskTasks,
     ) -> None:
-        # The stage trains only its own job data, at any size, so job_samples is the tasks of one job. The
-        # tasks wait in the task pool, so no buffer releases them.
-        super().__init__(context, None, settings.tasks_per_step)
-        self.buffer_size = None
+        super().__init__(context, None, None)
         self.record2record = record2record
         self.record2task = record2task
         self.tasks_per_step = settings.tasks_per_step
@@ -1060,7 +1050,7 @@ class GeneratedTaskJobData(Task2Job):
             return None
         return tuple(task.item for task in self.handed_out.tasks)
 
-    def own_job_data_done(self) -> frozenset[str]:
+    def own_job_data_submitted(self) -> frozenset[str]:
         handed_out = self.handed_out
         if handed_out is None:
             raise RuntimeError("no tasks were handed out")
@@ -1079,12 +1069,13 @@ class GeneratedTaskJobData(Task2Job):
                 )
         self.trained_rollouts = [entry for entry in self.trained_rollouts if entry not in durable]
 
-    def job_ended(self, outcome: Mapping[str, Any]) -> None:
+    def job_ended(self, outcome: JobOutcome) -> None:
         """Save a result for each trained task without one: its rewards in the job's ``rollout_rewards``, or why
         no episode ran."""
-        metrics = outcome.get("metrics")
-        rewards = metrics.get("rollout_rewards", {}) if isinstance(metrics, Mapping) else {}
-        error = str(outcome.get("error") or "no episode of the task ran")
+        rewards = outcome.metrics.get("rollout_rewards", {})
+        if not isinstance(rewards, Mapping):
+            raise TypeError("a task job's rollout_rewards metric must map task names to rewards")
+        error = outcome.error or "no episode of the task ran"
         store = self.record2task.task_store
         if store is not None:
             trained = store.trained_task_names()
@@ -1101,7 +1092,7 @@ class GeneratedTaskJobData(Task2Job):
         if self.submitted_tasks:
             self.task_pool.drop(self.submitted_tasks)
             self.submitted_tasks = ()
-        self.record2record.task_job_ended(finished=outcome.get("event") == "finished")
+        self.record2record.task_job_ended(finished=outcome.event == "finished")
         self.record2task.deliver_later()
 
     def status(self) -> Mapping[str, Any]:

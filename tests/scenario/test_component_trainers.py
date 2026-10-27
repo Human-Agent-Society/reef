@@ -1660,7 +1660,7 @@ def test_a_restart_whose_component_lost_the_running_job_ends_it_failed(
     assert _wait_for(lambda: _job_events(scenario) == ["submitted", "failed"])
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
     assert (state.job, state.start, state.finished_jobs) == (None, None, 1)
-    assert state.last_job is not None and "no such job" in state.last_job["error"]
+    assert state.last_job is not None and "no such job" in state.last_job.error
 
 
 @pytest.mark.unit

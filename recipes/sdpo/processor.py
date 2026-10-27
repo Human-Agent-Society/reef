@@ -278,9 +278,13 @@ class SDPOJobData(Task2Job):
         self.remove_thinking_from_demonstration = settings.remove_thinking_from_demonstration
         self.include_environment_feedback = settings.include_environment_feedback
         self.environment_feedback_only_without_solution = settings.environment_feedback_only_without_solution
-        super().__init__(context, settings.buffer_size, settings.job_samples)
         # One job's data is one grid: a larger job_samples would mix the coordinates of two grids.
-        self.max_job_samples = record2task.groups_per_step * record2task.rollouts_per_group
+        super().__init__(
+            context,
+            settings.buffer_size,
+            settings.job_samples,
+            max_job_samples=record2task.groups_per_step * record2task.rollouts_per_group,
+        )
 
     @classmethod
     def from_config(

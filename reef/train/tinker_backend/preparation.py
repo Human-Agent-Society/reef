@@ -20,7 +20,8 @@ class TinkerSteps:
     Values: either the objective trains the job's data, so ``loss`` is its Tinker loss and ``steps`` holds one
     or more non-empty tuples of rows, one per optimizer step in order; or it skipped the data, so ``loss`` is
     None and ``steps`` is empty. ``next_algorithm_state`` is the objective's state after the whole job data,
-    and ``metrics`` its telemetry with ``optimizer_steps`` (the number of steps) and ``dropped_rollouts``.
+    and ``metrics`` its telemetry, with ``optimizer_steps`` (the number of steps) and ``dropped_rollouts``
+    when it trains.
     Purpose: ``prepare_tinker_job`` makes it; the Tinker component trains it.
     """
 

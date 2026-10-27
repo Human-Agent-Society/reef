@@ -41,7 +41,8 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import Task2Job, Trainer, TrainingPipeline
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent, TrainingJob
-from reef.train.jobs import CheckpointCandidate, JobPlan, JobRequest
+from reef.train.jobs import JobPlan, JobRequest
+from reef.core.evaluation import CheckpointCandidate
 
 __all__ = [
     "SCENARIO_METADATA_KEY",

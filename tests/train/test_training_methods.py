@@ -10,6 +10,8 @@ from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
+from reef.core.job_data import JobOutcome
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
@@ -18,15 +20,7 @@ from reef.runtime.interfaces import (
 )
 from reef.runtime.jobs import job_id_for
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import (
-    FixedJobPlan,
-    JobLoop,
-    JobLoopState,
-    JobPlan,
-    JobPlanContext,
-    JobRequest,
-    TrainingMetricsSelectPlugin,
-)
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlan, JobPlanContext, JobRequest
 from reef.train.pipeline import PipelineConfig
 from reef.train.types import JobData
 
@@ -140,7 +134,10 @@ def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> No
     assert "learning_rate_schedule" not in plan.experiment_config()
     trainer = recipe.build("scenario", SQLiteRecordStore())
     assert trainer.job_loop is not None
-    assert trainer.job_loop.plan.next_job(JobPlanContext(batch("b"), 40, {"event": "finished"})) == plan.request
+    assert (
+        trainer.job_loop.plan.next_job(JobPlanContext(batch("b"), 40, JobOutcome("j", "stub", "finished")))
+        == plan.request
+    )
 
 
 @pytest.mark.unit
@@ -156,7 +153,7 @@ def test_a_recipe_job_plan_reaches_the_component_through_the_default_build() -> 
     loop = trainer.job_loop
     assert loop is not None and isinstance(loop.plan, SupervisedThenPolicy)
     loop.submit(JobLoopState(), batch("first"))
-    loop.submit(JobLoopState(finished_jobs=1, last_job={"event": "finished"}), batch("second"))
+    loop.submit(JobLoopState(finished_jobs=1, last_job=JobOutcome("j", "stub", "finished")), batch("second"))
     assert [TrainingMethod.from_dict(job.parameters["method"]) for job in component.submitted] == [
         TrainingMethod("sft", SFT),
         TrainingMethod("rl-objective", RL),
@@ -171,8 +168,8 @@ def test_the_job_loop_refuses_a_plan_that_returns_no_job_request() -> None:
 
     component = StubTrainingComponent()
     with pytest.raises(TypeError, match="plan must be a JobPlan"):
-        JobLoop(component, "sft", TrainingMetricsSelectPlugin(), scenario="s")  # type: ignore[arg-type]
-    loop = JobLoop(component, Broken(), TrainingMetricsSelectPlugin(), scenario="s")
+        JobLoop(component, "sft", AlwaysSelectCheckpointPlugin(), scenario="s")  # type: ignore[arg-type]
+    loop = JobLoop(component, Broken(), AlwaysSelectCheckpointPlugin(), scenario="s")
     with pytest.raises(TypeError, match=r"Broken\.next_job must return a JobRequest"):
         loop.submit(JobLoopState(), batch("b"))
     assert component.submitted == []

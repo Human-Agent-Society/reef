@@ -28,6 +28,7 @@ from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
 from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
@@ -42,7 +43,7 @@ from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.cordis_backend import CordisBackend
 from reef.train.cordis_backend.processor import TraceJobData, TraceTasks
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
 from reef.train.pipeline import TrainingPipeline
 
 
@@ -551,7 +552,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
-                TrainingMetricsSelectPlugin(),
+                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,

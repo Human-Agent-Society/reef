@@ -15,6 +15,7 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
 
+from reef.core.evaluation import CheckpointCandidate
 from reef.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
@@ -27,16 +28,10 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.evaluation.harness import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
 from reef.train.backend import CandidateBackend
-from reef.train.jobs import (
-    CheckpointCandidate,
-    FixedJobPlan,
-    JobLoop,
-    JobLoopState,
-    JobRequest,
-    TrainingMetricsSelectPlugin,
-)
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
 from reef.train.types import JobData
 
 
@@ -219,7 +214,7 @@ def test_decision_rejects_non_boolean_selected(selected: object) -> None:
 def test_a_checkpoint_candidate_names_the_saved_checkpoint_it_offers(tmp_path) -> None:
     candidates: list[UpdateCandidate] = []
 
-    class RecordingPlugin(TrainingMetricsSelectPlugin):
+    class RecordingPlugin(AlwaysSelectCheckpointPlugin):
         def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
             candidates.append(candidate)
             return super().evaluate(candidate)
@@ -227,14 +222,14 @@ def test_a_checkpoint_candidate_names_the_saved_checkpoint_it_offers(tmp_path) -
     component = StubTrainingComponent(tmp_path)
     loop = JobLoop(component, FixedJobPlan(JobRequest()), RecordingPlugin(), scenario="math")
     trajectory = policy_trajectory("s", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
-    submitted = JobLoopState.from_dict(loop.submit(JobLoopState(), JobData("b", (trajectory,))).state)
+    submitted = JobLoopState.from_dict(loop.submit(JobLoopState(), JobData("b", (trajectory,))).result.state)
     job_id = submitted.job.job_id
-    decided = loop.poll(submitted)
+    decided = loop.poll(submitted).result
 
     [candidate] = candidates
     assert isinstance(candidate, CheckpointCandidate)
     assert (candidate.candidate_id, candidate.training_job_id, candidate.step) == (f"{job_id}:0", job_id, 0)
-    assert candidate.checkpoint_path == str(tmp_path / "1")
+    assert candidate.release_path == str(tmp_path / "1")
     assert decided.artifact.local_path == tmp_path / "1"
 
 

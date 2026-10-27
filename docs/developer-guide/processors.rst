@@ -139,6 +139,7 @@ The trainer calls it on its own thread, under its lock; no call may block:
   other pipeline operations; it does not make the pipeline thread-safe.
 - ``ready(sample_count)``: call ``advance()`` and check whether job data of
   ``sample_count`` samples is available. The trainer passes ``job_samples``.
+  With ``sample_count`` None, held samples never make the pipeline ready.
 - ``build_job_data(sample_count)``: reserve whole record set units from the record
   stage, in its selection order, until the data holds at least
   ``sample_count`` samples,
@@ -146,10 +147,12 @@ The trainer calls it on its own thread, under its lock; no call may block:
   (see `Uploaded trajectories <#uploaded-trajectories>`__). The trainer
   validates the job data against ``output_schema``. The same job data stays
   reserved until it is acknowledged or released.
-- ``acknowledge(data_id)``: the training step trained that job data. The
-  pipeline consumes the reservation from the record stage's pool, and the
-  stage ends the units and returns the IDs of the records that they consumed.
-  The commit record persists these IDs, so recovery never pushes them again.
+- ``acknowledge(data_id)``: the commit that submits the job consumed that job
+  data. The pipeline consumes the reservation from the record stage's pool,
+  and the stage ends the units and returns the IDs of the records that they
+  consumed. The commit record persists these IDs, so recovery never pushes
+  them again. A job that later fails does not give its records back: they
+  never train again.
 
 A task-to-job stage can also make samples from no record and train them as
 job data of its own. The pipeline drives this through the stage's optional
@@ -161,11 +164,22 @@ hooks, whose defaults make no such samples:
   returns samples, the pipeline is ready and its next job data holds exactly
   these samples, whatever their count. The pipeline asks before it selects
   record sets.
-- ``own_job_data_done()``: the step trained the stage's own job data. Return the
-  IDs that the step's commit lists for it. The pipeline gives them to
-  ``release_own_ids(ids)`` once the commit is durable.
-- ``observe_serving_runtime_load_id``, ``background_jobs_running``,
-  ``status``, and ``close``: as on the record stage.
+- ``own_job_data_submitted()``: the commit that submits a job of the stage's
+  own job data is being prepared. Return the IDs that the commit lists for it.
+  The pipeline gives them to ``release_own_ids(ids)`` once the commit is
+  durable.
+- ``job_ended(outcome)``: a training job ended, and the commit of its end is
+  durable. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
+  ID, the component name, ``event`` (``finished`` or ``failed``), the job's
+  ``metrics``, and ``error``, which is set exactly when the job failed. A
+  trainer that starts with no running job calls it again for the last job
+  that ended, before any other call to a new stage.
+- ``background_jobs_running``, ``status``, and ``close``: as on the record
+  stage.
+
+A stage that trains only its own job data sets the class attribute
+``trains_own_job_data_only``. It takes no ``buffer_size`` and no
+``job_samples``, and held samples never make its pipeline ready.
 
 Released own job data stays the stage's, and the next ``build_job_data`` builds
 it again. The generated-task recipe rolls its saved tasks out this way (see
@@ -186,7 +200,8 @@ job's data into optimizer batches by its own batch size: Slime's
 - Harness evolution uses ``evolution.batch_size`` when the stage config sets
   no ``job_samples``.
 - A stage whose job data is one fixed unit, such as the TTTD and SDPO grid,
-  sets ``max_job_samples``. The trainer refuses a larger ``job_samples``.
+  passes ``max_job_samples`` to ``Task2Job.__init__``. The stage refuses a
+  larger ``job_samples`` with ``PluginConfigError``.
 
 The pipeline is ready when it holds at least ``job_samples`` samples. It takes
 whole units, so one job's data can hold more. Thus ``job_samples`` and the
@@ -205,8 +220,7 @@ samples. ``job_samples`` still counts samples, so the job's packs seldom fill
 whole steps. Set ``job_samples`` to the samples of many steps.
 
 The held units are a buffer of at most ``buffer_size`` samples. The
-``Task2Job`` sets it, and the trainer refuses one smaller than
-``job_samples``. Without a ``buffer_size`` setting, it holds the data of four
+``Task2Job`` sets it, and refuses one smaller than ``job_samples``. Without a ``buffer_size`` setting, it holds the data of four
 jobs: four times ``job_samples``. After each move of
 record sets, in every training mode, the pipeline releases the oldest
 unreserved units while their samples are more than ``buffer_size``. It

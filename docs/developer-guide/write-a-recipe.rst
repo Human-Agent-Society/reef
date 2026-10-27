@@ -78,7 +78,7 @@ A weight recipe is four pieces plus the class that binds them.
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
    pipeline stages | the record stage, the record-to-task stage, and the task-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
-   candidate evaluation | measures each checkpoint that a training job saved and decides select or reject. Every recipe carries one; the default, ``TrainingMetricsSelectPlugin``, records the job's training metrics and selects every checkpoint
+   candidate evaluation | measures each checkpoint that a training job saved and decides select or reject. Every recipe carries one; the default, ``AlwaysSelectCheckpointPlugin``, selects every checkpoint
    recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``job_plan()`` returns the ``JobPlan`` that gives each training job's parameters
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
@@ -255,8 +255,12 @@ Evaluate a candidate
 ~~~~~~~~~~~~~~~~~~~~
 
 Each checkpoint that a training job saves is a candidate, a
-``CheckpointCandidate``. Its ``checkpoint_path`` is the directory that Reef
-publishes if the candidate is selected. The recipe's ``candidate_evaluation``
+``CheckpointCandidate`` (``reef.core.evaluation``). Its ``release_path`` is
+the directory that Reef publishes if the candidate is selected, and
+``training_metrics`` holds the component's metrics for the checkpoint. The
+commit records those metrics beside the evaluation's, so an evaluation adds
+only its own metrics. A commit refuses an evaluation metric whose key is
+already a training metric. The recipe's ``candidate_evaluation``
 decides what happens to it. A weight recipe declares its evaluator in the
 deployment config. The top-level ``evaluation`` section serves weight recipes
 only. A harness recipe names its plugin in ``evolution.selection`` instead

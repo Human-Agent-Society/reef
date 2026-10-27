@@ -102,17 +102,25 @@ class LocalJobComponent(TrainingComponent):
         )
 
     def save_checkpoint(self, directory: Path, checkpoint: SavedCheckpoint) -> None:
-        """Record a complete checkpoint: once this returns, ``status`` reports it."""
-        entries = [
-            {
-                "step": saved.step,
-                "path": saved.path,
-                "release_path": saved.release_path,
-                "metrics": dict(saved.metrics),
-            }
-            for saved in (*self.saved(directory), checkpoint)
-        ]
-        write_json(directory / CHECKPOINTS_FILE, {"checkpoints": entries})
+        """Record a complete checkpoint: once this returns, ``status`` reports it.
+
+        A job that has ended, which only a cancel does while the job runs, records nothing: its checkpoint list
+        was complete when its result was written.
+        """
+        with self.jobs_lock:
+            if (directory / RESULT_FILE).exists():
+                logger.info("%s dropped checkpoint %d of an ended job", self.name, checkpoint.step)
+                return
+            entries = [
+                {
+                    "step": saved.step,
+                    "path": saved.path,
+                    "release_path": saved.release_path,
+                    "metrics": dict(saved.metrics),
+                }
+                for saved in (*self.saved(directory), checkpoint)
+            ]
+            write_json(directory / CHECKPOINTS_FILE, {"checkpoints": entries})
 
     def stopping(self, directory: Path) -> bool:
         """Whether the job in ``directory`` should stop at its next save: it was cancelled or the component closes."""

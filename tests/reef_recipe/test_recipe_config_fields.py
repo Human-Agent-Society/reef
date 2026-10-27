@@ -15,11 +15,12 @@ from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.core.config import config_arguments
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import FixedJobPlan, JobPlanContext, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobPlanContext
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.types import JobData
 
@@ -247,7 +248,7 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     assert isinstance(trainer.pipeline.record2task, ThresholdTasks)
     assert isinstance(trainer.pipeline.task2job, ThresholdJobData)
     assert trainer.job_loop is not None
-    assert isinstance(trainer.job_loop.evaluator, TrainingMetricsSelectPlugin)
+    assert isinstance(trainer.job_loop.evaluator, AlwaysSelectCheckpointPlugin)
     plan = trainer.job_loop.plan
     assert isinstance(plan, FixedJobPlan)
     request = plan.next_job(JobPlanContext(JobData("scenario:1"), 0, None))

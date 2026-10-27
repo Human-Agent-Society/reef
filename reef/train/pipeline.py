@@ -22,13 +22,15 @@ each record set's task result back to its stage, keeps the samples of held
 sets in the buffer, releases the oldest sets when the buffer is over the
 stage's ``buffer_size``, hands out the data of one job at a time until the
 trainer acknowledges or releases it, and runs the training modes and the
-training instructions. The trainer passes the stage's ``job_samples`` to
-``ready`` and ``build_job_data``. Automatic job data holds at least that many
-samples. It takes whole record sets, so it can hold more.
+training instructions. ``ready`` and ``build_job_data`` take a sample count:
+the trainer asks for its stage's ``job_samples``, and a test or a tool may ask
+for another count. Automatic job data holds at least that many samples. It
+takes whole record sets, so it can hold more.
 
-A client can also upload an ATIF trajectory. It is not a record, so it does not
-go through the first two stages. It counts as one sample. Job data takes
-uploaded trajectories first.
+A client can also upload an ATIF trajectory. It is not a record, so the
+record-to-record stage never sees it; the record-to-task stage renders it into
+its training sample (``Record2Task.uploaded_sample``), which counts as one
+sample. Job data takes uploaded trajectories first.
 
 A task-to-job stage can also make samples itself, from no record, such as
 the generated-task recipe's rollout episodes. While ``Task2Job.own_job_data``
@@ -43,6 +45,7 @@ from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from reef.core.job_data import JobOutcome
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -406,14 +409,13 @@ class TrainingPipeline:
         if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
             self.uploaded_trajectories.setdefault(trajectory_id, self.uploaded_sample(trajectory))
 
-    def job_ended(self, outcome: Mapping[str, Any]) -> None:
-        """Give the task-to-job stage the outcome of a job whose end the trainer committed (``JobLoopState.last_job``)."""
+    def job_ended(self, outcome: JobOutcome) -> None:
+        """Give the task-to-job stage the outcome of a job whose end the trainer committed."""
         self.task2job.job_ended(outcome)
 
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Give the stages the runtime load ID that serves the scenario now, for their staleness checks."""
+        """Give the record-to-record stage the runtime load ID that serves the scenario now, for its staleness check."""
         self.record2record.observe_serving_runtime_load_id(runtime_load_id)
-        self.task2job.observe_serving_runtime_load_id(runtime_load_id)
 
     # --------------------------------------------------------- job data cycle
     #
@@ -437,10 +439,12 @@ class TrainingPipeline:
             self.record2record.drop_stale_units()
             self.forget_ended_sets()
 
-    def ready(self, sample_count: int) -> bool:
+    def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples.
 
         The stage's own job data (``Task2Job.own_job_data``) makes the pipeline ready, whatever its sample count.
+        With ``sample_count`` None, as for a stage that ``trains_own_job_data_only``, held samples never make
+        the pipeline ready.
         """
         self.advance()
         if self.pending is not None or self.task2job.own_job_data() is not None:
@@ -449,9 +453,9 @@ class TrainingPipeline:
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:
             return True
-        return self.count_held_samples() >= sample_count
+        return sample_count is not None and self.count_held_samples() >= sample_count
 
-    def build_job_data(self, sample_count: int) -> JobData:
+    def build_job_data(self, sample_count: int | None) -> JobData:
         """Return the handed out job data, or build data of at least ``sample_count`` samples when ``ready``."""
         if self.pending is None:
             if not self.ready(sample_count):
@@ -470,7 +474,9 @@ class TrainingPipeline:
                 else None
             )
             # In manual mode an instruction runs alone; in hybrid it takes the samples that automatic job data would.
-            selected_samples = 0 if request is not None and self.training_mode == "manual" else sample_count
+            selected_samples = (
+                0 if sample_count is None or (request is not None and self.training_mode == "manual") else sample_count
+            )
             # Uploaded trajectories go first, in upload order. Whole record set units, in selection order, fill
             # the rest of the data until it holds ``selected_samples`` samples.
             self.reserved_trajectory_ids = tuple(self.uploaded_trajectories)[:selected_samples]
@@ -494,12 +500,13 @@ class TrainingPipeline:
         return self.pending
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
-        """The training step consumed the job data: end its units and uploaded trajectories, and return the consumed IDs."""
+        """The commit that submits the job data's job consumed it: end its units and uploaded trajectories, and
+        return the consumed IDs. The records are consumed whatever the job's outcome."""
         if self.pending is None or self.pending.data_id != data_id:
             raise ValueError(f"unknown data_id {data_id!r}")
         if self.pending_is_own:
             # The stage's own job data consumes no record: the stage names what the commit lists.
-            own_ids = self.task2job.own_job_data_done()
+            own_ids = self.task2job.own_job_data_submitted()
             self.consumed_own_ids |= own_ids
             self.pending = None
             self.pending_is_own = False
@@ -553,9 +560,8 @@ class TrainingPipeline:
         """Return True while background work runs: a waiting set, or a record stage job such as a judgment.
 
         A finished job can make the pipeline ready without a new record.
-        While this is True, the training thread polls at a fixed interval.
-        Otherwise it sleeps until the next accepted record. The training
-        thread reads this between drains. It must not block.
+        While this is True, the scenario's worker polls at a fixed interval.
+        Otherwise it sleeps until the next accepted record. It must not block.
         """
         return (
             bool(self.waiting_sets)

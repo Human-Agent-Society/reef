@@ -20,11 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, UpdateCandidate
-from reef.core.job_data import JobData
-from reef.evaluation.evaluators import AlwaysSelectMixin
+from reef.core.evaluation import CandidateEvaluationPlugin, CheckpointCandidate
+from reef.core.job_data import JobData, JobOutcome
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainStepResult
+
+#: The keys of a checkpoint decision's commit metrics that the job loop writes itself.
+DECISION_KEYS = frozenset({"selected", "selection", "training_job"})
 
 
 def require_count(value: object, name: str) -> None:
@@ -66,23 +68,21 @@ class JobPlanContext:
 
     ``data`` is the data the job trains. ``finished_jobs`` is the number of
     this trainer's jobs that ended, finished or failed, a non-negative int.
-    ``last_job`` is the outcome of the last of them, as ``JobLoop.end``
-    commits it (``{"job_id", "backend", "event", "metrics"}``, with ``"error"``
-    when ``event`` is ``"failed"``), and it is ``None`` exactly when
-    ``finished_jobs`` is 0. ``JobLoop.submit`` makes the value and
-    ``JobPlan.next_job`` reads it.
+    ``last_job`` is the outcome of the last of them, and it is ``None``
+    exactly when ``finished_jobs`` is 0. ``JobLoop.submit`` makes the value
+    and ``JobPlan.next_job`` reads it.
     """
 
     data: JobData
     finished_jobs: int
-    last_job: Mapping[str, Any] | None
+    last_job: JobOutcome | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, JobData):
             raise TypeError("JobPlanContext.data must be a JobData")
         require_count(self.finished_jobs, "JobPlanContext.finished_jobs")
-        if self.last_job is not None and not isinstance(self.last_job, Mapping):
-            raise TypeError("JobPlanContext.last_job must be a mapping or None")
+        if self.last_job is not None and not isinstance(self.last_job, JobOutcome):
+            raise TypeError("JobPlanContext.last_job must be a JobOutcome or None")
         if (self.last_job is None) != (self.finished_jobs == 0):
             raise ValueError("JobPlanContext.last_job is None exactly when no job has ended")
 
@@ -150,15 +150,15 @@ class JobLoopState:
     it (a non-empty string), or ``None`` for the base model. ``job`` is the
     running job, or ``None``. ``finished_jobs`` is the number of jobs that
     ended, finished or failed, a non-negative int. ``last_job`` is the outcome
-    of the last of them, a JSON object, and it is ``None`` exactly when
-    ``finished_jobs`` is 0. The commit history stores the value as
-    ``to_dict()``, and ``from_dict`` reads it back.
+    of the last of them, and it is ``None`` exactly when ``finished_jobs`` is
+    0. The commit history stores the value as ``to_dict()``, and ``from_dict``
+    reads it back.
     """
 
     start: str | None = None
     job: RunningJob | None = None
     finished_jobs: int = 0
-    last_job: Mapping[str, Any] | None = None
+    last_job: JobOutcome | None = None
 
     def __post_init__(self) -> None:
         if self.start is not None and (not isinstance(self.start, str) or not self.start):
@@ -166,8 +166,8 @@ class JobLoopState:
         if self.job is not None and not isinstance(self.job, RunningJob):
             raise TypeError("JobLoopState.job must be a RunningJob or None")
         require_count(self.finished_jobs, "JobLoopState.finished_jobs")
-        if self.last_job is not None and not isinstance(self.last_job, Mapping):
-            raise TypeError("JobLoopState.last_job must be a mapping or None")
+        if self.last_job is not None and not isinstance(self.last_job, JobOutcome):
+            raise TypeError("JobLoopState.last_job must be a JobOutcome or None")
         if (self.last_job is None) != (self.finished_jobs == 0):
             raise ValueError("JobLoopState.last_job is None exactly when no job has ended")
 
@@ -181,62 +181,49 @@ class JobLoopState:
                 else {"job_id": self.job.job_id, "checkpoints_handled": self.job.checkpoints_handled}
             ),
             "finished_jobs": self.finished_jobs,
-            "last_job": None if self.last_job is None else dict(self.last_job),
+            "last_job": None if self.last_job is None else self.last_job.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> JobLoopState:
-        """Read a committed state. An empty mapping is the state of a trainer that has committed nothing."""
-        job = value.get("job")
+        """Read ``to_dict``'s object; an empty mapping is the state of a trainer that has committed nothing.
+
+        ``ValueError`` for any other key set or a malformed value: a state that cannot be read must not be
+        taken for an untrained scenario.
+        """
+        if not value:
+            return cls()
+        keys = {"start", "job", "finished_jobs", "last_job"}
+        if set(value) != keys:
+            raise ValueError(f"a job loop state has the keys {sorted(keys)}, not {sorted(value)}")
+        job = value["job"]
+        if job is not None and (not isinstance(job, Mapping) or set(job) != {"job_id", "checkpoints_handled"}):
+            raise ValueError("a job loop state's job has the keys job_id and checkpoints_handled")
         return cls(
-            start=value.get("start"),
+            start=value["start"],
             job=None if job is None else RunningJob(job["job_id"], job["checkpoints_handled"]),
-            finished_jobs=value.get("finished_jobs", 0),
-            last_job=value.get("last_job"),
+            finished_jobs=value["finished_jobs"],
+            last_job=None if value["last_job"] is None else JobOutcome.from_dict(value["last_job"]),
         )
 
 
-@dataclass(frozen=True, kw_only=True)
-class CheckpointCandidate(UpdateCandidate):
-    """A checkpoint that a job saved and that Reef has not decided to serve.
+@dataclass(frozen=True)
+class JobCommit:
+    """One commit that a job loop gives its trainer: the result to commit, and the job end it records.
 
-    ``training_job_id`` (non-empty) and ``step`` (a non-negative int) name the
-    checkpoint within its job, and ``candidate_id`` is
-    ``"<training_job_id>:<step>"``. ``checkpoint_path`` is the non-empty
-    directory that Reef publishes when it serves the checkpoint
-    (``SavedCheckpoint.release_path``). ``training_metrics`` are the training
-    component's metrics for it. ``JobLoop.decide`` makes the value, and the
-    recipe's candidate evaluation reads it.
+    Values: ``result`` is the ``TrainStepResult`` whose ``state`` is the next ``JobLoopState`` as a dict.
+    ``ended`` is the outcome of the job whose end the commit records, which is that state's ``last_job``, or
+    None for a commit that submits a job or decides one of its checkpoints. Purpose: ``JobLoop.submit``,
+    ``poll``, ``decide`` and ``end`` make it; the trainer commits ``result`` and, once the commit is durable,
+    gives ``ended`` to its training pipeline.
     """
 
-    training_job_id: str
-    step: int
-    checkpoint_path: str
-    training_metrics: Mapping[str, Any] = field(default_factory=dict)
+    result: TrainStepResult
+    ended: JobOutcome | None = None
 
     def __post_init__(self) -> None:
-        super().__post_init__()
-        if not isinstance(self.training_job_id, str) or not self.training_job_id:
-            raise ValueError("CheckpointCandidate.training_job_id must be a non-empty string")
-        require_count(self.step, "CheckpointCandidate.step")
-        if not isinstance(self.checkpoint_path, str) or not self.checkpoint_path:
-            raise ValueError("CheckpointCandidate.checkpoint_path must be a non-empty string")
-        if self.candidate_id != f"{self.training_job_id}:{self.step}":
-            raise ValueError("CheckpointCandidate.candidate_id must be '<training_job_id>:<step>'")
-        if not isinstance(self.training_metrics, Mapping):
-            raise TypeError("CheckpointCandidate.training_metrics must be a mapping")
-
-
-class TrainingMetricsSelectPlugin(AlwaysSelectMixin):
-    """The default candidate evaluation of a weight trainer: record the training metrics and serve every checkpoint.
-
-    The evaluation's metrics are the candidate's ``training_metrics`` for a
-    ``CheckpointCandidate``, and empty for any other candidate.
-    """
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        metrics = candidate.training_metrics if isinstance(candidate, CheckpointCandidate) else {}
-        return EvaluationResult(evaluator="training_job", evaluator_version="1", metrics=dict(metrics))
+        if self.ended is not None and not isinstance(self.ended, JobOutcome):
+            raise TypeError("JobCommit.ended must be a JobOutcome or None")
 
 
 class JobLoop:
@@ -246,8 +233,7 @@ class JobLoop:
     ``evaluator`` decides which checkpoints Reef serves; ``scenario`` is the
     non-empty name of the trainer's scenario, which is part of each job's
     identity, so two scenarios never share a job. ``submit`` and ``poll``
-    return the ``TrainStepResult`` that the trainer commits next; its
-    ``state`` is the next ``JobLoopState`` as a dict.
+    return the ``JobCommit`` that the trainer commits next.
     """
 
     def __init__(
@@ -271,16 +257,31 @@ class JobLoop:
         self.evaluator = evaluator
         self.scenario = scenario
 
-    def submit(self, state: JobLoopState, data: JobData) -> TrainStepResult:
+    def job_id(self, state: JobLoopState, start: str | None, data: JobData, parameters: Mapping[str, Any]) -> str:
+        """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
+        (``state.finished_jobs``), the component, the start, the data's rows and request, and the parameters.
+
+        Two jobs of one trainer never share an ID, even with the same data from the same start, since their
+        ordinals differ; a resubmission after the service restarts names the same job, so the component does
+        not run it twice.
+        """
+        encoded = data.to_dict()
+        # The data's number is process-local, so the rows name the data.
+        identity = {
+            "scenario": self.scenario,
+            "job": state.finished_jobs,
+            "items": encoded["items"],
+            "request": encoded["request"],
+        }
+        return job_id_for(self.component.name, start, identity, parameters)
+
+    def submit(self, state: JobLoopState, data: JobData) -> JobCommit:
         """Submit the plan's job for ``data``; the result records the running job and its start.
 
         The job starts from ``state.start``, or from a fresh start of those
-        weights when the request restarts training. Raise ``ValueError`` when
-        ``state`` has a running job, or when the component cannot restart
-        training from its start. The job ID derives from the scenario, the
-        component, the start, the data's records and the parameters. A
-        resubmission after the service restarts therefore names the same job,
-        and the component does not run it twice.
+        weights when the request restarts training, under ``job_id``. Raise
+        ``ValueError`` when ``state`` has a running job, or when the component
+        cannot restart training from its start.
         """
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
@@ -289,19 +290,18 @@ class JobLoop:
             raise TypeError(f"{type(self.plan).__name__}.next_job must return a JobRequest")
         backend = self.component.name
         start = self.component.fresh_start(state.start) if request.restart else state.start
-        encoded = data.to_dict()
-        # The scenario and the rows name the data: the data's number is process-local.
-        identity = {"scenario": self.scenario, "items": encoded["items"], "request": encoded["request"]}
-        job_id = job_id_for(backend, start, identity, request.parameters)
+        job_id = self.job_id(state, start, data, request.parameters)
         self.component.submit(TrainingJob(job_id, backend, start, data, request.parameters))
         # The fresh start is the trainer's start from now on: a job that saves nothing leaves it in place.
         submitted = JobLoopState(start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         if request.restart:
             event["restart"] = True
-        return TrainStepResult(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
+        return JobCommit(
+            TrainStepResult(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
+        )
 
-    def poll(self, state: JobLoopState) -> TrainStepResult | None:
+    def poll(self, state: JobLoopState) -> JobCommit | None:
         """The next commit about the running job of ``state``, or ``None`` while it runs with nothing new.
 
         The result is the decision on the job's next undecided checkpoint
@@ -324,12 +324,16 @@ class JobLoop:
             return None
         return self.end(state, status)
 
-    def decide(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> TrainStepResult:
+    def decide(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
         """The commit that decides whether Reef serves ``checkpoint``, the running job's next undecided one.
 
         The next job starts from ``checkpoint.path`` whether or not the
         evaluation selects it. A selected checkpoint publishes its
-        ``release_path``. Raise ``ValueError`` when ``state`` has no running job.
+        ``release_path``. The commit's metrics are the checkpoint's training
+        metrics with the evaluation's and the decision's own metrics, and
+        ``selected``, ``selection`` (the whole decision) and ``training_job``.
+        Raise ``ValueError`` when ``state`` has no running job, or when two of
+        these share a key: a metric is never overwritten.
         """
         job = state.job
         if job is None:
@@ -338,7 +342,7 @@ class JobLoop:
             candidate_id=f"{job.job_id}:{checkpoint.step}",
             training_job_id=job.job_id,
             step=checkpoint.step,
-            checkpoint_path=checkpoint.release_path,
+            release_path=checkpoint.release_path,
             training_metrics=dict(checkpoint.metrics),
         )
         decision = self.evaluator.evaluate_and_decide(candidate)
@@ -348,10 +352,18 @@ class JobLoop:
             state.finished_jobs,
             state.last_job,
         )
+        parts = (dict(checkpoint.metrics), dict(decision.evaluation.metrics), dict(decision.metrics))
+        keys = [key for part in parts for key in part]
+        shared = {key for key in keys if keys.count(key) > 1} | (set(keys) & DECISION_KEYS)
+        if shared:
+            raise ValueError(
+                f"checkpoint {candidate.candidate_id}'s training, evaluation and decision metrics share the keys "
+                f"{sorted(shared)}"
+            )
         metrics = {
-            **checkpoint.metrics,
-            **decision.evaluation.metrics,
-            **decision.metrics,
+            **parts[0],
+            **parts[1],
+            **parts[2],
             "selected": decision.selected,
             "selection": {"candidate_id": candidate.candidate_id, **decision.to_dict()},
             "training_job": {
@@ -361,14 +373,16 @@ class JobLoop:
                 "step": checkpoint.step,
             },
         }
-        return TrainStepResult(
-            state=handled.to_dict(),
-            metrics=metrics,
-            artifact=Artifact.local(Path(checkpoint.release_path)) if decision.selected else None,
-            training_job_id=job.job_id,
+        return JobCommit(
+            TrainStepResult(
+                state=handled.to_dict(),
+                metrics=metrics,
+                artifact=Artifact.local(Path(checkpoint.release_path)) if decision.selected else None,
+                training_job_id=job.job_id,
+            )
         )
 
-    def end(self, state: JobLoopState, status: JobStatus) -> TrainStepResult:
+    def end(self, state: JobLoopState, status: JobStatus) -> JobCommit:
         """The commit that records the end of the running job, whose ended ``status`` the component reported.
 
         The job's outcome becomes ``last_job`` and ``finished_jobs`` grows by
@@ -380,15 +394,21 @@ class JobLoop:
             raise ValueError("only a running job ends")
         if status.state == "running":
             raise ValueError("a running job has not ended")
-        outcome: dict[str, Any] = {"job_id": job.job_id, "backend": self.component.name, "event": status.state}
-        if status.error is not None:
-            outcome["error"] = status.error
-        ended = JobLoopState(state.start, None, state.finished_jobs + 1, {**outcome, "metrics": dict(status.metrics)})
-        return TrainStepResult(
-            state=ended.to_dict(),
-            metrics={**status.metrics, "training_job": outcome},
-            training_job_id=job.job_id,
+        outcome = JobOutcome(job.job_id, self.component.name, status.state, status.metrics, status.error)
+        ended = JobLoopState(state.start, None, state.finished_jobs + 1, outcome)
+        event = {key: value for key, value in outcome.to_dict().items() if key != "metrics"}
+        return JobCommit(
+            TrainStepResult(
+                state=ended.to_dict(),
+                metrics={**status.metrics, "training_job": event},
+                training_job_id=job.job_id,
+            ),
+            ended=outcome,
         )
+
+    def import_start(self, release: Path) -> str | None:
+        """The start that the component makes of a rolled-back ``release`` (``TrainingComponent.import_start``)."""
+        return self.component.import_start(release)
 
     def cancel(self, state: JobLoopState) -> None:
         """Cancel the running job of ``state`` at the component; nothing when no job runs."""

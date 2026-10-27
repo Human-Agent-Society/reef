@@ -16,11 +16,10 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobData, TaskItem, TrajectoryItem
+from reef.core.job_data import JobData, JobOutcome, TaskItem, TrajectoryItem
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, write_harbor_task
-from reef.harness.client.tasks import TaskEpisode
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
@@ -44,7 +43,6 @@ from reef.recipe.generated_tasks.processor import (
     RoundSettings,
     TaskGroupSettings,
     TaskJobSettings,
-    rewards_of,
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
@@ -152,17 +150,6 @@ def sample(task: str, index: int, reward: float) -> TrajectoryItem:
     """One episode's sample in the task group ``task``, as the training component's rollout makes it."""
     trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, "r1")
     return dataclasses.replace(trajectory, group_id=task)
-
-
-def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
-    def episode(reward: float | None, error: str = "") -> TaskEpisode:
-        return TaskEpisode(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
-
-    assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
-    assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)
-    assert (
-        episode(None, "the sandbox is gone").is_infrastructure_failure and not episode(0.0).is_infrastructure_failure
-    )
 
 
 def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
@@ -403,12 +390,11 @@ def train_job(
     p.acknowledge(data.data_id)
     # The trainer releases the consumed IDs once the submission's commit is durable.
     p.release_records(p.releasable_record_ids())
-    outcome: dict[str, Any] = {"job_id": "job", "backend": "tinker"}
     if error is None:
         episode_rewards = {name: list((rewards or {}).get(name, (1.0, 0.0))) for name in names}
-        outcome.update(event="finished", metrics={"rollout_rewards": episode_rewards, "rollout_samples": 4})
+        outcome = JobOutcome("job", "tinker", "finished", {"rollout_rewards": episode_rewards, "rollout_samples": 4})
     else:
-        outcome.update(event="failed", error=error, metrics={})
+        outcome = JobOutcome("job", "tinker", "failed", error=error)
     p.job_ended(outcome)
     return names
 
@@ -749,7 +735,7 @@ def test_a_job_end_saves_each_tasks_first_result_from_its_rewards_and_sends_the_
     )
     assert task_generator.result_generations == [0] and 0 in delivered_generations(store)
     assert p.status()["submitted_tasks"] == 0 and stage_taken(p) == 0
-    p.job_ended({"event": "finished", "metrics": {"rollout_rewards": {ran: [0.5, 0.5]}}})
+    p.job_ended(JobOutcome("job", "tinker", "finished", {"rollout_rewards": {ran: [0.5, 0.5]}}))
     assert rollout_results(store)[ran].rollout_rewards == (1.0, 0.0), "a later run only trains"
 
 
@@ -1122,7 +1108,7 @@ def test_a_task_job_that_ran_across_a_restart_saves_its_rewards_when_it_ends(tmp
     again, _ = rounds(tmp_path, task_generator, rounds=1)
     assert rollout_results(again.record2task.task_store) == {}, "the running job's tasks wait for its end"
     rewards = {"harbor-00000-000": [1.0, 1.0], "harbor-00000-001": [0.0, 1.0]}
-    again.job_ended({"event": "finished", "metrics": {"rollout_rewards": rewards}})
+    again.job_ended(JobOutcome("job", "tinker", "finished", {"rollout_rewards": rewards}))
     saved = rollout_results(again.record2task.task_store)
     assert {name: result.rollout_rewards for name, result in saved.items()} == {
         "harbor-00000-000": (1.0, 1.0),
@@ -1165,7 +1151,7 @@ def test_a_task_that_trained_before_its_result_was_saved_gets_it_when_the_restar
     assert len(job_stage(again).task_pool) == 0, "a trained task does not run again"
     # The trainer starts with no running job, so it gives the stage the last job's end again.
     rewards = {"harbor-00000-000": [1.0, 0.0], "harbor-00000-001": [1.0, 0.0]}
-    again.job_ended({"event": "finished", "metrics": {"rollout_rewards": rewards}})
+    again.job_ended(JobOutcome("job", "tinker", "finished", {"rollout_rewards": rewards}))
     assert rollout_results(again.record2task.task_store)["harbor-00000-000"].rollout_rewards == (1.0, 0.0)
     assert asyncio.run(again.record2task.deliver_results()) == "" and task_generator.result_generations == [0]
 

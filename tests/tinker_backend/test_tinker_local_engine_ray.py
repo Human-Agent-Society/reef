@@ -321,7 +321,7 @@ def train_one_step(dispatcher, inference) -> None:
         time.sleep(1)
     state = loop_state(scenario)
     assert state.finished_jobs == 1, json.dumps(dispatcher.build_training_status(), default=str)[:3000]
-    assert state.last_job["event"] == "finished", state.last_job
+    assert state.last_job.event == "finished", state.last_job
 
 
 def served_adapters(tmp_path) -> list[Path]:

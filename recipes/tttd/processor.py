@@ -225,8 +225,9 @@ class TTTDJobData(Task2Job):
     ) -> None:
         self.groups_per_step = record2record.groups_per_step
         self.rollouts_per_group = record2record.rollouts_per_group
-        super().__init__(context, buffer_size, job_samples)
-        self.max_job_samples = self.groups_per_step * self.rollouts_per_group
+        super().__init__(
+            context, buffer_size, job_samples, max_job_samples=self.groups_per_step * self.rollouts_per_group
+        )
 
     @classmethod
     def from_config(

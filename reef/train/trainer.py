@@ -22,6 +22,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
+from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -54,6 +55,8 @@ class _PendingStep:
     data: JobData | None
     result: TrainStepResult | None
     prepared_commit: PreparedCommit | None = None
+    #: The outcome of the job whose end this commit records, which the pipeline learns once it is durable.
+    ended: JobOutcome | None = None
     # Set once the pipeline has the job data back and the step consumed these ids on its own, so no acknowledgement.
     consumed_ids: frozenset[str] | None = None
     #: The values ``result`` held before commit metrics replaced it: a caller may still hold one.
@@ -86,7 +89,11 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    """Turn scenario data into transactional local or backend training steps."""
+    """Turn a scenario's records into job data, and each training job's progress into commits.
+
+    A weight trainer submits jobs through its ``JobLoop``; a harness trainer runs a step on its candidate
+    backend. A trainer with neither trains nothing: it reads every record and is never ready.
+    """
 
     _DATA_READ_BATCH_SIZE = 256
 
@@ -115,19 +122,10 @@ class Trainer:
         for harness evolution, and None for a weight trainer, whose
         deployment sets the size. The trainer's ``job_samples`` is the
         task-to-job stage's ``job_samples``, which is ``default_job_samples``
-        unless the stage config sets it. A trainer that trains with no
-        ``job_samples``, a ``buffer_size`` below ``job_samples``, or a
-        ``job_samples`` above the stage's ``max_job_samples`` is a
-        ``PluginConfigError``.
+        unless the stage config sets it; the stage checks its own size rules.
+        A trainer that trains with no ``job_samples``, through a stage that
+        trains more than its own job data, is a ``PluginConfigError``.
         """
-        if default_job_samples is not None and (
-            isinstance(default_job_samples, bool)
-            or not isinstance(default_job_samples, int)
-            or default_job_samples <= 0
-        ):
-            raise ValueError(f"default_job_samples must be None or a positive int, got {default_job_samples!r}")
-        if candidate_backend is not None and job_loop is not None:
-            raise ValueError("a trainer trains through a job loop or a candidate backend, not both")
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend; a job loop holds its own")
         if candidate_evaluator is not None and not isinstance(candidate_evaluator, CandidateEvaluationPlugin):
@@ -147,24 +145,12 @@ class Trainer:
         if pipeline.training_mode != training_mode:
             pipeline.close()
             raise ValueError("pipeline_factory must preserve the requested training_mode")
-        stage = type(pipeline.task2job).__name__
-        job_samples = pipeline.task2job.job_samples
-        if job_samples is None and trains:
+        stage = pipeline.task2job
+        if trains and stage.job_samples is None and not stage.trains_own_job_data_only:
             pipeline.close()
             raise PluginConfigError(
-                f"{stage} has no job_samples: set pipeline.task2job.config.job_samples, "
+                f"{type(stage).__name__} has no job_samples: set pipeline.task2job.config.job_samples, "
                 "the fewest samples one training job trains"
-            )
-        if job_samples is not None and pipeline.buffer_size is not None and pipeline.buffer_size < job_samples:
-            pipeline.close()
-            raise PluginConfigError(
-                f"{stage} buffer_size {pipeline.buffer_size} is smaller than job_samples {job_samples}"
-            )
-        max_job_samples = pipeline.task2job.max_job_samples
-        if job_samples is not None and max_job_samples is not None and job_samples > max_job_samples:
-            pipeline.close()
-            raise PluginConfigError(
-                f"{stage} holds at most {max_job_samples} samples in one job's data, not job_samples {job_samples}"
             )
         if candidate_backend is not None:
             default_state: Mapping[str, Any] = candidate_backend.initial_state()
@@ -173,15 +159,19 @@ class Trainer:
         else:
             default_state = {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
-        trainer = cls(
-            scenario=scenario,
-            records=records,
-            pipeline=pipeline,
-            candidate_backend=candidate_backend,
-            candidate_evaluator=candidate_evaluator,
-            job_loop=job_loop,
-            state=initial_state,
-        )
+        try:
+            trainer = cls(
+                scenario=scenario,
+                records=records,
+                pipeline=pipeline,
+                candidate_backend=candidate_backend,
+                candidate_evaluator=candidate_evaluator,
+                job_loop=job_loop,
+                state=initial_state,
+            )
+        except BaseException:
+            pipeline.close()
+            raise
         if job_loop is not None:
             restored = JobLoopState.from_dict(initial_state)
             if restored.job is None and restored.last_job is not None:
@@ -200,6 +190,8 @@ class Trainer:
         state: Mapping[str, Any],
         job_loop: JobLoop | None = None,
     ) -> None:
+        if candidate_backend is not None and job_loop is not None:
+            raise ValueError("a trainer trains through a job loop or a candidate backend, not both")
         self._scenario = scenario
         self._records = records
         self._pipeline = pipeline
@@ -211,8 +203,9 @@ class Trainer:
             self._candidate_evaluator = candidate_evaluator
         else:
             self._candidate_evaluator = BackendAlwaysSelectPlugin(candidate_backend)
-        #: The fewest samples one job trains: automatic job data holds at least this many. None exactly
-        #: when the trainer trains nothing; such a trainer reads every record and is never ready.
+        #: The fewest samples one job trains: automatic job data holds at least this many. None when the
+        #: trainer trains nothing (it reads every record and is never ready) and when its stage trains only
+        #: its own job data.
         self.job_samples = pipeline.task2job.job_samples if self.trains else None
         self._state = dict(state)
         self._data_offset = 0
@@ -378,8 +371,8 @@ class Trainer:
         """Whether this trainer has records that its backend would still train on.
 
         That is the case when rows are unread, job data is ready or reserved,
-        or a background job runs. A trainer without a candidate backend
-        trains nothing. The rows that the pipeline keeps for later job data do
+        or a background job runs. A trainer that trains nothing (``trains``
+        is False) has none. The rows that the pipeline keeps for later job data do
         not count, because a rebuilt trainer reads them again from storage.
         """
         if not self.trains:
@@ -423,17 +416,17 @@ class Trainer:
 
     def pipeline_ready(self) -> bool:
         """Whether the pipeline holds the next job's data; the caller holds the lock. A trainer that trains nothing is never ready."""
-        return self.job_samples is not None and self._pipeline.ready(self.job_samples)
+        return self.trains and self._pipeline.ready(self.job_samples)
 
     def _build_validated_job_data(self) -> JobData:
         """Build the next job's data and hold the pipeline to its declared schema.
 
         ``Task2Job.output_schema`` is the recipe's published contract for
-        what a candidate backend will receive; enforcing it at the only place
+        what the training component or candidate backend receives; enforcing it at the only place
         job data enters the trainer turns a drifting recipe into a loud error
         instead of a backend-side shape failure.
         """
-        if self.job_samples is None:
+        if not self.trains:
             raise RuntimeError("a trainer that trains nothing builds no job data")
         data = self._pipeline.build_job_data(self.job_samples)
         schema = self._pipeline.output_schema
@@ -535,18 +528,20 @@ class Trainer:
         # Keep the job data reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
             result: TrainStepResult | None
+            ended: JobOutcome | None = None
             if data is None:
-                result = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
+                polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
+                result, ended = (None, None) if polled is None else (polled.result, polled.ended)
             elif self._job_loop is None:
                 result = self._execute_backend_step(data, scenario_step)
             else:
-                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data)
+                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data).result
         with self._lock:
             if data is None:
                 # A rollback that ran meanwhile replaced the state this poll read: its result is stale.
                 if result is None or self._state is not observed_state:
                     return None
-                self._pending = _PendingStep(data=None, result=result)
+                self._pending = _PendingStep(data=None, result=result, ended=ended)
             else:
                 if self._pending is None or self._pending.data_id != data.data_id:
                     raise RuntimeError("trainer reservation changed while its step was being prepared")
@@ -699,12 +694,9 @@ class Trainer:
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._pipeline.release_records(prepared.released_ids)
-            if self._job_loop is not None:
-                before = JobLoopState.from_dict(self._state)
-                after = JobLoopState.from_dict(prepared.algorithm_state)
-                if after.finished_jobs > before.finished_jobs and after.last_job is not None:
-                    # The job's end is durable: the pipeline learns its outcome, such as a task job's rewards.
-                    self._pipeline.job_ended(after.last_job)
+            if self._pending.ended is not None:
+                # The job's end is durable: the pipeline learns its outcome, such as a task job's rewards.
+                self._pipeline.job_ended(self._pending.ended)
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)
@@ -746,7 +738,7 @@ class Trainer:
         """
         if self._job_loop is None:
             raise RuntimeError("only a weight trainer imports a rolled-back release")
-        return self._job_loop.component.import_start(release)
+        return self._job_loop.import_start(release)
 
     def apply_rollback_start(self, start: str | None) -> None:
         """Start the next job from an imported rolled-back release, after the rollback committed.

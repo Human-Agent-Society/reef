@@ -20,7 +20,7 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.plugins import PluginConfigError, PluginReference
+from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -1513,16 +1513,13 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     for stage_config, message in (
         ({"batch_size": 2}, "unknown config fields: batch_size"),
         ({"buffer_size": 0}, "buffer_size must be None or a positive int"),
+        # The stage refuses a buffer that cannot hold one job's data.
+        ({"buffer_size": 1}, "buffer_size 1 is smaller than job_samples 2"),
     ):
         with pytest.raises(RecipeConfigError, match=message):
             CordisRecipe.from_environment(
                 {}, config=config(pipeline={"task2job": {"config": stage_config}}, batch_size=2), runtime=proxy
             ).build("demo", SQLiteRecordStore())
-    # The trainer refuses a buffer that cannot hold one job's data.
-    with pytest.raises(PluginConfigError, match="buffer_size 1 is smaller than job_samples 2"):
-        CordisRecipe.from_environment(
-            {}, config=config(pipeline={"task2job": {"config": {"buffer_size": 1}}}, batch_size=2), runtime=proxy
-        ).build("demo", SQLiteRecordStore())
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment(
             {}, config=config(pipeline={"task2job": {"config": {"batch_policy": "records"}}}), runtime=proxy

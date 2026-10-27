@@ -232,9 +232,12 @@ class TrainingComponent(ABC):
     def shares_scenarios(self) -> bool:
         """Whether jobs of several scenarios can run on this component.
 
-        True only for a component whose jobs train from their own start, so
-        one scenario's job never trains another scenario's weights. The
-        default is False.
+        True exactly when a job's weights depend only on the job: its
+        ``start``, data and parameters, and never on state that an earlier job
+        left in the component, such as weights held in memory. Then one
+        scenario's job never trains another scenario's weights, and the
+        scenario registry lets several training scenarios share the
+        component. The default is False.
         """
         return False
 

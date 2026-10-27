@@ -22,6 +22,7 @@ from reef.train.algos.registry import (
 )
 from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.tinker_backend.losses import resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.types import JobData
 
@@ -146,11 +147,11 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
         tinker = prepare_tinker_job(
             batch, TrainingMethod(objective.name), state, StepScheduling(), batch_size=1, kl_coef=0.0
         )
-        assert slime == tinker
         assert slime.action == "skip" and slime.payload is None
-        assert slime.next_algorithm_state == {"steps": 7, "skipped": True}
+        assert tinker.loss is None and tinker.steps == ()
+        assert slime.next_algorithm_state == tinker.next_algorithm_state == {"steps": 7, "skipped": True}
         assert state == {"steps": 7}
-        assert slime.metrics == {"reason": "no signal"}
+        assert slime.metrics == tinker.metrics == {"reason": "no signal"}
     finally:
         unregister_objective(objective.name)
 
@@ -175,11 +176,11 @@ def test_group_advantages_are_shared_across_backends_before_optimizer_partitioni
     )
     slime = prepare_slime_job(batch, TrainingMethod("tttd"), state, one_sample_steps, step_size=1)
     tinker = prepare_tinker_job(batch, TrainingMethod("tttd"), state, one_sample_steps, batch_size=1, kl_coef=0.0)
-    assert slime.payload["loss"] == tinker.payload["loss"] == "tttd"
+    assert slime.payload["loss"] == "tttd" and tinker.loss is resolve_tinker_loss("tttd")
     assert slime.payload["advantages"] == pytest.approx(expected)
-    assert [rows[0]["advantage"] for rows in tinker.payload["batches"]] == pytest.approx(expected)
+    assert [rows[0].advantage for rows in tinker.steps] == pytest.approx(expected)
     assert slime.payload["external_step_sizes"] == [1, 1, 1, 1]
-    assert len(tinker.payload["batches"]) == 4
+    assert len(tinker.steps) == 4
     assert slime.next_algorithm_state == tinker.next_algorithm_state == {"steps": 5}
     assert state == {"steps": 4}
     assert slime.metrics["adaptive_betas"] == tinker.metrics["adaptive_betas"]

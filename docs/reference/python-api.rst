@@ -959,14 +959,16 @@ record2task=..., task2job=...)``):
   ID. Automatic job data gets ``<scenario>:data:<number>``. An instruction's
   data gets ``<scenario>:instruction:<request id>``. The number counts the
   job data of one pipeline. It is not a training step.
-  ``Task2Job.__init__(context, buffer_size, job_samples)`` sets the most
-  samples that wait for a job and the fewest samples of one job. A
-  ``job_samples`` of ``None`` takes ``context.default_job_samples``; a
+  ``Task2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
+  sets the most samples that wait for a job and the fewest samples of one
+  job. A ``job_samples`` of ``None`` takes ``context.default_job_samples``; a
   ``buffer_size`` of ``None`` holds the data of four jobs
-  (``DEFAULT_BUFFER_JOBS``). ``Trainer.build`` raises ``PluginConfigError``
-  for a training trainer without ``job_samples``, for a buffer smaller than
-  ``job_samples``, and for a ``job_samples`` above the stage's
-  ``max_job_samples`` (an SDPO or TTTD grid). ``Task2JobSettings`` parses the
+  (``DEFAULT_BUFFER_JOBS``). The constructor raises ``PluginConfigError`` for
+  a buffer smaller than ``job_samples`` and for a ``job_samples`` above
+  ``max_job_samples`` (an SDPO or TTTD grid). A stage with the class
+  attribute ``trains_own_job_data_only`` takes neither size.
+  ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose
+  other stage has no ``job_samples``. ``Task2JobSettings`` parses the
   ``buffer_size`` and ``job_samples`` keys, and a stage with more keys
   extends it. See `Job size <../developer-guide/processors.rst#job-size>`__.
 
@@ -1351,8 +1353,10 @@ three fields:
 - ``data``: the ready job data that the job trains.
 - ``finished_jobs``: the number of this trainer's jobs that ended, finished
   or failed.
-- ``last_job``: the outcome of the last job that ended, or ``None`` before
-  the first one.
+- ``last_job``: the ``JobOutcome`` (``reef.core.job_data``) of the last job
+  that ended, or ``None`` before the first one. A ``JobOutcome`` holds
+  ``job_id``, ``backend``, ``event`` (``finished`` or ``failed``),
+  ``metrics``, and ``error``, which is set exactly when the job failed.
 
 The plan always returns a ``JobRequest(parameters, restart=False)``. Reef reads
 none of the ``parameters``; it submits them to the deployment's training
@@ -1512,8 +1516,11 @@ its ``evaluation`` section (`Configuration
 <configuration.rst#the-evaluation-section>`__).
 
 Without an ``evaluation`` section, a weight recipe uses
-``TrainingMetricsSelectPlugin`` (``reef.train.jobs``): it records the
-component's training metrics and selects every saved checkpoint.
+``AlwaysSelectCheckpointPlugin`` (``reef.evaluation.evaluators``): it selects
+every saved checkpoint and adds no metrics. The commit already records the
+checkpoint's ``training_metrics``, and it refuses an evaluation or decision
+metric whose key is a training metric or ``selected``, ``selection`` or
+``training_job``.
 
 A configured plugin inherits ``ConfiguredEvaluationPlugin``. It implements the
 class method ``from_config(config, *, runtime, scenario, environ)``, which
@@ -1775,7 +1782,8 @@ it submitted the job, so they do not train again.
 Once the commit of a job's end is durable, the trainer calls
 ``Task2Job.job_ended(outcome)`` with ``last_job``. The default does nothing.
 A trainer that starts with no running job calls it again for the last job
-that ended, so a second call for the same end must change nothing.
+that ended, before any other call to a new stage. The stage takes it as the
+end of the last job that it may have handed out.
 A stage whose job data holds ``TaskItem`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component
 reports ``rollout_rewards``, the rewards of each task's episodes, by task

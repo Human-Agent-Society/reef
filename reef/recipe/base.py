@@ -19,6 +19,7 @@ from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase
 from reef.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -34,7 +35,7 @@ from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.task2job import NoJobData
 from reef.train.algos.registry import resolve_objective
-from reef.train.jobs import FixedJobPlan, JobLoop, JobPlan, JobRequest, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobLoop, JobPlan, JobRequest
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -400,10 +401,9 @@ class WeightTrainingRecipe(Recipe):
     :meth:`training_spec` binds the training objective, which declares its
     backend loss family. Keeping that static machinery in one structured
     return value means the dataclass fields remain the recipe's instance
-    configuration. The
-    service reads the selected class from the same deployment config and
-    obtains its loss family from this hook; deployments do not repeat that
-    binding in an environment variable.
+    configuration. The service reads the selected class from the same
+    deployment config and obtains its loss family from this hook; deployments
+    do not repeat that binding in an environment variable.
 
     ``candidate_evaluation`` is framework-owned configuration derived from an
     optional top-level ``evaluation`` section. The plugin class it names builds one
@@ -437,8 +437,7 @@ class WeightTrainingRecipe(Recipe):
     def training_spec(cls) -> WeightTrainingSpec:
         """Return the objective binding for this recipe.
 
-        Concrete weight recipes override this hook. A recipe with bespoke
-        trainer wiring may omit ``task2job`` and override :meth:`build`.
+        Concrete weight recipes override this hook to name their objective.
         """
         return WeightTrainingSpec(objective="")
 
@@ -599,7 +598,7 @@ class WeightTrainingRecipe(Recipe):
         # Resolve the objective before starting workers, so an unknown reference fails the build.
         resolve_objective(spec.objective)
         evaluator = (
-            TrainingMetricsSelectPlugin()
+            AlwaysSelectCheckpointPlugin()
             if self.candidate_evaluation is None
             else build_candidate_evaluation(self.candidate_evaluation, runtime=self.runtime, scenario=scenario)
         )

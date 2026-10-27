@@ -10,21 +10,13 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import EvaluationResult, SelectionDecision
+from reef.core.evaluation import CheckpointCandidate, EvaluationResult, SelectionDecision
+from reef.core.job_data import JobOutcome
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import (
-    CheckpointCandidate,
-    FixedJobPlan,
-    JobLoop,
-    JobLoopState,
-    JobPlan,
-    JobPlanContext,
-    JobRequest,
-    RunningJob,
-    TrainingMetricsSelectPlugin,
-)
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlan, JobPlanContext, JobRequest, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
@@ -65,7 +57,7 @@ class FakeComponent(TrainingComponent):
         return f"fresh:{start}"
 
 
-class RejectAll(TrainingMetricsSelectPlugin):
+class RejectAll(AlwaysSelectCheckpointPlugin):
     def decide(self, candidate, evaluation: EvaluationResult) -> SelectionDecision:
         return SelectionDecision(selected=False, policy="test", reason="rejected", evaluation=evaluation)
 
@@ -86,7 +78,7 @@ def batch(name: str = "b") -> JobData:
     return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
 
 
-FINISHED = {"job_id": "j0", "backend": "fake", "event": "finished", "metrics": {}}
+FINISHED = JobOutcome("j0", "fake", "finished")
 
 
 @pytest.fixture
@@ -98,7 +90,7 @@ def loop_with(component, *, plan=None, evaluator=None, scenario="math"):
     return JobLoop(
         component,
         plan or FixedJobPlan(JobRequest({"method": "sft"})),
-        evaluator or TrainingMetricsSelectPlugin(),
+        evaluator or AlwaysSelectCheckpointPlugin(),
         scenario=scenario,
     )
 
@@ -132,32 +124,57 @@ def test_last_job_is_set_exactly_when_a_job_has_ended():
         JobPlanContext(batch(), True, FINISHED)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="JobData"):
         JobPlanContext("b", 0, None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="JobOutcome"):
+        JobLoopState(finished_jobs=1, last_job=FINISHED.to_dict())  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_a_job_outcome_has_an_error_exactly_when_the_job_failed():
+    failed = JobOutcome("j", "fake", "failed", error="boom")
+    assert JobOutcome.from_dict(failed.to_dict()) == failed
+    assert FINISHED.to_dict() == {"job_id": "j0", "backend": "fake", "event": "finished", "metrics": {}}
+    with pytest.raises(ValueError, match="exactly when the job failed"):
+        JobOutcome("j", "fake", "failed")
+    with pytest.raises(ValueError, match="exactly when the job failed"):
+        JobOutcome("j", "fake", "finished", error="boom")
+    with pytest.raises(ValueError, match="finished or failed"):
+        JobOutcome("j", "fake", "running")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        JobOutcome("j", "fake", "finished", {"loss": math.nan})
+    with pytest.raises(ValueError, match="keys"):
+        JobOutcome.from_dict({**FINISHED.to_dict(), "extra": 1})
 
 
 @pytest.mark.unit
 def test_a_checkpoint_candidate_id_names_its_job_and_step():
-    candidate = CheckpointCandidate(candidate_id="j:2", training_job_id="j", step=2, checkpoint_path="/c")
+    candidate = CheckpointCandidate(candidate_id="j:2", training_job_id="j", step=2, release_path="/c")
     assert candidate.training_metrics == {}
     with pytest.raises(ValueError, match="'<training_job_id>:<step>'"):
-        CheckpointCandidate(candidate_id="j:1", training_job_id="j", step=2, checkpoint_path="/c")
-    with pytest.raises(ValueError, match="checkpoint_path"):
-        CheckpointCandidate(candidate_id="j:2", training_job_id="j", step=2, checkpoint_path="")
+        CheckpointCandidate(candidate_id="j:1", training_job_id="j", step=2, release_path="/c")
+    with pytest.raises(ValueError, match="release_path"):
+        CheckpointCandidate(candidate_id="j:2", training_job_id="j", step=2, release_path="")
     with pytest.raises(ValueError, match="step"):
-        CheckpointCandidate(candidate_id="j:-1", training_job_id="j", step=-1, checkpoint_path="/c")
+        CheckpointCandidate(candidate_id="j:-1", training_job_id="j", step=-1, release_path="/c")
 
 
 @pytest.mark.unit
 def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     loop = loop_with(component)
-    result = loop.submit(JobLoopState(), batch())
+    submitted = loop.submit(JobLoopState(), batch())
+    result = submitted.result
     [job] = component.jobs
     assert (job.backend, job.start, job.parameters) == ("fake", None, {"method": "sft"})
+    assert submitted.ended is None
     assert result.artifact is None and result.training_job_id == job.job_id
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
     assert JobLoopState.from_dict(result.state).job == RunningJob(job.job_id)
     # The same rows are the same job, whatever the batch's number; another scenario's are another job.
-    assert loop.submit(JobLoopState(), JobData("renumbered", batch().items)).training_job_id == job.job_id
-    assert loop_with(component, scenario="code").submit(JobLoopState(), batch()).training_job_id != job.job_id
+    assert loop.submit(JobLoopState(), JobData("renumbered", batch().items)).result.training_job_id == job.job_id
+    other_scenario = loop_with(component, scenario="code").submit(JobLoopState(), batch())
+    assert other_scenario.result.training_job_id != job.job_id
+    # The next job of the same trainer is another job, even with the same data from the same start.
+    later = loop.submit(JobLoopState(finished_jobs=1, last_job=FINISHED), batch())
+    assert later.result.training_job_id != job.job_id
 
 
 @pytest.mark.unit
@@ -191,12 +208,12 @@ def test_a_phased_plan_sends_each_job_its_method_on_the_one_component(component)
     loop = loop_with(component, plan=SupervisedThenPolicy(supervised_jobs=2))
     state = JobLoopState()
     for index in range(3):
-        state = JobLoopState.from_dict(loop.submit(state, batch(str(index))).state)
+        state = JobLoopState.from_dict(loop.submit(state, batch(str(index))).result.state)
         component.statuses[state.job.job_id] = JobStatus(state.job.job_id, "finished")
-        state = JobLoopState.from_dict(loop.poll(state).state)
+        state = JobLoopState.from_dict(loop.poll(state).result.state)
     assert [job.parameters["method"]["objective"] for job in component.jobs] == ["sft", "sft", "policy"]
     assert {job.backend for job in component.jobs} == {"fake"}
-    assert state.finished_jobs == 3 and state.last_job["job_id"] == component.jobs[-1].job_id
+    assert state.finished_jobs == 3 and state.last_job.job_id == component.jobs[-1].job_id
     # The jobs saved no checkpoint, so only the restarted job starts elsewhere: from the component's fresh start.
     assert [job.start for job in component.jobs] == [None, None, "fresh:None"]
     assert state.start == "fresh:None"
@@ -205,11 +222,11 @@ def test_a_phased_plan_sends_each_job_its_method_on_the_one_component(component)
 @pytest.mark.unit
 def test_a_restart_submits_from_the_fresh_start_and_a_component_without_one_refuses(component):
     restart = FixedJobPlan(JobRequest({"method": "sft"}, restart=True))
-    result = loop_with(component, plan=restart).submit(JobLoopState("/c"), batch())
+    result = loop_with(component, plan=restart).submit(JobLoopState("/c"), batch()).result
     [job] = component.jobs
     assert job.start == "fresh:/c" and result.metrics["training_job"]["restart"] is True
     # The job ID names the fresh start, so a restarted job differs from the same job without a restart.
-    assert loop_with(component).submit(JobLoopState("/c"), batch()).training_job_id != job.job_id
+    assert loop_with(component).submit(JobLoopState("/c"), batch()).result.training_job_id != job.job_id
 
     class NoRestart(FakeComponent):
         fresh_start = TrainingComponent.fresh_start
@@ -221,12 +238,14 @@ def test_a_restart_submits_from_the_fresh_start_and_a_component_without_one_refu
 @pytest.mark.unit
 def test_each_saved_checkpoint_is_a_candidate_and_the_next_job_continues_from_it(component, tmp_path):
     loop = loop_with(component)
-    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).state)
+    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
     job_id = state.job.job_id
     assert loop.poll(state) is None
     first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"), {"loss": 0.5})
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
-    decided = loop.poll(state)
+    decision = loop.poll(state)
+    assert decision.ended is None
+    decided = decision.result
     assert decided.artifact is not None and decided.artifact.local_path == tmp_path / "1-release"
     assert decided.metrics["selected"] is True and decided.metrics["loss"] == 0.5
     assert decided.metrics["selection"]["candidate_id"] == f"{job_id}:1"
@@ -235,9 +254,11 @@ def test_each_saved_checkpoint_is_a_candidate_and_the_next_job_continues_from_it
     # Nothing new: the job runs on.
     assert loop.poll(state) is None
     component.statuses[job_id] = JobStatus(job_id, "finished", (first,), metrics={"optimizer_steps": 2})
-    ended = loop.poll(state)
+    end = loop.poll(state)
+    ended = end.result
     state = JobLoopState.from_dict(ended.state)
     assert state.job is None and state.finished_jobs == 1 and state.start == first.path
+    assert end.ended == state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
     assert ended.metrics["training_job"]["event"] == "finished" and ended.metrics["optimizer_steps"] == 2
     loop.submit(state, batch("next"))
     assert component.jobs[-1].start == first.path
@@ -246,10 +267,10 @@ def test_each_saved_checkpoint_is_a_candidate_and_the_next_job_continues_from_it
 @pytest.mark.unit
 def test_a_rejected_checkpoint_is_not_served_but_training_still_continues_from_it(component, tmp_path):
     loop = loop_with(component, evaluator=RejectAll())
-    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).state)
+    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
     saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"))
     component.statuses[state.job.job_id] = JobStatus(state.job.job_id, "running", (saved,))
-    decided = loop.poll(state)
+    decided = loop.poll(state).result
     assert decided.artifact is None and decided.metrics["selected"] is False
     assert JobLoopState.from_dict(decided.state).start == saved.path
 
@@ -258,9 +279,9 @@ def test_a_rejected_checkpoint_is_not_served_but_training_still_continues_from_i
 def test_a_failed_or_unknown_job_ends_and_keeps_the_start(component):
     loop = loop_with(component)
     state = JobLoopState("/start", RunningJob("lost"))
-    ended = JobLoopState.from_dict(loop.poll(state).state)
+    ended = JobLoopState.from_dict(loop.poll(state).result.state)
     assert ended.job is None and ended.start == "/start"
-    assert ended.last_job["event"] == "failed" and "no such job" in ended.last_job["error"]
+    assert ended.last_job.event == "failed" and "no such job" in ended.last_job.error
 
 
 @pytest.mark.unit
@@ -275,10 +296,15 @@ def test_a_rollback_cancels_the_running_job_and_restarts_from_the_imported_start
 
 @pytest.mark.unit
 def test_the_committed_state_round_trips_and_checks_its_values():
-    state = JobLoopState("/s", RunningJob("j", 2), 3, {"event": "finished"})
+    state = JobLoopState("/s", RunningJob("j", 2), 3, FINISHED)
     assert state.to_dict()["job"] == {"job_id": "j", "checkpoints_handled": 2}
     assert JobLoopState.from_dict(state.to_dict()) == state
     assert JobLoopState.from_dict({}) == JobLoopState()
+    # A state that cannot be read is refused, not taken for an untrained scenario.
+    with pytest.raises(ValueError, match="keys"):
+        JobLoopState.from_dict({"start": "/s"})
+    with pytest.raises(ValueError, match="job_id and checkpoints_handled"):
+        JobLoopState.from_dict({**state.to_dict(), "job": {"job_id": "j"}})
     with pytest.raises(ValueError, match="start"):
         JobLoopState(start="")
     with pytest.raises(TypeError, match="RunningJob"):
@@ -291,13 +317,30 @@ def test_the_committed_state_round_trips_and_checks_its_values():
 
 @pytest.mark.unit
 def test_the_default_evaluation_serves_every_checkpoint_with_its_training_metrics():
-    plugin = TrainingMetricsSelectPlugin()
+    plugin = AlwaysSelectCheckpointPlugin()
     candidate = CheckpointCandidate(
-        candidate_id="j:1", training_job_id="j", step=1, checkpoint_path="/c", training_metrics={"loss": 1.0}
+        candidate_id="j:1", training_job_id="j", step=1, release_path="/c", training_metrics={"loss": 1.0}
     )
     decision = plugin.evaluate_and_decide(candidate)
-    assert decision.evaluation.metrics == {"loss": 1.0}
+    # The commit already carries the training metrics, so the evaluation adds none.
+    assert decision.evaluation.metrics == {}
     assert decision.selected
+
+
+@pytest.mark.unit
+def test_a_checkpoint_decision_refuses_metrics_that_would_overwrite_each_other(component, tmp_path):
+    class ScoredEvaluation(AlwaysSelectCheckpointPlugin):
+        def evaluate(self, candidate) -> EvaluationResult:
+            return EvaluationResult("scored", "1", {"loss": 0.1})
+
+    loop = loop_with(component, evaluator=ScoredEvaluation())
+    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"), {"loss": 0.5})
+    with pytest.raises(ValueError, match=r"share the keys \['loss'\]"):
+        loop.decide(state, saved)
+    reserved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"), {"selected": 1})
+    with pytest.raises(ValueError, match=r"share the keys \['selected'\]"):
+        loop_with(component).decide(state, reserved)
 
 
 def scored_records() -> SQLiteRecordStore:
@@ -415,10 +458,10 @@ class EndedJobs(ThresholdJobData):
 
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, None, None)
-        self.outcomes: list[dict[str, object]] = []
+        self.outcomes: list[JobOutcome] = []
 
-    def job_ended(self, outcome) -> None:
-        self.outcomes.append(dict(outcome))
+    def job_ended(self, outcome: JobOutcome) -> None:
+        self.outcomes.append(outcome)
 
 
 @pytest.mark.unit
@@ -448,7 +491,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     prepared = trainer.prepare_commit(finished)
     assert ended.outcomes == [], "the end is not durable before its commit settles"
     trainer.commit(prepared)
-    assert ended.outcomes == [{"job_id": job.job_id, "backend": "fake", "event": "finished", "metrics": metrics}]
+    assert ended.outcomes == [JobOutcome(job.job_id, "fake", "finished", metrics)]
     trainer.commit(prepared)
     assert len(ended.outcomes) == 1, "a settled commit is not applied again"
 

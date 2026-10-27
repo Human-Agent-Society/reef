@@ -16,6 +16,7 @@ from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
@@ -26,7 +27,7 @@ from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.base import ServingRuntime
 from reef.surface.weights import WeightLoader
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
-from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.pipeline import TrainingPipeline
 
 WEIGHTS = "weights"
@@ -188,7 +189,7 @@ class _TwoTrainerRecipe(Recipe):
             job_loop=JobLoop(
                 training,
                 FixedJobPlan(JobRequest()),
-                TrainingMetricsSelectPlugin(),
+                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_states.get(WEIGHTS),

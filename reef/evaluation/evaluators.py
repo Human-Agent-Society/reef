@@ -36,6 +36,7 @@ from typing import Any, Self
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
     CandidateEvaluator,
+    CheckpointCandidate,
     EvaluationResult,
     SelectionDecision,
     UpdateCandidate,
@@ -156,7 +157,7 @@ class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, Selecti
 
     A harness trainer that configures no evaluation gets it, and a harness
     recipe's ``always`` selection names it. A weight trainer's default is
-    ``reef.train.jobs.TrainingMetricsSelectPlugin``.
+    ``AlwaysSelectCheckpointPlugin``.
     """
 
     def __init__(self, candidate_backend: Any) -> None:
@@ -170,7 +171,22 @@ class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, Selecti
         return cls(candidate_backend)
 
 
+class AlwaysSelectCheckpointPlugin(AlwaysSelectMixin):
+    """The default candidate evaluation of a weight trainer: serve every checkpoint that a job saves.
+
+    ``evaluate`` measures nothing: its result has no metrics, since the commit of the decision already carries
+    the checkpoint's training metrics. It takes a ``CheckpointCandidate`` and raises ``TypeError`` for another
+    candidate.
+    """
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        if not isinstance(candidate, CheckpointCandidate):
+            raise TypeError(f"{type(self).__name__} evaluates a CheckpointCandidate, got {type(candidate).__name__}")
+        return EvaluationResult(evaluator="training_job", evaluator_version="1", metrics={})
+
+
 __all__ = [
+    "AlwaysSelectCheckpointPlugin",
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",

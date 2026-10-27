@@ -26,6 +26,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
@@ -37,12 +38,11 @@ from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlanContext, TrainingMetricsSelectPlugin
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlanContext
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData
-
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 
@@ -544,7 +544,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         assert selection["evaluation"]["evaluator"] == "external_checkpoint"
         assert selection["evaluation"]["metrics"] == {
             "score": 0.25,
-            "checkpoint_path": str(tmp_path / "checkpoints" / "1"),
+            "release_path": str(tmp_path / "checkpoints" / "1"),
         }
         assert selection["evaluation"]["metadata"] == {"scenario": "math", "token_present": True}
     finally:
@@ -639,7 +639,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             job_loop=JobLoop(
                 component,
                 SAORecipe(**runtime_bindings(component)).job_plan(),
-                TrainingMetricsSelectPlugin(),
+                AlwaysSelectCheckpointPlugin(),
                 scenario="math",
             ),
             algorithm_state=algorithm_state,

@@ -9,17 +9,18 @@ from reef.artifact.artifact import Artifact
 
 @dataclass(frozen=True)
 class NoArtifactPublication:
-    pass
+    """The publication of a commit that publishes nothing. It has one value."""
 
 
 @dataclass(frozen=True)
 class SavedArtifactPublication:
-    """A materialized publication identified by its durable release.
+    """The publication of a commit that publishes durable bytes.
 
-    Engine-local ``runtime_load_id`` tokens deliberately stop at checkpoint
-    export; once bytes are materialized, the published version is the source
-    of identity. ``component`` names which component of a multi-component
-    release the artifact replaces; the committer carries the others forward.
+    Values: ``artifact`` is the release to publish, and ``component`` is None
+    or the non-empty name of the release component that ``artifact`` replaces;
+    the committer carries the other components forward. Purpose:
+    ``TrainStepResult.publication`` makes the value, and the scenario committer
+    publishes it. The published version, not a runtime load ID, names it.
     """
 
     artifact: Artifact
@@ -36,8 +37,10 @@ ArtifactPublication = NoArtifactPublication | SavedArtifactPublication
 class TrainStepResult:
     """One commit's worth of training: the trainer state to commit, its metrics and what it publishes.
 
-    ``state`` is the trainer state the commit records (``None`` keeps the
-    current one). ``artifact`` holds the bytes to publish, or ``None`` for a
+    ``state`` is the trainer state the commit records, a mapping, or ``None``
+    for a commit outside a training step that keeps the current state; a
+    training step's result needs a mapping (``Trainer.prepare_commit``
+    refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
     commit that publishes nothing, such as a job submission or a checkpoint
     that evaluation did not select. ``training_job_id`` names the training job
     the commit is about, if any.
@@ -62,6 +65,10 @@ class TrainStepResult:
     component: str | None = None
 
     def __post_init__(self) -> None:
+        if self.state is not None and not isinstance(self.state, Mapping):
+            raise TypeError("state must be a mapping or None")
+        if not isinstance(self.metrics, Mapping):
+            raise TypeError("metrics must be a mapping")
         if self.component is not None:
             if not isinstance(self.component, str) or not self.component:
                 raise ValueError("component must be a non-empty string or None")
