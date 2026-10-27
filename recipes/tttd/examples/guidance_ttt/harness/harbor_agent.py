@@ -3,7 +3,7 @@
 One Harbor trial owns the complete Guidance-TTT trajectory: every step samples
 the trainable guidance policy through Reef, executes the guidance with a frozen
 external model, verifies the candidate with the external judge, and waits for
-Reef's durable LoRA training transaction before the next step starts. It ends
+Reef's LoRA training job to end before the next step starts. It ends
 by writing the archive's best candidate into the task environment, where the
 Harbor verifier scores it independently.
 
@@ -17,7 +17,6 @@ import asyncio
 import base64
 from collections.abc import Callable
 
-import yaml
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -28,7 +27,7 @@ from .bootstrap import prepare_seed
 from .config import RunConfig
 from .contract import TaskContract
 from .execution import OpenAICompatibleExecutionClient
-from .run_controller import GuidanceRunController, GuidanceRunIdentity, GuidanceRunStateStore, RayTrainingBridge
+from .run_controller import GuidanceRunController, GuidanceRunIdentity, GuidanceRunStateStore, StatusTrainingProgress
 from .scorer import SOURCE_FILES, JudgeScorer
 
 CONFIG = RunConfig.load()
@@ -154,19 +153,13 @@ async def run_trajectory(
         guidance_max_tokens=MAX_TOKENS,
         max_workers=MAX_WORKERS,
     )
-    # reef serve publishes the shared runtime's address before starting
-    # the driver. Read that snapshot, not a fixed port or another cluster.
-    runtime = yaml.safe_load((STATE_DIR / "stack" / "slime-driver" / "runtime.yaml").read_text())["reef"]
     controller = GuidanceRunController(
         harness=harness,
         library=library,
-        bridge=RayTrainingBridge(
+        progress=StatusTrainingProgress(
             SERVICE_URL,
             SCENARIO,
             token=TOKEN,
-            ray_address=runtime["ray_address"],
-            ray_namespace=runtime["ray_namespace"],
-            ray_actor_name=runtime["ray_actor_name"],
             timeout_s=TRAIN_TIMEOUT_S,
             poll_interval_s=TRAIN_POLL_S,
         ),

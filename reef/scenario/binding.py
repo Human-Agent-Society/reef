@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from reef.core.reports import ReportBase
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.surface.base import Surface
 
 
@@ -22,4 +23,5 @@ class ScenarioBinding:
     #: when set, every report on this scenario is parsed through it at
     #: ingress. ``None`` keeps open ingress.
     report_type: type[ReportBase] | None = None
-    training_runtime: TrainingRuntime | None = None
+    #: The training component of a weight-training recipe, which its trainer submits jobs to.
+    training_component: TrainingComponent | None = None

@@ -200,21 +200,21 @@ step is the unit the rest of this page counts in.
 .. flow::
    :loop: publish the winner, or restore the snapshot
 
-   Batch :: a batch of units, or a queued request, or both
+   Job data :: the units of one step, or a queued request, or both
    ``propose`` :: one proposal, a mutation or a sequence applied as one, or ``None``
    Episodes* :: run the candidate and current tree on the same tasks
    Result :: publish the candidate or restore the snapshot
 
-A step begins either from a batch of recorded traffic or from a training
+A step begins either from job data of recorded traffic or from a training
 request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the recipe config
 decides which of the two a deployment accepts.
 
-- ``auto`` (the default): steps start from a batch of recorded traffic
+- ``auto`` (the default): steps start from job data of recorded traffic
   alone. Training requests are ignored.
 - ``manual``: steps start from training requests alone. Ordinary
   traffic never starts evolution.
 - ``hybrid``: steps start from either, as the tutorial's ``deployment.yaml``
-  sets. Training requests are queued and takes precedence, and batching continues
+  sets. Training requests are queued and take precedence, and automatic steps continue
   between those requests.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
@@ -228,23 +228,24 @@ Trigger of step
 
 In ``auto`` mode, two settings decide when Reef starts a step:
 
-- ``recipe.config.evolution.batch_size`` (default 1): when this number of
-  traces is collected, Reef starts a step.
+- ``pipeline.task2job.config.job_samples``: when this number of traces is
+  collected, Reef starts a step. Without the key, it is
+  ``recipe.config.evolution.batch_size`` (default 1).
 - The ``pipeline.record2record`` and ``pipeline.record2task`` stages decide
-  what counts as one trace toward ``batch_size``.
+  what counts as one trace toward ``job_samples``.
 
 The recipe's default stages count reports. Every valid scored report with
 at least one unique inference reference counts as one trace, including
-successful outcomes. A report over one receipt batches as that exchange. A
-report over several receipts batches as one trajectory sample that carries
+successful outcomes. A report over one receipt trains as that exchange. A
+report over several receipts trains as one trajectory sample that carries
 every referenced exchange in order. ``reef-pi report`` sends this kind of
 report for a whole run (``--per-receipt`` fans the score across the receipts
 as separate reports instead). Reports that reference inferences trained in
-earlier batches are dropped.
+earlier steps are dropped.
 
 To count recorded inference traffic instead, name the inference stages.
 Every inference then counts as one trace. No report is necessary: recorded
-traffic alone batches, unscored, for methods that judge for themselves.
+traffic alone trains, unscored, for methods that judge for themselves.
 
 .. code-block:: yaml
 
@@ -259,8 +260,8 @@ traffic alone batches, unscored, for methods that judge for themselves.
        module: reef.train.cordis_backend.processor:InferenceTasks
 
 Reef holds the traces that wait for a step in a buffer. The buffer keeps at
-most ``pipeline.task2batch.config.buffer_size`` traces (default four times
-``batch_size``). When more traces arrive, Reef releases the oldest ones. This
+most ``pipeline.task2job.config.buffer_size`` traces (default four times
+``job_samples``). When more traces arrive, Reef releases the oldest ones. This
 limit applies in every mode.
 
 Under ``auto`` mode, training requests are rejected.
@@ -284,14 +285,14 @@ beyond ``buffer_size``.
 ``hybrid`` mode
 ^^^^^^^^^^^^^^^
 
-In ``hybrid`` mode, either condition starts a step: ``batch_size`` traces
+In ``hybrid`` mode, either condition starts a step: ``job_samples`` traces
 collected by the ``pipeline`` stages, or a training request received.
 
 When both conditions are met, the training request takes precedence for the
 next step. Reef builds one step that uses both, whether or not
-``batch_size`` is met. The proposer then
-receives the training request and the traces that an automatic batch would
-take next. It gets up to ``batch_size`` traces, or none, and uses both
+``job_samples`` is met. The proposer then
+receives the training request and the traces that automatic job data would
+take next. It gets up to ``job_samples`` traces, or none, and uses both
 to make a mutation.
 
 Propose: mutation to the harness tree
@@ -638,8 +639,8 @@ its committed outputs are a full local run on ollama with no GPU.
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
 graded, and every result is reported against its receipt. Every valid scored
-report batches, a passing one included, and ``evolution.batch_size: 1`` makes each
-report its own batch, so every report this run submits triggers one evolve
+report trains, a passing one included, and ``evolution.batch_size: 1`` makes each
+report its own step, so every report this run submits triggers one evolve
 step. In this example the served model is its own proposer, and it answers
 with one skill mutation.
 
@@ -669,7 +670,7 @@ service then requires that token, and every ``curl`` on this page needs
 
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one reported trace filled the
-batch, the served model proposed a new skill beside the starter, and the evaluation
+step, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
 notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
 tied the current tree on every task and lost the gate. The run has succeeded when one
@@ -690,13 +691,13 @@ still answering plain requests. A missing model server does not produce
 this symptom: the record phase raises on its first call and ``run.py``
 exits with the upstream error before any evolve step runs.
 
-A model that answers all three tasks correctly still batches one step per
+A model that answers all three tasks correctly still trains one step per
 report. Evaluation runs the tasks again on the current and candidate trees,
 so passing the initial tasks does not determine whether a candidate will
 win, tie, or lose. A step publishes only when its candidate wins; rejected
 or skipped steps leave the served tree unchanged. ``run.py`` counts all
 submitted reports, waits for the steps they triggered up to its deadline,
-and prints how many reports it batched and how many of them failed.
+and prints how many reports it submitted for steps and how many of them failed.
 
 Install the published tree
 --------------------------
@@ -1026,7 +1027,7 @@ as query parameters so a browser opens it as is, one self contained HTML
 page that reads like the request page, light or dark with the system and
 usable on a phone, with
 five sections: Why (the request, else the proposal's reason, else a failure
-in the batch), What changed (the mutations; an extension update as a line
+in the job data), What changed (the mutations; an extension update as a line
 diff against the release it ran on), Result (the evaluation's result and numbers,
 and the step record directory when ``evolution.step_record_dir`` is set),
 Setup (what the release needs from you: the step's own items, then those

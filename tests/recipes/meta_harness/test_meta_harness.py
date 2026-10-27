@@ -474,6 +474,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        hold_local_cycles=True,
     )
     scenario_name = "../general-meta-harness"
     try:
@@ -577,6 +578,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
@@ -604,6 +606,7 @@ def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Pa
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("failed-evaluation")
@@ -633,7 +636,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     records = tmp_path / "records"
-    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
+    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
     mirror = scenario_population_path(tmp_path / "meta-harness", "commit-failure")
     try:
         scenario = dispatcher.get_or_create_scenario("commit-failure")
@@ -664,7 +667,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     # A stale/corrupt mirror is never loaded as search state.  Recovery gets
     # the prior durable commit and rewrites the mirror from that value.
     mirror.write_text('{"stale": true}\n')
-    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
+    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
     try:
         recovered = restarted.get_or_create_scenario("commit-failure")
         assert recovered is not None
@@ -687,6 +690,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("publish-failure")

@@ -2,10 +2,10 @@
 
 Group-relative pg is the shape a cookbook grouped method would register: a
 processor that groups reports by ``metadata.comparison_set`` and an objective
-that turns the resulting ``TrainingBatch`` into group-relative
+that turns the resulting ``JobData`` into group-relative
 advantages. Both live here rather than in ``reef`` because no bundled recipe
 uses them — the grouping machinery they exercise (group keys, slots, the
-``ReportGrouping.decide`` barrier, ``TrainingBatch`` through the trainer and the
+``ReportGrouping.decide`` barrier, ``JobData`` through the trainer and the
 runtime) IS production code, and these suites are what keep it pinned.
 
 ``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
@@ -25,11 +25,11 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
 from reef.record2task import ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import Task2Batch
-from reef.train.algos import StepSignal, TrainingObjective
+from reef.task2job import Task2Job
+from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectory_groups
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 
@@ -37,8 +37,9 @@ GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 class GroupedPolicyObjective(TrainingObjective):
     name = "test-grouped-pg"
     loss_family = "pg"
+    rollout_unit = "comparison_set"
 
-    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+    def prepare(self, batch: JobData, state: Mapping[str, Any]) -> TrainingSignal:
         advantages: list[float] = []
         for comparison_set in trajectory_groups(batch):
             rewards = [trajectory_reward(sample) for sample in comparison_set]
@@ -47,7 +48,7 @@ class GroupedPolicyObjective(TrainingObjective):
             advantages.extend((reward - mean) / std if std else 0.0 for reward in rewards)
         steps = next_steps(state)
         normalized = tuple(advantages)
-        return StepSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
+        return TrainingSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
 
 
 def _comparison_set_id(report: AgentRecord) -> str | None:
@@ -80,9 +81,9 @@ class ComparisonSetTasks(ReportTasks):
         return replace(self.assembly.build(context, context.require_score()), group_id=set_id)
 
 
-class GroupedPolicyBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+class GroupedPolicyJobData(Task2Job):
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, tasks)
 
 
 def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
@@ -91,5 +92,5 @@ def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = 
         context,
         record2record=ReportRecord2Record(context, ComparisonSetGrouping()),
         record2task=ComparisonSetTasks(),
-        task2batch=GroupedPolicyBatches(context, buffer_size),
+        task2job=GroupedPolicyJobData(context, buffer_size, None),
     )

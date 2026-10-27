@@ -290,11 +290,11 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
         dispatcher.close()
 
 
-def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_batch(tmp_path: Path) -> None:
+def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_job_data(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
         page = _page(dispatcher, 3)
-        assert "A failure in the batch" in _section(page, "Why")
+        assert "A failure in the job data" in _section(page, "Why")
         changed = _section(page, "What changed")
         assert '<span class="tag operation-create">create</span><span class="node-id">s1</span>' in changed
         assert '<span class="tag">skill</span>' in changed

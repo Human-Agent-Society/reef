@@ -16,5 +16,4 @@ PYD003|reef/harness/compose/fiber.py|Fiber|self._hooks
 PYD003|reef/harness/compose/fiber.py|Fiber|self._remove_from_runtime
 PYD003|reef/harness/compose/reflect.py|Impl|check
 PYD003|reef/harness/compose/registry.py|Runtime|callback
-PYD003|reef/train/slime_backend/reef_adapters/weight_updaters/base.py|SynchronizedWeightUpdateMixin|_on_chunk
 PYD004|reef/harness/compose/fiber.py|_drive|collect,live

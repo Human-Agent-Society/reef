@@ -10,10 +10,10 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 
 from reef.runtime.interfaces import TrainingMethod
-from reef.train.algos import StepScheduling
+from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
 from reef.train.slime_backend.distill import DistillSettings
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.score_centering import (
     ROLLOUT_KEYS,
     TOPK_INDICES_KEY,
@@ -22,7 +22,7 @@ from reef.train.slime_backend.score_centering import (
     sampler_topk_columns,
     settings_from_args,
 )
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 
 def log_probs_fixture(*probabilities: float) -> list[float]:
@@ -209,15 +209,15 @@ def test_payload_carries_each_wire_rows_top_k_in_schedule_order() -> None:
         TOPK_INDICES_KEY: [[[3, 1]], [[3, 0]], [[3, 1]]],
         TOPK_LOG_PROBS_KEY: [[[-0.5, -1.0]]] * 3,
     }
-    batch = TrainingBatch("batch", tuple(samples))
+    batch = JobData("batch", tuple(samples))
     # Two epochs repeat every row: the columns follow the wire rows.
-    step = prepare_slime_step(
-        batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample", epochs=2), step_size=1, sampler_topk=True
+    step = prepare_slime_job(
+        batch, TrainingMethod("sao"), {}, StepScheduling(epochs=2), step_size=1, sampler_topk=True
     )
     assert step.payload is not None
     rows = [row[0] for row in step.payload["samples"]]
     assert [ids[0][1] for ids in step.payload[TOPK_INDICES_KEY]] == [int(row[1:]) for row in rows]
-    plain = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
+    plain = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     assert plain.payload is not None and TOPK_INDICES_KEY not in plain.payload
 
 

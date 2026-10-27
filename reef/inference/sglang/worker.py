@@ -1,4 +1,4 @@
-"""Own SGLang engines, recovery and update control independently of training."""
+"""Own SGLang engines, their recovery and weight loads independently of training."""
 
 from __future__ import annotations
 
@@ -10,15 +10,13 @@ import ray
 from reef.inference.process import retire_engines
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.health import SGLangEngineHealthChecks
-from reef.inference.sglang.launch import SGLangCluster, engine_environment
-from reef.runtime.publication import WeightUpdateLock
+from reef.inference.sglang.launch import SGLangCluster
 from reef.runtime.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
     InferenceEngineGroup,
     InferenceMonitor,
-    WeightUpdateConnection,
 )
 
 
@@ -30,7 +28,7 @@ def recover_server(server) -> None:
 
 
 class SGLangWorker:
-    """Own serving engines, their update lock, monitors and locally launched routers."""
+    """Own serving engines, their monitors and locally launched routers."""
 
     def __init__(self, config: SGLangConfig, pg):
         self.config = config
@@ -42,8 +40,7 @@ class SGLangWorker:
         self._closed = False
         try:
             self._cluster.start()
-            self.rollout_engine_lock = self._new_rollout_engine_lock()
-            self._control = self._create_control()
+            self._control = InferenceControl(_SGLangEngineGroup(self), _SGLangInferenceMonitor(self))
             if config.health_enabled and not config.external_engines:
                 for server in self.servers.values():
                     for group in server.server_groups:
@@ -93,9 +90,8 @@ class SGLangWorker:
     def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> None:
         """Load one adapter directory into every updatable engine and serve it as ``runtime_load_id``.
 
-        The sender that owns the files is elsewhere (a hosted trainer); the
-        engines read the directory themselves. Generation is already paused
-        by the publisher, so no request observes an engine mid-load.
+        The engines read the directory themselves. Generation is already
+        paused by the caller, so no request observes an engine mid-load.
         """
         engines = self.updatable_rollout_engines
         if not engines:
@@ -112,8 +108,8 @@ class SGLangWorker:
     def load_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> None:
         """Reload every updatable engine's weights from a Hugging Face directory and serve them as ``runtime_load_id``.
 
-        The trainer that wrote the files is elsewhere; the engines read the
-        directory themselves. Generation is already paused by the publisher.
+        The engines read the directory themselves. Generation is already
+        paused by the caller.
         """
         engines = self.updatable_rollout_engines
         if not engines:
@@ -131,11 +127,6 @@ class SGLangWorker:
     def inference_url(self) -> str | None:
         return self._cluster.endpoint
 
-    def _create_control(self) -> InferenceControl:
-        return InferenceControl(
-            _SGLangEngineGroup(self), _SGLangWeightUpdateConnection(self), _SGLangInferenceMonitor(self)
-        )
-
     def pause_generation_for_update(self):
         return self._control.pause()
 
@@ -145,70 +136,11 @@ class SGLangWorker:
     def terminate_updatable_engines(self) -> int:
         return self._control.terminate()
 
-    def get_updatable_engines_and_lock(self):
-        server = self._get_updatable_server()
-        if server is None:
-            return [], self.rollout_engine_lock, 0, [], [], []
-        num_new_engines = server.num_new_engines
-        if self._control.reconnect_required:
-            num_new_engines = max(num_new_engines, 1)
-        return (
-            server.engines,
-            self.rollout_engine_lock,
-            num_new_engines,
-            server.engine_gpu_counts,
-            server.engine_gpu_offsets,
-            server.engine_parallel_configs,
-        )
+    def updatable_engines(self):
+        return self.updatable_rollout_engines
 
-    def offload(self, tags=None):
-        self.health_monitoring_pause()
-        if not tags:
-            return [server.offload() for server in self.servers.values()]
-        # Only node-zero engines in shared allocations receive memory operations.
-        handles = [
-            engine.release_memory_occupation.remote(tags=list(tags))
-            for server in self.servers.values()
-            for group in server.server_groups
-            if group.needs_offload
-            for engine in group.engines
-            if engine is not None
-        ]
-        return ray.get(handles) if handles else []
-
-    def onload(self, tags=None):
-        return [server.onload(tags) for server in self.servers.values()]
-
-    def onload_weights(self):
-        return [server.onload_weights() for server in self.servers.values()]
-
-    def onload_kv(self):
-        return [server.onload_kv() for server in self.servers.values()]
-
-    def prepare_training_connection(self):
-        self._control.prepare_training_connection()
-
-    def recover_updatable_engines(self):
-        self._control.recover()
-        return self.get_updatable_engines_and_lock()
-
-    def clear_updatable_num_new_engines(self):
-        server = self._get_updatable_server()
-        if server is not None:
-            server.num_new_engines = 0
-        self._control.acknowledge_reconnect()
-
-    def _new_rollout_engine_lock(self):
-        env_vars = engine_environment(self.config)
-        return (
-            ray.remote(WeightUpdateLock)
-            .options(
-                num_cpus=1,
-                num_gpus=0,
-                runtime_env={"env_vars": env_vars},
-            )
-            .remote()
-        )
+    def recover_updatable_engines(self) -> int:
+        return self._control.recover()
 
     def health_monitoring_pause(self):
         for monitor in self._health_monitors:
@@ -219,9 +151,6 @@ class SGLangWorker:
             return
         for monitor in self._health_monitors:
             monitor.resume()
-
-    def check_weights(self, action: str):
-        return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def check_health(self):
         """Raise if a monitor failed or a live engine actor is unreachable.
@@ -255,11 +184,6 @@ class SGLangWorker:
                 ]
             )
             self.servers = {}
-        lock = getattr(self, "rollout_engine_lock", None)
-        if lock is not None:
-            with suppress(Exception):
-                ray.kill(lock, no_restart=True)
-            self.rollout_engine_lock = None
         # Only routers launched by this inference owner belong to it.
         for router in self._routers:
             if router.is_alive():
@@ -283,15 +207,13 @@ class _SGLangEngineGroup(InferenceEngineGroup):
         return not self._worker.config.external_engines
 
     def pause(self) -> Any:
-        """Stop generation for a publication, leaving no reusable cache entry.
+        """Stop generation for a weight load, leaving no reusable cache entry.
 
         A ``retract`` pause releases every in-flight request's KV, which is
         what lets the shared prefix cache be cleared: an entry the previous
         weights built must not be matchable by a request running under the
-        next ones. A colocated engine drops the cache with its KV allocation
-        anyway; clearing it here extends the same guarantee to a disjoint
-        engine that shares prefixes. A failed flush raises, and the
-        publication then retires the engines.
+        next ones. A failed flush raises, and the caller then retires the
+        engines.
         """
         mode = self._worker.config.pause_mode
         engines = [engine for engine in self._worker.updatable_rollout_engines if engine is not None]
@@ -303,10 +225,13 @@ class _SGLangEngineGroup(InferenceEngineGroup):
     def resume(self) -> Any:
         return ray.get([engine.continue_generation.remote() for engine in self._worker.updatable_rollout_engines])
 
-    def recover(self) -> None:
+    def recover(self) -> int:
         server = self._worker._get_updatable_server()
-        if server is not None:
-            recover_server(server)
+        if server is None:
+            return 0
+        dead = sum(engine is None for group in server.server_groups for engine in group.all_engines)
+        recover_server(server)
+        return dead - sum(engine is None for group in server.server_groups for engine in group.all_engines)
 
     def terminate(self) -> int:
         server = self._worker._get_updatable_server()
@@ -318,23 +243,6 @@ class _SGLangEngineGroup(InferenceEngineGroup):
         for group, index in slots:
             group.all_engines[index] = None
         return len(slots)
-
-
-class _SGLangWeightUpdateConnection(WeightUpdateConnection):
-    """Keep Ray lock handles and their replacement private to the integration."""
-
-    def __init__(self, worker: SGLangWorker) -> None:
-        self._worker = worker
-
-    def is_usable(self) -> bool:
-        status = ray.get(self._worker.rollout_engine_lock.status.remote())
-        return isinstance(status, dict) and status.get("locked") is False and status.get("poisoned") is False
-
-    def replace(self) -> None:
-        old_lock = self._worker.rollout_engine_lock
-        self._worker.rollout_engine_lock = self._worker._new_rollout_engine_lock()
-        with suppress(Exception):
-            ray.kill(old_lock, no_restart=True)
 
 
 class _SGLangInferenceMonitor(InferenceMonitor):

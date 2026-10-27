@@ -177,20 +177,17 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
         "pause_generation_for_update",
         "continue_generation_after_update",
         "terminate_updatable_engines",
-        "get_updatable_engines_and_lock",
-        "offload",
-        "onload_weights",
-        "onload_kv",
-        "prepare_training_connection",
+        "updatable_engines",
         "recover_updatable_engines",
-        "clear_updatable_num_new_engines",
     ]
     for method in methods:
-        result = getattr(manager, method)()
-        assert result == (None if method == "prepare_training_connection" else method)
-    assert manager.offload(["weights"]) == "offload"
-    assert manager.check_weights("snapshot") == "check_weights"
-    assert executor.calls[-2:] == [("offload", (["weights"],), {}), ("check_weights", ("snapshot",), {})]
+        assert getattr(manager, method)() == method
+    assert manager.load_adapter_from_disk("adapter", "/release/adapter", "deployment:3") == "load_adapter_from_disk"
+    assert manager.load_weights_from_disk("/release", "deployment:4") == "load_weights_from_disk"
+    assert executor.calls[-2:] == [
+        ("load_adapter_from_disk", ("adapter", "/release/adapter", "deployment:3"), {}),
+        ("load_weights_from_disk", ("/release", "deployment:4"), {}),
+    ]
     manager.shutdown()
     assert executor.closed
 
@@ -220,7 +217,7 @@ def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
     assert killed == [engine]
 
 
-def test_rollout_shutdown_keeps_external_engines_and_releases_owned_lock(monkeypatch):
+def test_rollout_shutdown_of_external_engines_is_idempotent(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
     worker = object.__new__(module.SGLangWorker)
     worker.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
@@ -228,14 +225,19 @@ def test_rollout_shutdown_keeps_external_engines_and_releases_owned_lock(monkeyp
     worker._health_monitors = []
     worker._routers = []
     worker.servers = {"borrowed": types.SimpleNamespace(server_groups=[])}
-    lock = object()
-    worker.rollout_engine_lock = lock
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: killed.append(target))
     worker.shutdown()
     worker.shutdown()
-    assert killed == [lock]
+    assert killed == []
     assert worker.servers == {}
+
+
+def _attach_control(module, worker) -> None:
+    """Give a bare serving worker the inference control its constructor builds."""
+    from reef.runtime.recovery import InferenceControl
+
+    worker._control = InferenceControl(module._SGLangEngineGroup(worker), module._SGLangInferenceMonitor(worker))
 
 
 class _ServerGroup:
@@ -344,7 +346,7 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     server = SGLangModel(server_groups=[group])
     pauses: list[str] = []
     manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
+    _attach_control(module, manager)
     manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
     manager.servers = {"actor": server}
     manager._health_monitors = [types.SimpleNamespace(pause=lambda: pauses.append("pause"))]
@@ -368,7 +370,7 @@ def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
         update_weights=True, server_groups=[types.SimpleNamespace(all_engines=[engine])], engines=[engine]
     )
     manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
+    _attach_control(module, manager)
     manager.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
     manager.servers = {"actor": server}
     manager._health_monitors = []
@@ -403,14 +405,11 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
         resume=lambda: lifecycle.append("monitor_resume"),
     )
     manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
+    _attach_control(module, manager)
     manager.config = SGLangConfig("model", 1, 1, 1)
     manager.servers = {"actor": server}
-    manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": False, "poisoned": False}))
     manager._health_monitors = [monitor]
     manager._control.paused = True
-    manager._control.reconnect_required = False
 
     manager.recover_updatable_engines()
 
@@ -440,7 +439,7 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
     ]
     group = _ServerGroup([*engines, None], num_new_engines=0)
     manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
+    _attach_control(module, manager)
     manager.config = SGLangConfig("model", 1, 1, 1, pause_mode=pause_mode)
     manager.servers = {"actor": raw_rollout.RolloutServer(server_groups=[group])}
     manager._health_monitors = []
@@ -451,87 +450,6 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
         assert calls == ["pause:retract", "pause:retract", "flush", "flush"]
     else:
         assert calls == ["pause:in_place", "pause:in_place"], "an engine that keeps in-flight KV keeps its cache"
-
-
-@pytest.mark.unit
-def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
-    lifecycle: list[str] = []
-    old_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
-    new_lock = object()
-    server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    manager.servers = {"actor": server}
-    manager.rollout_engine_lock = old_lock
-    manager._health_monitors = [
-        types.SimpleNamespace(
-            pause=lambda: lifecycle.append("monitor_pause"),
-            resume=lambda: lifecycle.append("monitor_resume"),
-        )
-    ]
-    manager._control.paused = False
-    manager._control.reconnect_required = False
-    manager._new_rollout_engine_lock = lambda: new_lock
-    killed = []
-    monkeypatch.setattr(module.ray, "kill", lambda actor, **kwargs: killed.append((actor, kwargs)))
-
-    result = manager.recover_updatable_engines()
-
-    assert result[1] is new_lock
-    assert result[2] == 1
-    assert manager._control.reconnect_required is True
-    assert killed == [(old_lock, {"no_restart": True})]
-    assert lifecycle == ["monitor_pause", "monitor_resume"]
-
-
-@pytest.mark.unit
-def test_poisoned_external_update_requires_deployment_restart(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
-    server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    manager.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
-    manager.servers = {"actor": server}
-    manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
-    manager._health_monitors = [types.SimpleNamespace(pause=lambda: None, resume=lambda: None)]
-    manager._new_rollout_engine_lock = lambda: pytest.fail("external lock must stay fenced")
-
-    with pytest.raises(RuntimeError, match="restarting the external deployment"):
-        manager.recover_updatable_engines()
-
-
-@pytest.mark.unit
-def test_recovery_replaces_an_orphaned_locked_transport(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
-    old_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": False}))
-    new_lock = object()
-    server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.SGLangWorker)
-    manager._control = manager._create_control()
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    manager.servers = {"actor": server}
-    manager.rollout_engine_lock = old_lock
-    manager._health_monitors = []
-    manager._control.paused = False
-    manager._control.reconnect_required = False
-    manager._new_rollout_engine_lock = lambda: new_lock
-    monkeypatch.setattr(module.ray, "kill", lambda *_args, **_kwargs: None)
-
-    result = manager.recover_updatable_engines()
-
-    assert result[1] is new_lock
-    assert result[2] == 1
 
 
 @pytest.mark.unit
@@ -552,16 +470,16 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
     monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
 
-    manager = object.__new__(module.TrainingBatchProcessor)
-    manager.args = types.SimpleNamespace(
+    args = types.SimpleNamespace(
         global_batch_size=2,
         rollout_data_transport="object-store",
         custom_rollout_data_keys=(
             "producing_runtime_load_spans",
             "producing_runtime_load_ids",
         ),
+        reef_rollout_tensor_dtypes={},
     )
-    manager.train_parallel_config = {"dp_size": 2}
+    manager = module.TrainingBatchProcessor(args, {"dp_size": 2})
     spans = [
         [{"start": 0, "end": 1, "runtime_load_id": "engine:1"}],
         [{"start": 0, "end": 1, "runtime_load_id": "engine:2"}],
@@ -593,10 +511,13 @@ def _manager_for_schedule(monkeypatch: pytest.MonkeyPatch, *, global_batch_size:
     monkeypatch.setattr(sys.modules["slime.utils.dp_schedule"], "build_dp_schedule", _round_robin_dp_schedule)
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
     monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
-    manager = object.__new__(module.TrainingBatchProcessor)
-    manager.args = types.SimpleNamespace(global_batch_size=global_batch_size, rollout_data_transport="object-store")
-    manager.train_parallel_config = {"dp_size": 2}
-    return manager
+    args = types.SimpleNamespace(
+        global_batch_size=global_batch_size,
+        rollout_data_transport="object-store",
+        custom_rollout_data_keys=(),
+        reef_rollout_tensor_dtypes={},
+    )
+    return module.TrainingBatchProcessor(args, {"dp_size": 2})
 
 
 @pytest.mark.unit
@@ -638,7 +559,9 @@ def test_dp_packaging_trains_a_partial_last_step(monkeypatch: pytest.MonkeyPatch
 
 def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
     _, module = _load_manager_module(monkeypatch)
-    processor = module.TrainingBatchProcessor(types.SimpleNamespace(), {"dp_size": 1})
+    processor = module.TrainingBatchProcessor(
+        types.SimpleNamespace(custom_rollout_data_keys=(), reef_rollout_tensor_dtypes={}), {"dp_size": 1}
+    )
     assert processor.train_parallel_config == {"dp_size": 1}
     for name in ("inference_url", "pause_generation_for_update", "dispose", "shutdown"):
         assert not hasattr(processor, name)
@@ -647,7 +570,7 @@ def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
 def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
     worker = object.__new__(module.SGLangWorker)
-    worker._control = worker._create_control()
+    _attach_control(module, worker)
     worker._control.paused = True
     resumed = []
     worker._health_monitors = [types.SimpleNamespace(resume=lambda: resumed.append(True))]
@@ -665,8 +588,6 @@ def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
     worker._routers = []
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
     worker.servers = {"actor": types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])}
-    lock = object()
-    worker.rollout_engine_lock = lock
     calls = []
 
     class Monitor:
@@ -688,14 +609,14 @@ def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
     assert worker._health_monitors == [stuck]
     assert calls == ["stuck", "drained"]
     assert killed == []
-    assert worker.rollout_engine_lock is lock
+    assert worker.servers
     stuck.stuck = False
     worker.shutdown()
     worker.shutdown()
     assert worker._closed
     assert worker._health_monitors == []
     assert calls == ["stuck", "drained", "stuck"]
-    assert killed == [engine, lock]
+    assert killed == [engine]
 
 
 def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
@@ -709,7 +630,6 @@ def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
         "SGLangCluster",
         lambda config, pg: types.SimpleNamespace(servers={"actor": server}, routers=[], start=lambda: None),
     )
-    monkeypatch.setattr(module.SGLangWorker, "_new_rollout_engine_lock", lambda self: object())
     configs = []
 
     class RecordingMonitor(EngineHealthMonitor):
@@ -744,62 +664,3 @@ def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(mo
     )
     module._SGLangEngineGroup(worker).pause()
     assert paused == ["retract", "flush"]
-
-
-@pytest.mark.parametrize("offload", [False, True])
-def test_inference_owner_prepares_memory_before_training_attaches(monkeypatch, offload):
-    from reef.inference.sglang.control import SGLangControl
-
-    args = SGLangConfig(
-        "model",
-        1,
-        1,
-        1,
-        executor=_RecordingRolloutExecutor,
-        check_weights=True,
-        offload=offload,
-    )
-    worker = SGLangControl(args, "placement")
-    worker.prepare_training_connection()
-    expected = [
-        ("prepare_training_connection", (), {}),
-        ("check_weights", ("snapshot",), {}),
-        ("check_weights", ("reset_tensors",), {}),
-    ]
-    if offload:
-        expected.append(("offload", (None,), {}))
-    assert worker._serving.calls == expected
-    worker.prepare_training_connection()
-    expected.append(("prepare_training_connection", (), {}))
-    if offload:
-        expected.append(("offload", (None,), {}))
-    assert worker._serving.calls == expected
-    worker.shutdown()
-    assert worker._serving.closed
-
-
-@pytest.mark.parametrize("failure", ["check_weights", "offload"])
-def test_inference_preparation_failure_is_not_acknowledged(monkeypatch, failure):
-    from reef.inference.sglang.control import SGLangControl
-
-    args = SGLangConfig(
-        "model",
-        1,
-        1,
-        1,
-        executor=_RecordingRolloutExecutor,
-        check_weights=True,
-        offload=True,
-    )
-    worker = SGLangControl(args, "placement")
-
-    def fail(*args):
-        raise RuntimeError("cannot prepare inference")
-
-    monkeypatch.setattr(worker, failure, fail)
-    with pytest.raises(RuntimeError, match="cannot prepare"):
-        worker.prepare_training_connection()
-    assert not worker._prepared
-    assert "continue_generation_after_update" not in [call[0] for call in worker._serving.calls]
-    worker.shutdown()
-    assert worker._serving.closed

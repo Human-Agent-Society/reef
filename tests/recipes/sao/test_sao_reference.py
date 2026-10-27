@@ -96,6 +96,24 @@ def test_critic_role_args_disable_the_adaptive_lambda_and_pin_critic_lambda() ->
 
 
 @pytest.mark.unit
+def test_dense_attention_freeze_is_explicit_and_critic_only() -> None:
+    import copy
+
+    sao = resolve_loss_family("sao")
+    actor = _sao_backend_args(num_experts=0, freeze_params_name_list=None, only_train_params_name_list=None)
+    options, remaining = sao.parse_specific_options(["--sao-freeze-critic-attention"])
+    assert remaining == []
+    sao.apply_driver_options(actor, options)
+    critic = copy.deepcopy(actor)
+    sao.configure_critic_args(critic)
+    assert critic.freeze_params_name_list == ["self_attention"]
+    assert actor.freeze_params_name_list is None
+    critic.only_train_params_name_list = ["linear_fc"]
+    with pytest.raises(ValueError, match="conflicts"):
+        sao.configure_critic_args(critic)
+
+
+@pytest.mark.unit
 def test_critic_role_args_are_a_no_op_without_the_sao_projection() -> None:
     sao = resolve_loss_family("sao")
 

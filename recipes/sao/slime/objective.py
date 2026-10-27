@@ -100,7 +100,9 @@ def get_skip_observation_advantages_and_returns(
         from slime.backends.megatron_utils.cp_utils import all_gather_with_cp
 
         full_values = all_gather_with_cp(values, total_len, response_len)
-        full_action_mask = all_gather_with_cp(action_mask, total_len, response_len)
+        # Slime's gather creates a differentiable destination. Integer masks
+        # cannot require gradients; gather exact 0/1 floats and detach them.
+        full_action_mask = all_gather_with_cp(action_mask.float(), total_len, response_len).detach()
     else:
         full_values = values
         full_action_mask = action_mask

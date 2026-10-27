@@ -12,7 +12,11 @@ abstract, so only the pairing is instantiable.
 from __future__ import annotations
 
 import pytest
+from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import StubTrainingComponent
 
+from reef.core.evaluation import CheckpointCandidate
+from reef.core.plugins import PluginConfigError
 from reef.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
@@ -25,9 +29,12 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin, ManualPromotionPlugin
 from reef.evaluation.harness import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate
+from reef.inference.http import InferenceProxyRuntime
 from reef.train.backend import CandidateBackend
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
+from reef.train.types import JobData
 
 
 class DecideOnlyBackend(CandidateEvaluator):
@@ -206,16 +213,26 @@ def test_decision_rejects_non_boolean_selected(selected: object) -> None:
         )
 
 
-def test_model_candidate_records_the_unactivated_checkpoint() -> None:
-    candidate = ModelCandidate(
-        candidate_id="job-7",
-        training_job_id="job-7",
-        checkpoint_path="/checkpoints/job-7",
-        current_runtime_load_id="inc:6",
-    )
+def test_a_checkpoint_candidate_names_the_saved_checkpoint_it_offers(tmp_path) -> None:
+    candidates: list[UpdateCandidate] = []
 
-    assert candidate.current_runtime_load_id == "inc:6"
-    assert ActivatedModel(candidate.candidate_id, "inc:7").runtime_load_id == "inc:7"
+    class RecordingPlugin(AlwaysSelectCheckpointPlugin):
+        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+            candidates.append(candidate)
+            return super().evaluate(candidate)
+
+    component = StubTrainingComponent(tmp_path)
+    loop = JobLoop(component, FixedJobPlan(JobRequest()), RecordingPlugin(), scenario="math")
+    trajectory = policy_trajectory("s", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
+    submitted = JobLoopState.from_dict(loop.submit(JobLoopState(), JobData("b", (trajectory,))).result.state)
+    job_id = submitted.job.job_id
+    decided = loop.poll(submitted).result
+
+    [candidate] = candidates
+    assert isinstance(candidate, CheckpointCandidate)
+    assert (candidate.candidate_id, candidate.training_job_id, candidate.step) == (f"{job_id}:0", job_id, 0)
+    assert candidate.release_path == str(tmp_path / "1")
+    assert decided.artifact.local_path == tmp_path / "1"
 
 
 def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
@@ -232,3 +249,15 @@ def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
     plugin = Plugin(Backend())
     assert plugin.evaluate(candidate).evaluator == "held-out-suite"
     assert plugin.decide(candidate, plugin.evaluate(candidate)).selected is True
+
+
+def test_manual_promotion_holds_every_checkpoint_for_review() -> None:
+    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
+    plugin = ManualPromotionPlugin.from_config({}, runtime=runtime, scenario="s", environ={})
+    candidate = CheckpointCandidate(candidate_id="job:1", training_job_id="job", step=1, release_path="/r")
+    decision = plugin.evaluate_and_decide(candidate)
+    assert (decision.selected, decision.policy) == (False, "manual")
+    with pytest.raises(TypeError, match="evaluates a CheckpointCandidate"):
+        plugin.evaluate(UpdateCandidate("other"))
+    with pytest.raises(PluginConfigError, match="takes no config"):
+        ManualPromotionPlugin.from_config({"x": 1}, runtime=runtime, scenario="s", environ={})

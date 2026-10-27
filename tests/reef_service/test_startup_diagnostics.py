@@ -79,13 +79,13 @@ def test_command_line_startup_reports_environment_and_flag_sources(monkeypatch):
 
 def test_declared_environment_fallbacks_are_reported(tmp_path):
     raw = {
-        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
+        "recipe": {"implementation": "tests.reef_recipe.test_recipe_config_fields:ConfiguredRecipe"},
         "inference": {"model-path": "/models/demo"},
         "training": {"options": {"global-batch-size": 1}},
     }
     resolved, _ = resolve_deployment_config(raw, None, tmp_path / "stack.yaml")
-    lines = startup_report(raw, resolved, {}, environ={"REEF_MAX_STALENESS": "4"}, from_file=True)
-    assert "  recipe.config.max-staleness = 4  (environment REEF_MAX_STALENESS)" in lines
+    lines = startup_report(raw, resolved, {}, environ={"REEF_CONFIGURED_BATCH_SIZE": "4"}, from_file=True)
+    assert "  recipe.config.batch-size = 4  (environment REEF_CONFIGURED_BATCH_SIZE)" in lines
     assert "  training.backend = slime  (automatic)" in lines
 
 

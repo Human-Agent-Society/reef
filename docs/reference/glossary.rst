@@ -52,9 +52,9 @@ the recipe decides what they mean.
 Recipe
 ------
 
-The method a deployment runs. It binds a processor, a training objective, a
-runtime, and a surface. The core ``recipe`` records without
-producing updates.
+The method a deployment runs. It binds a processor, a training objective, an
+inference runtime, and a surface; a weight recipe also binds a training
+component. The core ``recipe`` records without producing updates.
 
 Recipe reference
 ----------------
@@ -90,7 +90,9 @@ Release chain
 -------------
 
 A scenario's history of accepted updates, each release carrying its parent. A
-durable release can be restored when its surface and runtime support rollback.
+durable release can be restored when its surface and runtime support rollback,
+and, in a weight-training scenario, when its training component can start from
+it.
 
 Component
 ---------
@@ -107,9 +109,10 @@ Candidate selection
 The decision whether a produced update should replace the current served
 release. A ``CandidateEvaluator`` measures the candidate, a
 ``CandidateSelector`` makes the select-or-reject decision, and a
-``CandidateEvaluationPlugin`` implements both. The docs also call this the
-gate. Every recipe carries the plugin as ``candidate_evaluation``. It is
-independent of checkpoint saves and retention.
+``CandidateEvaluationPlugin`` implements both. Every recipe carries the
+plugin as ``candidate_evaluation``. For a weight recipe, each checkpoint that
+a training job saves is one candidate. Selection decides only what is served;
+the next training job starts from the newest saved checkpoint either way.
 
 Surface
 -------
@@ -121,23 +124,24 @@ hooks, and an optional client-pulled file tree, composed as fields on one
 Training pipeline
 -----------------
 
-The method's data side. Three stages turn records into a typed training
-batch: the record-to-record stage decides which records train, the
-record-to-task stage turns each record set into tasks, and the task-to-batch
-stage shapes the tasks into a batch. Reported feedback uses valid reports with
-existing inference references; computed feedback derives its signal from
-traffic. Reef's ``TrainingPipeline`` drives the stages and owns batching,
+The method's data side. Three stages turn records into typed job data: the
+record-to-record stage decides which records train, the record-to-task stage
+turns each record set into tasks, and the task-to-job stage shapes the tasks
+into one job's data. Reported feedback uses valid reports with existing
+inference references; computed feedback derives its signal from traffic.
+Reef's ``TrainingPipeline`` drives the stages and owns job size,
 consumption, and retention.
 
 Training objective
 ------------------
 
 The method-owned ``TrainingObjective`` declares its backend loss family and
-prepares a complete reserved batch. Its ``prepare`` method returns advantages,
-metrics, and proposed algorithm state in a ``StepSignal`` before optimizer or
+prepares a job's complete reserved data. Its ``prepare`` method returns advantages,
+metrics, and proposed algorithm state in a ``TrainingSignal`` before optimizer or
 worker partitioning. It imports no training stack. A recipe selects it by
-registered name or dotted class/instance path and binds the ``StepScheduling``
-the runtime cuts each batch with; the objective only rejects a schedule its
+registered name or dotted class/instance path. The training component cuts
+each job's data into optimizer steps. The objective declares the rows that one step
+keeps together (``rollout_unit``) and rejects a job's step schedule that its
 loss cannot train.
 
 Loss family
@@ -187,11 +191,35 @@ the rest of the tree. Updating one needs no GPU.
 Runtime
 -------
 
-``InferenceRuntime`` executes inference requests and owns admission;
-``TrainingRuntime`` prepares training jobs and exports checkpoints. They are
-independent components. The existing ``RuntimeCandidateBackend`` coordinates
-candidate activation, publication and recovery for weight recipes. Concrete
-backend integrations implement the component operations.
+``InferenceRuntime`` executes inference requests, owns admission, and loads
+published releases for serving. It loads only weights that a
+training job saved and that Reef published. It is independent of the
+training component: no trainer holds a serving engine.
+
+Training component
+------------------
+
+A ``TrainingComponent`` runs bounded training jobs with its framework's own
+training loop, for example Slime or Tinker. Reef submits a job, reads its
+status, and can cancel it; the component saves checkpoints. A
+``SavedCheckpoint`` names the directory a later job starts from and the
+directory Reef publishes as a release.
+
+Training job
+------------
+
+One ``TrainingJob``: its job data, the weights it starts from, and the backend's
+parameters. The recipe's ``JobPlan`` chooses the parameters of each job. The
+job ID is a hash of the scenario, the backend, the start, the records of the
+job's data and the parameters, so a retry submits the same job.
+
+Job data
+--------
+
+The data of one training job: a ``JobData`` value of trajectories and tasks
+that the task-to-job stage makes. A job's data holds at least
+``pipeline.task2job.config.job_samples`` samples. The training component cuts
+it into optimizer batches by its own batch size.
 
 SAO
 ---
@@ -221,7 +249,7 @@ conversation and is not reused for another one in the same scenario.
 Transcript matching is the fallback when the tag is absent.
 
 Runtime load ID
---------------
+---------------
 
 An engine-scoped ``<incarnation>:<sequence>`` token naming the concrete weight
 load that produced a span of generated tokens. It is a serving fence, not a
@@ -233,9 +261,10 @@ Staleness
 ---------
 
 The number of versions that a scenario served after the runtime load that
-produced a sample, bounded by ``max_staleness``. Zero requires a sample to
+produced a sample, bounded by the record-to-record stage's ``max_staleness``
+(``pipeline.record2record.config.max_staleness``). Zero requires a sample to
 train against the weights that generated it. The record-to-record stage checks
-it before a batch forms.
+it before job data forms.
 
 Reported and computed feedback
 ------------------------------
@@ -272,7 +301,7 @@ Mutation
 
 One proposed edit to a harness tree: ``create``, ``update``, or ``remove`` on a
 single root-level entry. A sequence applies as one composite proposal under one
-verdict.
+selection result.
 
 Preset
 ------

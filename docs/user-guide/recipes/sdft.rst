@@ -33,7 +33,7 @@ What it does
 The harness sends a request through Reef. It gets a demonstration of the
 response from somewhere else such as a reference solution or a stronger
 model. It reports the demonstration against the request's receipt. With a
-batch size of 1, each report is one training step.
+``job_samples`` and a batch size of 1, each report is one training step.
 
 .. flow::
    :loop: the next request is served by the updated weights
@@ -50,9 +50,9 @@ How Reef implements it
 SDFT has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
 ``ExclusiveReportRecord2Record`` makes each report its own record set. ``SDFTTasks``
-turns each report into a task. The shared ``DistillBatches`` stage batches
-the tasks in arrival order. A batch holds the Slime ``--global-batch-size`` of
-tasks.
+turns each report into a task. The shared ``DistillJobData`` stage puts
+the tasks into job data in arrival order. One job's data holds
+``pipeline.task2job.config.job_samples`` tasks.
 
 ``SDFTTasks`` extends the shared ``DistillTasks``. ``DistillTasks`` turns every
 ``TeacherContextReport`` into one ``TrajectoryItem``. The item carries the
@@ -120,13 +120,17 @@ no config.
 
    recipe:
      implementation: recipes.sdft.recipe:SDFTRecipe
-     config:
-       max-staleness: 0
    pipeline:
+     record2record:
+       config:
+         max_staleness: 0
      record2task:
        config:
          tokenizer_path: /models/Qwen2.5-7B-Instruct
          max_teacher_tokens: 8192
+     task2job:
+       config:
+         job_samples: ${training.config.global_batch_size}
    training:
      config:
        global_batch_size: 32
@@ -141,14 +145,15 @@ key's place in ``pipeline``.
    pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
    pipeline.record2task.config.max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
    pipeline.record2task.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
-   training.config.global_batch_size | the batch size: rollouts in one batch and in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
-   recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
+   pipeline.task2job.config.job_samples | required | rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+   training.config.global_batch_size | rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
 
 ``SDFTTasks`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
 ``scaffold_tolerance``).
 
-The Slime driver takes ``--loss-type custom_loss`` and
+Slime takes ``--loss-type custom_loss`` and
 ``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.
 The family adds its own flags:
 
@@ -172,7 +177,8 @@ Run the example
 ---------------
 
 The `example <../../../recipes/sdft/examples/skill_stream>`__ trains one
-model on Tool Use and then on Science Q&A on a four-GPU stack. A judge scores
+model on Tool Use and then on Science Q&A on an eight-GPU stack: four GPUs
+for the actor and four for the serving engines. A judge scores
 both skills every ten steps during both stages. The example's README
 describes the protocol and the settings.
 

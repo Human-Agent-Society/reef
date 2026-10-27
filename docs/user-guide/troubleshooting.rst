@@ -15,7 +15,7 @@ Starting Reef
 
 **A setting is not what the config says.** The first lines of the launcher log list every resolved setting with its source (``file``, ``command line``, ``environment``, ``automatic``, ``default``), so a command-line flag or ``REEF_*`` variable that overrode the file shows up there; ``reef serve ... --print-config`` prints the full list, defaults included, without starting anything. A file that repeats a key, spells one field two ways, or sets ``null`` on a field that is not optional is refused before startup, naming the field and lines.
 
-**A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits that service's ``ready_timeout`` before giving up. The default is 30 seconds for the Reef HTTP service and 3600 seconds for a managed engine or a training stack, which download weights. Read that service's log under ``reef.run-dir``. For a training stack, the usual causes are a model that is still downloading, an ``inference.url`` override that does not match where Slime bound its router (leave it unset; Reef takes the address from the training actor), or GPUs already in use.
+**A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits that service's ``ready_timeout`` before giving up. The default is 30 seconds for the Reef HTTP service and 3600 seconds for a managed engine or a training stack, which download weights. Read that service's log under ``reef.run-dir``. For a training stack, the usual causes are a model that is still downloading, serving engines that fail to start on the inference component (read ``inference.log``), or GPUs already in use.
 
 **Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; ``harness_evolve`` takes none in the flat section and is configured through a preset.
 
@@ -64,81 +64,34 @@ them does not give one generation more time.
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (the backend's batch size of samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready, and its ``processor`` entry compares ``ready_samples`` with ``batch_size``. When more samples wait than ``pipeline.task2batch.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``pipeline.task2job.config.job_samples`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether job data is ready (``job_data_ready``), and its ``processor`` entry compares ``ready_samples`` with ``job_samples``. When more samples wait than ``pipeline.task2job.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
 **409 on a report.** The client-chosen ``agent_record_id`` was sent before with different content. Use a new id, or resend identical content.
 
-**The training step fails and /reef/status reports an error.** The service log has the traceback. A driver rejecting ``--wandb-key`` or ``--use-wandb`` means tracking must be configured under ``observability.wandb`` instead. A mismatch between the recipe's loss family and the Slime flags is refused at startup by design.
+**A training job fails and /reef/status reports an error.** The service log has the traceback. Slime rejecting ``--wandb-key`` or ``--use-wandb`` means tracking must be configured under ``observability.wandb`` instead. A mismatch between the recipe's loss family and the Slime flags is refused at startup by design.
 
-**After a restart, the training of the last jobs is lost.** With ``--save-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. With per-scenario LoRA, each scenario continues from its own last checkpoint. To lose fewer jobs, decrease the interval.
+**A Slime job fails with checkpoint storage is full.** Slime admits a new checkpoint under the checkpoint root only when it fits. Retention first deletes older checkpoints in the order of ``--reef-checkpoint-policy`` (``latest`` or ``best_reward``). It never deletes the latest checkpoint or the checkpoint the job starts from. The error names the reason:
 
-**A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` still says ``RUNNING``. The marker is in the HF checkpoint directory, for example ``/data/ckpt/hf`` for ``--save-hf /data/ckpt/hf/{rollout_id}``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:
+- the storage cap: ``--reef-checkpoint-max-storage-fraction`` (default 0.8) or ``--reef-checkpoint-max-storage``
+- the free-space floor: ``--reef-checkpoint-min-free-space-fraction`` (default 0.1) or ``--reef-checkpoint-min-free-space``
+- ``unowned checkpoint assets``: files in the checkpoint directories that Slime did not save
 
-- the marker's rollout, ``N`` below
-- what Megatron's tracker, ``latest_checkpointed_iteration.txt`` in the Megatron checkpoint directory (``--save``), says: the iteration it names, ``P`` below, or that it is missing or unreadable
-- the paths for rollout ``N`` that exist, including its checkpoint record
-- whether the run trains per-scenario LoRA adapters
+Free disk space, change the limits, or move the extra files out of the checkpoint root.
 
-Reef keeps a copy of the settled marker that ``RUNNING`` replaced only when that marker settled a committed job; the preflight then recovers one state by itself, described below. Otherwise recovery is manual. The checkpoint root is the directory that holds the HF and Megatron checkpoint directories and ``.reef-retention``. A run with a critic also keeps its critic checkpoint directory there: ``--critic-save``, by default ``<save>-critic``. Unless all the conditions below hold, replace the whole checkpoint root with a copy. Use a copy from a time when no job ran and the marker said ``COMPLETE``. That is after the last committed job and before the next job started.
+**After a restart, a job trains its data again.** Reef keeps each submitted job, and the training component resumes a job that did not end. Slime's workers load their latest saved checkpoint again. A job that stopped after Megatron saved its checkpoint records that checkpoint and does not train again. A job that stopped before the save trains its data again from the latest checkpoint. A Tinker job continues after its last saved checkpoint.
 
-The preflight also refuses a copy whose marker says ``REJECTING`` or ``REJECTED``. So if the job before this one was rejected, the copy must be older than that job. Reef does not take these copies. Automatic recovery is tracked in `#333 <https://github.com/Human-Agent-Society/reef/issues/333>`__.
-
-For a first job, empty the checkpoint root, including the hidden ``.reef-retention`` directory. The preflight refuses a checkpoint record left in it. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
-
-*The job saved nothing.* The preflight recovers this state by itself when the ``RUNNING`` marker keeps a copy of the committed marker it replaced. Reef keeps that copy, under ``committed_marker``, when the job before it was committed and its commit was acknowledged. The preflight then checks the conditions below, restores the copy, and logs the replaced ``RUNNING`` marker; the job's batch trains again. The preflight does this for full-weight and per-scenario LoRA runs, so it does not check the ``per-scenario LoRA: no`` condition. A marker written by an earlier release has no copy, so recover it by hand.
-
-*The job before it saved no checkpoint.* With ``--save-interval`` above 1, the copy of the committed marker can name a job without a checkpoint. Then the preflight deletes the marker. It does not restore the copy. It examines the same conditions. Training continues from the checkpoint of rollout ``P``. The batches of the jobs after ``P`` do not train again. With per-scenario LoRA, each scenario continues from its own last checkpoint.
-
-Recover by hand only when all of these hold:
-
-1. The error says ``per-scenario LoRA: no``. The tracker names an iteration ``P`` below ``N``. The error lists no paths for rollout ``N``. ``--load`` is the same directory as ``--save``, as in the bundled configurations.
-
-   A per-scenario LoRA run always needs the copy. Its settled marker also names the scenario and the scenario's runtime load ID. Also, a save that started can already have rewritten the scenario's adapter snapshot in ``reef_adapter_slots``.
-2. ``.reef-retention/records/`` under the checkpoint root has a record for ``P``. The file name is ``P`` padded to 20 digits, then ``.json``. No record is newer. Its ``job_id`` is the job for rollout ``P``.
-3. That job was committed. A rejected job also leaves a checkpoint record and moves the tracker. Its rollout holds the declined candidate. Retention can also have deleted the committed rollout before it.
-
-   Each scenario has a SQLite database in ``agent_record_dir`` on the Reef service's host. The default is ``.reef/agent-record``. Its ``scenario_commit`` table has one row for each committed step. A committed training step records its job ID as ``training_job_id``. A rejected step does not. But a rejected step still has the ID in another field of its row. So search for the exact pair with the ``sqlite3`` command-line tool:
-
-   .. code:: bash
-
-      for db in <agent_record_dir>/*.sqlite3; do
-        sqlite3 "$db" "SELECT '$db', step FROM scenario_commit WHERE instr(commit_json, '\"training_job_id\":\"<job_id>\"') > 0"
-      done
-
-   A printed row means that the job was committed. No output means that the job was rejected, or that its commit cannot be confirmed.
-4. The ``RUNNING`` marker has a ``parent_runtime_load_id``: the runtime load ID that rollout ``P`` is served under.
-
-Before you replace the marker, back up the ``RUNNING`` marker to a directory outside the checkpoint root. The preflight refuses any extra file or directory in the HF, Megatron or critic checkpoint directory as ``unowned checkpoint assets``. It also refuses any extra ``*.json`` file in ``.reef-retention/records/``.
-
-Then replace the marker with the settled marker of rollout ``P``. For example, with ``P`` = 4 and ``--save-hf /data/ckpt/hf/{rollout_id}``:
-
-.. code:: json
-
-   {
-     "status": "COMPLETE",
-     "job_id": "<job_id in /data/ckpt/.reef-retention/records/00000000000000000004.json>",
-     "rollout_id": 4,
-     "checkpoint_path": "/data/ckpt/hf/4",
-     "runtime_load_id": "<parent_runtime_load_id in the RUNNING marker>",
-     "commit_acknowledged": true
-   }
-
-The preflight then accepts the checkpoint directories. Reef does not count the interrupted job's batch as trained. Do not use the interrupted job's ID as ``job_id``. If you do, Reef takes its batch as already trained.
-
-Do not delete the marker to get past the error. The checkpoint directories stay, so the trainer loads the iteration that the tracker names. In a full-weight run without a marker, Reef publishes these weights under a new runtime load ID. They can be a rejected candidate, or they can already hold the interrupted job's step. Reef also drops the interrupted job's batch as stale. The empty-root reset for a first job loses that batch too. But it leaves no checkpoint, so Reef starts as on a first start.
-
-In a per-scenario LoRA run, admission compares the batch with the scenario's publications in ``reef_scenarios.json``. It does not compare the batch with the serving runtime load ID. So Reef admits the batch again. The batch can then train on an adapter snapshot that already holds the job's step.
+**A rollback is refused on a Slime scenario.** Slime's workers continue from their own latest checkpoint and cannot load a published release, so Reef refuses the rollback. Tinker scenarios can roll back.
 
 Harness evolution
 -----------------
 
-**reports are accepted but no evolve step runs.** Check the configured training mode and batch size. Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
+**reports are accepted but no evolve step runs.** Check the configured training mode and ``job_samples`` (by default ``evolution.batch_size``). Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 
-**no skill mutation won a gate.** A step ran and the candidate did not win. Read the step's episodes in the service log. Both sides scoring nothing means the episodes could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or an episode exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
+**no skill mutation passed the selection.** A step ran and the candidate did not win. Read the step's episodes in the service log. Both sides scoring nothing means the episodes could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or an episode exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
 
 **GET /reef/harness returns 404.** Nothing has been published yet, or the scenario's recipe serves no files. The catalog at ``GET /reef/harness/releases`` lists what exists.
 

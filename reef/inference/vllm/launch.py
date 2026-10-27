@@ -39,7 +39,6 @@ class VLLMEngineGroup(EngineGroup):
         self.nodes_per_engine = 1
         self.port_ranges: dict[int, tuple[str, range]] = {}
         self.num_new_engines = 0
-        self.needs_offload = bool(config.offload and config.shared_gpus > 0)
 
     @property
     def engines(self) -> list[Any]:
@@ -102,15 +101,10 @@ class VLLMEngineGroup(EngineGroup):
         )
 
     def recover(self) -> None:
-        """Relaunch dead engines; a colocated replacement releases memory like the originals did."""
-        missing = [index for index, engine in enumerate(self.all_engines) if engine is None]
+        """Relaunch dead engines."""
         startup = EngineStartup()
         startup.start(self)
         startup.wait()
-        replaced = [self.all_engines[index] for index in missing]
-        if self.needs_offload and replaced:
-            ray.get([engine.release_memory_occupation.remote() for engine in replaced])
-            ray.get([engine.resume_memory_occupation.remote(tags=["weights"]) for engine in replaced])
 
 
 class VLLMEngineHealthChecks(EngineHealthChecks):

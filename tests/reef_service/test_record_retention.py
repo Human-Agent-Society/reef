@@ -11,6 +11,7 @@ import pytest
 from aiohttp import web
 from sqlalchemy.exc import OperationalError
 
+from tests.support.consumption_receipts import write_consumption_receipt
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service import assembly
@@ -43,7 +44,7 @@ def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_pat
             removed.append(replace(trace("archived"), created_at=15.0))
             second.append(replace(trace("middle", "code"), created_at=20.0))
             first.append(replace(trace("new"), created_at=30.0))
-            first.record_consumption("math", frozenset({"old"}), receipt_id="skip", metadata={})
+            write_consumption_receipt(first, "math", frozenset({"old"}), receipt_id="skip", metadata={})
         assert store_factory.prune(max_bytes=2 * BODY_BYTES) == 2
         assert first.get_for_audit("math", "old") is None
         assert first.get("math", "new") is not None
@@ -67,7 +68,7 @@ def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_pat
 def test_record_age_and_training_completion_do_not_trigger_deletion(tmp_path, store_factory):
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         records.append(replace(trace("old"), created_at=1.0))
-        records.record_consumption("math", frozenset({"old"}), receipt_id="skip", metadata={})
+        write_consumption_receipt(records, "math", frozenset({"old"}), receipt_id="skip", metadata={})
         assert store_factory.prune(max_bytes=BODY_BYTES) == 0
         assert records.get_for_audit("math", "old") is not None
         assert records.loss("math").record_count == 0
@@ -77,7 +78,7 @@ def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_pa
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         for index in range(600):
             records.append(trace(str(index)))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
+        monkeypatch.setattr("time.time", lambda: 100.0)
         assert store_factory.prune(max_bytes=3 * BODY_BYTES) == 597
         assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["597", "598", "599"]
 

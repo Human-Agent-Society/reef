@@ -19,7 +19,7 @@ published SFT checkpoint instead of training one.
 run.sh                          starts the Reef stack and runs the campaign
 run.py                          samples, reports and evaluates against the live service
 prepare.py                      pins the datasets and writes the prompts and the evaluation set
-serve.yaml                      the stack: TP2 actor, four rollout engines and the TP2 teacher engine on eight GPUs
+serve.yaml                      the stack: TP2 actor, four serving engines and the TP2 teacher engine on eight GPUs
 results/                        the learning curve of the recorded run
 ```
 
@@ -42,7 +42,7 @@ results/                        the learning curve of the recorded run
 - OPD: four responses per prompt at temperature 1 under a 16384-token response
   limit, 55 optimizer updates at learning rate 5e-5, the sampled-token reverse
   KL (`opd-top-k 1`) with no importance-sampling correction: one on-policy update
-  per batch. No answer labels, correctness rewards or teacher-only context.
+  per job. No answer labels, correctness rewards or teacher-only context.
 - Evaluation: the 30 AIME'24 questions, 16 samples per question at seeds 0
   through 15, temperature 1, top-p 1, top-k disabled, a 30720-output-token
   budget (the student's 32768-token window less the prompt), the same
@@ -57,7 +57,7 @@ results/                        the learning curve of the recorded run
 ## Setup (once)
 
 Use the repository's Slime GPU image (`docker/README.md`) on eight 80 GB GPUs.
-`serve.yaml` places the TP2 actor, four single-GPU rollout engines and the TP2
+`serve.yaml` places the TP2 actor, four single-GPU serving engines and the TP2
 teacher engine on separate GPUs and expects models, data and output under
 `/work`.
 
@@ -91,7 +91,7 @@ for `/healthz` and runs the campaign, whose output goes to
 `OPD_EVAL_REPEATS` change the schedule and budgets, and `REEF_PORT` and
 `REEF_SCENARIO` must belong to this experiment.
 
-The driver collects a complete batch before submitting any training report,
+The driver collects a complete job's responses before submitting any training report,
 checks that every response came from one release, then waits for exactly one
 committed update. It refuses an existing output directory or scenario unless
 `--resume` is given. `run.sh --resume` recovers an interrupted driver against
@@ -103,7 +103,7 @@ Resume does not restore a stopped trainer or its optimizer.
 evaluation under the same data, seeds, budget, prompt and scorer. The teacher
 control above was measured that way.
 
-`results/` holds the responses and receipts of every batch and evaluation, and
+`results/` holds the responses and receipts of every job and evaluation, and
 `metrics.jsonl` the accuracy and truncations per evaluated step.
 
 ## Results

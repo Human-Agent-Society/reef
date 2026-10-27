@@ -35,8 +35,6 @@ ExperimentEvent = TrainingExperimentEvent | RollbackExperimentEvent
 @dataclass(frozen=True)
 class PreparedExperiment:
     context: TrainingExperimentContext
-    source_runtime_load_id: str | None
-    produced_runtime_load_id: str | None
     checkpoint_path: str | None
 
 
@@ -129,12 +127,10 @@ class CommitExperimentObserver(RecordObserver):
         self,
         context: TrainingExperimentContext,
         *,
-        source_runtime_load_id: str | None,
-        produced_runtime_load_id: str | None,
         checkpoint_path: str | None,
     ) -> Mapping[str, object]:
-        """Keep runtime-only fields until the commit lands; tracking failures leave metrics alone."""
-        self.prepared = PreparedExperiment(context, source_runtime_load_id, produced_runtime_load_id, checkpoint_path)
+        """Keep the checkpoint's local path until the commit lands; tracking failures leave metrics alone."""
+        self.prepared = PreparedExperiment(context, checkpoint_path)
         try:
             return dict(self.tracker.correlation_metrics(context))
         except Exception:
@@ -198,8 +194,6 @@ class CommitExperimentObserver(RecordObserver):
                 metrics=metrics,
                 outcome="rejected" if metrics.get("selected") is False else "committed",
                 training_job_id=commit.training_job_id,
-                source_runtime_load_id=None if prepared is None else prepared.source_runtime_load_id,
-                produced_runtime_load_id=None if prepared is None else prepared.produced_runtime_load_id,
                 checkpoint_path=None if prepared is None else prepared.checkpoint_path,
             )
         )

@@ -84,6 +84,10 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/promote``                                      | serve a release held for review                   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/tasks``                                         | imported tasks, their splits, which trained       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                                                            | the served harness tree                           |
@@ -152,7 +156,7 @@ Reef uses it as the inference record's ``artifact_ref`` only when all three
 conditions hold:
 
 - The scenario serves files for clients to pull.
-- Its surface has no inference hooks, and it has no training runtime.
+- Its surface has no inference hooks, and it has no training component.
 - The tag names a release in that scenario's catalog.
 
 Otherwise the record names the current served release, including when the tag
@@ -227,7 +231,7 @@ worker as live traffic. Keep the same scenario header when subsequently calling
 ``POST /v1/chat/completions``: its records continue through the existing
 processor, with no processor replacement or end-of-dataset signal. A processor
 that needs reward/report feedback still needs it for both imported and live
-records; submit each example's feedback promptly so completed batches can drain.
+records; submit each example's feedback promptly so completed jobs can drain.
 For example, feedback for the imported record can be sent as:
 
 .. code:: json
@@ -235,7 +239,7 @@ For example, feedback for the imported record can be sent as:
    {"agent_record_id": "offline-score-0001", "request_type": "report",
     "payload": {"references": ["offline-0001"], "score": 1.0}}
 
-Batching, buffering, retention and training policy remain owned by the selected
+Job size, buffering, retention and training policy remain owned by the selected
 recipe and processor. Uploading can overlap training; this API adds no dataset
 epochs, cold-start completion barrier, or automatic algorithm switch. To start
 chat traffic after cold-start training has finished, use the recipe's progress
@@ -308,8 +312,9 @@ Upload trajectories
 -------------------
 
 Use this route when your data is already a complete ATIF trajectory. An
-uploaded trajectory is not a record. Reef keeps it in the scenario storage and
-gives it directly to the recipe's task-to-batch stage. The scenario's recipe
+uploaded trajectory is not a record. Reef keeps it in the scenario storage.
+The recipe's record-to-task stage renders it as a training sample, and the
+task-to-job stage puts it in the next job's data. The scenario's recipe
 must accept uploaded trajectories. If it does not, Reef refuses the upload with
 400. For the recipe side, see
 `Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
@@ -339,15 +344,65 @@ of them in one transaction, or none. The request body can be at most 10 MiB:
 The response is ``{"scenario": "my-agent", "trajectory_ids":
 ["trajectory-0001"]}``. An identical retry returns the same receipt, also
 after training. The same ID with a different trajectory returns 409. An
-invalid upload returns 400 and saves nothing.
+invalid upload returns 400 and saves nothing. The recipe also checks each
+trajectory: a trajectory that it cannot turn into a training sample refuses
+the upload with 400, and the message names the trajectory. The SFT recipe
+renders each upload with every agent turn trained, except the steps marked
+``is_copied_context: true`` (`SFT
+<../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
 
-Each uploaded trajectory counts as one sample toward the backend's batch
-size. It does not count toward the pipeline's ``buffer_size``, so Reef never
-releases it to make room. A batch takes uploaded trajectories first, in
+Each uploaded trajectory counts as one sample toward the pipeline's
+``job_samples``. It does not count toward the pipeline's ``buffer_size``, so Reef never
+releases it to make room. Job data takes uploaded trajectories first, in
 upload order, and then the units of recorded traffic. Thus a large upload can delay the
-training of live traffic. The delay continues until the batches use all of
+training of live traffic. The delay continues until the jobs use all of
 the upload. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
+
+Upload Harbor tasks
+-------------------
+
+Use this route to give a scenario your own Harbor tasks, for training or as
+held-out tasks. It adds the tasks to the scenario's task store
+``imported-tasks``, the same store that the `task-import section
+<../user-guide/operate.rst#import-harbor-tasks>`__ fills. The scenario's recipe
+must read imported tasks, such as the SFT-then-RL recipe (`SFT then RL
+<configuration.rst#sft-then-rl>`__). If it does not, Reef refuses the upload
+with 400.
+
+The body is a gzip-compressed tar archive with ``Content-Type:
+application/gzip``. The archive and the files it unpacks to are each at most
+256 MiB, in at most 10,000 entries. Each top-level entry is one Harbor task
+directory, named by its task name: a lowercase letter or a digit, then
+lowercase letters, digits, ``.``, ``_`` and ``-``. The query parameter
+``split`` is ``train`` or ``eval``, for every task of the archive:
+
+.. code:: bash
+
+   tar -czf tasks.tar.gz -C /data/benchmark/tasks sum-391 sort-17
+   curl -f "http://127.0.0.1:8900/reef/scenarios/my-agent/tasks?split=train" \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/gzip' \
+     --data-binary @tasks.tar.gz
+
+The response is ``{"scenario": "my-agent", "split": "train", "tasks":
+[{"name": "sort-17", "files_digest": "..."}, {"name": "sum-391",
+"files_digest": "..."}]}``, in name order. An identical retry returns the
+same receipt. Reef returns:
+
+- 400, and adds nothing, for an archive that is not tar.gz, a link or a device
+  in it, a path outside its task directories, a file at the top level, a name
+  that is not a task name, more than 1000 tasks or 10,000 entries, more than
+  256 MiB unpacked, or a directory that Harbor's task loader refuses;
+- 413 for a body larger than 256 MiB;
+- 409 for a task name that the scenario holds with other files or in the other
+  split. The tasks before it in name order are added; to change a task, give
+  it a new name;
+- 415 for another content type.
+
+``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
+[{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
+added. ``trained`` is true once a task job trained the task.
 
 Manual training
 ---------------
@@ -389,15 +444,15 @@ the install script only reads the check offs, and the update notice prints
 the setup list instead of the update while an item is unmet.
 
 The three modes differ in what starts a step. ``auto``, the default,
-batches on traffic and refuses an instruction with HTTP 400. ``manual``
-runs instructions only and never batches on traffic; harness evolution
-runs an instruction alone, without samples. ``hybrid`` batches on traffic and
+trains on traffic and refuses an instruction with HTTP 400. ``manual``
+runs instructions only and never trains on traffic; harness evolution
+runs an instruction alone, without samples. ``hybrid`` trains on traffic and
 runs instructions: a queued instruction goes first, oldest first, one per
-step, and the units an automatic batch would take next, up to
-``evolution.batch_size`` traces and possibly none, ride beside it
-as the batch's samples (scored traces, or unscored records when the
+step, and the units that automatic job data would take next, up to
+``job_samples`` traces (by default ``evolution.batch_size``) and possibly none, ride beside it
+as the samples of its data (scored traces, or unscored records when the
 ``pipeline`` section names the inference stages), so the proposer reads the
-request next to them; with none queued the step batches as ``auto`` does.
+request next to them; with none queued the step trains as ``auto`` does.
 
 .. code:: bash
 
@@ -418,7 +473,7 @@ consumes the instruction with a committed row whose ``skipped`` reads
 ``instruction failed`` and whose ``error`` carries the failure, and the
 queue moves on. Send the instruction again to run it again. That row
 consumes the instruction alone: in ``hybrid`` the units that rode beside it
-stay held for the next batch, so no failing trace is consumed unread. The
+stay held for the next job, so no failing trace is consumed unread. The
 ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
 every step, instruction steps included, and stop automatic steps only; an
 instruction still runs past them. The existing evaluation and publication
@@ -538,21 +593,14 @@ scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every release it published stays reachable. The
 base artifact, the shared head and releases other scenarios may fork from
 stay where they are. A local step in flight for the scenario ends without a
-commit. While a weight training job of the scenario is out at its backend the
-request answers 409: the job could neither commit nor be acknowledged without
-its scenario, and its marker would keep inference admission closed for every
-scenario on the runtime. Retry once the job has committed or been rejected.
-The job's marker names the scenario that owns it, so deleting any other
-scenario goes through, a registration left by a create the runtime refused
-included: deleting that one and restarting lets the owner bind again and
-finish its job.
-Only a local artifact repository can be archived; a remote one answers 501.
+commit. Only a local artifact repository can be archived; a remote one
+answers 501.
 
-For a scenario that trains weights the deletion is Reef-side: the training
-backend is told to retire the scenario, and the Slime backend does not yet
-act on it, so the scenario's adapter stays resident in the serving engine
-until it is evicted or the training group restarts, and the training job's
-per-scenario history keeps its entry until then.
+For a scenario that trains weights, the delete also cancels the scenario's
+running training job at its training component, since nothing would read the
+job's checkpoints afterwards. On a runtime that serves per-scenario adapters,
+the scenario's adapter stays resident in the serving engines until the
+adapter residency evicts it.
 
 Scenario updates
 ~~~~~~~~~~~~~~~~
@@ -567,10 +615,10 @@ To change the data processor's mode:
 
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 The values are ``auto``, ``manual`` and ``hybrid``: ``"auto"`` resumes recipe
-batching alone, ``"hybrid"`` keeps it and takes instructions too. The change
-selects subsequent batches; a batch already reserved or running completes
+training alone, ``"hybrid"`` keeps it and takes instructions too. The change
+selects subsequent job data; job data already reserved or running completes
 in its original mode. The modes share buffered data, so auto and hybrid can
-batch traffic collected while manual was selected. Accepted instructions
+train on traffic collected while manual was selected. Accepted instructions
 wait for a mode that takes them, including instructions not yet read when
 the selector changes to auto.
 
@@ -663,7 +711,7 @@ Serving version of a training response
 
 For a training scenario, Reef records which engine weights answered. The engine
 reports the ``runtime_load_id`` of the response, or of each generated token
-span when a publication lands mid-generation. The spans must be contiguous and
+span when a weight load lands mid-generation. The spans must be contiguous and
 must not return to an earlier version. A training response that reports no
 ``runtime_load_id``, or reports inconsistent spans, is a backend contract error
 and returns HTTP 409. A streamed training response must be buffered and
@@ -952,6 +1000,14 @@ Choose a target from ``GET /reef/scenarios/{scenario}/releases``, which lists
 **newest first**; ``GET /reef/harness/releases`` lists oldest first. Only
 releases marked ``restorable`` can be rolled back.
 
+In a scenario that trains weights, a rollback to other weights also moves
+where training continues. Reef first imports the release into the training
+component. It then commits the rollback and cancels the running job. The next
+job starts from the imported release. When the component cannot start from
+the release, Reef refuses the rollback with HTTP 409. The Slime component
+always refuses, because its workers continue from their own latest
+checkpoint. A Slime scenario therefore cannot roll back.
+
 Review before serving
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -995,7 +1051,7 @@ behavior, and one status vocabulary, so a step reads ``Published``,
 ``Ready for review``, ``Not selected`` or ``No changes`` in place of the
 record's own field names. The page has up to seven sections, each its own
 card, in this order: Why (the request the
-step read, else the claimed proposal's reason, else a failure in the batch),
+step read, else the claimed proposal's reason, else a failure in the job data),
 Design (the proposer's plan, ``proposal_notes.design``; only when the method
 recorded one), What changed (the step's mutations, each with its operation,
 node id and kind; an extension's file as text for a create, and for an update
@@ -1173,48 +1229,67 @@ Status
 ------
 
 Read ``GET /reef/status`` when inference is still serving an older release while
-an update is being trained or published.
+a training job runs or an update is being published.
 
 .. code:: json
 
    {
      "error": null,
-     "last_drain_at": 1756400000.0,
+     "loaded_scenarios": 1,
      "preload_errors": {},
      "scenarios": {
        "hello-reef": {
          "scenario_step": 3,
+         "artifact_head_sync": {"state": "synchronized", "release_id": "...", "error": null},
          "last_committed_step": {
            "step": 3,
            "recorded_at": 1756400000.0,
-           "metrics": {"published": false, "selection": {"reason": "candidate lost"}}
+           "metrics": {"selected": false, "selection": {"reason": "candidate lost"}}
          },
          "current_runtime_load_id": "7f2a:12",
-         "checkpoint_storage": {"...": "..."},
-         "batch_ready": false,
+         "job_data_ready": false,
+         "training_mode": "auto",
          "processor": {"...": "..."},
-         "inference_admission": {"...": "..."}
+         "inference_admission": {"...": "..."},
+         "training_job": {"job_id": "9c41...", "backend": "slime", "checkpoints_handled": 0},
+         "finished_jobs": 2
        }
      },
-     "serving": {"...": "..."},
-     "training_job": {"status": "CHECKPOINT", "training_job_id": "9c41...", "owner": "hello-reef"}
+     "serving": {"...": "..."}
    }
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
-failures. ``training_job`` is the weight job the training runtime holds out:
-its marker ``status``, its ``training_job_id`` and its ``owner``, the scenario
-a delete refuses (see Deleting a scenario). It is ``null`` when no job is out
-or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
-not be read. ``batch_ready`` says whether the processor has a batch waiting.
+failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
+``job_data_ready`` says whether the processor has a job's data waiting.
 ``processor`` includes ``ready_samples``, the samples of the held record sets
-and uploaded trajectories; ``batch_size``, the samples an automatic batch
-needs; and ``buffer_size``, the most samples the held record sets keep.
-A scenario whose recipe runs one trainer per release component adds a
-``components`` object: for each component, its own ``batch_ready``,
-``training_mode``, ``processor`` status and ``last_committed_step``. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
+and uploaded trajectories; ``job_samples``, the samples that automatic job
+data needs (``pipeline.task2job.config.job_samples``); and ``buffer_size``,
+the most samples the held record sets keep.
+
+A scenario that trains weights also reports its training job.
+``training_job`` is the job that the scenario's training component runs. It
+holds the ``job_id``, the ``backend`` that runs the job, and
+``checkpoints_handled``. ``checkpoints_handled`` is the number of the job's
+saved checkpoints that Reef has evaluated and committed. ``training_job`` is
+``null`` while no job runs. ``finished_jobs`` counts the jobs of the scenario
+that ended, finished or failed. A runtime that serves each scenario its own
+adapter adds ``adapter_runtime_load_id``. It is the runtime load ID of the
+scenario's served adapter, or ``null`` while the scenario samples the base
+model.
+
+A scenario whose recipe runs one trainer per recipe component adds a
+``components`` object. For each recipe component, it holds the component's
+own ``job_data_ready``, ``training_mode``, ``processor`` status and
+``last_committed_step``. The scenario-wide ``job_data_ready``, ``training_mode``
+and ``processor`` describe the first trainer that trains, else the first
+trainer. The scenario-wide ``last_committed_step`` is the latest commit of
+any recipe component.
+
+In a scenario of several trainers, every new training row from
 ``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
-trainer that made it; a scenario of one trainer, and rows written before Reef
-named components, carry none.
+trainer that made it. Rows of a scenario of one trainer carry no
+``component``, and neither do rows written before Reef named components.
+
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
@@ -1223,9 +1298,10 @@ step that skipped or rejected its candidate. A rollback advances
 without an agent-record directory has no durable commit history, so after a
 restart from a rollback checkpoint this field is ``null`` until the next
 training commit.
-``serving`` is runtime-wide but recipe-shaped: a LoRA deployment reports the
-engine's shared adapter residency there, keyed by recipe. Each scenario's
-``adapter_runtime_load_id`` appears in its own ``scenarios`` block.
+
+``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
+that serves per-scenario adapters reports the engines' shared adapter
+residency there, under ``adapters``.
 
 Status codes
 ------------
@@ -1257,8 +1333,11 @@ Status codes
 +--------+-------------------------------------------------------------+
 | 502    | the upstream provider failed on its own account             |
 +--------+-------------------------------------------------------------+
-| 503    | the artifact store is unreachable, or inference kept losing |
-|        | the weight-update race until its deadline                   |
+| 503    | the artifact store is unreachable, the deployment serves no |
+|        | inference (``inference.backend: none``), no loaded scenario |
+|        | is idle at ``reef.max_loaded_scenarios`` (with              |
+|        | ``Retry-After``), or inference attempts kept being aborted  |
+|        | until the retry deadline                                    |
 +--------+-------------------------------------------------------------+
 
 Reef relays upstream 4xx failures with the provider's original message; the
