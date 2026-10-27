@@ -79,6 +79,7 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
+from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ class EnvironmentVariableProbe(ReadinessProbe):
     a reason, empty for none. ``missing`` returns "" if and only if ``os.environ[variable]`` is set and not empty;
     otherwise it returns "<variable> is not set where reef serve starts the generator", followed by ``hint``. It
     names the variable and never its value, since the value can be a secret.
-    Purpose: ``readiness_probes`` makes one for ``E2B_API_KEY`` when the Harbor environment is ``e2b``; the
+    Purpose: ``readiness_probes`` makes one for each credential variable of the ``e2b`` environment; the
     ``/healthz`` handler reads ``missing``.
     """
 
@@ -217,7 +218,8 @@ class EnvironmentVariableProbe(ReadinessProbe):
 def readiness_probes(*, harbor: str | None = None, environment: str = "docker") -> tuple[ReadinessProbe, ...]:
     """What checking a task and running its episodes takes: reef-eval, the harbor command line, and ``environment``.
 
-    ``docker`` needs a Docker daemon that answers. ``e2b`` needs ``E2B_API_KEY`` and the e2b package, which Harbor's
+    ``docker`` needs a Docker daemon that answers. ``e2b`` needs its credential variables in
+    ``REMOTE_TASK_ENVIRONMENTS`` (``E2B_API_KEY``) and the e2b package, which Harbor's
     e2b environment imports. Raise ``ValueError`` for a name outside ``HARBOR_ENVIRONMENTS``.
     """
     stack = (
@@ -229,7 +231,10 @@ def readiness_probes(*, harbor: str | None = None, environment: str = "docker") 
     if environment == "e2b":
         return (
             *stack,
-            EnvironmentVariableProbe("E2B_API_KEY", hint="export it before reef serve starts"),
+            *(
+                EnvironmentVariableProbe(variable, hint="export it before reef serve starts")
+                for variable in REMOTE_TASK_ENVIRONMENTS["e2b"]
+            ),
             ModuleNamesProbe(
                 "e2b", HARBOR_E2B_NAMES, hint="Harbor's e2b environment needs it; install reef-infra[e2b]"
             ),
