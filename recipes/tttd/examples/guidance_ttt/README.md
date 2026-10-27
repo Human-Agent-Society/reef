@@ -26,7 +26,9 @@ editable file, and the task's own verifier scores it on the development suite.
 | `polar_express` | Python `polar_express.py` | 12 train matrices | Maximum FrontierCS 2 train score |
 
 `serve-frontiercs2.yaml` runs them at the paper's search budget with a
-16,384-token sequence limit for their longer statements. The final verifier
+16,384-token sequence limit for their longer statements. It uses four GPUs:
+two for training and two for inference. Each training job consumes all 128
+rollouts from one step. The final verifier
 scores the best candidate once on the task's held-out suite and records whether
 it beats the human reference. The [judge guide](judges/README.md#frontiercs-2)
 covers preparation, verifier images, and the two stub tasks.
