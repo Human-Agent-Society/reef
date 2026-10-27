@@ -44,7 +44,7 @@ jobs:
           smoke=false
           while IFS= read -r file; do
             case "$file" in
-              reef/harness/*|reef/recipe/reefine/*|reef/train/harness_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml)
+              reef/harness/*|recipes/beta/reefine/*|reef/train/harness_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml)
                 smoke=true ;;
             esac
           done <<< "$files"

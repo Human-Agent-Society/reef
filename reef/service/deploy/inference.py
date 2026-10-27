@@ -19,7 +19,6 @@ from reef.runtime.deployment import http_readiness_command
 from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.service.profiles import profile_names
 
 
 @dataclass(frozen=True)
@@ -292,7 +291,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
             "(or their REEF_UPSTREAM_* variables).\n"
             "  Example: reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model\n"
             "  Or start local inference: reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct\n"
-            f"  Alternatively pass -c <file> or --recipe <name>; recipes with a profile: {', '.join(profile_names())}"
+            "  Alternatively pass -c <file>"
         )
     try:
         upstream = urlsplit(settings.upstream_url)

@@ -57,9 +57,9 @@ def test_parser_defaults_come_from_settings():
         assert defaults[argument.name] == getattr(ServiceConfig(recipe="recipe"), field.name)
 
 
-def test_recipe_setting_and_launcher_profile_are_independent_arguments():
-    args = build_serve_parser().parse_args(["--recipe", "reefine", "--reef.recipe", "custom-preset"])
-    assert args.recipe == "reefine"
+def test_recipe_setting_and_reserved_launcher_flag_are_independent_arguments():
+    args = build_serve_parser().parse_args(["--recipe", "removed", "--reef.recipe", "custom-preset"])
+    assert args.recipe == "removed"
     assert args.config_recipe == "custom-preset"
     assert parse_service_arguments({"reef": {"recipe": "custom-preset"}})["recipe"] == "custom-preset"
 

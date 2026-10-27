@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, _remove_episode_root, run_episode
+from reef.harness.episodes.run import EpisodeError, _remove_episode_root, run_episode
 from reef.harness.episodes.trajectory import (
     ClaudeSessionReader,
     CodexSessionReader,
@@ -29,7 +29,6 @@ from reef.harness.episodes.trajectory import (
     reader_for,
 )
 from reef.harness.tree import HarnessTree, render_tree
-from reef.recipe.reefine.scorer import AnswerScorer
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -269,7 +268,6 @@ def test_opencode_episode_grades_the_final_answer_of_its_session(tmp_path: Path)
     files = render_tree(HarnessTree({}), get_adapter("opencode"))
     result = run_episode(get_adapter("opencode"), files, "Run it.", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert final_assistant_text(result.trajectory) == "reef-ok"
-    assert AnswerScorer().score("[health] Run the shell command `echo reef-ok`.", result) == 1.0
 
 
 def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
@@ -389,8 +387,8 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
 
 
-@pytest.mark.parametrize("answer, expected_score", [("reef-ok", 1.0), ("wrong", 0.0), (None, 0.0)])
-def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str | None, expected_score: float) -> None:
+@pytest.mark.parametrize("answer", ["reef-ok", "wrong", None])
+def test_codex_episode_reads_only_assistant_output_text(tmp_path: Path, answer: str | None) -> None:
     events = [
         {
             "type": "response_item",
@@ -420,8 +418,6 @@ def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str 
     trajectory = CodexSessionReader()(tmp_path)
     expected_reply = None if answer is None else f"Output:\n{answer}"
     assert final_assistant_text(trajectory) == expected_reply
-    result = EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
-    assert AnswerScorer().score("[health] Reply with the shell command's output", result) == expected_score
     assert trajectory == tuple(events)
 
 

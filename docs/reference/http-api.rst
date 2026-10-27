@@ -445,7 +445,7 @@ that answered a request carries, for example:
 
 A method may also record notes beside its proposal. They land under
 ``proposal_notes``, a JSON mapping the backend writes as given and never
-reads, present only when non-empty. Reefine writes these keys:
+reads, present only when non-empty. The beta Reefine recipe writes these keys:
 
 - ``design``: the proposer's plan, a few sentences.
 - ``review``: ``{"result": "complete" | "partial", "covered": [...],

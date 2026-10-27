@@ -18,7 +18,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
 from reef.core.training_request import TrainingRequest
 from reef.harness.tree import TreePatch
-from reef.recipe.reefine.proposer import client_text
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
@@ -645,15 +644,6 @@ def test_a_request_carries_the_clients_machine_and_drops_what_does_not_fit() -> 
     }
     plain = TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": "darwin"})
     assert plain.client == {} and "client" not in plain.to_dict()
-
-
-def test_the_proposer_is_told_the_machine_the_change_runs_on() -> None:
-    reported = {"platform": "darwin", "release": "24.6.0", "commands": {"afplay": True, "mpv": False}}
-    told = client_text(TrainingRequest("speak", "s", "r", client=reported))
-    assert "platform: darwin 24.6.0" in told and "on its PATH: afplay" in told and "not on its PATH: mpv" in told
-    assert "requires item" in told
-    unknown = client_text(TrainingRequest("speak", "s", "r"))
-    assert "unknown" in unknown and "WSL 2" in unknown
 
 
 def test_a_binary_item_names_the_program_and_its_check_stays_optional() -> None:

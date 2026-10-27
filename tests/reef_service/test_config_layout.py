@@ -257,7 +257,7 @@ def test_shipped_reef_yamls_use_the_public_layout():
 
     root = Path(__file__).resolve().parents[2]
     configs = []
-    for directory in ("recipes", "tutorials", "reef/service/profiles", "tests/packaging"):
+    for directory in ("recipes", "tutorials", "tests/packaging"):
         for path in (root / directory).rglob("*.yaml"):
             if "work" in path.relative_to(root).parts:
                 continue

@@ -260,7 +260,7 @@ edits them with its own tools, and ``workspace.read()`` returns the patch
 from the head tree and the files the agent wrote off the layout. For model
 calls the agent process makes outside ``context.models``, call
 ``agent_host.calls.spend()`` before each and ``agent_host.calls.record(entry)``
-after it. ``reef.recipe.reefine.agent`` is a complete agent proposer.
+after it. ``recipes.beta.reefine.agent`` is a complete agent proposer.
 
 Manual requests
 ---------------
@@ -499,7 +499,7 @@ Every method package keeps each part in the same file:
    processor.py    its record stages, when it reads records its own way
    seed/           its first tree
 
-``reef/recipe/reefine/``, ``recipes/gepa/`` and ``recipes/meta_harness/``
+``recipes/gepa/``, ``recipes/meta_harness/`` and ``recipes/beta/reefine/``
 follow this layout.
 
 Untrusted input

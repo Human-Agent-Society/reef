@@ -1,8 +1,8 @@
 """Guarantees of the tutorials/evolve-your-harness example, hermetic: the model binding is stubbed, episodes
 never run, and the boot tests read the serve files the way run.sh and ``reef serve`` do.
 
-The pi variant proposes with the built-in Reefine text proposer, whose tests live with the method; this file
-covers what the tutorial owns: its grader, the native variant's proposer, the serve files and the replay page.
+The pi variant proposes with the Reefine text proposer (``recipes/beta/reefine``), whose tests live with the
+method; this file covers what the tutorial owns: its grader, the native variant's proposer, the serve files and the replay page.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.reefine import scorer as reefine_scorer
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
@@ -107,23 +106,12 @@ def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
     assert evolution.evaluate("no such prefix", episode((pi_message(answer),))) == 0.0
 
 
-HEALTH_TASK = (
-    "[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output as a "
-    "plain word alone on the last line."
-)
-
-
-def test_the_builtin_grades_the_health_task_and_the_tutorial_keeps_its_own_answers(evolution) -> None:
-    """The built-in scorer knows the profile's health task alone; the tutorial's grader keeps the three arithmetic
-    answers its deployments still run, reading the trajectory through the built-in reader."""
-    builtin = reefine_scorer.AnswerScorer()
-    assert reefine_scorer.ANSWERS == {"[health]": "reef-ok"}
+def test_the_tutorial_grader_keeps_its_own_answers(evolution) -> None:
+    """The tutorial's grader knows the three arithmetic answers its deployments run, and no other task; it reads
+    the trajectory through the built-in reader."""
     assert set(evolution.ANSWERS) == {"[sieve]", "[fib]", "[csv]"}
-    assert builtin.score(HEALTH_TASK, episode((pi_message("$ echo reef-ok\nreef-ok"),))) == 1.0
-    assert builtin.score(HEALTH_TASK, episode((pi_message("reef-ok is the output."),))) == 0.0
-    assert evolution.evaluate(HEALTH_TASK, episode((pi_message("reef-ok"),))) == 0.0
+    assert evolution.evaluate("[health] Run `echo reef-ok`.", episode((pi_message("reef-ok"),))) == 0.0
     assert evolution.evaluate("[sieve] count the primes", episode((pi_message("Sieving...\n\n9592"),))) == 1.0
-    assert builtin.score("[sieve] count the primes", episode((pi_message("9592"),))) == 0.0
     assert final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 

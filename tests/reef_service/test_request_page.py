@@ -271,7 +271,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
         "metrics": {"floor_score": 1},
     }
     cause = "harness binary reef-terminus not found"
-    episode = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
+    episode = {"task": "/checkout/recipes/beta/reefine/health", "score": None, "failure": cause, "reply": None}
     metrics = _answered(
         selected=False, selection=selection, candidate_episodes=[episode], candidate_score=0.0, patch=PATCH
     )

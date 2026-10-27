@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from pathlib import Path
@@ -68,7 +68,6 @@ from reef.service.deploy.service_config import (
     service_override,
 )
 from reef.service.deploy.training import assemble_training_services, local_model_required
-from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
@@ -418,11 +417,9 @@ def resolve_deployment_config(
 
 
 def _config_source(config_path: Path | None) -> str:
-    """Name the selected file, profile or command line for the startup log."""
+    """Name the selected file or the command line for the startup log."""
     if config_path is None:
         return "config: command line"
-    if config_path.parent == PROFILES_DIR.resolve():
-        return f"config: profile {config_path.stem} at {config_path}"
     return f"config: {config_path}"
 
 
@@ -535,38 +532,11 @@ def _model_overrides(
     return {"upstream_url": url, "upstream_model": model, "upstream_api_key": key}
 
 
-def _resolve_config(config: str | None, recipe: str | None) -> str | None:
-    """Select a file/profile, or return None for configuration-free provider startup."""
-    if config is not None and recipe is not None:
-        raise DeployConfigError("pass -c <file> or --recipe <name>, not both")
-    if config is not None:
-        if not config.strip():
-            raise DeployConfigError("--config must name a non-empty file path")
-        return config
-    if recipe is not None:
-        try:
-            path = profile_path(recipe)
-        except UnknownProfileError as exc:
-            raise DeployConfigError(str(exc)) from exc
-        return str(path)
-    return None
-
-
-def _prepare_profile(
-    recipe: str,
-    model: str | None,
-    environ: MutableMapping[str, str],
-    overrides: Mapping[str, str] | None = None,
-) -> None:
-    """What a profile needs from the environment before it loads: its own directory and a model."""
-    selected_model = model or environ.get("REEF_UPSTREAM_MODEL", "")
-    for key, value in (overrides or {}).items():
-        declared = service_override(key, value)
-        if declared is not None and declared[0].name == "upstream_model":
-            selected_model = value
-    if not selected_model.strip():
-        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --inference.upstream-model MODEL")
-    environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
+def _resolve_config(config: str | None) -> str | None:
+    """Select a config file, or return None for configuration-free provider startup."""
+    if config is not None and not config.strip():
+        raise DeployConfigError("--config must name a non-empty file path")
+    return config
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -575,20 +545,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         bootstrap = build_serve_parser(service_arguments=False)
         selection, extras = bootstrap.parse_known_args([arg for arg in argv if arg not in ("--help", "-h")])
         help_config = None
-        if (
-            selection.config
-            or selection.recipe
-            or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras)
-        ):
-            path = Path(selection.config or (profile_path(selection.recipe) if selection.recipe else "reef.yaml"))
-            config = (
-                translate_layout(load_config(path, interpolate_env=False))
-                if selection.config or selection.recipe
-                else {}
-            )
+        if selection.config or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras):
+            path = Path(selection.config or "reef.yaml")
+            config = translate_layout(load_config(path, interpolate_env=False)) if selection.config else {}
             help_config, _ = _component_selection(config, _parse_overrides(extras), path.resolve())
         build_serve_parser(config=help_config).parse_args(argv)
-    # Discover the file/profile without applying defaults or converting
+    # Discover the file without applying defaults or converting
     # public values before YAML and environment references are available.
     parser = build_serve_parser(service_arguments=False)
     args, extras = parser.parse_known_args(argv)
@@ -601,9 +563,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model_defaults.pop(key, None)
                 model_defaults[key] = value
             overrides = model_defaults
-        config_path = _resolve_config(args.config, args.recipe)
-        if args.recipe:
-            _prepare_profile(args.recipe, args.model, os.environ, overrides)
+        if args.recipe is not None:
+            raise DeployConfigError(f"--recipe {args.recipe}: built in profiles were removed; pass -c <config file>")
+        config_path = _resolve_config(args.config)
         exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:
         parser.error(str(exc))

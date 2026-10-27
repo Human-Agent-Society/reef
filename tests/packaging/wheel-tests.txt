@@ -58,6 +58,12 @@ tests/recipes/meta_harness/test_meta_harness_artifact_transactions.py
 tests/recipes/opd/test_opd_pipeline.py
 tests/recipes/openclawrl/test_openclawrl.py
 tests/recipes/openclawrl/test_openclawrl_gpu_pool.py
+tests/recipes/reefine/test_reefine_agent.py
+tests/recipes/reefine/test_reefine_answer_loop.py
+tests/recipes/reefine/test_reefine_harness_facts.py
+tests/recipes/reefine/test_reefine_multimodal_relay.py
+tests/recipes/reefine/test_reefine_recipe.py
+tests/recipes/reefine/test_reefine_tutorial.py
 tests/recipes/sao/test_sao_pipeline.py
 tests/recipes/sao/test_sao_reference.py
 tests/recipes/sdft/test_sdft_pipeline.py
@@ -76,11 +82,6 @@ tests/reef_recipe/test_recipe_config_fields.py
 tests/reef_recipe/test_recipe_runtime_model.py
 tests/reef_recipe/test_reef_interface_inheritance.py
 tests/reef_recipe/test_reef_recipes.py
-tests/reef_recipe/test_reefine_agent.py
-tests/reef_recipe/test_reefine_answer_loop.py
-tests/reef_recipe/test_reefine_harness_facts.py
-tests/reef_recipe/test_reefine_recipe.py
-tests/reef_recipe/test_reefine_tutorial.py
 tests/reef_service/test_artifact_versions.py
 tests/reef_service/test_async_pipeline_core.py
 tests/reef_service/test_auth.py
@@ -126,7 +127,6 @@ tests/reef_service/test_routes_off_loop.py
 tests/reef_service/test_runtime_registry.py
 tests/reef_service/test_scenario_api.py
 tests/reef_service/test_scenario_models.py
-tests/reef_service/test_serve_profile.py
 tests/reef_service/test_served_url.py
 tests/reef_service/test_service_config_arguments.py
 tests/reef_service/test_service_executor_ray.py

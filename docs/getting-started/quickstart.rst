@@ -164,15 +164,10 @@ training driver and model workers.
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
-The one that runs on a laptop is ``reefine``, the built-in recipe:
-``reef serve --recipe reefine --model ollama/gemma4:26b`` needs no second file,
-because its proposer and evaluator ship with the package. Ask for a change
-with ``POST /reef/train`` and one evolve step runs for it; read
-`Reefine <../user-guide/recipes/reefine.rst>`__ for what it does with a request.
-
-To write the loop yourself, use ``evolve-your-harness``, which takes a second
-file: a **preset** naming your ``propose`` and ``evaluate`` classes, the seed
-tree and the tasks to evaluate on. ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
+A harness recipe runs on a laptop with only a model endpoint. Bind
+``reef.recipe.harness:HarnessEvolutionRecipe`` and give it a **preset**
+naming your ``propose`` and ``evaluate`` classes, the seed tree and the tasks
+to evaluate on. ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
 together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 

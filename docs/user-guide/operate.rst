@@ -66,7 +66,7 @@ Read what a release requires
 
 A request sent to ``POST /reef/train`` may name what its change needs where the harness runs, and the method may add items of its own. The commit that answered the request carries the merged list as ``training_request.requires``: ``{name, kind, check, prompt}`` items, where ``kind`` is ``permission``, ``env``, ``service`` or ``binary``. A releases row in ``GET /reef/harness/releases`` carries its own step's list. The ``requires`` of ``GET /reef/harness`` is the union over the release's chain (a promote continues at the release it promoted), the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. Each step's page shows both under Setup.
 
-Reef runs no check. A client checks each item where the harness runs before it runs the release: an ``env`` item's variable is set, a ``binary`` item's program is on the PATH, and any other ``check`` command exits 0. A person should read a check before the client runs it. ``tutorials/reefine/run.py`` shows one such client: it refuses to install a release with an unmet item and prints each item's ``prompt``.
+Reef runs no check. A client checks each item where the harness runs before it runs the release: an ``env`` item's variable is set, a ``binary`` item's program is on the PATH, and any other ``check`` command exits 0. A person should read a check before the client runs it. ``recipes/beta/reefine/examples/run.py`` shows one such client: it refuses to install a release with an unmet item and prints each item's ``prompt``.
 
 Choose a starting release
 -------------------------
@@ -452,6 +452,6 @@ With PostgreSQL, a remote artifact repository and a remote task file store, a
 new host with the same configuration continues every scenario from the
 database and the two remote stores.
 
-Some recipes have their own directories, for example Reefine's
-``step_record_dir`` and ``proposals_dir``. These directories are not scenario
+Some recipes have their own directories, for example the harness evolution
+recipe's ``evolution.step_record_dir`` and ``evolution.proposals_dir``. These directories are not scenario
 storage. Keep them on a persistent volume.

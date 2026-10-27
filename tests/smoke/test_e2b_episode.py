@@ -4,7 +4,6 @@ Only a short synthetic prompt is sent to OpenRouter. The provider key stays in
 the test process; the sandbox reaches a temporary model endpoint over Reef's tunnel.
 """
 
-import json
 import os
 import threading
 import urllib.error
@@ -20,7 +19,6 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import run_episode
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
-from reef.recipe.reefine.agent import launch_pi
 from reef.sandbox.config import build_executor
 from reef.sandbox.e2b import E2BExecutor
 from reef.sandbox.process import EpisodeTimeout
@@ -182,29 +180,3 @@ def test_the_evaluation_worker_scores_a_real_remote_episode(model_endpoint, tmp_
     scored = worker.run(bound_files(binding, "pi"), task, models=ModelBindings(binding))
     assert scored.score == 1.0 and scored.failure is None
     assert scored.reply is not None and "REEF_E2B_OK" in scored.reply
-
-
-def test_reefine_scripted_trial_uses_node_in_the_shared_session(tmp_path):
-    executor, _ = build_executor({"executor": "e2b"}).for_program(AdapterProgram(get_adapter("pi")))
-    assert isinstance(executor, E2BExecutor)
-    session = executor.open()
-    root = tmp_path / "trial"
-    root.mkdir()
-    try:
-        outcome = launch_pi(
-            get_adapter("pi"),
-            "/host-only/pi",
-            session,
-            {},
-            "",
-            {},
-            root=root,
-            timeout=60,
-            script={"fixture_tools": [], "steps": [{"prompt": "hello", "expect": {"model_called": True}}]},
-        )[0]
-        report = json.loads((root / "sessions/trial-result.json").read_text())
-        assert outcome.exit_code == 0, (outcome.stderr, report)
-        assert report["passed"]
-        assert report["steps"][0]["model_requests"] == 1
-    finally:
-        session.close()

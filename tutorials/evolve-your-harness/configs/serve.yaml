@@ -26,11 +26,11 @@ recipe:
       # The default pipeline stages batch every valid scored report, a passing one included.
       # batch_size 1 makes each report one evolve step.
       batch_size: 1
-      # The proposer is the built-in Reefine text proposer: the served model
+      # The proposer is the text proposer of the beta Reefine recipe: the served model
       # proposes one skill change over its failures. The grader is the method
       # package beside this file (harness/): the reef service resolves the
       # dotted reference because run.sh starts it with this cwd.
-      propose: reef.recipe.reefine.proposer:TextProposer
+      propose: recipes.beta.reefine.proposer:TextProposer
       evaluate: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi. Set evolution.binary to a path to use an install of your own instead.

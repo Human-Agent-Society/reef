@@ -368,7 +368,7 @@ Reef's inference routes answer only a call that carries the
 ``x-reef-scenario`` header. The render refuses a tree that sets provider
 headers, so the client adds the header to its own binding after the render.
 pi sends the headers of its provider entry, ``providers.reef.headers`` in
-``pi-agent/models.json``, as ``tutorials/reefine/run.py`` writes them. For an
+``pi-agent/models.json``, as ``recipes/beta/reefine/examples/run.py`` writes them. For an
 agent that sends no custom header, point ``base_url`` at a local proxy that
 adds it, such as ``reef.harness.capture.CaptureProxy``, which also keeps the
 receipts a report references. See `Use a published tree
@@ -509,10 +509,11 @@ To run the task on E2B instead of local Docker, add
 ``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY=<key>`` to the command.
 
 The JSON trial record under ``$TREE_ROOT/terminus/sessions`` contains the
-verifier rewards and ATIF trajectory. The bundled Reefine health task succeeds
-with reward 1. If a local Docker trial has neither reward nor verifier output,
-the runner reports a possible mount problem: check that Docker shares
-``$TRIALS_DIR`` with the host.
+verifier rewards and ATIF trajectory. The health task of the beta Reefine
+recipe, ``recipes/beta/reefine/health``, succeeds with reward 1. If a local
+Docker trial has neither reward nor verifier output, the runner reports a
+possible mount problem: check that Docker shares ``$TRIALS_DIR`` with the
+host.
 
 Evaluation directories and Docker context
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1327,7 +1328,7 @@ Descriptor fields
 - ``trajectory`` specifies the session log's path and reader format.
   ``final_assistant_text`` extracts assistant replies from flat messages,
   pi's ``message`` events, and Codex's ``response_item.payload`` messages,
-  including ``output_text`` parts. Reefine uses this text for episode scoring;
+  including ``output_text`` parts. Episode scorers use this text as the answer;
   user messages, tool outputs, and reasoning events are not answers.
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. It also turns off what would make an episode

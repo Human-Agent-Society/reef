@@ -1,6 +1,6 @@
 """The tutorial's grader, shared by both variants and by ``run.py``.
 
-Proposals on pi come from the built-in Reefine text proposer, which the serve
+Proposals on pi come from the beta Reefine text proposer, which the serve
 file names; the grader and its three arithmetic answers are this tutorial's
 own, since its deployments keep those tasks. The grader stays dependency-free
 so ``run.py`` still needs only reef-client.

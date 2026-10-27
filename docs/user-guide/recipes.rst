@@ -6,9 +6,8 @@ evolves**, model weights or the agent harness. Weight recipes need GPUs and
 the training stack in `Train model weights from agent feedback
 <evolve-your-model.rst>`__, while harness recipes need only a model endpoint.
 
-Reefine ships with ``reef-infra``, and the other implementations live in the
-repository's ``recipes/`` cookbook and do not ship in the Reef wheel. Reef
-also ships `SFT <recipes/sft.rst>`__. SFT trains model weights on
+The implementations live in the repository's ``recipes/`` cookbook and do
+not ship in the Reef wheel. Reef ships `SFT <recipes/sft.rst>`__. SFT trains model weights on
 demonstrations or on imported examples, for all task types.
 ``recipes/basic/`` is the record-only starting stack and stays outside the
 catalog, and beta recipes join it once they publish learning results. The root
@@ -112,11 +111,6 @@ recipe reads it out of the traffic it already serves.
      - ``recipes/skillclaw/``
      - `SkillClaw <recipes/skillclaw.rst>`__
      - `SkillClaw on WildClawBench <../../recipes/skillclaw/README.md>`__
-   * - Reefine
-     - harness: skills, rules, agent commands, and pi extensions
-     - ``reef/recipe/reefine/``
-     - `Reefine <recipes/reefine.rst>`__
-     - `Reefine on pi <../../tutorials/reefine/README.md>`__
 
 How a recipe is selected
 ------------------------
@@ -135,7 +129,7 @@ point deployments configured with different recipes at the same repository.
        training_mode: auto
 
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
-Reefine ships in Reef, and other learning methods are imported only when selected. The ``recipes/`` tree in
+Learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__
 describes each spelling.
@@ -149,13 +143,6 @@ Reef yet. For a harness recipe, follow `Evolve agent prompts, rules, and skills
 <evolve-your-harness.rst>`__. For a weight recipe, follow `Train model weights
 from agent feedback <evolve-your-model.rst>`__. Each recipe page above provides
 its own configuration and example.
-
-Built-in harness refinement
----------------------------
-
-`Reefine <recipes/reefine.rst>`__ turns user instructions into harness updates
-and ships with ``reef-infra``. Start it with ``reef serve --recipe reefine``
-and a configured model endpoint.
 
 Beta recipes
 ------------
@@ -197,3 +184,14 @@ generated-task recipe runs the tasks and trains on them (see `generated tasks
 <../reference/configuration.rst#generated-tasks>`__). With ``author: prompt``,
 the generator service's one-reply prompt Designer rebuilds the same sessions as
 the baseline.
+
+`Reefine <../../recipes/beta/reefine/README.md>`__ is **beta** under
+``recipes/beta/reefine/``. It turns a plain-language request into a harness
+update: skills, rules, agent commands, or pi extensions. The served model, or
+a pi coding agent where the host can isolate it, proposes the change. The
+evaluation checks only that the changed harness still works on a health task,
+and code extensions wait for a promote before they are served. Reefine does
+not ship with ``reef-infra``; start it from a checkout with
+``reef serve -c recipes/beta/reefine/examples/configs/serve.yaml``. Its
+`example <../../recipes/beta/reefine/examples/README.md>`__ runs a bug-fix
+flow, a research loop, and a measurement of which requests passed the checks.

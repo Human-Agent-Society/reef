@@ -1,6 +1,6 @@
 # Harness evolution quickstart
 
-This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a tree of text files, a proposal is one patch to that tree, and a patch that wins the evaluation publishes as a release any client can pull. The proposer is the served model itself, through Reefine's text proposer: it reads the current skills and its own batched requests, each with the score and feedback its report carried, and answers with one skill file as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
+This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a tree of text files, a proposal is one patch to that tree, and a patch that wins the evaluation publishes as a release any client can pull. The proposer is the served model itself, through the text proposer of the beta [Reefine](../../recipes/beta/reefine/README.md) recipe (`recipes.beta.reefine.proposer:TextProposer`): it reads the current skills and its own batched requests, each with the score and feedback its report carried, and answers with one skill file as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
 
 The pinned paper reproduction built on this mechanism lives at `recipes/skillclaw/`.
 

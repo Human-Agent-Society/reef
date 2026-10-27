@@ -128,11 +128,6 @@ def test_serve_logs_the_config_source_and_masked_settings(tmp_path, monkeypatch,
     assert "file-secret" not in err
 
 
-def test_config_source_names_a_profile():
-    profile = Path(orchestrator.PROFILES_DIR) / "demo-profile.yaml"
-    assert orchestrator._config_source(profile) == f"config: profile demo-profile at {profile}"
-
-
 @pytest.mark.usefixtures("idle_stack")
 def test_print_config_lists_every_setting_and_starts_nothing(tmp_path, monkeypatch, capsys):
     def must_not_run(*args, **kwargs):

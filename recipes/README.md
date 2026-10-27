@@ -14,8 +14,8 @@ Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 The catalog below groups recipes by the **task type** they serve and by
 **what they evolve**, model weights or the agent harness. Weight recipes need
 the GPU training stack, while harness recipes need only a model endpoint.
-Reefine and [SFT](../docs/user-guide/recipes/sft.rst) ship with `reef-infra`,
-and every other recipe here is a cookbook package. [Basic](#basic) is the
+[SFT](../docs/user-guide/recipes/sft.rst) ships with `reef-infra`, and every
+other recipe here is a cookbook package. [Basic](#basic) is the
 record-only starting stack and stays outside the catalog, and
 [beta recipes](#beta-recipes) join it once they publish learning results. The
 root [README](../README.md#-recipes-and-examples) and the
@@ -101,7 +101,6 @@ recipe reads it out of the traffic it already serves.
 |---|---|---|---|---|
 | OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
 | SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
-| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on pi](../tutorials/reefine/README.md) |
 
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
 personal-agent experiment as a reef-eval task stream: a simulated student brings
@@ -124,14 +123,6 @@ criterion carried verbatim from the sealed campaign. Its `harbor/` is one
 WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
 one-episode reef-eval smoke over it.
-
-[Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
-turns a plain-language request into a harness update. The served model
-proposes the change, the evaluation checks that the changed harness still
-works, and code extensions wait for a promote before they are served.
-`reef serve --recipe reefine` starts its profile without a checkout, and the
-[Reefine tutorial](../tutorials/reefine/README.md) records a bug-fix flow, a
-research loop, and which requests passed the checks.
 
 ## Basic
 
@@ -220,3 +211,14 @@ can reach. The deployment selects it as the generator of the generated-task
 stages in its `pipeline` section, and the built-in generated-task recipe runs
 the tasks and trains on them. With `author: prompt`, the generator service's
 one-reply prompt Designer rebuilds the same sessions as the baseline.
+
+[Reefine](beta/reefine/README.md) is beta under `recipes/beta/reefine/`. It
+turns a plain-language request into a harness update: skills, rules, agent
+commands, or pi extensions. The served model, or a pi coding agent where the
+host can isolate it, proposes the change. The evaluation checks only that the
+changed harness still works on a health task, and code extensions wait for a
+promote before they are served. Reefine does not ship with `reef-infra`; start
+it from a checkout with
+`reef serve -c recipes/beta/reefine/examples/configs/serve.yaml`. Its
+[example](beta/reefine/examples/README.md) records a bug-fix flow, a research
+loop, and which requests passed the checks.

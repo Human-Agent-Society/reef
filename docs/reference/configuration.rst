@@ -497,7 +497,7 @@ Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 Relative config paths resolve from the directory where you run the command.
-With no ``-c`` or explicit ``--recipe`` profile, Reef uses CLI inference inputs;
+With no ``-c``, Reef uses CLI inference inputs;
 it does not discover ``REEF_CONFIG`` or ``./reef.yaml``. File deployments must
 use ``reef serve -c reef.yaml`` or ``reef serve -c "$REEF_CONFIG"`` instead
 of relying on the previous implicit discovery. ``REEF_CONFIG`` remains the
@@ -508,7 +508,7 @@ installation for your config. From outside a checkout,
 pass an absolute path to a cookbook config.
 
 Before any model download or process start, the launcher logs the selected
-source (file, profile, or command line) and then every resolved setting with
+source (file or command line) and then every resolved setting with
 where its value came from:
 
 .. code:: text
@@ -534,7 +534,7 @@ masked by key name at any depth, including inside native ``options`` objects.
 ``reef serve ... --print-config`` prints the same report on standard output,
 defaults included, and exits with status 0 (or 2 for an invalid config)
 without downloading a model, allocating GPUs or starting a process. It takes
-the same ``-c``, ``--recipe``, ``--model`` and override flags as a real start,
+the same ``-c``, ``--model`` and override flags as a real start,
 so it shows exactly what that start would use. A Hugging Face model path is
 shown as written; the snapshot is resolved only at startup.
 
@@ -562,8 +562,9 @@ CLI values override YAML values; omitted values use the setting's default.
 Run ``reef serve --help`` to see these options. Use ``--inference.upstream-model``
 as the canonical spelling. Compatibility aliases include ``--upstream-model``,
 ``--upstream_model`` and ``--reef.upstream_model``. The last
-explicit CLI spelling of a setting wins. ``--recipe`` still selects a launcher
-profile; ``--recipe.implementation`` overrides the deployment's recipe setting.
+explicit CLI spelling of a setting wins. ``--recipe.implementation`` overrides
+the deployment's recipe setting; a bare ``--recipe <name>`` is refused because
+built-in profiles were removed.
 
 String settings retain their text: ``--inference.upstream-model 00123`` remains ``00123``.
 Numeric and boolean settings are parsed according to their declared type;
@@ -871,10 +872,7 @@ launcher does not export ``PYTHONPATH`` itself. Entries already in
 
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
-The one kind of preset reef bundles is a recipe's profile under
-``reef/service/profiles/``: ``reef serve --recipe <name>`` points this
-variable at that directory and starts the profile as the deployment config
-(see `the CLI reference <cli.rst>`__).
+Reef bundles no presets.
 
 A preset uses the configuration file layout and is read as-is. ``${VAR}``
 interpolates in a deployment config, never in a preset. A preset carries its
@@ -1062,8 +1060,8 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.min_win_margin | 0 | under ``selection: score_comparison``, the candidate must win more than this many task pairings beyond its losses; refused with any other selection
    evolution.max_rejected_history | 25 | how many of the latest rejected proposals the scenario state keeps (step, patch and reason) for the proposer to read; 0 keeps none
    evolution.recheck_every | 0 | on each automatic step whose number is a multiple of this, and at once when the served model or the adapter version changed since the last publish, re-evaluate the last published tree against the tree it replaced instead of proposing; when the older tree wins, the step publishes it, which rolls back; 0 disables; refused with ``selection: floor``
-   evolution.multimodal | | reefine only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; the profile reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
-   evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer whose ``runs_agent`` is true runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``e2b`` runs it in an E2B cloud sandbox that reaches the gateway through a tunnel, with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>-episodes-v1`` with bubblewrap, built on first use), and needs the ``e2b`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
+   evolution.multimodal | | Reefine (beta) only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; Reefine's example configuration reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
+   evolution.proposer_agent | | off unless set (the beta Reefine recipe sets it); a proposer whose ``runs_agent`` is true runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``e2b`` runs it in an E2B cloud sandbox that reaches the gateway through a tunnel, with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>-episodes-v1`` with bubblewrap, built on first use), and needs the ``e2b`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See ``recipes/beta/reefine/README.md``
    evolution.executor | local | ``local`` runs episodes as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` creates a cloud VM per episode and checks provider access, template, binary and namespace support at startup. E2B uses remote binaries; Terminus retains its own Harbor execution
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
@@ -1075,7 +1073,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.promote | | optional ``Promoter`` class, in the same form as ``evolution.propose``; its ``promote(samples, *, manifest=None)`` chooses which trace prompts to promote; without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
    evolution.publish | auto | ``review`` holds every successful evaluation as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
    evolution.review_kinds | [] | tree kinds (``rules``, ``config``, ``skill``, ``agent_command``, ``code_extension`` and the ``native_*`` kinds) whose changed files make a win wait for a promote while the rest publish at once; a win that changes a ``native_loop`` file waits whether or not the list names it
-   evolution.seed | the directory of the first tree: every regular file under it, at its path in the harness layout; it becomes the base release of a new scenario, and an existing scenario keeps its head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the recipe's own seed (Reefine's starter skill), else the empty tree
+   evolution.seed | the directory of the first tree: every regular file under it, at its path in the harness layout; it becomes the base release of a new scenario, and an existing scenario keeps its head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the recipe's own seed (for example Reefine's starter skill), else the empty tree
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``

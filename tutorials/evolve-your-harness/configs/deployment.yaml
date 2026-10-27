@@ -20,7 +20,7 @@ recipe:
       # The default pipeline stages batch every valid scored report, a passing one included.
       # batch_size 1 makes each report one evolve step.
       batch_size: 1
-      propose: reef.recipe.reefine.proposer:TextProposer
+      propose: recipes.beta.reefine.proposer:TextProposer
       evaluate: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]

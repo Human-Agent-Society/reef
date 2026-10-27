@@ -4,8 +4,8 @@ Skipped unless the ``terminus`` extra is installed. These are the contract
 checks no hermetic mapping can make: that Harbor accepts the agent spec and
 the trial overrides the runner builds, that the constructor arguments the
 render quirk admits are real Terminus 2 parameters, that Terminus 2 sends the
-bound model name to the bound endpoint and reads that model's context limit,
-and that Harbor loads the reefine health task. They need Harbor, but not
+bound model name to the bound endpoint and reads that model's context limit.
+They need Harbor, but not
 Docker and not a model (a local endpoint stands in), so they run in any job
 that installs the extra.
 """
@@ -28,7 +28,6 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
 from reef.harness.tree import HarnessTree, render_tree
-from reef.recipe.reefine.scorer import HEALTH_TASK_DIRECTORY
 
 pytest.importorskip("harbor", reason="harbor is not installed")
 
@@ -218,16 +217,6 @@ def test_terminus_2_reads_the_context_limit_under_the_served_name(tmp_path: Path
     else:
         with pytest.raises(Exception, match="isn't mapped yet"):
             get_model_info(served)
-
-
-@pytest.mark.unit
-def test_harbor_loads_the_reefine_health_task_directory() -> None:
-    from harbor.models.task.task import Task
-
-    assert Task.is_valid_dir(HEALTH_TASK_DIRECTORY)
-    task = Task(HEALTH_TASK_DIRECTORY)
-    assert "echo reef-ok" in task.instruction
-    assert task.paths.test_path.is_file() and (task.paths.environment_dir / "Dockerfile").is_file()
 
 
 @pytest.mark.unit

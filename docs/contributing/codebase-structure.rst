@@ -9,12 +9,13 @@ Choose a destination
 
 ``reef/`` holds every shared mechanism, including the harness evolution engine
 at ``reef/train/harness_backend/`` and the harness source tree at
-``reef/harness/tree/``. The built-in Reefine recipe lives under
-``reef/recipe/reefine/``. The built-in SFT recipe lives under
+``reef/harness/tree/``. The built-in SFT recipe lives under
 ``reef/recipe/sft/``, and its Slime loss family is in
 ``reef/train/slime_backend/sft.py``. Paper-backed methods live in separate
 packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``gepa``,
-``meta_harness``, ``skillclaw``). A weight method holds its recipe, processor
+``meta_harness``, ``skillclaw``). Beta methods live under ``recipes/beta/``
+(``coral``, ``spade``, ``autoenvscaling``, ``reefine``) until they publish
+reproducible results. A weight method holds its recipe, processor
 and training objective, with the ``slime/`` subpackage only the training
 plane imports. A harness method holds its recipe and proposer, and a scorer
 or selection policy when it needs its own. Nothing under ``reef/`` imports a
@@ -83,8 +84,8 @@ import a concrete integration.
 |                         | recovery, and lifecycle                                  | implementations                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/recipe/``        | the contract a method implements, dotted                 | external cookbook methods                  |
-|                         | resolution, runtime binding, and the built-in Reefine    |                                            |
-|                         | and generated-task recipes                               |                                            |
+|                         | resolution, runtime binding, the base harness evolution  |                                            |
+|                         | recipe, and the built-in generated-task recipe           |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/train/``         | the trainer loop, the training pipeline, batch types,    | HTTP endpoints, deployment                 |
 |                         | backend integrations                                     | configuration parsing                      |

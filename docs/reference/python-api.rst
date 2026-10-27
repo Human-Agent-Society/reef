@@ -136,7 +136,6 @@ Recipe
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
    from reef.recipe.harness import HarnessEvolutionRecipe
-   from reef.recipe.reefine import ReefineRecipe
    from reef.recipe.sft import SFTRecipe
 
 A recipe is one frozen dataclass configuring the serving and evolution behavior
@@ -152,10 +151,10 @@ for every scenario in a deployment.
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── HarnessEvolutionRecipe   harness tree + episodes  reef.recipe.harness
-       ├── ReefineRecipe                                  reef.recipe.reefine
        ├── GEPARecipe                                     recipes.gepa.recipe
        ├── MetaHarnessRecipe                              recipes.meta_harness.recipe
-       └── SkillClawRecipe                                recipes.skillclaw.recipe
+       ├── SkillClawRecipe                                recipes.skillclaw.recipe
+       └── ReefineRecipe (beta)                           recipes.beta.reefine
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the

@@ -30,13 +30,13 @@ from reef_client.client import ReefClient, ReefClientError
 from reef_client.serve import RECEIPT_HEADER
 
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
+from recipes.beta.reefine.agent import launch_pi, rendered_files
+from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
 from reef.core.prompts import untrusted_text
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
-from reef.recipe.reefine.agent import launch_pi, rendered_files
-from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
 from reef.record2task.generator.designer import (
     HARBOR_OUTPUT_TEXT,
     SYSTEM_PROMPT,

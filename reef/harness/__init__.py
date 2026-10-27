@@ -11,8 +11,7 @@ The map, one subpackage per job:
     one directory per agent, the mapping only: a ``descriptor.yaml`` (schema
     in ``descriptor``) that says which tree kinds the agent takes and where
     each lands, how its binary runs headless and binds a model, plus its
-    quirks and the ``harness_facts.yaml`` a text proposer reads about the
-    agent. pi, opencode, claude, codex, dsh, hermes, and the two programs
+    quirks. pi, opencode, claude, codex, dsh, hermes, and the two programs
     Reef ships, native and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root through any

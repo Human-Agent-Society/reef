@@ -2,7 +2,7 @@
 
 They import Reef, so they live apart from ``evolution.py`` and
 ``native_evolution.py``, which ``run.py`` imports with only reef-client
-installed. The pi variant proposes with the built-in Reefine text proposer;
+installed. The pi variant proposes with the beta Reefine text proposer;
 these classes are the scorers of both variants and the native proposer.
 """
 

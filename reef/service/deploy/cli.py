@@ -244,9 +244,9 @@ def _apply_overrides(
 def build_serve_parser(
     *, service_arguments: bool = True, config: Mapping[str, Any] | None = None
 ) -> argparse.ArgumentParser:
-    """``reef serve``'s own arguments: the service child's parser plus the profile and model flags.
+    """``reef serve``'s own arguments: the service child's parser plus the model flags.
 
-    Only the launcher takes them; ``python -m reef.service`` still refuses ``--recipe``."""
+    Only the launcher takes them. ``--recipe`` stays reserved so that a removed profile name fails clearly."""
     parser = build_parser(service_arguments=service_arguments)
     if config is not None:
         for argument in component_config_arguments(config):
@@ -258,7 +258,7 @@ def build_serve_parser(
         "--recipe",
         default=None,
         metavar="NAME",
-        help="Start a built in recipe's profile instead of a config file (reefine).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--model",

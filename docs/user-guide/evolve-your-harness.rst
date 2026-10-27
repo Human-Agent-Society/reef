@@ -593,21 +593,21 @@ From a Reef checkout:
    cd tutorials/evolve-your-harness
    ./run.sh
 
-To run a harness-evolving deployment without the example's driver, start
-the built-in Reefine profile and name the model:
+To run a long-lived harness-evolving deployment without the example's
+driver, start the example's ``configs/deployment.yaml`` from the repository
+root and name the model:
 
 .. code:: bash
 
-   reef serve --recipe reefine \
+   reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml \
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b
 
-The profile is Reefine's own default (loopback, port 8901, no token unless
-``REEF_TOKEN`` is set, state under ``.reef/reefine/``); its proposer and evaluator
-ship in the wheel, so it needs no checkout. This
-example's own stack stays in ``configs/serve.yaml``, which ``run.sh`` passes
-with ``-c``. `The CLI reference <../reference/cli.rst>`__ describes provider
-settings and legacy shorthand.
+It listens on ``127.0.0.1:8901``, requires no token unless ``REEF_TOKEN`` is
+set, and keeps state under ``tutorials/evolve-your-harness/work/deployment/``.
+The short-lived example's own stack stays in
+``configs/serve.yaml``, which ``run.sh`` passes with ``-c``.
+`The CLI reference <../reference/cli.rst>`__ describes provider settings.
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
@@ -627,8 +627,10 @@ pass as a notebook, cell by cell, with the service managed as a subprocess.
 graded, and every result is reported against its receipt. Every valid scored
 report batches, a passing one included, and ``evolution.batch_size: 1`` makes each
 report its own batch, so every report this run submits triggers one evolve
-step. In this example the served model is its own proposer, through Reefine's
-text proposer, and it answers with one skill file.
+step. In this example the served model is its own proposer, through the text
+proposer of the beta `Reefine <../../recipes/beta/reefine/README.md>`__ recipe
+(``recipes.beta.reefine.proposer:TextProposer``), and it answers with one skill
+file.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
@@ -719,9 +721,10 @@ Report how a run went with ``POST /reef/report``: a score and feedback over
 the receipts of its model calls. A release's ``requires`` items say what the
 machine must provide (an ``env`` variable, a ``permission``, a ``service``, a
 ``binary``), each with an optional ``check`` and a ``prompt`` sentence; the
-client checks them before it runs the release. ``tutorials/reefine/run.py``
-is a worked client: it pulls the source tree, checks ``requires``, renders the
-tree for pi with its own binding at Reef, and runs a session on it.
+client checks them before it runs the release.
+``recipes/beta/reefine/examples/run.py`` is a worked client: it pulls the
+source tree, checks ``requires``, renders the tree for pi with its own binding
+at Reef, and runs a session on it.
 
 Ask for a harness change
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -764,10 +767,10 @@ the tutorial's ``configs/deployment.yaml`` sets
 ``evolution.review_kinds: [code_extension]``: a release that changes one waits
 as pending until a person promotes it. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused. The
-built-in ``reef.recipe.reefine:ReefineRecipe`` is available through
-``reef serve --recipe reefine``; ``tutorials/reefine/`` runs this path end to
-end on one machine, from the ask to the install and a session on the new
-tree, with a bug fix demo, a research demo and a measurement of which
+beta `Reefine <../../recipes/beta/reefine/README.md>`__ recipe answers
+requests like these. Its example, ``recipes/beta/reefine/examples/``, runs this
+path end to end on one machine, from the ask to the install and a session on
+the new tree, with a bug fix demo, a research demo and a measurement of which
 requests passed the checks (``./run.sh bugfix``, ``./run.sh research``,
 ``./run.sh measure``).
 

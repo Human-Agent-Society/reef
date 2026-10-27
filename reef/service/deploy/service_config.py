@@ -37,7 +37,7 @@ class ServiceConfig:
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset (the launcher owns --recipe).",
+        help="Recipe implementation or named deployment preset (the launcher reserves --recipe).",
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")

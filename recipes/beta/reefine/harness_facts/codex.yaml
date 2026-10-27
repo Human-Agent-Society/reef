@@ -1,0 +1,24 @@
+# What Reefine's proposer is told about Codex CLI: see recipes/beta/reefine/harness_facts/__init__.py.
+title: Codex CLI
+command: >-
+  Codex has no custom slash commands: a typed /<word> that is not one of its own commands is refused before the
+  model sees it. A command file renders as a skill, which a person types as $<name> in the session, so every place
+  that tells the person how to use it says $<name>, never /<name>. Its text is a SKILL.md: YAML frontmatter with name
+  and description, then the instructions; what the person typed after $<name> stays in their message.
+tools: >-
+  exec_command (a shell, sandboxed to the workspace without network), write_stdin, request_user_input, view_image,
+  multi_agent_v1, the goal tools and web_search (the hosted web search, off unless the config sets web_search)
+conversation_mode:
+  name: Codex
+  skill: >-
+    Codex puts a typed $<name> skill into the message as a <skill> block with its <name>
+  escape: >-
+    Codex runs a line that starts with ! in the person's shell
+  toggle: skill
+config_keys: [web_search]
+config_example: >-
+  {"web_search": "live"} in config/primary.json gives sessions the web_search tool (evaluation episodes keep it
+  off). Web search comes only from this file: it takes effect in a new session once the person installs the
+  release, and the person never edits the rendered config, since every install writes it again. The file turns
+  the hosted search on in every session of the release, not only while a mode is on: How to use says so, and the
+  review lists that point under limits
