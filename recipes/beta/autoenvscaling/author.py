@@ -1,7 +1,7 @@
 """The author: who rebuilds one recorded session as a Harbor task, a coding agent by default.
 
 :class:`TaskAuthor` hands its task back as a Designer's reply, so every author's task is admitted the same way.
-:class:`AgentAuthor` is pi, Reefine's pinned coding agent, in an E2B sandbox. It reads the session, the repository at
+:class:`AgentAuthor` is pi, Reefine's pinned coding agent, in a cloud sandbox (E2B or Modal). It reads the session, the repository at
 the base commit and its checkout path under ``../inputs/``, writes the task under ``./task/``, and checks it with its
 one tool, ``task_check``. Its model calls and checks go through a loopback gateway (:class:`RecordingGateway`) that
 holds the credentials and records each model call on Reef. :class:`PromptAuthor` is the baseline: the generator
@@ -453,7 +453,7 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
 
 
 class AgentAuthor(TaskAuthor):
-    """pi in an E2B sandbox, its model calls recorded on the Reef at ``reef_url`` under ``scenario``.
+    """pi in a cloud sandbox, its model calls recorded on the Reef at ``reef_url`` under ``scenario``.
 
     ``reef_url`` and ``token`` also read the source sessions; ``cache_dir`` keeps the repository snapshots.
     One run lasts at most ``timeout_seconds`` and makes at most ``max_model_calls`` model calls. With

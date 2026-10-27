@@ -43,7 +43,7 @@ class RolloutSettings:
     Values: ``episodes_per_task`` is an int of at least 2, the group of one task. ``agent`` is a Harbor
     agent config with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None for
     ``TaskEpisodeRunner``'s default agent. ``environment`` is a non-empty Harbor environment type, such as
-    ``docker`` or ``e2b``. ``agent_host`` is the host at which an agent in the sandbox reaches this host, or
+    ``docker``, ``e2b`` or ``modal``. ``agent_host`` is the host at which an agent in the sandbox reaches this host, or
     None for an agent on this host. ``concurrency`` is a positive int, the episodes in flight.
     ``verifier_timeout_reward`` is the reward of an episode whose verifier timed out, or None to leave it
     unscored. ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign
