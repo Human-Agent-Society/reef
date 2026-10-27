@@ -55,7 +55,9 @@ export REEF_MODEL_NAME=${REEF_MODEL_NAME:-$(basename "$MODEL_DIR")}
 config="$PWD/serve.yaml"
 # All methods share exact-token history and engine settings. Baselines send
 # no reports, so their training backend remains idle throughout the campaign.
-"$python" -m reef serve -c "$config" >> "$REEF_WORK/reef.log" 2>&1 &
+# Environment interpolation yields text; SGLang's Python API needs numeric options.
+inference_options=$("$python" -m harness.config --inference-options)
+"$python" -m reef serve -c "$config" --inference.options "$inference_options" >> "$REEF_WORK/reef.log" 2>&1 &
 reef_pid=$!
 trap 'kill "$reef_pid" 2>/dev/null || true; wait "$reef_pid" 2>/dev/null || true' EXIT
 trap 'exit 130' INT

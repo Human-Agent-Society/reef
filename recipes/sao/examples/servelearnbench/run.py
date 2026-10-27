@@ -1,9 +1,9 @@
 """Run the Retail L1 stream through Reef: every window in order, as the benchmark's runner does.
 
-For each window: the serving tasks run in order and, for SAO, every full
-batch trains the policy before the next batch starts; then the window's
-held-out tests run against the frozen weights and report nothing. The
-weights carry into the next window. The summary's ``test_score`` is the
+For each window, serving tasks run in order. Each SAO batch, including the
+window tail, trains before the next batch starts. Held-out tests then run
+against the frozen weights and report nothing. The weights carry into
+the next window. The summary's ``test_score`` is the
 combined mean reward over every test task run, times 100. Official setting
 scores are reported separately for hidden and fully specified test tasks.
 """
@@ -31,7 +31,7 @@ BENCHMARK_REVISION = "57aa919b5ae71d60c38a7ed559262447406f1e8b"
 
 
 def training_releases(client: ReefClient, scenario: str) -> list[dict]:
-    """Return committed training releases oldest first; an uncreated scenario has none."""
+    """Return selected training checkpoints oldest first, excluding job lifecycle events."""
     try:
         response = client.get(f"/reef/scenarios/{quote(scenario, safe='')}/releases")
     except ReefClientError as error:
@@ -41,7 +41,10 @@ def training_releases(client: ReefClient, scenario: str) -> list[dict]:
     return [
         release
         for release in reversed(response["releases"])
-        if release["operation"] == "training" and not release.get("pending", False)
+        if release["operation"] == "training"
+        and not release.get("pending", False)
+        and (release.get("metrics") or {}).get("training_job", {}).get("event") == "checkpoint"
+        and (release.get("metrics") or {}).get("selected") is True
     ]
 
 
@@ -67,7 +70,13 @@ def wait_for_training(client: ReefClient, scenario: str, expected: int, timeout_
             version = current["current_runtime_load_id"]
             # Saved-artifact release rows do not carry runtime_load_id.
             # Read the published version only after admission reopens.
-            if current["inference_admission"]["open"] and isinstance(version, str) and version:
+            if (
+                current["finished_jobs"] == expected
+                and current["training_job"] is None
+                and current["inference_admission"]["open"]
+                and isinstance(version, str)
+                and version
+            ):
                 return {**releases[-1], "runtime_load_id": version}
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     raise TimeoutError(f"Training did not commit release {expected} within {timeout_seconds}s")
@@ -115,9 +124,11 @@ def recover_campaign(log: ResultLog, client: ReefClient, model: ReefLLM, config:
     if len(releases) == len(recorded_releases):
         for row in batch:
             model.receipts = list(row["receipts"])
-            report_episode(model, model.scenario, row["task_id"], row["reward"], row["end_reason"])
+            report_episode(
+                model, model.scenario, row["task_id"], row["reward"], row["end_reason"], batch_task_ids=tasks
+            )
     release = wait_for_training(client, model.scenario, len(recorded_releases) + 1, timeout)
-    log.append({"type": "training", "task_ids": tasks, "release": release})
+    log.append({"type": "training", "task_ids": tasks, "batch_size": len(tasks), "release": release})
 
 
 def main() -> None:
@@ -174,9 +185,9 @@ def main() -> None:
         tests = bundle["test_set"](window)
         test_timestamp = protocol.stamp_test(tests, bundle["serving"], window)
         if args.smoke:
-            serving, tests = serving[: 2 * args.batch_size], tests[:2]
+            serving, tests = serving[: max(2, 2 * args.batch_size - 1)], tests[:2]
         plan[window] = (serving, tests, test_timestamp)
-        batches = len(serving) // args.batch_size if args.method == "sao" else 0
+        batches = (len(serving) + args.batch_size - 1) // args.batch_size if args.method == "sao" else 0
         tail = len(serving) % args.batch_size if args.method == "sao" else 0
         window_plan.append(
             {
@@ -184,13 +195,13 @@ def main() -> None:
                 "serving": len(serving),
                 "test": len(tests),
                 "training_batches": batches,
-                "untrained_tail": tail,
+                "partial_batch_tasks": tail,
             }
         )
     serving_total = sum(len(serving) for serving, _, _ in plan.values())
     test_total = sum(len(tests) for _, tests, _ in plan.values())
     batch_total = sum(row["training_batches"] for row in window_plan)
-    trained_total = batch_total * args.batch_size
+    trained_total = serving_total if args.method == "sao" else 0
     warmup = settings["SAO_WARMUP"] if args.method == "sao" else 0
     training_plan = {
         "windows": window_plan,
@@ -215,7 +226,7 @@ def main() -> None:
     model_name = os.environ.get("REEF_MODEL_NAME") or Path(os.environ.get("MODEL_DIR", "reef")).name
     config = {
         "type": "config",
-        "campaign_format": 2,
+        "campaign_format": 3,
         "benchmark_revision": BENCHMARK_REVISION,
         "scenario": "retail_l1",
         "windows": windows,
@@ -229,8 +240,9 @@ def main() -> None:
         "micro_batch_size": settings["SAO_MICRO_BATCH"],
         "critic_only_batches": settings["SAO_WARMUP"],
         "context_length": settings["SAO_CONTEXT"],
-        "tail_policy": "score_without_training",
-        "untrained_tail_tasks": sum(row["untrained_tail"] for row in window_plan),
+        "tail_policy": "train_partial_batch",
+        "untrained_tail_tasks": 0,
+        "partial_batch_tasks": sum(row["partial_batch_tasks"] for row in window_plan),
         "max_steps": args.max_steps,
         "max_output_per_task": protocol.MAX_OUTPUT_PER_TASK,
         "tool_budget": protocol.ENGINE_TOOL_BUDGET,
@@ -269,7 +281,6 @@ def main() -> None:
             return
         for window in windows:
             serving, tests, test_timestamp = plan[window]
-            trainable_count = len(serving) // args.batch_size * args.batch_size
             pending: list[dict] = []
             for phase, tasks in (("serving", serving), ("test", tests)):
                 for task_index, task in enumerate(tasks):
@@ -292,7 +303,7 @@ def main() -> None:
                         expected_version = version
                     if expected_version is not None and version != expected_version:
                         raise RuntimeError("Episode did not use the latest committed training weights")
-                    trainable = phase == "serving" and args.method == "sao" and task_index < trainable_count
+                    trainable = phase == "serving" and args.method == "sao"
                     row = {
                         "type": "episode",
                         "scenario": "retail_l1",
@@ -320,21 +331,33 @@ def main() -> None:
                     episodes.append(row)
                     if trainable:
                         pending.append(row)
-                        if len(pending) == args.batch_size:
+                        if len(pending) == args.batch_size or task_index == len(tasks) - 1:
                             task_ids = [episode["task_id"] for episode in pending]
                             # Persist the entire batch before any report can cause an update.
                             log.append({"type": "batch_ready", "task_ids": task_ids})
                             for episode in pending:
                                 model.receipts = list(episode["receipts"])
                                 report_episode(
-                                    model, args.scenario, episode["task_id"], episode["reward"], episode["end_reason"]
+                                    model,
+                                    args.scenario,
+                                    episode["task_id"],
+                                    episode["reward"],
+                                    episode["end_reason"],
+                                    batch_task_ids=task_ids,
                                 )
                             expected_releases += 1
                             release = wait_for_training(
                                 client, args.scenario, expected_releases, args.training_timeout
                             )
                             expected_version = release["runtime_load_id"]
-                            log.append({"type": "training", "task_ids": task_ids, "release": release})
+                            log.append(
+                                {
+                                    "type": "training",
+                                    "task_ids": task_ids,
+                                    "batch_size": len(task_ids),
+                                    "release": release,
+                                }
+                            )
                             pending.clear()
                             if args.stop_after_batches is not None and expected_releases >= args.stop_after_batches:
                                 print(
@@ -342,8 +365,6 @@ def main() -> None:
                                     flush=True,
                                 )
                                 return
-                    elif phase == "serving" and args.method == "sao":
-                        log.append({"type": "untrained_tail", "task_id": task.task_id})
                     print(f"W{window} {phase} {task.task_id}: reward={reward.reward:g}, end={reason}", flush=True)
         test_rewards = [row["reward"] for row in episodes if row["phase"] == "test"]
         window_scores = {}
@@ -369,7 +390,8 @@ def main() -> None:
             "smoke": args.smoke,
             "ending_counts": ending_counts,
             "trained_tasks": trained_total,
-            "untrained_tail_tasks": config["untrained_tail_tasks"],
+            "untrained_tail_tasks": 0,
+            "partial_batch_tasks": config["partial_batch_tasks"],
         }
         log.append(summary)
         print(json.dumps(summary), flush=True)

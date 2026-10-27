@@ -7,6 +7,7 @@ Scripted responses test the harness contract, not model quality or GPU execution
 import copy
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -19,17 +20,26 @@ from reef_client import ReefClient, ReefClientError
 from servelearnbench import agent, llm, protocol
 from servelearnbench.scenarios import get_bundle, n_windows
 from servelearnbench.scoring import read_rows, setting_scores
+from tests.support.config_helpers import load_deployment
 
 from recipes.sao.examples.servelearnbench import harness as reef_harness
+from recipes.sao.examples.servelearnbench.batching import BatchGrouping, RetailBatchReports
 from recipes.sao.examples.servelearnbench.harness import agent as reef_agent
 from recipes.sao.examples.servelearnbench.harness import campaign as campaign_results
 from recipes.sao.examples.servelearnbench.harness import config as campaign_config
 from recipes.sao.examples.servelearnbench.harness import report as reef_report
-from recipes.sao.processor import SAOTasks
+from recipes.sao.processor import SAOJobData, SAOTasks
+from recipes.sao.recipe import SAORecipe
 from reef.core import AgentRecord, RequestType
+from reef.core.reports import ScoredRolloutReport
 from reef.core.trajectories import trajectory_reward
+from reef.pipeline_context import PipelineContext
 from reef.record2record import ReportContext
 from reef.record2task.assembly import SampleAssemblySettings
+from reef.runtime.interfaces import TrainingMethod
+from reef.train.algos.schedule import StepScheduling
+from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/sao/examples/servelearnbench"
 
@@ -229,21 +239,27 @@ def test_training_barrier_never_succeeds_on_timeout(monkeypatch):
 def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeypatch):
     campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
-    newest = {"operation": "training", "release_id": "second", "content_kind": "saved_artifact"}
-    older = {"operation": "training", "release_id": "first", "content_kind": "saved_artifact"}
-    pending = {"operation": "training", "release_id": "pending", "pending": True}
-    admissions = iter([False, True])
+    checkpoint = {"operation": "training", "metrics": {"training_job": {"event": "checkpoint"}, "selected": True}}
+    newest = {**checkpoint, "release_id": "second"}
+    older = {**checkpoint, "release_id": "first"}
+    pending = {**checkpoint, "release_id": "pending", "pending": True}
+    submitted = {"operation": "training", "metrics": {"training_job": {"event": "submitted"}}}
+    finished = {"operation": "training", "metrics": {"training_job": {"event": "finished"}}}
+    # Open admission alone is insufficient while an asynchronous job still runs.
+    states = iter([(True, 1), (False, 2), (True, 2)])
 
     def get(path):
         if path.endswith("/releases"):
-            return {"releases": [pending, newest, older, {"operation": "creation"}]}
-        open_for_inference = next(admissions)
+            return {"releases": [finished, pending, newest, submitted, older, {"operation": "creation"}]}
+        open_for_inference, finished_jobs = next(states)
         return {
             "error": None,
             "scenarios": {
                 "retail": {
                     "current_runtime_load_id": "v2" if open_for_inference else "v1",
                     "inference_admission": {"open": open_for_inference},
+                    "finished_jobs": finished_jobs,
+                    "training_job": None if finished_jobs == 2 else {"job_id": "running"},
                 }
             },
         }
@@ -282,7 +298,7 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     client = Mock(spec=ReefClient)
     client.service_url, client.token = "http://reef.invalid", None
     monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)
-    releases, reports, phases = [], [], []
+    releases, reports, phases, batches = [], [], [], []
     monkeypatch.setattr(campaign, "training_releases", lambda *args: copy.deepcopy(releases))
     monkeypatch.setattr(campaign, "episode_runtime_load_id", lambda model: f"v{len(releases)}")
 
@@ -297,12 +313,15 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
             {},
         )
 
-    def report_episode(model, run_id, task_id, reward, end_reason):
+    def report_episode(model, run_id, task_id, reward, end_reason, *, batch_task_ids):
+        if task_id == batch_task_ids[0]:
+            batches.append(batch_task_ids)
         reports.append(task_id)
         return {"status": "accepted"}
 
     def wait_for_training(client, scenario, count, timeout):
-        assert len(reports) == count * batch_size
+        assert len(batches) == count
+        assert len(reports) == sum(len(batch) for batch in batches)
         releases.append({"operation": "training", "runtime_load_id": f"v{count}", "release_id": f"release-{count}"})
         return releases[-1]
 
@@ -341,11 +360,11 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
         serving = [t for t in bundle["serving"] if t.z["window"] == window]
         tests = bundle["test_set"](window)
         if smoke:
-            serving, tests = serving[: 2 * batch_size], tests[:2]
+            serving, tests = serving[: max(2, 2 * batch_size - 1)], tests[:2]
         plan.append((window, len(serving), len(tests)))
     serving_count = sum(n for _, n, _ in plan)
     test_count = sum(m for _, _, m in plan)
-    trained = sum(n // batch_size * batch_size for _, n, _ in plan) if method == "sao" else 0
+    trained = sum(n for _, n, _ in plan) if method == "sao" else 0
     assert len(reports) == trained
     assert set(reports).isdisjoint(row["task_id"] for row in episodes if row["phase"] == "test")
     # Each episode sees the releases committed so far; a batch completes a
@@ -355,13 +374,14 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     for _window, n, m in plan:
         for i in range(n):
             expected_versions.append(released)
-            if method == "sao" and i < n // batch_size * batch_size and (i + 1) % batch_size == 0:
+            if method == "sao" and ((i + 1) % batch_size == 0 or i == n - 1):
                 released += 1
         expected_versions += [released] * m
     assert [row["training_releases_before"] for row in episodes] == expected_versions
     assert [row["window"] for row in episodes] == [w for w, n, m in plan for _ in range(n + m)]
     tails = [row for row in rows if row.get("type") == "untrained_tail"]
-    assert len(tails) == (sum(n % batch_size for _, n, _ in plan) if method == "sao" else 0)
+    assert not tails
+    assert rows[-1]["partial_batch_tasks"] == (sum(n % batch_size for _, n, _ in plan) if method == "sao" else 0)
     assert rows[-1]["training_releases"] == released
     assert rows[-1]["trained_tasks"] == trained
     assert rows[-1]["windows"] == windows
@@ -384,9 +404,9 @@ def test_default_plan_and_no_actor_guard(monkeypatch, capsys, tmp_path):
     )
     campaign.main()
     plan = json.loads(capsys.readouterr().out)["training_plan"]
-    assert (plan["training_batches"], plan["critic_only_batches"], plan["actor_updates"]) == (8, 1, 7)
-    assert [row["untrained_tail"] for row in plan["windows"]] == [15, 12, 12, 56, 56, 57]
-    monkeypatch.setenv("SAO_WARMUP", "10")
+    assert (plan["training_batches"], plan["critic_only_batches"], plan["actor_updates"]) == (14, 1, 13)
+    assert [row["partial_batch_tasks"] for row in plan["windows"]] == [15, 12, 12, 56, 56, 57]
+    monkeypatch.setenv("SAO_WARMUP", "14")
     with pytest.raises(SystemExit, match="2"):
         campaign.main()
     assert "no actor update" in capsys.readouterr().err
@@ -432,8 +452,42 @@ def test_config_single_source_and_micro_divisibility(monkeypatch):
         campaign_config.training_config()
 
 
+def test_inference_options_keep_native_numeric_types(monkeypatch):
+    monkeypatch.setenv("SAO_CONTEXT", "32768")
+    options = campaign_config.inference_options()
+    assert options["context-length"] == 32768
+    assert type(options["context-length"]) is int
+    assert type(options["max-running-requests"]) is int
+    assert type(options["chunked-prefill-size"]) is int
+    assert type(options["mem-fraction-static"]) is float
+
+
+def test_deployment_builds_declared_batch_pipeline(monkeypatch, tmp_path):
+    for name in ("MODEL_DIR", "CHECKPOINT_DIR", "REEF_WORK"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    monkeypatch.setenv("REEF_PORT", "8900")
+    monkeypatch.setenv("REEF_TOKEN", "test-token")
+    monkeypatch.setenv("SAO_GPUS", "1")
+    deployment = load_deployment(EXAMPLE / "serve.yaml")
+    stages = PipelineConfig.from_setting(deployment["pipeline"], spec=SAORecipe.pipeline_spec(), environ=os.environ)
+    pipeline = stages.build(PipelineContext("retail", report_type=ScoredRolloutReport))
+    assert isinstance(pipeline.record2record, RetailBatchReports)
+    assert pipeline.record2record.grouping.max_batch_size == 64
+    assert pipeline.task2job.job_samples == 1
+    assert pipeline.task2job.buffer_size == 64
+
+
 @pytest.mark.parametrize(
-    "interruption", ["batch_boundary", "partial_collection", "partial_reports", "committed_without_log", "test"]
+    "interruption",
+    [
+        "batch_boundary",
+        "partial_collection",
+        "partial_reports",
+        "committed_without_log",
+        "test",
+        "tail_report",
+        "tail_committed",
+    ],
 )
 def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, interruption):
     campaign = load_campaign(monkeypatch)
@@ -449,7 +503,7 @@ def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, in
 
     def run_episode(model, bundle, task, **kwargs):
         # Stop before the second collection or test task. Its predecessor is already durable.
-        threshold = 1 if interruption == "partial_collection" else 5
+        threshold = 1 if interruption == "partial_collection" else 4
         if interruption in ("partial_collection", "test") and not interrupted[0] and len(sampled) == threshold:
             interrupted[0] = True
             raise RuntimeError("simulated interruption")
@@ -462,22 +516,26 @@ def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, in
             {},
         )
 
-    def report_episode(model, run_id, task_id, reward, end_reason):
-        report = (tuple(model.receipts), reward, end_reason)
+    def report_episode(model, run_id, task_id, reward, end_reason, *, batch_task_ids):
+        report = (tuple(model.receipts), reward, end_reason, tuple(batch_task_ids))
         if task_id in accepted:
             assert accepted[task_id] == report  # Idempotent retry must keep the original receipts.
         else:
             accepted[task_id] = report
-        if interruption == "partial_reports" and not interrupted[0]:
+        if (
+            interruption == "partial_reports" or (interruption == "tail_report" and len(accepted) == 3)
+        ) and not interrupted[0]:
             interrupted[0] = True
             raise RuntimeError("simulated interruption")
         return {"status": "accepted"}
 
     def wait_for_training(client, scenario, count, timeout):
         if len(releases) < count:
-            assert len(accepted) == count * 2
+            assert len(accepted) == min(count * 2, 3)
             releases.append({"operation": "training", "release_id": f"release-{count}"})
-        if interruption == "committed_without_log" and not interrupted[0]:
+        if (
+            interruption == "committed_without_log" or (interruption == "tail_committed" and count == 2)
+        ) and not interrupted[0]:
             interrupted[0] = True
             raise RuntimeError("simulated interruption")
         return {**releases[-1], "runtime_load_id": f"session-{session[0]}-v{count}"}
@@ -501,12 +559,12 @@ def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, in
     campaign.main()
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     episodes = [row for row in rows if row.get("type") == "episode"]
-    assert len(episodes) == len({row["task_id"] for row in episodes}) == 6
-    assert len(accepted) == 4 and len(releases) == 2
+    assert len(episodes) == len({row["task_id"] for row in episodes}) == 5
+    assert len(accepted) == 3 and len(releases) == 2
     assert all(row["task_id"] not in accepted for row in episodes if row["phase"] == "test")
     assert rows[-1]["test_score"] == 100.0
     assert rows[-1]["training_releases"] == 2
-    assert rows[-1]["trained_tasks"] == 4
+    assert rows[-1]["trained_tasks"] == 3
     # Resuming a completed run neither samples nor reports again.
     counts = (len(sampled), len(accepted), len(releases))
     campaign.main()
@@ -541,3 +599,66 @@ def test_resume_discards_only_incomplete_final_json_line(tmp_path):
         assert path.read_bytes() == b'{"config": {}}\n'
     finally:
         log.close()
+
+
+@pytest.mark.parametrize("count", [64, 15, 12, 56, 57])
+def test_declared_batch_waits_for_every_task_and_keeps_tail_rewards(count):
+    context = PipelineContext("retail", report_type=ScoredRolloutReport)
+
+    def pipeline():
+        reports = RetailBatchReports.from_config({"max_batch_size": 64}, context=context, environ={})
+        tasks = SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=True))
+        jobs = SAOJobData(context, buffer_size=64, job_samples=1)
+        return TrainingPipeline(context, record2record=reports, record2task=tasks, task2job=jobs)
+
+    task_ids = [f"task-{index}" for index in range(count)]
+    records = []
+    active = pipeline()
+    for index, task_id in enumerate(task_ids):
+        model = model_with_responses([])
+        model.scenario = "retail"
+        model.receipts = [f"inference-{index}"]
+        reef_report.report_episode(model, "retail", task_id, float(index % 2), "finish", batch_task_ids=task_ids)
+        payload = model.reef.report.call_args.args[1]
+        inference = AgentRecord.create(
+            scenario="retail",
+            request_type=RequestType.INFERENCE,
+            agent_record_id=model.receipts[0],
+            payload={"tokens": [10, 20], "loss_mask": [1], "rollout_log_probs": [-0.2], "runtime_load_id": "v0"},
+        )
+        report = AgentRecord.create(
+            scenario="retail",
+            request_type=RequestType.REPORT,
+            agent_record_id=payload["agent_record_id"],
+            payload=payload,
+            references=tuple(model.receipts),
+        )
+        records.extend((inference, report))
+        active.push(inference)
+        active.push(report)
+        assert active.ready(1) == (index == count - 1)
+        if index == count // 2:
+            # Rebuild from persisted records halfway through collection.
+            active = pipeline()
+            for record in records:
+                active.push(record)
+            assert not active.ready(1)
+    data = active.build_job_data(1)
+    assert len(data.items) == count
+    assert [trajectory_reward(item) for item in data.items] == [float(index % 2) for index in range(count)]
+    prepared = prepare_slime_job(data, TrainingMethod("sao"), {}, StepScheduling(), step_size=64)
+    assert prepared.payload["external_step_sizes"] == [count]
+    assert prepared.metrics["optimizer_steps"] == 1
+    assert active.acknowledge(data.data_id)
+    assert not active.ready(1)
+
+
+@pytest.mark.parametrize("task_ids", [[], ["a", "a"], ["b"], list(map(str, range(65)))])
+def test_batch_membership_rejects_invalid_task_lists(task_ids):
+    report = AgentRecord.create(
+        scenario="retail",
+        request_type=RequestType.REPORT,
+        payload={"score": 1, "metadata": {"task": {"name": "a"}, "batch_task_ids": task_ids}},
+    )
+    with pytest.raises(ValueError, match="batch_task_ids"):
+        BatchGrouping(64).placement(ReportContext(report=report, score=1, inferences=()))

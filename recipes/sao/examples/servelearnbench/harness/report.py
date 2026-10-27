@@ -34,7 +34,15 @@ def episode_runtime_load_id(model: ReefLLM) -> str:
     return versions.pop()
 
 
-def report_episode(model: ReefLLM, run_id: str, task_id: str, reward: float, end_reason: str) -> dict:
+def report_episode(
+    model: ReefLLM,
+    run_id: str,
+    task_id: str,
+    reward: float,
+    end_reason: str,
+    *,
+    batch_task_ids: list[str] | None = None,
+) -> dict:
     """Submit one scalar outcome against all ordered inference receipts.
 
     This function accepts serving episodes only through the campaign driver.
@@ -43,6 +51,9 @@ def report_episode(model: ReefLLM, run_id: str, task_id: str, reward: float, end
     if not model.receipts or not 0.0 <= reward <= 1.0:
         raise ValueError("A report requires inference receipts and a reward in [0, 1]")
     report_id = uuid.uuid5(uuid.NAMESPACE_URL, f"servelearnbench:{run_id}:{task_id}").hex
+    metadata = {"task": {"name": task_id}, "end_reason": end_reason}
+    if batch_task_ids is not None:
+        metadata["batch_task_ids"] = list(batch_task_ids)
     return model.reef.report(
         model.scenario,
         {
@@ -50,6 +61,6 @@ def report_episode(model: ReefLLM, run_id: str, task_id: str, reward: float, end
             "score": reward,
             "feedback": protocol.score_line(reward),
             "references": list(model.receipts),
-            "metadata": {"task": {"name": task_id}, "end_reason": end_reason},
+            "metadata": metadata,
         },
     )

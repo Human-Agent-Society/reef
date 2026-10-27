@@ -1,6 +1,9 @@
 """Shared defaults for the Retail launcher, trainer, and result records."""
 
+import argparse
+import json
 import os
+from pathlib import Path
 
 DEFAULTS = {
     "SAO_BATCH": 64,
@@ -22,6 +25,20 @@ def training_config() -> dict[str, int]:
     return values
 
 
+def inference_options() -> dict:
+    """Resolve native SGLang numbers before its Python ServerArgs constructor reads them."""
+    import yaml
+
+    options = yaml.safe_load((Path(__file__).resolve().parents[1] / "serve.yaml").read_text())["inference"]["options"]
+    options["context-length"] = training_config()["SAO_CONTEXT"]
+    return options
+
+
 if __name__ == "__main__":
-    for name, value in training_config().items():
-        print(f"export {name}={value}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--inference-options", action="store_true")
+    if parser.parse_args().inference_options:
+        print(json.dumps(inference_options()))
+    else:
+        for name, value in training_config().items():
+            print(f"export {name}={value}")
