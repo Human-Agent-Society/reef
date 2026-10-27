@@ -412,25 +412,30 @@ def reply_object(reply: str, key: str) -> dict[str, Any] | None:
 def trace_text(trace: Trace) -> str:
     """What the Reflector reads of ``trace``.
 
-    The text starts with the trace's score and feedback, each when the trace has one. Then it has the
-    conversation without the system prompt: one line per message, and one line per tool call. A text longer than
-    ``TRACE_CHARS`` keeps its first and its last ``TRACE_CHARS // 2`` characters.
+    The text starts with the trace's score, feedback and failure, each when the trace has one. Then it has the
+    conversation without the system prompt: one line per message, and one line per tool call. A rollout, whose
+    trace has no trajectory, shows its task and its reply instead. A text longer than ``TRACE_CHARS`` keeps its
+    first and its last ``TRACE_CHARS // 2`` characters.
     """
     lines = [
         f"{name}: {value}"
-        for name, value in (("score", trace.score), ("feedback", trace.feedback))
+        for name, value in (("score", trace.score), ("feedback", trace.feedback), ("failure", trace.failure))
         if value is not None
     ]
-    for message in atif_messages(trace.trajectory()):
-        if message["role"] == "system":
-            continue
-        text = content_text(message["content"])
-        if text:
-            lines.append(f"[{message['role']}] {text}")
-        lines.extend(
-            f"[tool call] {call['function']['name']} {call['function']['arguments']}"
-            for call in message.get("tool_calls", ())
-        )
+    trajectory = trace.trajectory()
+    if trajectory is None:
+        lines.extend((f"[user] {trace.task or ''}", f"[assistant] {trace.reply or ''}"))
+    else:
+        for message in atif_messages(trajectory):
+            if message["role"] == "system":
+                continue
+            text = content_text(message["content"])
+            if text:
+                lines.append(f"[{message['role']}] {text}")
+            lines.extend(
+                f"[tool call] {call['function']['name']} {call['function']['arguments']}"
+                for call in message.get("tool_calls", ())
+            )
     text = "\n".join(lines)
     if len(text) <= TRACE_CHARS:
         return text

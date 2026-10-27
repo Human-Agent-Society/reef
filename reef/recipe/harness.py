@@ -60,11 +60,11 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.sample2job.traces import TraceJobData
+from reef.sample2job.traces import TraceJobData, TrainTaskRollouts
 from reef.sandbox.config import build_executor
 from reef.sandbox.process import EpisodeExecutor
 from reef.storage.records import RecordStore
-from reef.storage.tasks import TaskStorage
+from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
 from reef.surface.base import Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
@@ -241,6 +241,15 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(
                 "evaluation.promote_failures adds prompts, and this adapter plays task directories"
             )
+        if issubclass(self.stages().sample2job.plugin_class, TrainTaskRollouts):
+            # An offline step plays the imported train tasks, which are task directories, and scores each episode.
+            if not descriptor.is_prompt_task_directory:
+                raise RecipeConfigError(
+                    f"offline rollouts play task directories, and adapter {descriptor.name!r} takes a prompt "
+                    "(terminus takes a task directory)"
+                )
+            if self.scorer is None:
+                raise RecipeConfigError("offline rollouts score each train task, so they need evaluation.scorer")
         if self.scorer is not None:
             evaluation_selection(self.scorer, self.worker_executor)
         # A task manifest is read now, so a deployment with an unreadable one refuses to start.
@@ -451,6 +460,8 @@ class HarnessEvolutionRecipe(Recipe):
             training_mode=self.training_mode,
             task_storage=task_storage,
             default_job_samples=self.batch_size,
+            # An evaluation on the eval split of the imported tasks reads them, so the scenario takes task uploads.
+            reads_imported_tasks=self.evaluation.task_store == IMPORTED_TASK_STORE,
         )
 
     def build_policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:

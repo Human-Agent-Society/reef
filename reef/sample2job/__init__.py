@@ -19,15 +19,20 @@ and names the class in its ``pipeline_spec()``.
 * ``DistillJobData`` (``distill.py``): samples as they come; the distilling
   recipes and the SFT recipe use it.
 * ``TraceJobData`` (``traces.py``): harness evolution's trace samples as they
-  come, in every training mode.
+  come, in every training mode, and ``TrainTaskRollouts``: offline harness
+  evolution, whose steps roll out the scenario's imported train tasks.
+
+``imported_task_sample`` (``base.py``) turns one of the scenario's imported
+tasks into the task sample that a job rolls out.
 
 Everything numeric about a method, such as advantages and the loss family,
 lives in its backend training objective, not here. The package depends only
-on ``reef.core``, ``reef.observability``, ``reef.pipeline_context``, and the
-two earlier stage packages, whose classes ``Sample2Job.from_config`` receives.
+on ``reef.core``, ``reef.observability``, ``reef.pipeline_context``,
+``reef.storage.tasks``, and the two earlier stage packages, whose classes
+``Sample2Job.from_config`` receives.
 """
 
-from reef.sample2job.base import DEFAULT_BUFFER_JOBS, NoJobData, Sample2Job, Sample2JobSettings
+from reef.sample2job.base import DEFAULT_BUFFER_JOBS, NoJobData, Sample2Job, Sample2JobSettings, imported_task_sample
 from reef.sample2job.distill import DistillJobData
 
 __all__ = [
@@ -36,4 +41,5 @@ __all__ = [
     "NoJobData",
     "Sample2Job",
     "Sample2JobSettings",
+    "imported_task_sample",
 ]

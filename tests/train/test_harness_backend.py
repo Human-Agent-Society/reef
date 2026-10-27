@@ -25,16 +25,20 @@ from tests.support.harness_steps import (
     changed_rules,
     harness_backend,
     harness_recipe,
+    marker_score,
 )
 
 import reef.evaluation.harness.runner as harness_runner
+from reef.core.job_data import TaskSample
+from reef.core.tasks import HarborTask, write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import FailureObservation, FloorPolicy
+from reef.evaluation.harness import EpisodeRecord, FailureObservation, FloorPolicy
+from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.backend import ComponentReleases
-from reef.train.harness_backend import StepResult
+from reef.train.harness_backend import StepResult, Workspace
 from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.harness_backend.manifest import advance
 from reef.train.harness_backend.state import HarnessState
@@ -210,7 +214,14 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
     result = backend_step(backend, data(1, sample, request=REQUEST), backend.initial_state())
     trace = seen["traces"][0]
     assert seen["tree"] == PI_SEED and seen["tasks"] == ("task one",) and seen["request"] == REQUEST
-    assert (trace.task, trace.reply, trace.score, trace.feedback, trace.record) == ("q", "a", 0.5, "close", "i1")
+    assert (trace.source, trace.task, trace.reply, trace.score, trace.feedback, trace.record) == (
+        "traffic",
+        "q",
+        "a",
+        0.5,
+        "close",
+        "i1",
+    )
     assert seen["host"]["adapter"] == "pi" and "rules" in seen["host"]["kinds"] and seen["model"] == "qwen3-8b"
     step_dir = Path(result.metrics["step_record"])
     assert step_dir == (tmp_path / "harness" / "demo" / "harness" / "steps" / "1").resolve()
@@ -424,6 +435,77 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
     backend_step(backend, data(1, request=REQUEST), backend.initial_state())
     assert seen == [("proposing", "ask-1", None), ("evaluating", "ask-1", 2), ("evaluating", "ask-1", 2)]
     assert backend.step_progress is None
+
+
+def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method_reads_them(tmp_path: Path) -> None:
+    seen: dict = {"phases": []}
+
+    def phase() -> tuple[str, int | None]:
+        progress = backend.step_progress
+        return progress.phase, progress.episodes_total
+
+    def step(workspace, tools):
+        seen["phases"].append(phase())
+        seen["traces"] = workspace.traces()
+        return MARKER
+
+    def score(task, result):
+        seen["phases"].append(phase())
+        return marker_score(task, result)
+
+    backend, _ = harness_backend(tmp_path, step, score=score, evaluation={"recheck_every": 1})
+    body = {"patch": PLAIN.to_json(), "reason": "", "session": "", "release_id": ""}
+    backend.proposals.submit(ProposalInbox.new_id(), body)
+    tasks = (TaskSample(Path("train one")), TaskSample(Path("train two")))
+    state = HarnessState(steps=1, rollback_release_id="base", rollback_context="drifted").to_json()
+    result = backend_step(backend, data(2, *tasks), state)
+    # The method ran on the rollouts, although a recheck was due and a proposal waited.
+    assert (
+        "recheck" not in result.metrics and "proposal" not in result.metrics and len(backend.proposals.pending()) == 1
+    )
+    assert result.metrics["rollouts"] == 2 and result.metrics["selected"] is True
+    assert seen["phases"] == [
+        ("rolling out", 2),
+        ("rolling out", 2),
+        ("proposing", None),
+        ("evaluating", 2),
+        ("evaluating", 2),
+    ]
+    traces = seen["traces"]
+    assert [(trace.source, trace.task, trace.score, trace.trajectory()) for trace in traces] == [
+        ("rollout", "train one", 0.0, None),
+        ("rollout", "train two", 0.0, None),
+    ]
+    # Each trace names its episode of the head tree; the history keeps the episode's files.
+    episodes = {record.episode: record for record in backend.history.episodes}
+    assert [(episodes[trace.record].task, episodes[trace.record].tree) for trace in traces] == [
+        ("train one", PI_SEED.checksum()),
+        ("train two", PI_SEED.checksum()),
+    ]
+
+
+def test_a_rollout_of_a_task_directory_gives_the_method_the_task_instruction(tmp_path: Path) -> None:
+    task = HarborTask(
+        name="fix-the-build",
+        instruction="Fix the build, then run the tests.\n",
+        tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+        environment={"Dockerfile": "FROM python:3.12-slim\n"},
+    )
+    directory = write_harbor_task(task, tmp_path / "tasks")
+    record = EpisodeRecord("e1", PI_SEED.checksum(), str(directory), "key", 0, "context", 1, 1.0)
+    workspace = Workspace.create(
+        tmp_path / "step",
+        history_dir=tmp_path / "history",
+        step=1,
+        tree=PI_SEED,
+        descriptor=get_adapter("terminus"),
+        tasks=(),
+        repeats=1,
+        rollouts=(record,),
+    )
+    assert [(trace.source, trace.task, trace.record) for trace in workspace.traces()] == [
+        ("rollout", "Fix the build, then run the tests.\n", "e1")
+    ]
 
 
 def test_the_step_and_failure_streak_limits_skip_automatic_steps_only(tmp_path: Path) -> None:

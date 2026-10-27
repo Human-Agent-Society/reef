@@ -39,8 +39,8 @@ from reef.recipe.generated_tasks.rollout import (
 from reef.recipe.sft.processor import SFTJobData
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
-from reef.sample2job import Sample2JobSettings
-from reef.storage.tasks import IMPORTED_TASK_STORE, StoredTask, TaskStorage, TaskStore
+from reef.sample2job import Sample2JobSettings, imported_task_sample
+from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.train.jobs import ArtifactEvaluation, EvaluationJob, JobPlan, JobPlanContext, JobRequest
 
 #: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
@@ -61,14 +61,6 @@ class SFTThenRLJobSettings(Sample2JobSettings):
         super().__post_init__()
         if isinstance(self.tasks_per_job, bool) or not isinstance(self.tasks_per_job, int) or self.tasks_per_job <= 0:
             raise ValueError("tasks_per_job must be a positive int")
-
-
-def imported_task_item(store: TaskStore, stored: StoredTask) -> TaskSample:
-    """The task that a task job rolls out for the imported task ``stored``: its directory, named by its task name."""
-    return TaskSample(
-        store.path(stored.files_digest),
-        metadata={"task": {"name": stored.name, "files_digest": stored.files_digest, "split": stored.split}},
-    )
 
 
 class SFTThenRLJobData(SFTJobData):
@@ -122,7 +114,7 @@ class SFTThenRLJobData(SFTJobData):
         trained = self.task_store.trained_task_names()
         for stored in self.task_store.tasks(split="train"):
             if stored.name not in trained and stored.name not in pooled:
-                self.task_pool.add(stored.name, imported_task_item(self.task_store, stored))
+                self.task_pool.add(stored.name, imported_task_sample(self.task_store, stored))
         taken = self.task_pool.take(self.tasks_per_job)
         if not taken:
             return
@@ -222,7 +214,7 @@ class ImportedTaskEvaluation(ArtifactEvaluation):
         held_out = self.task_store.tasks(split="eval")
         if not held_out:
             return None
-        items = tuple(imported_task_item(self.task_store, stored) for stored in held_out)
+        items = tuple(imported_task_sample(self.task_store, stored) for stored in held_out)
         return EvaluationJob(
             JobData(f"{candidate.candidate_id}:evaluation", items),
             {**self.parameters, "evaluation_of": candidate.candidate_id},

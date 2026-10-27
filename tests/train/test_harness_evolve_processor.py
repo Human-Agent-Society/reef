@@ -1,23 +1,32 @@
-"""The trace pipeline: the trace batching half of harness evolution.
+"""Harness evolution's job data: trace batching, and offline rollouts of the imported train tasks.
 
-The pipeline pairs reports with their inference records and batches every
-valid scored trace; the evolution backend (``HarnessBackend``) consumes the
-batch. The stages are built from a ``pipeline`` section, as a deployment
-configures them, rather than through any Recipe wrapper.
+The trace pipeline pairs reports with their inference records and batches
+every valid scored trace; the evolution backend (``HarnessBackend``)
+consumes the batch. The stages are built from a ``pipeline`` section, as a
+deployment configures them, rather than through any Recipe wrapper.
+``TrainTaskRollouts`` hands out the scenario's imported train tasks instead,
+chunk by chunk and epoch by epoch, for offline steps.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from tests.support.task_service_stubs import task_for
 
 from reef.core import AgentRecord, RequestType
+from reef.core.job_data import TaskSample
 from reef.core.reports import ReportValidationError
+from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.pipeline_context import PipelineContext
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2sample.traces import InferenceSamples, TraceSamples
-from reef.sample2job.traces import TraceJobData
+from reef.sample2job.traces import TraceJobData, TrainTaskRollouts, TrainTaskRolloutSettings
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import JobData
 
@@ -256,3 +265,68 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
     retention = processor.releasable_record_ids()
     assert retention.isdisjoint(frozenset({"inf-2"}))
     assert not processor.ready(2)
+
+
+def import_tasks(storage: TaskStorage, root: Path, split: str, *names: str) -> None:
+    """Publish one Harbor task per name to ``split`` of the scenario's imported tasks, each with its own files."""
+    store = storage.open(IMPORTED_TASK_STORE)
+    for name in names:
+        directory = write_harbor_task(task_for(name, "record-1", 9000 + sum(name.encode())), root / split)
+        store.add_task(directory=directory, split=split)
+
+
+def rollout_pipeline(storage: TaskStorage, *, tasks_per_step: int) -> TrainingPipeline:
+    """A pipeline whose sample-to-job stage rolls the imported train tasks out over two epochs."""
+    context = PipelineContext("offline", task_storage=storage, default_job_samples=1)
+    settings = TrainTaskRolloutSettings(tasks_per_step=tasks_per_step, epochs=2)
+    return TrainingPipeline(context, sample2job=TrainTaskRollouts(context, settings))
+
+
+def rollout_step(pipeline: TrainingPipeline, *, durable: bool = True) -> list[str]:
+    """The task names of one offline step; its commit is prepared, and it is durable when ``durable``."""
+    data = pipeline.build_job_data(1)
+    consumed = pipeline.acknowledge(data.data_id)
+    if durable:
+        pipeline.release_records(frozenset(consumed))
+    return [sample.metadata["task"]["name"] for sample in data.samples if isinstance(sample, TaskSample)]
+
+
+def test_a_manual_scenario_refuses_offline_rollouts(tmp_path: Path) -> None:
+    storage = SQLiteScenarioStorage(tmp_path / "records").open("offline").tasks
+    context = PipelineContext("offline", training_mode="manual", task_storage=storage, default_job_samples=1)
+    with pytest.raises(NotImplementedError, match="training_mode='manual'"):
+        TrainingPipeline(context, sample2job=TrainTaskRollouts(context, TrainTaskRolloutSettings()))
+
+
+def test_each_epoch_rolls_out_every_train_task_once_in_chunks_and_then_the_run_ends(tmp_path: Path) -> None:
+    storage = SQLiteScenarioStorage(tmp_path / "records").open("offline").tasks
+    import_tasks(storage, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    import_tasks(storage, tmp_path / "tasks", "eval", "held-out")
+    pipeline = rollout_pipeline(storage, tasks_per_step=2)
+    chunks = [rollout_step(pipeline) for _ in range(4)]
+    # The last chunk of an epoch takes what is left, and eval tasks never roll out.
+    assert [len(chunk) for chunk in chunks] == [2, 1, 2, 1]
+    assert sorted(chunks[0] + chunks[1]) == sorted(chunks[2] + chunks[3]) == ["task-a", "task-b", "task-c"]
+    assert not pipeline.ready(1)
+    pipeline.close()
+
+
+def test_a_restart_resumes_after_the_last_durable_step_and_a_later_task_joins_the_next_epoch(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteScenarioStorage(tmp_path / "records").open("offline").tasks
+    import_tasks(storage, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    first = rollout_pipeline(storage, tasks_per_step=1)
+    done = rollout_step(first)
+    lost = rollout_step(first, durable=False)
+    import_tasks(storage, tmp_path / "tasks", "train", "task-d")
+    first.close()
+
+    restarted = rollout_pipeline(storage, tasks_per_step=1)
+    # The step whose commit never became durable runs again; the epoch keeps the three tasks it started with.
+    rest = [rollout_step(restarted) for _ in range(2)]
+    assert rest[0] == lost
+    assert sorted(done + rest[0] + rest[1]) == ["task-a", "task-b", "task-c"]
+    next_epoch = [name for _ in range(4) for name in rollout_step(restarted)]
+    assert sorted(next_epoch) == ["task-a", "task-b", "task-c", "task-d"] and not restarted.ready(1)
+    restarted.close()

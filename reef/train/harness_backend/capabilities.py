@@ -44,21 +44,27 @@ class StepRecords(ABC):
     def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
 
 
+#: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
+STEP_PHASES = ("rolling out", "proposing", "evaluating")
+
+
 @dataclass(frozen=True)
 class StepProgress:
     """Where the running step stands, for a page a person watches.
 
     Values: ``request_id`` names the instruction the step answers, ``None``
-    for an automatic step or a client's proposal. ``phase`` is
-    ``"proposing"`` from the moment the step claims its record directory
-    until a candidate exists, then ``"evaluating"`` while the episodes run.
+    for an automatic step or a client's proposal. ``phase`` is one of
+    ``STEP_PHASES``: ``"rolling out"`` while an offline step runs the head
+    tree on its train tasks, ``"evaluating"`` while the evaluation's
+    episodes run, and ``"proposing"`` at any other time from the moment the
+    step claims its record directory until a candidate exists.
     ``started_at`` is the step's start in seconds since the epoch.
     ``step_record`` is the step's record directory, which the step claims
     before it reports any progress.
-    ``episodes_total`` ≥ 0 is the evaluation's episode count once the
-    episodes are laid out, else ``None``. ``activity`` is what the method did
-    so far, oldest first, each ``{at, kind, text}`` with ``failed`` on a line
-    that went wrong.
+    ``episodes_total`` ≥ 0 is the episode count of the rollouts or of the
+    evaluation once its episodes are laid out, else ``None``. ``activity``
+    is what the method did so far, oldest first, each ``{at, kind, text}``
+    with ``failed`` on a line that went wrong.
     Purpose: the backend replaces it at each phase change; the request page
     reads it from another thread.
     """
@@ -71,8 +77,8 @@ class StepProgress:
     activity: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.phase not in ("proposing", "evaluating"):
-            raise ValueError("StepProgress.phase must be 'proposing' or 'evaluating'")
+        if self.phase not in STEP_PHASES:
+            raise ValueError(f"StepProgress.phase must be one of {', '.join(STEP_PHASES)}")
         if not isinstance(self.step_record, str) or not self.step_record:
             raise ValueError("StepProgress.step_record must name the step's record directory")
         total = self.episodes_total
@@ -92,4 +98,4 @@ class StepProgressReader(ABC):
     def step_progress(self) -> StepProgress | None: ...
 
 
-__all__ = ["PatchAdmission", "StepProgress", "StepProgressReader", "StepRecords"]
+__all__ = ["STEP_PHASES", "PatchAdmission", "StepProgress", "StepProgressReader", "StepRecords"]

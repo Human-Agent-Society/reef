@@ -282,7 +282,7 @@ class GEPA(Method):
         if parent == archive.served:
             archive.charge(len(traces))
             return [
-                Example(task, trace.reply or "", 0.0 if trace.score is None else trace.score, "")
+                Example(task, trace.reply or "", 0.0 if trace.score is None else trace.score, trace.failure or "")
                 for task, trace in traces
             ]
         tasks = [task for task, _ in traces]

@@ -969,10 +969,12 @@ def max_tokens(default: int) -> int:
 
 def failures_text(traces: Sequence[Trace]) -> str:
     """The step's traces as a prompt reads them: one object per trace with the request as served (the trace's last
-    captured exchange), the trace's score and its feedback verbatim (``null`` where there is none)."""
+    captured exchange; the task of a rollout, whose trace has no trajectory), the trace's score and its feedback
+    verbatim (``null`` where there is none)."""
     views = []
     for trace in traces:
-        served = recorded_payload(TrajectorySample(trace.trajectory()))
+        document = trace.trajectory()
+        served = trace.task if document is None else recorded_payload(TrajectorySample(document))
         views.append({"request": served, "score": trace.score, "feedback": trace.feedback})
     return json.dumps(views, indent=2, default=str)
 

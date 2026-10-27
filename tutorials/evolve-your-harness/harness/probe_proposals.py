@@ -53,10 +53,12 @@ def main(argv: list[str] | None = None) -> int:
     # One failing trace of the task, as a step's material shows it; the probe reads no trace files.
     trace = Trace(
         directory=HERE,
+        source="traffic",
         task=task,
         reply=None,
         score=0.0,
         feedback=None,
+        failure=None,
         record="probe",
         client="untagged",
     )

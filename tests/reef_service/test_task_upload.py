@@ -8,13 +8,16 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_steps import evolution_config, runtime
 from tests.support.task_service_stubs import task_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
@@ -138,6 +141,34 @@ def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> N
             assert "does not use imported tasks" in await response.text()
             store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
             assert store.tasks() == ()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize(
+    ("evaluation", "published"),
+    [({"tasks": [], "task_store": IMPORTED_TASK_STORE}, ["held-out"]), ({}, [])],
+    ids=["evaluation-reads-imported-tasks", "nothing-reads-them"],
+)
+def test_a_harness_scenario_takes_an_upload_when_its_evaluation_reads_imported_tasks(
+    tmp_path: Path, evaluation: dict, published: list[str]
+) -> None:
+    """Harness evolution's default job data reads no imported task: only an evaluation on them takes the upload."""
+    config = evolution_config(evaluation=evaluation, adapter="terminus", state_dir=str(tmp_path / "state"))
+    dispatcher = dispatcher_for(
+        tmp_path, HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
+    )
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            body = archive(tmp_path, "held-out")
+            response = await client.post("/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=body)
+            assert response.status == (200 if published else 400), await response.text()
+            store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
+            assert [task.name for task in store.tasks(split="eval")] == published
 
     try:
         asyncio.run(run())

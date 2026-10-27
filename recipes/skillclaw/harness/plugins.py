@@ -32,7 +32,11 @@ class NightMethod(Method):
 
     def step(self, context: StepContext) -> StepResult:
         workspace, tools = context.workspace, context.tools
-        samples = tuple(TrajectorySample(trace.trajectory()) for trace in workspace.traces())
+        samples = tuple(
+            TrajectorySample(trajectory)
+            for trace in workspace.traces()
+            if trace.source == "traffic" and (trajectory := trace.trajectory()) is not None
+        )
         served = workspace.tree()
         patch = skillclaw.propose(served.files, samples, tools.models)
         if patch is None:

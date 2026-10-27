@@ -62,6 +62,7 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, ScenarioModels
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
+from reef.sample2job.traces import TrainTaskRollouts
 from reef.sandbox.process import LocalExecutor
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -389,6 +390,17 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
             built.build_backend("s", releases_for(built), None)
     with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
         from_config(evolution_config(evaluation=store_settings), runtime=runtime())
+
+
+def test_offline_rollouts_need_an_adapter_that_plays_task_directories_and_a_scorer() -> None:
+    offline = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskRollouts"}}}
+    built = from_config({**evolution_config(adapter="terminus"), **offline}, runtime=runtime())
+    assert built.stages().sample2job.plugin_class is TrainTaskRollouts
+    with pytest.raises(RecipeConfigError, match="offline rollouts play task directories, and adapter 'pi'"):
+        from_config({**evolution_config(), **offline}, runtime=runtime())
+    unscored = evolution_config(adapter="terminus", evaluation={"scorer": None, "policy": "none"})
+    with pytest.raises(RecipeConfigError, match=r"they need evaluation\.scorer"):
+        from_config({**unscored, **offline}, runtime=runtime())
 
 
 # -- the pipeline, the executors and the served model ---------------------------------------------

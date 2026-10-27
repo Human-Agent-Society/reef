@@ -295,9 +295,13 @@ class MetaHarness(Method):
         max_traces = self.settings.max_traces
         shown: list[dict[str, Any]] = [
             {
-                "source": "traffic",
+                "source": trace.source,
                 "score": trace.score,
-                "record": excerpt(trace.directory, self.settings.trace_chars),
+                # A rollout keeps its trajectory files and its episode.json in the history, not in the trace.
+                "record": excerpt(
+                    history.episode_dir(trace.record) if trace.source == "rollout" else trace.directory,
+                    self.settings.trace_chars,
+                ),
             }
             for trace in workspace.traces()[:max_traces]
         ]

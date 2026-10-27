@@ -5,8 +5,11 @@ One step runs in the trainer's three phases:
 ``prepare_step``
     Read the head tree from git through ``ComponentReleases``. The candidate
     is the tree the latest publish replaced (a recheck), a client's patch from
-    the inbox, or the tree the method leaves in a fresh step workspace.
-    Validate it, and make a ``HarnessCandidate`` of it against the head.
+    the inbox, or the tree the method leaves in a fresh step workspace. An
+    offline step's job data holds train tasks: the step rolls them out on the
+    head tree first, and the method reads the episodes as rollout traces.
+    Validate the candidate, and make a ``HarnessCandidate`` of it against the
+    head.
 ``evaluate``
     Score the sides that the publication policy names with
     ``HarnessEpisodeEvaluator``, which reuses the scores the history holds.
@@ -32,10 +35,12 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
     DecisionRecord,
+    EpisodeRecord,
     EvaluationTasks,
     FailureObservation,
     HarnessCandidate,
@@ -58,7 +63,7 @@ from reef.train.harness_backend.records import CALLS_FILE, RESULT_FILE, StepReco
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.tools import StepTools
 from reef.train.harness_backend.workspace import Workspace
-from reef.train.types import JobData, TrainStepResult, trajectories
+from reef.train.types import JobData, TrainStepResult
 
 
 @dataclass(frozen=True)
@@ -173,13 +178,17 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
 
     def prepare(self, data: JobData, previous: HarnessState) -> PreparedStep:
         """The step's candidate, or the skip and its reason."""
-        samples = trajectories(data)
+        # The step's material: the traces of traffic, and on an offline step the train tasks it rolls out.
+        samples = tuple(sample for sample in data.samples if isinstance(sample, TrajectorySample))
+        rollout_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
         if self.model_resolver is not None:
             self.models = self.model_resolver.resolve()
             if self.evaluator is not None:
                 self.evaluator.use_models(self.models)
         state = replace(previous, steps=previous.steps + 1)
         metrics: dict[str, Any] = {"steps": state.steps, "traces": len(samples)}
+        if rollout_tasks:
+            metrics["rollouts"] = len(rollout_tasks)
         automatic = data.request is None
         if automatic and self.limits.max_steps and state.steps > self.limits.max_steps:
             return skipped(state, metrics, f"step budget of {self.limits.max_steps} exhausted")
@@ -204,7 +213,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
             started_at=time.time(),
             step_record=str(step_dir),
         )
-        if automatic and self.recheck_due(state) and state.rollback_release_id is not None:
+        # A recheck and a client's proposal wait for a step without rollouts: the method reads every rolled-out chunk.
+        if automatic and not rollout_tasks and self.recheck_due(state) and state.rollback_release_id is not None:
             # The candidate is the tree the latest publish replaced; it wins only when the head got worse.
             target = self.releases.release(state.rollback_release_id)
             target_tree = HarnessTree(target.files)
@@ -230,7 +240,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 recheck=True,
             )
             return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
-        claimed = None if self.inbox is None or not automatic else self.inbox.claim()
+        claimed = None if self.inbox is None or not automatic or rollout_tasks else self.inbox.claim()
         if claimed is not None:
             metrics["proposal"] = {
                 "id": claimed.id,
@@ -248,6 +258,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 candidate_tree, step=state.steps, origin="proposal", parent=head_record.tree, summary=claimed.reason
             )
         else:
+            rollouts = self.roll_out(head_tree, rollout_tasks, state.steps) if rollout_tasks else ()
             workspace = Workspace.create(
                 step_dir,
                 history_dir=self.history.root,
@@ -257,6 +268,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 tasks=step_tasks.tasks,
                 repeats=0 if self.evaluator is None else self.evaluator.episode_repeats,
                 samples=samples,
+                rollouts=rollouts,
                 request=data.request,
                 manifest=state.manifest,
                 state_files=state.method_files,
@@ -298,6 +310,21 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
             proposal_id=None if claimed is None else claimed.id,
         )
         return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
+
+    def roll_out(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[EpisodeRecord, ...]:
+        """One episode record of ``head`` on each of an offline step's train ``tasks``, in task order.
+
+        The episodes go through the score cache, as an evaluation's do: an episode of the same tree, task and
+        evaluation context that the history holds is reused. ``RuntimeError`` without a scorer.
+        """
+        if self.evaluator is None:
+            raise RuntimeError("an offline step rolls out its train tasks, which needs evolution.evaluation.scorer")
+        if self.progress is not None:
+            self.progress = replace(self.progress, phase="rolling out", episodes_total=len(tasks))
+        records = self.evaluator.episodes(head, tasks, repeats=1, step=step)
+        if self.progress is not None:
+            self.progress = replace(self.progress, phase="proposing", episodes_total=None)
+        return records
 
     def run_method(self, workspace: Workspace, head: str, metrics: dict[str, Any], calls: StepCalls) -> StepResult:
         """Run the method's step in ``workspace`` with ``calls`` as its call meter, and record its calls and its
