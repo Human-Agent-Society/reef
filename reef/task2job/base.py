@@ -100,6 +100,9 @@ class Task2Job(ABC, Plugin):
     #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
     #: when no trainer of the scenario accepts uploaded trajectories.
     accepts_trajectories: bool = False
+    #: Whether the recipe reads the scenario's imported tasks (the ``imported-tasks`` store). Admission refuses a
+    #: task upload (``POST /reef/scenarios/{scenario}/tasks``) when no trainer of the scenario reads them.
+    accepts_imported_tasks: bool = False
     #: Whether every job of the stage trains only the samples it makes itself (``own_job_data``), so it has no
     #: buffer and no ``job_samples``.
     trains_own_job_data_only: bool = False

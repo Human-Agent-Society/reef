@@ -84,6 +84,10 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/promote``                                      | serve a release held for review                   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/tasks``                                         | imported tasks, their splits, which trained       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                                                            | the served harness tree                           |
@@ -354,6 +358,51 @@ upload order, and then the units of recorded traffic. Thus a large upload can de
 training of live traffic. The delay continues until the jobs use all of
 the upload. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
+
+Upload Harbor tasks
+-------------------
+
+Use this route to give a scenario your own Harbor tasks, for training or as
+held-out tasks. It adds the tasks to the scenario's task store
+``imported-tasks``, the same store that the `task-import section
+<../user-guide/operate.rst#import-harbor-tasks>`__ fills. The scenario's recipe
+must read imported tasks, such as the SFT-then-RL recipe (`SFT then RL
+<configuration.rst#sft-then-rl>`__). If it does not, Reef refuses the upload
+with 400.
+
+The body is a gzip-compressed tar archive with ``Content-Type:
+application/gzip``. The archive and the files it unpacks to are each at most
+256 MiB, in at most 10,000 entries. Each top-level entry is one Harbor task
+directory, named by its task name: a lowercase letter or a digit, then
+lowercase letters, digits, ``.``, ``_`` and ``-``. The query parameter
+``split`` is ``train`` or ``eval``, for every task of the archive:
+
+.. code:: bash
+
+   tar -czf tasks.tar.gz -C /data/benchmark/tasks sum-391 sort-17
+   curl -f "http://127.0.0.1:8900/reef/scenarios/my-agent/tasks?split=train" \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/gzip' \
+     --data-binary @tasks.tar.gz
+
+The response is ``{"scenario": "my-agent", "split": "train", "tasks":
+[{"name": "sort-17", "files_digest": "..."}, {"name": "sum-391",
+"files_digest": "..."}]}``, in name order. An identical retry returns the
+same receipt. Reef returns:
+
+- 400, and adds nothing, for an archive that is not tar.gz, a link or a device
+  in it, a path outside its task directories, a file at the top level, a name
+  that is not a task name, more than 1000 tasks or 10,000 entries, more than
+  256 MiB unpacked, or a directory that Harbor's task loader refuses;
+- 413 for a body larger than 256 MiB;
+- 409 for a task name that the scenario holds with other files or in the other
+  split. The tasks before it in name order are added; to change a task, give
+  it a new name;
+- 415 for another content type.
+
+``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
+[{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
+added. ``trained`` is true once a task job trained the task.
 
 Manual training
 ---------------

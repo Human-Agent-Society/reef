@@ -1,13 +1,14 @@
-"""Validate records and uploaded trajectories and append them to one loaded scenario.
+"""Validate records, uploaded trajectories and uploaded tasks and append them to one loaded scenario.
 
 The dispatcher calls these functions under the scenario's lock. They append
-records and uploaded trajectories durably and count the ``ingest/*`` metrics of records.
+records, uploaded trajectories and uploaded Harbor tasks durably and count the ``ingest/*`` metrics of records.
 They do not start training: the caller wakes the trainers after new data lands.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import TrajectoryItem
@@ -17,6 +18,7 @@ from reef.core.training_request import normalize_training_request_payload
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
+from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -126,6 +128,21 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     for result in appended:
         current.operations.increment("ingest/accepted_total" if result.inserted else "ingest/duplicates_total")
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
+
+
+def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
+    """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's ``imported-tasks`` store.
+
+    Return the published tasks in the order of ``directories``. A task that the store holds with the same files
+    and split is returned as it is. Admission refuses the upload when no trainer of the scenario reads imported
+    tasks (``TrainingPipeline.accepts_imported_tasks``), since nothing would use them. The caller checks that each
+    directory is a Harbor task. A ``TaskConflict`` (a name published with other files or in the other split)
+    stops the upload; the tasks before it stay published, and a corrected upload adds the rest.
+    """
+    if not any(component_trainer.trainer.pipeline.accepts_imported_tasks for component_trainer in current.trainers):
+        raise ValueError(f"the recipe of scenario {current.name!r} does not use imported tasks")
+    store = current.store.tasks.open(IMPORTED_TASK_STORE)
+    return tuple(store.add_task(directory=directory, split=split) for directory in directories)
 
 
 def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, TrajectoryItem], ...]) -> bool:

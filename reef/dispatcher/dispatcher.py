@@ -30,6 +30,7 @@ from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +405,29 @@ class Dispatcher(ScenarioLifecycle):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             if ingest.append_trajectories(current, trajectories):
                 self.process_accepted_records(current)
+
+    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
+        """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's imported tasks, then wake
+        their consumers. Return the published tasks (``ingest.append_tasks``)."""
+        if not directories:
+            raise ValueError("an upload must hold one or more tasks")
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            published = ingest.append_tasks(current, directories, split)
+            self.local_workers.wake(current)
+            return published
+
+    def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
+        """The scenario's imported tasks in publication order, each with whether it trained."""
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            store = current.store.tasks.open(IMPORTED_TASK_STORE)
+            trained = store.trained_task_names()
+            return tuple((task, task.name in trained) for task in store.tasks())
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""

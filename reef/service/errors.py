@@ -24,6 +24,7 @@ from reef.core.errors import (
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.request_service import InferenceRetryTimeout
 from reef.storage.records import RecordConflict
+from reef.storage.tasks import TaskConflict
 from reef.storage.trajectories import TrajectoryConflict
 from reef.surface.weights import RuntimeLoadMismatch
 
@@ -39,6 +40,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ReleaseNotRestorable, web.HTTPConflict),
     (RecordConflict, web.HTTPConflict),
     (TrajectoryConflict, web.HTTPConflict),
+    (TaskConflict, web.HTTPConflict),
     (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (InferenceUnavailable, web.HTTPServiceUnavailable),

@@ -379,7 +379,9 @@ keeps a copy of the files.
 
 The import runs again each time a scenario opens. To add tasks, add them to the
 manifest and the directory, and then restart the service or reload the
-scenario. A task that is already imported with the same files and split does
+scenario. To add tasks to one running scenario without a restart, upload them
+with ``POST /reef/scenarios/{scenario}/tasks`` (`Upload Harbor tasks
+<../reference/http-api.rst#upload-harbor-tasks>`__). A task that is already imported with the same files and split does
 not change. A scenario does not open, and the error says why, when:
 
 - a task directory is missing, or Harbor cannot load it;

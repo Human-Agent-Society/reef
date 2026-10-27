@@ -34,7 +34,10 @@ sample. Job data takes uploaded trajectories first.
 
 A task-to-job stage can also make samples itself, from no record, such as
 the generated-task recipe's rollout episodes. While ``Task2Job.own_job_data``
-returns samples, the pipeline is ready, and its next job data holds exactly those.
+returns samples, the pipeline is ready, and its next job data holds exactly
+those, unless automatic job data is also ready: held samples, such as
+uploaded trajectories, train first, so a recipe that trains both trains its
+held samples before its own.
 """
 
 from __future__ import annotations
@@ -246,6 +249,11 @@ class TrainingPipeline:
         return self.task2job.accepts_trajectories
 
     @property
+    def accepts_imported_tasks(self) -> bool:
+        """Whether the recipe reads the scenario's imported tasks."""
+        return self.task2job.accepts_imported_tasks
+
+    @property
     def buffer_size(self) -> int | None:
         """The most samples that the held record sets keep, or None for every sample; the task-to-job stage sets it."""
         return self.task2job.buffer_size
@@ -451,6 +459,10 @@ class TrainingPipeline:
         self.advance()
         if self.pending is not None or self.task2job.own_job_data() is not None:
             return True
+        return self.held_data_ready(sample_count)
+
+    def held_data_ready(self, sample_count: int | None) -> bool:
+        """Whether the training mode lets held samples and instructions make job data of ``sample_count`` samples."""
         if self.training_mode == "manual":
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:
@@ -464,7 +476,8 @@ class TrainingPipeline:
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
             own = self.task2job.own_job_data()
-            if own is not None:
+            # Held samples go first; the stage's own samples wait while they are ready.
+            if own is not None and not self.held_data_ready(sample_count):
                 # The stage's own samples train as one job, however many they are.
                 self.pending = self.task2job.make_job_data(own, f"{self.scenario}:data:{self.data_number}")
                 self.pending_is_own = True

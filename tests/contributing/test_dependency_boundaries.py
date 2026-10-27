@@ -181,7 +181,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
     assert all(
         any(
             target == contract or target.startswith(contract + ".")
-            for contract in ("reef.storage.records", "reef.storage.scenario")
+            for contract in ("reef.storage.records", "reef.storage.scenario", "reef.storage.tasks")
         )
         for target in _imports_of(imported, "reef.storage")
     )
