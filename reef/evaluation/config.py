@@ -10,7 +10,7 @@ An evaluation section has this shape::
 
 The reference names a :class:`ConfiguredEvaluationPlugin` subclass. Loading
 the section imports and checks the class only. Its
-``from_config(config, runtime=..., training_runtime=..., scenario=..., environ=...)``
+``from_config(config, runtime=..., scenario=..., environ=...)``
 builds one scenario-local plugin implementing both ``evaluate(candidate)`` and
 ``decide(candidate, evaluation)``.
 """
@@ -25,7 +25,7 @@ from typing import Any, Self
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime
 
 
 class CandidateEvaluationConfigError(ReefError):
@@ -42,7 +42,6 @@ class ConfiguredEvaluationPlugin(CandidateEvaluationPlugin, Plugin):
         config: Mapping[str, Any],
         *,
         runtime: InferenceRuntime,
-        training_runtime: TrainingRuntime,
         scenario: str,
         environ: Mapping[str, str],
     ) -> Self:
@@ -73,14 +72,12 @@ def build_candidate_evaluation(
     config: CandidateEvaluationConfig,
     *,
     runtime: InferenceRuntime,
-    training_runtime: TrainingRuntime,
     scenario: str,
 ) -> CandidateEvaluationPlugin:
     """Build one scenario's external candidate evaluation plugin."""
     return ConfiguredEvaluationPlugin.referenced_class(config.plugin).from_config(
         config.plugin.config,
         runtime=runtime,
-        training_runtime=training_runtime,
         scenario=scenario,
         environ=config.environ,
     )

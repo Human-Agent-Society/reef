@@ -1,7 +1,8 @@
-# Colocated Qwen3-8B LoRA stack for the CORAL test-time-training example.
+# Qwen3-8B LoRA stack for the CORAL test-time-training example on four GPUs:
+# two for the actor and two for two single-GPU serving engines.
 # Every value is literal except the two run.sh computes: CORAL_TTT_STATE_DIR
 # (the absolute root all durable state hangs off) and REEF_INFERENCE_HOST
-# (this machine's IP, which Slime binds the training engines' router to).
+# (this machine's IP, which the serving engines bind to).
 
 reef:
   host: 127.0.0.1
@@ -11,7 +12,7 @@ reef:
   ready-timeout: 120
 
 inference:
-  num-gpus: "${training.config.num_gpus}"
+  num-gpus: "2"
   tensor-parallel-size: "1"
   model-path: work/model
   timeout-s: 7200
@@ -22,11 +23,13 @@ pipeline:
   record2record:
     config:
       group_size: 2        # two scored siblings release a training group
+  task2job:
+    config:
+      job_samples: 4       # one optimizer step: the same value as global-batch-size
 training:
   backend: slime
   ready-timeout: 3600
   ray-namespace: reef
-  ray-actor-name: reef-train-bridge
   timeout-s: 7200
   config:
     num_gpus: 2
@@ -53,7 +56,7 @@ training:
     n-samples-per-prompt: "${pipeline.record2record.config.group_size}"
     global-batch-size: "4"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
-    num-gpus-per-node: "${training.config.num_gpus}"
+    num-gpus-per-node: "4"
     megatron-lora-rank: "32"
     megatron-lora-alpha: "32"
     megatron-lora-target-modules:

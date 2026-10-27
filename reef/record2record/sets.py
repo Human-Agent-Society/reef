@@ -1,4 +1,4 @@
-"""Record sets and record set units: the input of the record-to-task stage, and the unit that a batch takes.
+"""Record sets and record set units: the input of the record-to-task stage, and the unit that job data takes.
 
 Notation: ``refs(r)`` is the set of records that a record ``r`` references.
 """
@@ -58,7 +58,7 @@ class SingleRecordSet(RecordSet):
 
 @dataclass(frozen=True, kw_only=True)
 class RecordSetUnit(ABC):
-    """Record sets that must train in the same batch.
+    """Record sets that must train in the same job.
 
     Values: ``U`` is a record set unit if and only if ``record_sets(U)`` is not
     empty. Its record sets are distinct and share no record, because a record
@@ -67,8 +67,8 @@ class RecordSetUnit(ABC):
     the group of a unit that is a group. It is None for any other unit.
 
     Purpose: the record stage puts it in its pool when the tasks of its record
-    sets are ready. A batch takes all its tasks or none of them, and the
-    batch size counts each of its tasks as one sample. Consuming ``U`` writes
+    sets are ready. Job data takes all its tasks or none of them, and the
+    ``job_samples`` counts each of its tasks as one sample. Consuming ``U`` writes
     ``consumed_ids(U)``, the IDs of the records of its record sets, to the commit.
     """
 
@@ -82,10 +82,10 @@ class RecordSetUnit(ABC):
 
     @abstractmethod
     def record_sets(self) -> tuple[RecordSet, ...]:
-        """Return the record sets of the unit, in batch order."""
+        """Return the record sets of the unit, in selection order."""
 
     def set_ids(self) -> tuple[Hashable, ...]:
-        """Return the IDs of the record sets of the unit, in batch order."""
+        """Return the IDs of the record sets of the unit, in selection order."""
         return tuple(record_set.set_id for record_set in self.record_sets())
 
     def consumed_ids(self) -> frozenset[str]:
@@ -95,7 +95,7 @@ class RecordSetUnit(ABC):
 
 @dataclass(frozen=True, kw_only=True)
 class SingleSetUnit(RecordSetUnit):
-    """A batch unit of one record set, with the ID and the arrival index of that set. ``of`` makes it."""
+    """A record set unit of one record set, with the ID and the arrival index of that set. ``of`` makes it."""
 
     record_set: RecordSet
 

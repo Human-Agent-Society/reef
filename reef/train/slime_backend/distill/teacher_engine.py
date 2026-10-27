@@ -2,7 +2,7 @@
 
 This is the second of a distillation family's two teacher paths. ``teacher``
 runs the teacher on the actor's weights inside the training step;
-this module asks a separate engine and runs on the bridge, which fills the
+this module asks a separate engine and runs in the training component, which fills the
 distillation columns before partitioning or starting the step. No
 generation, retokenization or actor weight swap is involved, and the module
 deliberately has no torch or serving-runtime imports.
@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from numbers import Integral, Real
 from typing import Any
 
-#: The columns the teacher engine fills on the bridge: the top-K representation. The exact
+#: The columns the teacher engine fills in the training component: the top-K representation. The exact
 #: full-vocabulary column stays with the checkpoint teacher, which scores on the actor.
 ENGINE_TEACHER_BATCH_KEYS = (
     "distill_teacher_topk_ids",

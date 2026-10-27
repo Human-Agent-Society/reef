@@ -1,9 +1,8 @@
-"""Backend-independent inference recovery and update-lock contracts."""
+"""Backend-independent inference pause, recovery and termination contracts."""
 
 import pytest
 
-from reef.runtime.publication import WeightUpdateLock
-from reef.runtime.recovery import InferenceControl, InferenceEngineGroup, InferenceMonitor, WeightUpdateConnection
+from reef.runtime.recovery import InferenceControl, InferenceEngineGroup, InferenceMonitor
 
 
 class MemoryEngines(InferenceEngineGroup):
@@ -13,6 +12,7 @@ class MemoryEngines(InferenceEngineGroup):
         self.events = events
         self.failure = None
         self.paused = False
+        self.dead_engines = 0
 
     def event(self, name):
         self.events.append(name)
@@ -33,29 +33,12 @@ class MemoryEngines(InferenceEngineGroup):
         self.event("recover_engines")
         # Replacement engines start without the previous controller's barrier.
         self.paused = False
+        replaced, self.dead_engines = self.dead_engines, 0
+        return replaced
 
     def terminate(self):
         self.event("terminate_engines")
         return 2
-
-
-class MemoryConnection(WeightUpdateConnection):
-    def __init__(self, events):
-        self.events = events
-        self.usable = True
-        self.failure = None
-
-    def is_usable(self):
-        self.events.append("lock_status")
-        if self.failure == "status":
-            raise RuntimeError("lock unavailable")
-        return self.usable
-
-    def replace(self):
-        self.events.append("replace_lock")
-        if self.failure == "replace":
-            raise RuntimeError("failed replace")
-        self.usable = True
 
 
 class MemoryMonitor(InferenceMonitor):
@@ -76,17 +59,16 @@ class MemoryMonitor(InferenceMonitor):
 def control():
     events = []
     engines = MemoryEngines(events)
-    connection = MemoryConnection(events)
     monitor = MemoryMonitor(events)
-    return InferenceControl(engines, connection, monitor), engines, connection, monitor, events
+    return InferenceControl(engines, monitor), engines, monitor, events
 
 
 def test_recovery_reapplies_pause_and_keeps_monitor_stopped_until_commit_resume(control):
-    controller, engines, _, monitor, events = control
+    controller, engines, monitor, events = control
     assert controller.pause() == ["paused"]
     events.clear()
     controller.recover()
-    assert events == ["pause_monitor", "lock_status", "recover_engines", "pause_engines"]
+    assert events == ["pause_monitor", "recover_engines", "pause_engines"]
     assert engines.paused and monitor.paused and controller.paused
     assert controller.resume() == ["resumed"]
     assert events[-2:] == ["resume_engines", "resume_monitor"]
@@ -94,7 +76,7 @@ def test_recovery_reapplies_pause_and_keeps_monitor_stopped_until_commit_resume(
 
 
 def test_partial_pause_failure_preserves_recovery_barrier(control):
-    controller, engines, _, monitor, _ = control
+    controller, engines, monitor, _ = control
     engines.failure = "pause_engines"
     with pytest.raises(RuntimeError, match="failed pause_engines"):
         controller.pause()
@@ -106,7 +88,7 @@ def test_partial_pause_failure_preserves_recovery_barrier(control):
 
 @pytest.mark.parametrize("failure", ["recover_engines", "pause_engines"])
 def test_recovery_failure_never_resumes_monitor(control, failure):
-    controller, engines, _, monitor, events = control
+    controller, engines, monitor, events = control
     controller.pause()
     events.clear()
     engines.failure = failure
@@ -117,7 +99,7 @@ def test_recovery_failure_never_resumes_monitor(control, failure):
 
 
 def test_failure_on_unpaused_recovery_latches_pause_for_retry(control):
-    controller, engines, _, monitor, events = control
+    controller, engines, monitor, events = control
     engines.failure = "recover_engines"
     with pytest.raises(RuntimeError, match="failed recover_engines"):
         controller.recover()
@@ -129,119 +111,40 @@ def test_failure_on_unpaused_recovery_latches_pause_for_retry(control):
     assert engines.paused and monitor.paused
 
 
-@pytest.mark.parametrize("unknown_status", [False, True])
-def test_uncertain_lock_forces_reconnect_until_worker_acknowledgement(control, unknown_status):
-    controller, _, connection, _, events = control
-    connection.usable = False
-    if unknown_status:
-        connection.failure = "status"
-    controller.recover()
-    assert events == ["pause_monitor", "lock_status", "replace_lock", "recover_engines", "resume_monitor"]
-    assert controller.reconnect_required
-    connection.failure = None
-    events.clear()
-    controller.recover()
-    assert "replace_lock" not in events
-    assert controller.reconnect_required
-    controller.acknowledge_reconnect()
-    assert not controller.reconnect_required
+def test_recovery_of_running_engines_resumes_the_monitor(control):
+    controller, engines, monitor, events = control
+    assert controller.recover() == 0
+    assert events == ["pause_monitor", "recover_engines", "resume_monitor"]
+    assert not controller.paused and not monitor.paused and not engines.paused
 
 
-def test_failed_replacement_keeps_old_connection_fenced(control):
-    controller, _, connection, monitor, events = control
-    connection.usable = False
-    connection.failure = "replace"
-    with pytest.raises(RuntimeError, match="failed replace"):
-        controller.recover()
-    assert controller.paused and monitor.paused
-    assert not controller.reconnect_required
-    assert "recover_engines" not in events
+def test_recovery_returns_the_number_of_dead_engines_it_refilled(control):
+    controller, engines, _, _ = control
+    engines.dead_engines = 2
+    assert controller.recover() == 2
+    assert controller.recover() == 0
 
 
-def test_external_engines_are_never_replaced_or_terminated(control):
-    controller, engines, connection, monitor, events = control
+def test_external_engines_are_never_terminated(control):
+    controller, engines, monitor, events = control
     engines.owned = False
-    connection.usable = False
-    with pytest.raises(RuntimeError, match="restarting the external deployment"):
-        controller.recover()
-    assert "replace_lock" not in events
-    assert "recover_engines" not in events
     assert controller.terminate() == 0
     assert "terminate_engines" not in events
     assert monitor.paused
 
 
 def test_owned_engine_termination_preserves_pause_for_replacement(control):
-    controller, engines, _, monitor, _ = control
+    controller, engines, monitor, _ = control
     assert controller.terminate() == 2
     controller.recover()
     assert engines.paused and monitor.paused
 
 
 def test_failed_resume_keeps_monitor_paused(control):
-    controller, engines, _, monitor, events = control
+    controller, engines, monitor, events = control
     controller.pause()
     engines.failure = "resume_engines"
     with pytest.raises(RuntimeError, match="failed resume_engines"):
         controller.resume()
     assert controller.paused and monitor.paused
-    assert "resume_monitor" not in events
-
-
-def test_weight_update_lock_fences_poisoned_transport_and_preserves_phase_errors():
-    lock = WeightUpdateLock()
-    assert lock.acquire()
-    assert not lock.acquire()
-    lock.complete_phase("send", "connection lost")
-    assert lock.phase_status("send") == {"error": "connection lost"}
-    assert lock.phase_status("missing") is None
-    lock.poison()
-    assert lock.status() == {"locked": True, "poisoned": True}
-    for operation in (lock.acquire, lock.release, lock.clear_phases):
-        with pytest.raises(RuntimeError):
-            operation()
-    assert lock.phase_status("send") == {"error": "connection lost"}
-
-
-def test_weight_update_lock_can_clear_finished_phases_only_when_idle():
-    lock = WeightUpdateLock()
-    with pytest.raises(RuntimeError, match="not acquired"):
-        lock.release()
-    lock.acquire()
-    lock.complete_phase("send")
-    with pytest.raises(RuntimeError, match="active"):
-        lock.clear_phases()
-    lock.release()
-    lock.clear_phases()
-    assert lock.phase_status("send") is None
-    assert lock.acquire()
-
-
-@pytest.mark.parametrize("phase,error", [("", None), (None, None), ("send", ""), ("send", 5)])
-def test_weight_update_lock_rejects_invalid_phase_records(phase, error):
-    with pytest.raises(ValueError):
-        WeightUpdateLock().complete_phase(phase, error)
-
-
-def test_new_trainer_requires_attachment_even_to_healthy_engines(control):
-    controller, engines, _, monitor, events = control
-    controller.prepare_training_connection()
-    assert events == ["pause_monitor", "lock_status", "recover_engines", "pause_engines"]
-    assert controller.paused and engines.paused and monitor.paused
-    assert controller.reconnect_required
-    controller.acknowledge_reconnect()
-    controller.resume()
-    events.clear()
-    controller.prepare_training_connection()
-    assert controller.reconnect_required
-    assert "replace_lock" not in events
-    assert "resume_monitor" not in events
-
-
-def test_failed_new_trainer_attachment_remains_fenced(control):
-    controller, engines, _, monitor, events = control
-    engines.failure = "recover_engines"
-    with pytest.raises(RuntimeError, match="failed recover_engines"):
-        controller.prepare_training_connection()
-    assert controller.paused and monitor.paused and controller.reconnect_required
     assert "resume_monitor" not in events

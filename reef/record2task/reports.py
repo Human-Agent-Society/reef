@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
-from reef.core.batches import TaskItem, TrainDataItem, TrajectoryItem
+from reef.core.job_data import TaskItem, TrainDataItem, TrajectoryItem
 from reef.record2record import RecordSet, ReportCandidate, ReportContext
 from reef.record2task.base import ImmediateRecord2Task, TaskResult
 

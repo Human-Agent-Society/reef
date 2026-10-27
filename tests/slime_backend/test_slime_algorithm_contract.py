@@ -334,19 +334,23 @@ def test_sao_schedule_supports_warmup_and_validates_configuration() -> None:
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_handles_policy_versions_and_clock_skew() -> None:
+def test_sao_rollout_metrics_measure_the_spread_to_the_newest_version_and_clamp_clock_skew() -> None:
     sao = resolve_loss_family("sao")
+    # The spread counts versions behind the newest producing version of the same serving incarnation,
+    # so a sample of another incarnation counts against its own newest version; a malformed ID does not count.
     rollout_data = {
-        "producing_runtime_load_ids": ["inc:3"],
-        "rollout_created_ats": [time.time() - 2.5],
-        "response_lengths": [4],
-        "loss_masks": [[1, 1, 1, 0]],
+        "producing_runtime_load_ids": ["inc:3", "inc:7", "old:1", "malformed", None],
+        "rollout_created_ats": [time.time() - 2.5, time.time() + 60.0],
+        "response_lengths": [4, 4],
+        "loss_masks": [[1, 1, 1, 0], [1, 1, 1, 1]],
     }
-    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:7")
-    assert metrics["sao/policy_lag_max"] == 4
-    assert metrics["sao/policy_lag_mean"] == 4.0
-    assert metrics["sao/effective_token_rate"] == 3 / 4
+    metrics = sao.rollout_metrics(rollout_data)
+    assert metrics["sao/producing_version_spread_max"] == 4
+    assert metrics["sao/producing_version_spread_mean"] == pytest.approx(4 / 3)
+    assert metrics["sao/effective_token_rate"] == 7 / 8
     assert metrics["sao/queue_age_s_max"] >= 2.0
+    # A creation time ahead of this clock counts as age zero, not a negative age.
+    assert 1.0 <= metrics["sao/queue_age_s_mean"] < metrics["sao/queue_age_s_max"]
 
 
 @pytest.mark.unit

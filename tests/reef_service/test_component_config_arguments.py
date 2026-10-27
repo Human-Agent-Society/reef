@@ -11,11 +11,11 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support.runtime_stubs import runtime_bindings, runtime_fixture
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.inference.http import InferenceProxyRuntime
-from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
+from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, config_field
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, RuntimeRegistry
 from reef.runtime.executor.config import executor_settings
@@ -34,6 +34,10 @@ class ExtensionRecipe(WeightTrainingRecipe):
     scale: float = config_field(0.5, allow_nonfinite=False)
     tags: tuple[str, ...] = config_field(())
     options: Mapping[str, Any] = config_field(default_factory=dict)
+
+    @classmethod
+    def training_spec(cls) -> WeightTrainingSpec:
+        return WeightTrainingSpec(objective="sft")
 
 
 @dataclass(frozen=True)
@@ -164,7 +168,7 @@ def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
         {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:runtime"}}},
         ["--reef.data.label", "001", "--reef.runtime.label", "true", "--no-reef.runtime.enabled"],
     )
-    runtime = runtime_fixture(RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={}))
+    runtime = RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={})
     assert runtime.parsed_config["label"] == "true"
     assert runtime.parsed_config["enabled"] is False
     assert runtime.parsed_config["type"] == "reef_config_extension:runtime"
@@ -176,9 +180,7 @@ def test_unknown_declared_recipe_and_runtime_fields_are_rejected(extension):
     with pytest.raises(RecipeConfigError, match=r"reef\.typo"):
         resolve_deployment({"reef": {"recipe": "reef_config_extension:Training", "typo": 4}})
     with pytest.raises(RuntimeConfigError, match=r"unknown config fields.*typo"):
-        runtime_fixture(
-            RuntimeRegistry().build({"type": "reef_config_extension:runtime", "typo": 1}, model_path="model")
-        )
+        RuntimeRegistry().build({"type": "reef_config_extension:runtime", "typo": 1}, model_path="model")
 
 
 def test_executor_aliases_preserve_profile_and_parse_resources(extension):
@@ -268,8 +270,6 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
 
 
 def test_training_recipe_resolves_fields_once_before_connecting(extension, monkeypatch):
-    from tests.support.runtime_stubs import StubTrainingRuntime
-
     from reef.service import assembly
     from reef.service.deploy.service_config import ServiceConfig
 
@@ -281,37 +281,50 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         resolved.append(values)
         return values
 
-    def connect(**kwargs):
+    def connect(settings, *, model_path, loss_family):
         assert len(resolved) == 1
-        assert "max_staleness" not in kwargs
-        training = StubTrainingRuntime()
-        return training, training.inference
+        assert model_path == "model"
+        return StubTrainingComponent(), StubInferenceRuntime()
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
+    monkeypatch.setattr(assembly, "connect_training_component", connect)
     settings = ServiceConfig(
         recipe="reef_config_extension:Training",
         model_path="model",
         ray_address="local",
         training_backend_options={"global-batch-size": 1},
-        recipe_settings={"count": "2", "max_staleness": "3"},
+        recipe_settings={"count": "2", "label": "run-a"},
     )
-    recipe = assembly._training_recipe(ExtensionRecipe, settings, {}, connect)
-    assert recipe.count == 2 and recipe.max_staleness == 3
+    recipe = assembly._training_recipe(ExtensionRecipe, settings, {})
+    assert recipe.count == 2 and recipe.label == "run-a"
     assert len(resolved) == 1
 
 
-@pytest.mark.parametrize("runtime_type", ["ray_training", "executor_training"])
-def test_training_adapters_share_typed_fields_without_allocating_resources(runtime_type):
-    from reef.runtime.deployment import runtime_factory_for
+@pytest.mark.parametrize(
+    "runtime_type, required",
+    [
+        ("reef.train.tinker_backend.launch:component_factory", {"state_dir": "state"}),
+        (
+            "remote_serving",
+            {"remote": {"url": "http://gpu-host:8000"}, "release_format": {"layout": "full"}},
+        ),
+    ],
+    ids=["tinker", "remote_serving"],
+)
+def test_training_and_serving_runtimes_share_typed_fields_without_allocating_resources(runtime_type, required):
+    from reef.runtime.deployment import ConfiguredFactory, runtime_factory_for, training_component_factory_for
 
-    factory = runtime_factory_for(runtime_type)
-    parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5"}, {})
+    factory: ConfiguredFactory | None = (
+        training_component_factory_for(runtime_type) if ":" in runtime_type else runtime_factory_for(runtime_type)
+    )
+    assert factory is not None
+    parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", **required}, {})
     assert parsed["inference_timeout_s"] == 5.5
-    # The staleness window is the recipe's setting; a runtime refuses it.
+    # The staleness window is the record-to-record stage's setting; a runtime refuses it.
     with pytest.raises(RuntimeConfigError, match="unknown config fields: max_staleness"):
-        factory.parse_config({"max_staleness": 2}, {})
+        factory.parse_config({"max_staleness": 2, **required}, {})
     with pytest.raises(RuntimeConfigError, match="inference_timeout_s"):
-        factory.parse_config({"inference_timeout_s": "nan"}, {})
+        factory.parse_config({"inference_timeout_s": "nan", **required}, {})
 
 
 def test_optional_extension_null_and_string_null_are_distinct():

@@ -1,8 +1,8 @@
 """Harness-side building blocks for Test-Time Training to Discover.
 
 ``harness.agent`` contains the Reef-specific harness subclass.
-``harness.run_controller`` pairs each search step with Reef's durable training
-commit. ``harness.search`` implements the PUCT archive, the search algorithm,
+``harness.run_controller`` pairs each search step with the end of its Reef
+training job. ``harness.search`` implements the PUCT archive, the search algorithm,
 and generic prompt construction. ``harness.scorer`` provides ``JudgeScorer``
 (HTTP to a judge server) and ``ProgramScorer`` (direct subprocess sandbox).
 ``harness.sandbox`` provides the isolated subprocess executor.

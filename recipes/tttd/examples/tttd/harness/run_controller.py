@@ -1,4 +1,9 @@
-"""Durable step orchestration for TTT-Discover harness runs."""
+"""Durable step orchestration for TTT-Discover harness runs.
+
+One search step is one Reef training job. Reef commits a job at its
+submission, at each saved checkpoint and at its end, so the controller counts
+finished jobs (``finished_jobs`` in ``GET /reef/status``), not scenario steps.
+"""
 
 from __future__ import annotations
 
@@ -51,10 +56,23 @@ class ScenarioTrainingFailure:
 
 @dataclass(frozen=True)
 class ScenarioTrainingStatus:
-    scenario_step: int
+    """One scenario's training as ``GET /reef/status`` reports it.
+
+    ``finished_jobs`` is the number of training jobs that ended, a
+    non-negative int; one job trains one search step. ``running_job_id`` is
+    the running job's ID, or ``None`` while no job runs. ``runtime_load_id``
+    is the serving load ID, or ``None``. ``failed_steps`` are the TTTD steps
+    the processor discarded. ``failed_job_error`` is the error of the last
+    commit's job when that job failed, or ``None``. ``ReefTrainingStatusClient``
+    makes the value and ``TTTDRunController`` reads it.
+    """
+
+    finished_jobs: int
+    running_job_id: str | None
     runtime_load_id: str | None
-    batch_ready: bool
+    job_data_ready: bool
     failed_steps: tuple[ScenarioTrainingFailure, ...] = ()
+    failed_job_error: str | None = None
 
 
 class SearchHarness(ABC):
@@ -109,9 +127,13 @@ class ReefTrainingStatusClient(TrainingStatusReader):
         value = scenarios[scenario]
         if not isinstance(value, Mapping):
             raise RuntimeError(f"Reef status for scenario {scenario!r} is not an object")
-        step = value.get("scenario_step")
-        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
-            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid scenario_step {step!r}")
+        finished_jobs = value.get("finished_jobs")
+        if not isinstance(finished_jobs, int) or isinstance(finished_jobs, bool) or finished_jobs < 0:
+            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid finished_jobs {finished_jobs!r}")
+        running_job = value.get("training_job")
+        running_job_id = running_job.get("job_id") if isinstance(running_job, Mapping) else None
+        if running_job is not None and (not isinstance(running_job_id, str) or not running_job_id):
+            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid training_job {running_job!r}")
         runtime_load_id = value.get("current_runtime_load_id")
         if runtime_load_id is not None and (not isinstance(runtime_load_id, str) or not runtime_load_id):
             raise RuntimeError(
@@ -145,11 +167,22 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                     release_ids=tuple(versions),
                 )
             )
+        # The last commit's job outcome: a failed job ends with event "failed" and its error.
+        last_commit = value.get("last_committed_step")
+        metrics = last_commit.get("metrics") if isinstance(last_commit, Mapping) else None
+        last_job = metrics.get("training_job") if isinstance(metrics, Mapping) else None
+        failed_job_error = (
+            str(last_job.get("error") or "the training job failed")
+            if isinstance(last_job, Mapping) and last_job.get("event") == "failed"
+            else None
+        )
         return ScenarioTrainingStatus(
-            scenario_step=step,
+            finished_jobs=finished_jobs,
+            running_job_id=running_job_id,
             runtime_load_id=runtime_load_id,
-            batch_ready=value.get("batch_ready") is True,
+            job_data_ready=value.get("job_data_ready") is True,
             failed_steps=tuple(failed_steps),
+            failed_job_error=failed_job_error,
         )
 
 
@@ -249,7 +282,7 @@ class TTTDRunOutcome:
 
 
 class TTTDRunController:
-    """Run search steps only after the preceding Reef transaction commits."""
+    """Run search steps only after the preceding step's Reef training job ends."""
 
     def __init__(
         self,
@@ -290,9 +323,10 @@ class TTTDRunController:
                     raise TTTDRunStateError(f"Reef has no status for resumed TTTD step {step}")
                 previous_runtime_load_id = None
             else:
-                if before.scenario_step != step:
+                if before.running_job_id is not None or before.finished_jobs != step:
                     raise TTTDRunStateError(
-                        f"Reef is at scenario step {before.scenario_step}, but the PUCT archive expects {step}"
+                        f"Reef finished {before.finished_jobs} training jobs (running: {before.running_job_id}), "
+                        f"but the PUCT archive expects {step}"
                     )
                 previous_runtime_load_id = before.runtime_load_id
 
@@ -340,9 +374,10 @@ class TTTDRunController:
         saved = self.state_store.load()
         if saved is None:
             current = self.status_reader.scenario_status(self.state_store.identity.scenario)
-            if current is not None and current.scenario_step != 0:
+            if current is not None and (current.finished_jobs != 0 or current.running_job_id is not None):
                 raise TTTDRunStateError(
-                    f"Reef scenario is already at step {current.scenario_step}, but no PUCT state exists"
+                    f"Reef already finished {current.finished_jobs} training jobs "
+                    f"(running: {current.running_job_id}), but no PUCT state exists"
                 )
             return 0, None if current is None else current.runtime_load_id
 
@@ -400,22 +435,24 @@ class TTTDRunController:
                 failure = next((item for item in last.failed_steps if item.step == failed_rollout), None)
                 if failure is not None:
                     raise TTTDRunStateError(
-                        f"TTTD step {failure.step} failed ({failure.reason}); "
-                        f"releases={list(failure.release_ids)!r}"
+                        f"TTTD step {failure.step} failed ({failure.reason}); releases={list(failure.release_ids)!r}"
                     )
-                if last.scenario_step > expected_step:
+                if last.finished_jobs > expected_step:
                     raise TTTDRunStateError(
-                        f"Reef advanced to step {last.scenario_step}, beyond PUCT step {expected_step}"
+                        f"Reef finished {last.finished_jobs} training jobs, beyond PUCT step {expected_step}"
                     )
-                if last.scenario_step == expected_step and (
-                    previous_runtime_load_id is None or last.runtime_load_id != previous_runtime_load_id
-                ):
-                    # Reef commits the durable scenario head before the runtime
-                    # acknowledges that commit and refreshes its public serving
-                    # version. Keep polling through that short reconciliation
-                    # window so a successful update is not mistaken for stale
-                    # weights after checkpoint recovery.
-                    return last
+                if last.finished_jobs == expected_step and last.running_job_id is None:
+                    if last.failed_job_error is not None:
+                        raise TTTDRunStateError(
+                            f"the training job of TTTD step {expected_step - 1} failed: {last.failed_job_error}"
+                        )
+                    if previous_runtime_load_id is None or last.runtime_load_id != previous_runtime_load_id:
+                        # Reef commits the served checkpoint before the runtime
+                        # acknowledges it and refreshes its public serving
+                        # version. Keep polling through that short
+                        # reconciliation window so a successful update is not
+                        # mistaken for stale weights after checkpoint recovery.
+                        return last
             self._sleep(self.poll_interval_s)
         raise TTTDTrainingTimeoutError(
             f"Reef scenario did not restore step {expected_step} after {self.train_timeout_s:g}s: {last}"

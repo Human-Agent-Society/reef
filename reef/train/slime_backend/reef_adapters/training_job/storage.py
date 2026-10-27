@@ -3,25 +3,21 @@ and restart-safe tombstone reclamation."""
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import math
 import os
 import re
 import shutil
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, SCENARIO_HISTORY_FILENAME
-from reef.runtime.recovery import fsync_dir as _fsync_dir
-from reef.runtime.recovery import marker_path as _marker_path
-from reef.runtime.recovery import mkdir_durable as _mkdir_durable
-from reef.runtime.recovery import read_json as _read_json
-from reef.runtime.recovery import write_json as _write_json
+from reef.runtime.durable_files import fsync_dir, mkdir_durable, read_json, write_json
 
 POLICIES = {"latest", "best_reward"}
 Inventory = tuple[list[dict[str, Any]], list[str]]
@@ -31,10 +27,8 @@ class CheckpointStorageError(RuntimeError):
     pass
 
 
-#: Rank-local adapter snapshots live beside the Megatron checkpoint.
-ADAPTER_SLOTS_DIRNAME = "reef_adapter_slots"
-#: The learning-rate schedule progress of every scenario lives beside the job marker.
-LEARNING_RATE_SCHEDULES_FILENAME = "reef_learning_rate_schedules.json"
+#: The file Megatron keeps beside its checkpoints, naming the newest iteration.
+MEGATRON_TRACKER = "latest_checkpointed_iteration.txt"
 
 
 @dataclass(frozen=True)
@@ -75,25 +69,43 @@ class RetentionConfig:
         )
 
 
-def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
-    """Whether the commit at ``rollout_id`` writes the critic checkpoint.
+def retention_options(arguments: Sequence[str]) -> tuple[RetentionConfig, list[str]]:
+    """Split Reef's ``--reef-checkpoint-*`` options from ``arguments``; return their config and the other arguments.
 
-    Every ``interval``-th commit does, counting from the first; ``interval``
-    1 is every commit. The bridge saves on this cadence and the storage
-    requires the critic asset on the same commits.
+    The sizes take a unit (``size_bytes``). An option that is not given keeps
+    its ``RetentionConfig`` default. Raise ``ValueError`` for a config that
+    ``RetentionConfig`` refuses.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
+    parser.add_argument("--reef-checkpoint-policy", dest="policy")
+    parser.add_argument("--reef-checkpoint-max-storage-fraction", dest="max_storage_fraction", type=float)
+    parser.add_argument("--reef-checkpoint-min-free-space-fraction", dest="min_free_space_fraction", type=float)
+    parser.add_argument("--reef-checkpoint-max-storage", dest="max_storage_bytes", type=size_bytes)
+    parser.add_argument("--reef-checkpoint-min-free-space", dest="min_free_space_bytes", type=size_bytes)
+    options, remaining = parser.parse_known_args(list(arguments))
+    return RetentionConfig(**vars(options)), remaining
+
+
+def size_bytes(value: str) -> int:
+    """The positive byte count of a size with a unit: ``B``, decimal ``KB`` to ``TB``, or binary ``KiB`` to ``TiB``."""
+    match = re.fullmatch(r"(\d+)\s*(B|[KMGT]i?B)", value.strip(), re.IGNORECASE)
+    if match is None:
+        raise argparse.ArgumentTypeError("size must include a unit such as GB or GiB")
+    unit = match[2].upper()
+    size = int(match[1]) * (1024 if "I" in unit else 1000) ** "BKMGT".index(unit[0])
+    if size <= 0:
+        raise argparse.ArgumentTypeError("size must be positive")
+    return size
+
+
+def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
+    """Whether the saved rollout ``rollout_id`` includes the critic checkpoint.
+
+    Every ``interval``-th rollout does, counting from rollout 0; ``interval``
+    1 is every rollout. The training component saves the critic on this
+    cadence, and the storage requires the critic asset on the same rollouts.
     """
     return (rollout_id + 1) % interval == 0
-
-
-def checkpoint_due(scenario_step: int, interval: int) -> bool:
-    """Return True if the job that trains ``scenario_step`` saves the paired checkpoint.
-
-    Each ``interval``-th scenario version saves. With ``interval`` 1, each
-    job saves. The count uses scenario versions, not rollout IDs, because
-    each saved version becomes an artifact. A rejected job uses a rollout ID
-    but makes no version.
-    """
-    return (scenario_step + 1) % interval == 0
 
 
 class CheckpointStorage:
@@ -151,11 +163,6 @@ class CheckpointStorage:
         )
         self._disk_usage = disk_usage
 
-    @property
-    def marker_path(self) -> Path:
-        """Location of the durable training-job marker for these checkpoints."""
-        return _marker_path(self.hf_template)
-
     def validate_capacity(self, *, active_rollouts: set[int] | None = None) -> dict[str, Any]:
         with self._locked():
             inventory = self._reconcile()
@@ -167,7 +174,7 @@ class CheckpointStorage:
     def _estimate(self, records: list[dict[str, Any]]) -> int:
         # Retain the high-water mark after deletion so future reservations
         # cannot underestimate a previously observed checkpoint pair.
-        persisted = (_read_json(self.estimate_path) or {}).get("bytes", 0)
+        persisted = (read_json(self.estimate_path) or {}).get("bytes", 0)
         persisted = persisted if isinstance(persisted, int) else 0
         return max(
             self._source_estimate,
@@ -200,17 +207,17 @@ class CheckpointStorage:
             yield plan
 
     def complete(self, job_id: str, rollout_id: int, *, reward: float | None) -> None:
-        # The critic asset is required at completion time on the commits the
-        # critic's cadence saves it — the bridge saves it before completing —
+        # The critic asset is required at completion time on the rollouts the
+        # critic's cadence saves it — the component saves it before completing —
         # so a failed critic save cannot be recorded as a durable checkpoint.
         for path in self.required_assets(rollout_id):
             if path.is_symlink() or not path.is_dir():
                 raise CheckpointStorageError(f"checkpoint asset is missing or unsafe: {path}")
         pair_bytes = sum(self._measure(path) for path in self.required_assets(rollout_id))
-        previous = (_read_json(self.estimate_path) or {}).get("bytes", 0)
+        previous = (read_json(self.estimate_path) or {}).get("bytes", 0)
         previous = previous if isinstance(previous, int) else 0
-        _write_json(self.estimate_path, {"bytes": max(previous, pair_bytes)})
-        _write_json(
+        write_json(self.estimate_path, {"bytes": max(previous, pair_bytes)})
+        write_json(
             self._record_path(rollout_id),
             {
                 "version": 1,
@@ -285,7 +292,7 @@ class CheckpointStorage:
         rollout_id = int(record["rollout_id"])
         # Persist intent before renames so reconciliation can finish after a crash.
         record = {**record, "status": "DELETING"}
-        _write_json(self._record_path(rollout_id), record)
+        write_json(self._record_path(rollout_id), record)
         self._finish_delete(record)
 
     def _reconcile(self) -> Inventory:
@@ -307,20 +314,20 @@ class CheckpointStorage:
         for original, tombstone in pairs:
             if original.exists():
                 os.replace(original, tombstone)
-                _fsync_dir(original.parent)
+                fsync_dir(original.parent)
         for _, tombstone in pairs:
             if tombstone.exists():
                 shutil.rmtree(tombstone)
-                _fsync_dir(tombstone.parent)
+                fsync_dir(tombstone.parent)
         self._record_path(rollout_id).unlink(missing_ok=True)
-        _fsync_dir(self.records_root)
+        fsync_dir(self.records_root)
 
     def _records(self, *, allow_deleting: bool = False) -> tuple[list[dict[str, Any]], list[str]]:
         records: list[dict[str, Any]] = []
         errors: list[str] = []
         for path in sorted(self.records_root.glob("*.json")):
             try:
-                if (record := _read_json(path)) is None:
+                if (record := read_json(path)) is None:
                     continue
                 self._validate_record(record, deleting=allow_deleting and record.get("status") == "DELETING")
                 if path != self._record_path(int(record["rollout_id"])):
@@ -351,29 +358,28 @@ class CheckpointStorage:
 
     def _unknown_assets(self, known: set[Path]) -> list[str]:
         unknown: list[str] = []
-        # Control files Reef itself keeps in the managed roots: the job marker,
-        # the LoRA scenario history and the learning-rate schedule progress
-        # beside the HF exports, and the adapter-slot snapshots beside the
-        # Megatron checkpoints.
-        roots = [
-            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_HISTORY_FILENAME, LEARNING_RATE_SCHEDULES_FILENAME}),
-            (self.megatron_root, "latest_checkpointed_iteration.txt", {ADAPTER_SLOTS_DIRNAME}),
-        ]
+        # The only control file in the managed roots is Megatron's tracker beside its checkpoints,
+        # and the temporary file it is written through.
+        roots = [(self.hf_root, None), (self.megatron_root, MEGATRON_TRACKER)]
         if self.critic_root is not None:
-            roots.append((self.critic_root, "latest_checkpointed_iteration.txt", set()))
-        for root, control, owned in roots:
+            roots.append((self.critic_root, MEGATRON_TRACKER))
+        for root, control in roots:
             if root.exists():
                 unknown.extend(
                     str(path)
                     for path in root.iterdir()
                     if path not in known
-                    and path.name != control
-                    and path.name not in owned
-                    and not (
-                        not path.is_symlink()
-                        and path.is_file()
-                        and path.name.startswith(f".{control.lstrip('.')}.")
-                        and path.name.endswith(".tmp")
+                    and (
+                        control is None
+                        or not (
+                            path.name == control
+                            or (
+                                not path.is_symlink()
+                                and path.is_file()
+                                and path.name.startswith(f".{control}.")
+                                and path.name.endswith(".tmp")
+                            )
+                        )
                     )
                 )
         return unknown
@@ -418,7 +424,7 @@ class CheckpointStorage:
         if re.fullmatch(r"iter_\d{7}", path.name):
             return path
         try:
-            iteration = int((path / "latest_checkpointed_iteration.txt").read_text(encoding="utf-8").strip())
+            iteration = int((path / MEGATRON_TRACKER).read_text(encoding="utf-8").strip())
         except FileNotFoundError:
             return path if path.is_dir() else None
         except (IsADirectoryError, ValueError):
@@ -430,7 +436,7 @@ class CheckpointStorage:
         rollouts: set[int] = set()
         roots = [self.megatron_root] + ([self.critic_root] if self.critic_root is not None else [])
         for root in roots:
-            tracker = root / "latest_checkpointed_iteration.txt"
+            tracker = root / MEGATRON_TRACKER
             try:
                 rollouts.add(int(tracker.read_text(encoding="utf-8").strip()))
             except (FileNotFoundError, ValueError):
@@ -462,8 +468,8 @@ class CheckpointStorage:
         return paths
 
     def required_assets(self, rollout_id: int) -> tuple[Path, ...]:
-        """The assets a commit at ``rollout_id`` must have written: the pair,
-        plus the critic checkpoint on the commits its cadence saves it.
+        """The assets the saved rollout ``rollout_id`` must have written: the pair,
+        plus the critic checkpoint on the rollouts its cadence saves it.
 
         :meth:`asset_paths` stays the full set the store owns, so a critic
         checkpoint from a denser earlier cadence is still recognized and
@@ -482,7 +488,7 @@ class CheckpointStorage:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        _mkdir_durable(self.meta_root)
+        mkdir_durable(self.meta_root)
         roots: tuple[Path, ...] = (self.root, self.hf_root, self.megatron_root, self.meta_root)
         if self.critic_root is not None:
             roots = (*roots, self.critic_root)

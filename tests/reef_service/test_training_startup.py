@@ -1,58 +1,88 @@
-"""Weight recipes assemble their driver and bridge connection through the shared config path."""
+"""Weight recipes assemble their inference component and HTTP service through the shared config path."""
 
 import json
 import os
-import socket
 import subprocess
 import sys
+from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import yaml
 
 from reef.cli import main
+from reef.runtime.jobs import ReleaseFormat
+from reef.service.deploy import inference as inference_deploy
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
 from reef.service.deploy.execution import validate_services
-from reef.service.deploy.inference import command_line_config
+from reef.service.deploy.inference import (
+    INFERENCE_COMPONENT_SERVICE,
+    command_line_config,
+    free_loopback_port,
+    local_inference_component,
+)
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
+from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.serving import serving_runtime_config
+from reef.train.slime_backend.launch import SlimeDeployment, global_batch_size, slime_arguments
 
 RECIPE = "recipes.sao.recipe:SAORecipe"
+CONTROL_TOKEN_ENV = "REEF_REMOTE_CONTROL_TOKEN"
+FULL_WEIGHTS = ReleaseFormat("full")
+INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 
 
 def training_config():
     return {
         "recipe": {"implementation": RECIPE},
-        "pipeline": {"task2batch": {"config": {"buffer_size": 4}}},
+        "pipeline": {"task2job": {"config": {"buffer_size": 4}}},
         "inference": {"model-path": "/models/demo"},
         "training": {"options": {"lr": 0.000001, "use-critic": True, "global-batch-size": 4}},
     }
 
 
+def slime_runtime_config(config):
+    return SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family="")
+
+
+def slime_argv(config):
+    """The arguments the HTTP service gives Slime's parser for this resolved deployment config."""
+    return slime_arguments(slime_runtime_config(config)["settings"], loss_family="", environ={})
+
+
+def serving_config(config, release_format=FULL_WEIGHTS):
+    """The serving runtime config that the HTTP service builds for Slime's releases of ``release_format``."""
+    return serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), release_format)
+
+
 @pytest.fixture(autouse=True)
-def clean_environment(monkeypatch):
-    for key in list(os.environ):
-        if key.startswith("REEF_") or key == "RAY_ADDRESS":
-            monkeypatch.delenv(key)
+def clean_environment():
+    # Deployment resolution generates the inference component's tokens into os.environ; drop them afterwards.
+    with patch.dict(os.environ):
+        for key in [key for key in os.environ if key.startswith("REEF_") or key == "RAY_ADDRESS"]:
+            os.environ.pop(key)
+        yield
 
 
 def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     overrides = {
         "recipe.implementation": RECIPE,
         "inference.model-path": "/models/demo",
-        "pipeline.task2batch.config.buffer_size": "8",
+        "pipeline.task2job.config.buffer_size": "8",
         "training.options.lr": "0.000002",
         "training.options.use-critic": "true",
         "training.options.global-batch-size": "4",
         "training.ray-namespace": "custom",
-        "training.ray-actor-name": "bridge-custom",
         "training.ready-timeout": "45",
     }
     file_config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         reef = config["reef"]
-        assert config["pipeline"] == {"task2batch": {"config": {"buffer_size": 8}}}
+        assert config["pipeline"] == {"task2job": {"config": {"buffer_size": 8}}}
         assert reef["training_backend_options"] == {
             "lr": "0.000002",
             "use-critic": True,
@@ -60,17 +90,19 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             "hf-checkpoint": "${reef.model_path}",
         }
         assert reef["training_backend"] == "slime"
-        assert config["execution"] == {"training": "ray", "rollout": "ray"}
-        driver, http = validate_services(config, "test")
-        assert driver["command"] == [sys.executable, "-m", "reef.service.training_driver"]
-        assert driver["ready_timeout"] == 45
-        assert interpolate_config(config, driver["env"]["REEF_RAY_NAMESPACE"]) == "custom"
-        assert interpolate_config(config, driver["env"]["REEF_RAY_ACTOR_NAME"]) == "bridge-custom"
-        assert http["depends_on"] == [driver["name"]]
-        assert driver["executor"] == http["executor"] == "uni"
+        assert reef["ray_namespace"] == "custom"
+        assert config["execution"] == {"training": "ray"}
+        assert slime_runtime_config(config)["execution"] == {"execution": {"training": "ray"}}
+        component, http = validate_services(config, "test")
+        assert component["name"] == INFERENCE_COMPONENT_SERVICE
+        assert component["command"][1:3] == ["-m", "reef.inference.remote"]
+        assert http["command"] == [sys.executable, "-m", "reef.service"]
+        assert component["ready_timeout"] == http["ready_timeout"] == 45
+        assert http["depends_on"] == [component["name"]]
+        assert component["executor"] == http["executor"] == "uni"
         assert "inference_url" not in reef
+        assert reef["inference_remote"]["url"] == component["endpoint"]
         assert reef["inference_backend"] == "sglang"
-        assert reef["inference_handler_factory"] is None
 
 
 @pytest.mark.parametrize(
@@ -81,14 +113,13 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"training.ready-timeout": "0"}, "must be positive"),
         ({"training.timeout-s": "0"}, "must be positive"),
         ({"training.options.hf-checkpoint": "different/model"}, "must match inference.model-path"),
-        ({"training.options.ready-file": "/tmp/marker"}, "managed by Reef"),
-        ({"training.options.ready": "/tmp/marker"}, "managed by Reef"),
+        ({"training.colocate": "true"}, "unknown configuration flag --training.colocate"),
         ({"inference.upstream-url": "http://localhost:8000"}, "managed inference"),
-        ({"inference.url": "http://localhost:8000"}, "connection from the bridge"),
+        ({"inference.url": "http://localhost:8000"}, "inference.url is reserved"),
         ({"inference.options.tp-size": "2"}, "managed by Reef"),
         ({"inference.num-gpus": "3", "inference.tensor-parallel-size": "2"}, "must be divisible"),
         ({"inference.num-gpus": "0"}, "must be positive"),
-        ({"inference.backend": "none", "training.colocate": "true"}, "remove training.colocate"),
+        ({"inference.backend": "none", "training.colocate": "true"}, "unknown configuration flag --training.colocate"),
         ({"inference.backend": "none", "inference.num-gpus": "8"}, "remove inference.num-gpus"),
         (
             {"inference.backend": "none", "inference.tensor-parallel-size": "2", "inference.options.dtype": "bf16"},
@@ -115,49 +146,13 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
         ({"execution.training.backend": "uni"}, "requires execution.training.backend: ray"),
         ({"recipe.config.max-stalenes": "2"}, "unknown configuration flag"),
-        ({"inference.backend": "vllm"}, "update-weight-transport: disk"),
         (
-            {
-                "inference.backend": "vllm",
-                "training.options.update-weight-transport": "disk",
-                "training.options.update-weight-mode": "delta",
-            },
-            "update-weight-mode: full",
+            {"inference.backend": "vllm", "inference.num-gpus": "2", "inference.tensor-parallel-size": "1"},
+            "vllm serves one engine",
         ),
-        (
-            {
-                "inference.backend": "vllm",
-                "training.options.update-weight-transport": "disk",
-                "training.options.update-weight-local-checkpoint-dir": "/nvme/checkpoint",
-            },
-            "update-weight-local-checkpoint-dir",
-        ),
-        (
-            {
-                "inference.backend": "vllm",
-                "training.options.update-weight-transport": "disk",
-                "training.options.megatron-lora-rank": "8",
-            },
-            "LoRA",
-        ),
-        (
-            {
-                "inference.backend": "vllm",
-                "training.options.update-weight-transport": "disk",
-                "training.options.check-weight-update-equal": "true",
-            },
-            "weights checker",
-        ),
-        (
-            {
-                "inference.backend": "vllm",
-                "training.options.update-weight-transport": "disk",
-                "inference.num-gpus": "2",
-                "inference.tensor-parallel-size": "1",
-            },
-            "one engine per stack",
-        ),
-        ({"inference.backend": "tinker-engine"}, "sglang, vllm or none"),
+        ({"inference.serving": "trainer"}, "needs a training backend that serves its own releases"),
+        ({"inference.serving": "elsewhere"}, "engines, trainer, none or module:Factory"),
+        ({"inference.backend": "tinker-engine"}, "unknown inference backend 'tinker-engine'"),
     ],
 )
 def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, monkeypatch, capsys, override, match):
@@ -253,7 +248,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
                 RECIPE,
                 "--inference.model-path",
                 "org/model",
-                "--pipeline.task2batch.config.buffer_size",
+                "--pipeline.task2job.config.buffer_size",
                 "8",
                 "--training.options.use-critic",
                 "true",
@@ -265,7 +260,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
     assert downloads == ["org/model"]
     reef = configs[0]["reef"]
     assert reef["model_path"] == "/downloaded/snapshot"
-    assert configs[0]["pipeline"] == {"task2batch": {"config": {"buffer_size": 8}}}
+    assert configs[0]["pipeline"] == {"task2job": {"config": {"buffer_size": 8}}}
     assert interpolate_config(configs[0], reef["training_backend_options"]["hf-checkpoint"]) == reef["model_path"]
     assert not paths[0].exists()
     assert not (tmp_path / "reef.yaml").exists()
@@ -300,11 +295,41 @@ assert config['services'][-1]['name'] == 'reef'
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("external_cluster,driver_fails", [(False, False), (True, False), (False, True)])
-def test_generated_services_share_connection_wait_for_bridge_and_clean_up(
-    tmp_path, monkeypatch, external_cluster, driver_fails
+INFERENCE_SCRIPT = """
+import json, os, socket, sys
+from pathlib import Path
+argv = sys.argv[1:]
+keys = ['RAY_ADDRESS', 'REEF_REMOTE_CONTROL_TOKEN', 'REEF_REMOTE_INFERENCE_TOKEN']
+Path('inference.json').write_text(json.dumps({'argv': argv, 'env': {key: os.environ.get(key) for key in keys}}))
+listener = socket.create_server(('127.0.0.1', int(argv[argv.index('--port') + 1])))
+while True:
+    listener.accept()[0].close()
+"""
+
+HTTP_SCRIPT = """
+import json, os, socket
+from pathlib import Path
+from urllib.parse import urlsplit
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import yaml
+config = yaml.safe_load(Path(os.environ['REEF_CONFIG']).read_text())
+remote = urlsplit(config['reef']['inference_remote']['url'])
+socket.create_connection((remote.hostname, remote.port), timeout=5).close()
+keys = ['RAY_ADDRESS', 'REEF_REMOTE_CONTROL_TOKEN', 'REEF_REMOTE_INFERENCE_TOKEN']
+Path('http.json').write_text(json.dumps({'reef': config['reef'], 'env': {key: os.environ.get(key) for key in keys}}))
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
+"""
+
+
+@pytest.mark.parametrize("external_cluster,inference_fails", [(False, False), (True, False), (False, True)])
+def test_generated_services_share_tokens_and_ray_cluster_and_clean_up(
+    tmp_path, monkeypatch, external_cluster, inference_fails
 ):
-    # Real local workers and readiness probes; only the GPU workloads and Ray lease are stand-ins.
+    # Real local workers and readiness probes; only the engines and the Ray lease are stand-ins.
     released = []
 
     def acquire(address):
@@ -312,58 +337,40 @@ def test_generated_services_share_connection_wait_for_bridge_and_clean_up(
         return SimpleNamespace(address="127.0.0.1:6379", close=lambda: released.append(True))
 
     monkeypatch.setattr(orchestrator, "acquire_ray_runtime", acquire)
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
     raw = training_config()
-    raw["reef"] = {"port": port, "ready-timeout": 15}
-    raw["training"].update({"ray-namespace": "test-namespace", "ray-actor-name": "test-actor"})
+    raw["reef"] = {"port": free_loopback_port(0), "ready-timeout": 15}
+    raw["training"].update({"ray-namespace": "test-namespace", "ready-timeout": 15})
     if external_cluster:
         raw["training"]["ray-address"] = "127.0.0.1:6380"
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    driver, http = config["services"]
-    driver_script = """
-import json, os, time
-from pathlib import Path
-keys = ['RAY_ADDRESS', 'REEF_RAY_NAMESPACE', 'REEF_RAY_ACTOR_NAME']
-Path('driver-env.json').write_text(json.dumps({key: os.environ[key] for key in keys}))
-Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-training-ready')
-time.sleep(120)
-"""
-    http_script = """
-import json, os
-from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import yaml
-assert Path('stack/slime-driver/bridge.ready').read_text() == 'reef-training-ready'
-config = yaml.safe_load(Path(os.environ['REEF_CONFIG']).read_text())
-Path('http-config.json').write_text(json.dumps(config))
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
-"""
-    driver["command"] = [sys.executable, "-c", "raise SystemExit(7)" if driver_fails else driver_script]
-    http["command"] = [sys.executable, "-c", http_script]
-    for service in (driver, http):
+    component, http = config["services"]
+    arguments = component["command"][3:]
+    component["command"] = [sys.executable, "-c", "raise SystemExit(7)" if inference_fails else INFERENCE_SCRIPT]
+    component["command"].extend(arguments)
+    http["command"] = [sys.executable, "-c", HTTP_SCRIPT]
+    for service in (component, http):
         service["cwd"] = str(tmp_path)
     run_dir = tmp_path / "stack"
     run_dir.mkdir()
     stack = _Stack(config, validate_services(config, "test.yaml"), run_dir, 15, tmp_path / "serve.yaml")
     try:
-        if driver_fails:
-            with pytest.raises(RuntimeError, match=r"slime-driver.*exited"):
+        if inference_fails:
+            with pytest.raises(RuntimeError, match=r"inference.*exited"):
                 stack.start()
-            assert not (tmp_path / "http-config.json").exists()
+            assert not (tmp_path / "http.json").exists()
         else:
             stack.start()
-            environment = json.loads((tmp_path / "driver-env.json").read_text())
-            child = json.loads((tmp_path / "http-config.json").read_text())["reef"]
-            assert environment["RAY_ADDRESS"] == child["ray_address"]
-            assert environment["REEF_RAY_NAMESPACE"] == child["ray_namespace"] == "test-namespace"
-            assert environment["REEF_RAY_ACTOR_NAME"] == child["ray_actor_name"] == "test-actor"
-            assert child["ray_address"] == ("127.0.0.1:6380" if external_cluster else "127.0.0.1:6379")
+            started = json.loads((tmp_path / "inference.json").read_text())
+            child = json.loads((tmp_path / "http.json").read_text())
+            cluster = "127.0.0.1:6380" if external_cluster else "127.0.0.1:6379"
+            assert started["env"]["RAY_ADDRESS"] == child["env"]["RAY_ADDRESS"] == child["reef"]["ray_address"]
+            assert child["reef"]["ray_address"] == cluster
+            assert child["reef"]["ray_namespace"] == "test-namespace"
+            # An external cluster is named to the component; a managed one reaches it through RAY_ADDRESS.
+            assert ("--ray-address" in started["argv"]) is external_cluster
+            assert started["env"][CONTROL_TOKEN_ENV] == child["env"][CONTROL_TOKEN_ENV]
+            assert started["env"][INFERENCE_TOKEN_ENV] == child["env"][INFERENCE_TOKEN_ENV]
+            assert started["env"][CONTROL_TOKEN_ENV] != started["env"][INFERENCE_TOKEN_ENV]
     finally:
         stack.shutdown(grace=1)
     assert released == ([] if external_cluster else [True])
@@ -373,10 +380,109 @@ HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
                 os.kill(pid, 0)
 
 
-@pytest.mark.parametrize("mode", [{}, {"colocate": True}, {"options": {"megatron-lora-rank": 8}}])
-def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_path, mode):
-    from reef.train.slime_backend.launch import driver_arguments
+def test_local_inference_component_listens_on_loopback_and_records_its_address(tmp_path):
+    config = {"reef": {}, "run_dir": str(tmp_path / "run")}
+    settings = ServiceConfig(
+        recipe=RECIPE, port=8900, inference_backend="vllm", ray_address="10.0.0.1:6379", training_ready_timeout=77
+    )
+    service = local_inference_component(config, settings)
+    port = int(service["command"][service["command"].index("--port") + 1])
+    assert service["name"] == INFERENCE_COMPONENT_SERVICE
+    assert service["endpoint"] == config["reef"]["inference_remote"]["url"] == f"http://127.0.0.1:{port}"
+    assert port != settings.port
+    assert service["command"][1:] == [
+        "-m",
+        "reef.inference.remote",
+        "--engine",
+        "vllm",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--work-dir",
+        str(tmp_path / "run" / INFERENCE_COMPONENT_SERVICE),
+        "--ray-address",
+        "10.0.0.1:6379",
+    ]
+    assert service["ready"][-1] == str(port)
+    assert service["ready_timeout"] == 77
+    assert config["reef"]["inference_remote"]["control_token_env"] == CONTROL_TOKEN_ENV
+    assert os.environ[CONTROL_TOKEN_ENV] and os.environ[INFERENCE_TOKEN_ENV]
+    assert os.environ[CONTROL_TOKEN_ENV] != os.environ[INFERENCE_TOKEN_ENV]
 
+
+def test_local_inference_component_keeps_operator_tokens_and_defaults_to_sglang(tmp_path, monkeypatch):
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "control")
+    monkeypatch.setenv(INFERENCE_TOKEN_ENV, "inference")
+    config = {"reef": {}}
+    service = local_inference_component(config, ServiceConfig(recipe=RECIPE))
+    command = service["command"]
+    assert command[command.index("--engine") + 1] == "sglang"
+    assert command[command.index("--work-dir") + 1] == str(Path(".reef/run") / INFERENCE_COMPONENT_SERVICE)
+    assert "--ray-address" not in command
+    assert (os.environ[CONTROL_TOKEN_ENV], os.environ[INFERENCE_TOKEN_ENV]) == ("control", "inference")
+
+
+def test_local_inference_component_refuses_one_token_for_control_and_inference(monkeypatch):
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "shared")
+    monkeypatch.setenv(INFERENCE_TOKEN_ENV, "shared")
+    with pytest.raises(DeployConfigError, match="must differ"):
+        local_inference_component({"reef": {}}, ServiceConfig(recipe=RECIPE))
+
+
+def test_free_loopback_port_skips_the_reserved_port(monkeypatch):
+    class Listener:
+        ports = iter((8900, 41000))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return None
+
+        def bind(self, address):
+            assert address == ("127.0.0.1", 0)
+
+        def getsockname(self):
+            return ("127.0.0.1", next(self.ports))
+
+    assert free_loopback_port(8900) != 8900
+    monkeypatch.setattr(inference_deploy.socket, "socket", Listener)
+    assert free_loopback_port(8900) == 41000
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"inference": {"model-path": "/models/demo", "remote": {"url": "https://gpu-host.example"}}},
+        {"inference": {"model-path": "/models/demo", "backend": "none"}},
+    ],
+    ids=["remote-component", "no-inference"],
+)
+def test_no_local_inference_component_without_local_engines(tmp_path, change):
+    raw = {**training_config(), **change}
+    if "backend" in change["inference"]:
+        raw["recipe"]["implementation"] = "reef.recipe.sft.recipe:SFTRecipe"
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    assert [service["name"] for service in config["services"]] == ["reef"]
+    assert not config["services"][0].get("depends_on")
+
+
+def test_teacher_endpoint_reaches_the_http_service_environment(tmp_path):
+    config, _ = resolve_deployment_config(
+        training_config(),
+        {"teacher.model-path": "/models/teacher", "teacher.num-gpus": "1", "teacher.port": "30100"},
+        tmp_path / "serve.yaml",
+    )
+    component, teacher, http = config["services"]
+    assert (component["name"], teacher["name"]) == (INFERENCE_COMPONENT_SERVICE, "distill-teacher")
+    assert http["depends_on"] == [INFERENCE_COMPONENT_SERVICE, "distill-teacher"]
+    assert http["env"] == {"REEF_DISTILL_TEACHER_URL": "${endpoints.distill-teacher}"}
+    assert not component.get("env")
+
+
+@pytest.mark.parametrize("mode", [{}, {"options": {"megatron-lora-rank": 8}}], ids=["full", "lora"])
+def test_inference_cli_over_yaml_reaches_the_serving_engines_and_not_slime(tmp_path, mode):
     raw = training_config()
     raw["inference"].update(
         {
@@ -386,8 +492,6 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
         }
     )
     raw["training"]["options"].update(mode.get("options", {}))
-    if mode.get("colocate"):
-        raw["training"]["colocate"] = True
     overrides = {
         "inference.num-gpus": "4",
         "inference.tensor-parallel-size": "2",
@@ -397,8 +501,6 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
     config, _ = resolve_deployment_config(raw, overrides, tmp_path / "serve.yaml")
     equivalent = training_config()
     equivalent["training"]["options"].update(mode.get("options", {}))
-    if mode.get("colocate"):
-        equivalent["training"]["colocate"] = True
     equivalent["inference"].update(
         {
             "num-gpus": 4,
@@ -407,27 +509,26 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
         }
     )
     file_only, _ = resolve_deployment_config(equivalent, None, tmp_path / "other.yaml")
-    assert driver_arguments(config) == driver_arguments(file_only)
-    argv = driver_arguments(config)
-    assert "--rollout-num-gpus=4" in argv
-    assert "--rollout-num-gpus-per-engine=2" in argv
-    assert "--sglang-mem-fraction-static=0.6" in argv
-    assert "--sglang-router-port=30000" in argv
-    assert "--sglang-disable-cuda-graph" not in argv
+    argv = slime_argv(config)
+    assert argv == slime_argv(file_only)
+    # Slime starts no engine and receives no engine flag.
+    assert "--rollout-num-gpus=0" in argv
+    assert not [argument for argument in argv if argument.startswith(("--sglang-", "--rollout-num-gpus-per-engine"))]
     assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
     assert raw["inference"]["num-gpus"] == 2
-    colocated = {"--colocate", "--offload-rollout", "--offload-train"}
-    assert colocated <= set(argv) if mode.get("colocate") else not colocated & set(argv)
-    assert config["reef"]["colocate"] is bool(mode.get("colocate"))
-    assert "colocate" not in config["reef"]["training_backend_options"]
+    assert not {"--colocate", "--offload-rollout", "--offload-train"} & set(argv)
+    serving = serving_config(config)
+    # Each resolution starts its own local component, on its own port.
+    assert {**serving, "remote": None} == {**serving_config(file_only), "remote": None}
+    assert (serving["num_gpus"], serving["tensor_parallel_size"]) == (4, 2)
+    assert serving["options"] == {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False}
 
 
-def test_native_placement_flags_are_rejected_in_training_options(tmp_path):
+@pytest.mark.parametrize("option", ["colocate", "offload-rollout"])
+def test_native_placement_flags_are_rejected_in_training_options(tmp_path, option):
     raw = training_config()
-    raw["training"]["options"]["colocate"] = True
-    with pytest.raises(
-        DeployConfigError, match=r"training\.options\.colocate places the model; use training\.colocate"
-    ):
+    raw["training"]["options"][option] = True
+    with pytest.raises(DeployConfigError, match=f"training.options.{option} shares GPUs between training and serving"):
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
@@ -443,9 +544,6 @@ def test_slime_deployment_refuses_a_global_batch_size_that_is_not_a_positive_int
 
 
 def test_slime_runtime_config_carries_the_resolved_global_batch_size(tmp_path):
-    from reef.service.deploy.service_config import service_config_from_mapping
-    from reef.service.deploy.training import training_deployment_for
-
     raw = training_config()
     raw["training"]["config"] = {"global_batch_size": 8}
     # Slime may derive the global batch size from --num-steps-per-rollout; Reef still reads the explicit value.
@@ -453,75 +551,43 @@ def test_slime_runtime_config_carries_the_resolved_global_batch_size(tmp_path):
         {"global-batch-size": "${training.config.global_batch_size}", "num-steps-per-rollout": 1}
     )
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    settings = service_config_from_mapping(config)
-    runtime = training_deployment_for("slime").runtime_config({**settings.__dict__, "ray_address": "auto"})
-    assert runtime["batch_size"] == 8
+    assert global_batch_size(slime_runtime_config(config)["settings"]["training_backend_options"]) == 8
+    assert "--global-batch-size=8" in slime_argv(config)
 
 
 def test_inference_capacity_defaults_to_one_tensor_parallel_engine(tmp_path):
-    from reef.train.slime_backend.launch import driver_arguments
-
     config, _ = resolve_deployment_config(training_config(), {"inference.tensor-parallel-size": "4"}, tmp_path / "c")
     assert config["reef"]["inference_num_gpus"] == 4
-    assert "--rollout-num-gpus=4" in driver_arguments(config)
+    assert (serving_config(config)["num_gpus"], serving_config(config)["tensor_parallel_size"]) == (4, 4)
 
 
-def test_driver_arguments_expand_the_model_path_reference(tmp_path):
+def test_slime_arguments_expand_the_model_path_reference(tmp_path):
     # The deploy layer binds hf-checkpoint to ``${reef.model_path}`` so the model
-    # resolves once; the driver must receive the resolved path, not the reference.
-    from reef.train.slime_backend.launch import driver_arguments
-
+    # resolves once; Slime must receive the resolved path, not the reference.
     config, _ = resolve_deployment_config(training_config(), None, tmp_path / "serve.yaml")
 
     assert config["reef"]["training_backend_options"]["hf-checkpoint"] == "${reef.model_path}"
-    argv = driver_arguments(config)
+    argv = slime_argv(config)
     assert f"--hf-checkpoint={config['reef']['model_path']}" in argv
     assert not any("${" in argument for argument in argv)
 
 
-def test_legacy_native_driver_arguments_remain_available():
-    from reef.train.slime_backend.launch import driver_arguments
-
-    config = {
-        "reef": {
-            "training_backend_options": {
-                "rollout-num-gpus": 3,
-                "sglang-context-length": 1024,
-                "rollout-external": True,
-            }
-        }
-    }
-    assert driver_arguments(config) == ["--rollout-num-gpus=3", "--sglang-context-length=1024", "--rollout-external"]
-
-
-def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags(tmp_path):
-    from reef.train.slime_backend.launch import driver_arguments
-
-    overrides = {
-        "recipe.implementation": RECIPE,
-        "inference.model-path": "/models/demo",
-        "inference.backend": "vllm",
-        "inference.options.max-model-len": "4096",
-        "training.options.update-weight-transport": "disk",
-        "training.options.update-weight-disk-dir": "/shared/weights",
-    }
+def test_vllm_serving_engines_get_their_options_and_slime_gets_no_engine_flags(tmp_path):
+    overrides = {"inference.backend": "vllm", "inference.options.max-model-len": "4096"}
     config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
     reef = config["reef"]
     assert reef["inference_backend"] == "vllm"
     assert reef["inference_options"] == {"max-model-len": "4096"}
-    argv = driver_arguments(config)
-    assert "--update-weight-transport=disk" in argv
-    assert "--rollout-num-gpus=1" in argv
-    assert "--rollout-num-gpus-per-engine=1" in argv
+    component = config["services"][0]
+    assert component["command"][component["command"].index("--engine") + 1] == "vllm"
+    argv = slime_argv(config)
+    assert "--rollout-num-gpus=0" in argv
     assert not any(argument.startswith("--sglang-") for argument in argv)
+    serving = serving_config(config)
+    assert (serving["engine"], serving["options"]) == ("vllm", {"max-model-len": "4096"})
 
 
 def test_a_deployment_without_an_inference_engine_trains_on_every_gpu(tmp_path):
-    from dataclasses import asdict
-
-    from reef.service.deploy.service_config import service_config_from_mapping
-    from reef.train.slime_backend.launch import SlimeDeployment, driver_arguments
-
     overrides = {
         "recipe.implementation": "reef.recipe.sft.recipe:SFTRecipe",
         "inference.model-path": "/models/demo",
@@ -531,17 +597,16 @@ def test_a_deployment_without_an_inference_engine_trains_on_every_gpu(tmp_path):
     }
     config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
     reef = config["reef"]
-    assert (reef["inference_backend"], reef["inference_num_gpus"], reef["colocate"]) == ("none", 0, False)
-    assert reef["inference_options"] == {}
-    argv = driver_arguments(config)
+    assert reef["inference_backend"] == "none"
+    assert not reef.get("inference_num_gpus") and not reef.get("inference_options")
+    argv = slime_argv(config)
     assert "--rollout-num-gpus=0" in argv
     assert "--actor-num-gpus-per-node=8" in argv
     assert not any(
         argument.startswith(("--colocate", "--offload", "--sglang-", "--router-", "--rollout-num-gpus-per-engine"))
         for argument in argv
     )
-    settings = asdict(service_config_from_mapping({**config, "reef": {**reef, "ray_address": "auto"}}))
-    assert SlimeDeployment().runtime_config(settings)["inference_runtime"] == "none"
+    assert serving_config(config, None)["type"] == "none"
 
 
 def test_a_deployment_without_an_inference_engine_refuses_a_composite_recipe(tmp_path):
@@ -561,11 +626,8 @@ def test_a_deployment_without_an_inference_engine_refuses_a_composite_recipe(tmp
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
-def test_slime_remote_engines_take_weight_files_without_colocation(tmp_path):
-    from reef.runtime.deployment import RuntimeConfigError
-    from reef.service.deploy.service_config import service_config_from_mapping
-    from reef.service.deploy.training import local_model_required, training_deployment_for
-    from reef.train.slime_backend.runtime import SlimeRuntimeFactory
+def test_slime_serves_on_a_remote_inference_component(tmp_path):
+    from reef.service.deploy.training import local_model_required
 
     raw = training_config()
     raw["inference"]["remote"] = {"url": "https://gpu-host.example"}
@@ -573,28 +635,16 @@ def test_slime_remote_engines_take_weight_files_without_colocation(tmp_path):
     # Megatron loads the model here; the component loads it as the file names it.
     assert local_model_required(config)
     assert config["reef"]["inference_remote"]["model_path"] == "/models/demo"
-    settings = service_config_from_mapping(config)
-    runtime = training_deployment_for("slime").runtime_config({**settings.__dict__, "ray_address": "ray://head:10001"})
-    assert runtime["inference_runtime"] == "remote"
-    assert runtime["inference_runtime_options"] == {
-        "engine": "sglang",
-        "inference_token_env": "REEF_REMOTE_INFERENCE_TOKEN",
-    }
-    with pytest.raises(RuntimeConfigError, match="inference_runtime_options cannot set inference_url"):
-        SlimeRuntimeFactory().parse_config({**runtime, "inference_runtime_options": {"inference_url": "x"}}, {})
+    serving = serving_config(config)
+    assert serving["remote"]["url"] == "https://gpu-host.example"
+    assert serving["remote"]["inference_token_env"] == INFERENCE_TOKEN_ENV
+    assert (serving["engine"], serving["num_gpus"]) == ("sglang", 1)
     lora = training_config()
     lora["inference"]["remote"] = {"url": "https://gpu-host.example"}
     lora["training"]["options"] = {**lora["training"]["options"], "megatron-lora-rank": 8}
     resolve_deployment_config(lora, None, tmp_path / "serve.yaml")
-    for change, match in (
-        ({"training": {**raw["training"], "colocate": True}}, "training.colocate"),
-        (
-            {"training": lora["training"], "inference": {**lora["inference"], "backend": "vllm"}},
-            "vllm does not publish LoRA",
-        ),
-    ):
-        refused = training_config()
-        refused["inference"]["remote"] = {"url": "https://gpu-host.example"}
-        refused.update(change)
-        with pytest.raises(DeployConfigError, match=match):
-            resolve_deployment_config(refused, None, tmp_path / "serve.yaml")
+    refused = training_config()
+    refused["inference"]["remote"] = {"url": "https://gpu-host.example"}
+    refused["training"] = {**raw["training"], "colocate": True}
+    with pytest.raises(DeployConfigError, match=r"unknown config fields: training\.colocate"):
+        resolve_deployment_config(refused, None, tmp_path / "serve.yaml")

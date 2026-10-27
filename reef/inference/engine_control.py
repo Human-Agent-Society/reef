@@ -1,7 +1,7 @@
 """Shared control of the engine groups that Reef launches on Ray.
 
 SGLang and vLLM use the same control vocabulary. Each role here has one base
-class: the coordinator backend, the inference service, the control actor and
+class: the inference backend, the inference service, the control actor and
 its default serving executor. The engine subpackages subclass these bases and
 set the differences as class attributes. This module imports no engine library.
 """
@@ -20,7 +20,7 @@ from reef.runtime.executor.config import ExecutorSettings, select_executor
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceMemoryHandoffBackend, WeightFiles
+from reef.runtime.interfaces import InferenceBackend, WeightFiles
 
 #: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -30,8 +30,6 @@ class EngineConfig:
     """Settings that the shared control reads from every engine configuration."""
 
     env_vars: dict[str, str]
-    offload: bool
-    check_weights: bool
     executor: str | type[Executor]
     executor_options: dict[str, Any]
 
@@ -39,12 +37,12 @@ class EngineConfig:
 ConfigT = TypeVar("ConfigT", bound=EngineConfig)
 
 
-class EngineInferenceBackend(InferenceMemoryHandoffBackend):
-    """Borrow a control connection without owning publication or engine lifetime.
+class EngineInferenceBackend(InferenceBackend):
+    """Borrow a control connection without owning engine lifetime.
 
-    The coordinator decides operation order and whether a loaded revision may
-    serve requests. This adapter translates individual operations to the
-    engine control vocabulary and validates receiver results.
+    The inference component decides operation order and whether a loaded
+    revision may serve requests. This adapter translates individual operations
+    to the engine control vocabulary and validates receiver results.
     """
 
     #: The engine name in error messages.
@@ -72,7 +70,7 @@ class EngineInferenceBackend(InferenceMemoryHandoffBackend):
         return tuple(values)
 
     def initialize_version(self, runtime_load_id: str) -> None:
-        """Stamp Reef's initial version while the coordinator keeps serving paused."""
+        """Stamp Reef's initial version while serving stays paused."""
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
             raise ValueError("initial runtime load ID must be a nonempty string")
         self._engines().collective_rpc("set_runtime_load_id", args=(runtime_load_id,), timeout=CONTROL_TIMEOUT_S)
@@ -83,20 +81,14 @@ class EngineInferenceBackend(InferenceMemoryHandoffBackend):
     def resume(self) -> None:
         self._call("continue_generation_after_update")
 
-    def recover(self) -> None:
-        self._call("recover_updatable_engines")
+    def recover(self) -> int:
+        replaced = self._call("recover_updatable_engines")
+        if isinstance(replaced, bool) or not isinstance(replaced, int) or replaced < 0:
+            raise RuntimeError(f"{self.engine_name} inference returned an invalid replaced-engine count: {replaced!r}")
+        return replaced
 
     def abort(self) -> None:
         self._call("terminate_updatable_engines")
-
-    def offload(self, tags: tuple[str, ...] | None) -> None:
-        self._call("offload", tags)
-
-    def onload_weights(self) -> None:
-        self._call("onload_weights")
-
-    def onload_kv(self) -> None:
-        self._call("onload_kv")
 
     def load_weight_files(self, files: WeightFiles, *, adapter_name: str | None, runtime_load_id: str | None) -> None:
         if (adapter_name is None) != (files.layout == "full"):
@@ -117,8 +109,7 @@ class EngineInferenceBackend(InferenceMemoryHandoffBackend):
                 raise RuntimeError(f"engine kept adapter {name!r}: {result!r}")
 
     def _engines(self) -> RayExecutor:
-        engines, *_ = self._call("get_updatable_engines_and_lock")
-        return RayExecutor.from_workers(engines)
+        return RayExecutor.from_workers(self._call("updatable_engines"))
 
     def _call(self, method: str, *args: Any) -> Any:
         return self._executor.rpc(0, method, args=args, timeout=CONTROL_TIMEOUT_S)
@@ -172,12 +163,8 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
         return connection.control
 
     def backend(self, connection: InferenceConnection) -> EngineInferenceBackend:
-        """Adapt a compatible borrowed connection for Reef's coordinator."""
+        """Adapt a compatible borrowed connection for the serving runtime that loads weights into the engines."""
         return self.backend_type(self._control(connection))
-
-    def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
-        """Fence engines and release shared memory before trainer allocation."""
-        self._control(connection).rpc(0, "prepare_training_connection", timeout=CONTROL_TIMEOUT_S)
 
     def _running(self) -> RayExecutor:
         if self._inference is None or self._closed:
@@ -207,8 +194,7 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
 class EngineControl(Generic[ConfigT]):
     """Own the selected serving executor inside Reef's inference control actor.
 
-    Every method forwards one control operation to the serving worker; only
-    :meth:`prepare_training_connection` adds policy of its own.
+    Every method forwards one control operation to the serving worker.
     """
 
     def __init__(self, config: ConfigT, pg: Any) -> None:
@@ -218,8 +204,6 @@ class EngineControl(Generic[ConfigT]):
                 options={**config.executor_options, "config": config, "pg": pg},
             )
         )
-        self._config = config
-        self._prepared = False
         self._closed = False
 
     def _call(self, method: str, *args: Any) -> Any:
@@ -249,40 +233,11 @@ class EngineControl(Generic[ConfigT]):
     def terminate_updatable_engines(self) -> Any:
         return self._call("terminate_updatable_engines")
 
-    def get_updatable_engines_and_lock(self) -> Any:
-        return self._call("get_updatable_engines_and_lock")
-
-    def offload(self, tags: Sequence[str] | None = None) -> Any:
-        return self._call("offload", tags)
-
-    def onload_weights(self) -> Any:
-        return self._call("onload_weights")
-
-    def onload_kv(self) -> Any:
-        return self._call("onload_kv")
-
-    def prepare_training_connection(self) -> None:
-        """Fence serving and release shared memory before training workers exist."""
-        self._call("prepare_training_connection")
-        if not self._prepared and self._config.check_weights:
-            self.check_weights("snapshot")
-            self.check_weights("reset_tensors")
-        if self._config.offload:
-            # Every trainer attachment needs the whole allocation, even when
-            # later LoRA steps keep the frozen base resident. The engine skips
-            # regions already released by an earlier attachment attempt.
-            self.offload()
-        self._prepared = True
+    def updatable_engines(self) -> Any:
+        return self._call("updatable_engines")
 
     def recover_updatable_engines(self) -> Any:
         return self._call("recover_updatable_engines")
-
-    def clear_updatable_num_new_engines(self) -> Any:
-        return self._call("clear_updatable_num_new_engines")
-
-    def check_weights(self, action: str) -> Any:
-        """Run one step of the optional weight check; only engines that offer it enable ``check_weights``."""
-        return self._call("check_weights", action)
 
     def shutdown(self) -> None:
         if self._closed:

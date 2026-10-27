@@ -4,7 +4,7 @@ Guidance-TTT: train the guide, keep the executor frozen
 Guidance-TTT trains a small model to propose improvements to a candidate
 program. A frozen execution model turns each proposal into code. A task judge
 evaluates that code, and Reef uses the score to update the guidance model.
-Only the guidance response contributes tokens to the training batch.
+Only the guidance response contributes tokens to the training job's data.
 
 The example includes Polyomino Packing, Lasso Path, AHC058, and TriMul.
 These tasks cover packing, numerical solvers, planning, and GPU kernels.
@@ -126,7 +126,9 @@ Choose the frozen executor:
 For a bounded smoke run, set ``GUIDANCE_EXECUTOR_MAX_TOKENS=16384``.
 Without this setting, the executor provider selects its default output limit.
 
-Start the example from a GPU allocation:
+Start the example from an allocation of four GPUs: two train the LoRA actor
+and two serve the guidance model. ``run.sh`` selects GPUs ``0,1,2,3`` unless
+``CUDA_VISIBLE_DEVICES`` is set.
 
 .. code-block:: shell
 
@@ -159,6 +161,9 @@ file, including a file selected through ``GUIDANCE_CONFIG``.
    * - ``pipeline.record2record.config.rollouts_per_group``
      - 4
      - Guidance samples per parent
+   * - ``pipeline.task2job.config.job_samples``
+     - 8
+     - Must equal groups times rollouts
    * - ``training.options.global-batch-size``
      - 8
      - Must equal groups times rollouts
@@ -178,7 +183,7 @@ file, including a file selected through ``GUIDANCE_CONFIG``.
      - ``work/<task>``
      - Absolute root for records, checkpoints, and the archive
 
-For the paper budget, set the grid to 8 by 16, the batch size to 128,
+For the paper budget, set the grid to 8 by 16, ``job_samples`` and the batch size to 128,
 and the update count to 30. AHC058 and TriMul use Qwen3-14B in the main results.
 Set ``GUIDANCE_MODEL=Qwen/Qwen3-14B`` for those configurations. Model size,
 context length, and concurrency determine the required GPU memory.
@@ -288,9 +293,10 @@ Inspect progress and resume
 ---------------------------
 
 Each task writes ``reef.log``, ``guidance-run/``, ``checkpoints/``,
-``agent-record/``, and ``lab/`` under its state directory. The controller waits
-for the training transaction and adapter publication before it commits the
-matching archive.
+``agent-record/``, and ``lab/`` under its state directory. After each step the
+controller polls ``GET /reef/status`` until the step's training job has ended,
+then reads the job's checkpoint metrics from the scenario's commits. It
+commits the matching archive only after these checks pass.
 
 Restart with the same task, model, executor, grid, configuration, and state
 directory. The controller restores ``committed-library.json`` and checks the
@@ -309,7 +315,7 @@ project, optional entity, and credentials through the normal W&B configuration.
 `Experiment tracking <../operate.rst>`__ describes Reef's tracking behavior.
 
 The recipe records ``tttd/reward_mean``, ``tttd/reward_max``, and grid metrics.
-These rewards describe the training batch. Use the committed archive's raw
+These rewards describe the training job's data. Use the committed archive's raw
 score for the best discovered program, especially when the reward is normalized.
 
 Add another task

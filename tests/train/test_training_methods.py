@@ -1,30 +1,35 @@
-"""The per-job training method: learning-rate schedules, their progress, and the recipe's selection."""
+"""The per-job training method: learning-rate schedules, their progress, and the recipe's job plan."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
 from typing import Any
 
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
-from tests.support.runtime_stubs import StubTrainingRuntime
+from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
+from reef.core.job_data import JobOutcome
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
-    PreparedTrainingStep,
     TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
-from reef.runtime.scheduler import training_job_id
+from reef.runtime.jobs import job_id_for
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
-from reef.train.types import TrainingBatch
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlan, JobPlanContext, JobRequest
+from reef.train.pipeline import PipelineConfig
+from reef.train.types import JobData
 
 SFT = LearningRateSchedule("sft", 2e-5, warmup_steps=4, decay_style="cosine", decay_steps=8, min_learning_rate=2e-6)
 RL = LearningRateSchedule("rl", 1e-6, warmup_steps=2)
+#: The staged recipe's stages with jobs of one sample.
+ONE_SAMPLE_JOBS = PipelineConfig.from_setting(
+    {"task2job": {"config": {"job_samples": 1}}}, spec=StagedRecipe.pipeline_spec(), environ={}
+)
 
 
 @pytest.mark.unit
@@ -87,10 +92,10 @@ def test_a_job_continues_the_active_schedule_and_starts_another_at_step_zero() -
 def test_the_method_takes_part_in_the_job_identity() -> None:
     method = TrainingMethod("sft", SFT)
     assert TrainingMethod.from_dict(method.to_dict()) == method
-    payload = {"samples": [["a", [1, 2], [1], [-0.1], 1.0]], "rollout_ids": [0], "loss": "sft"}
+    data = {"scenario": "math", "items": [["a", [1, 2], [1], [-0.1], 1.0]]}
 
     def identity(value: TrainingMethod) -> str:
-        return training_job_id({**payload, "method": value.to_dict(), "scenario_step": 3})
+        return job_id_for("stub", None, data, {"method": value.to_dict()})
 
     # A retry selects the same method: the same job.
     assert identity(TrainingMethod("sft", SFT)) == identity(method)
@@ -104,108 +109,67 @@ def test_the_method_takes_part_in_the_job_identity() -> None:
         TrainingMethod("sft", SFT.to_dict())  # type: ignore[arg-type]
 
 
-class RecordingRuntime(StubTrainingRuntime):
-    """Record the method of every prepared job and skip it, advancing the objective's step counter."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.prepared: list[tuple[TrainingMethod, dict[str, Any]]] = []
-
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
-        *,
-        parent_runtime_load_id: str | None = None,
-        scenario: str | None = None,
-    ) -> PreparedTrainingStep:
-        self.prepared.append((method, dict(algorithm_state)))
-        return PreparedTrainingStep("skip", {"steps": algorithm_state.get("steps", 0) + 1}, {"steps": 1})
-
-
-class SupervisedThenPolicy(TrainingMethodSelector):
+class SupervisedThenPolicy(JobPlan):
     """Supervised warmup for the first jobs, then policy training with a fresh warmup and lower rate."""
 
-    def __init__(self, supervised_steps: int) -> None:
-        self.supervised_steps = supervised_steps
+    def __init__(self, supervised_jobs: int) -> None:
+        self.supervised_jobs = supervised_jobs
 
-    def select(self, batch: TrainingBatch, algorithm_state: Mapping[str, Any]) -> TrainingMethod:
-        if algorithm_state.get("steps", 0) < self.supervised_steps:
-            return TrainingMethod("sft", SFT)
-        return TrainingMethod("rl-objective", RL)
-
-
-@pytest.mark.unit
-def test_the_backend_selects_every_jobs_method_from_the_committed_state() -> None:
-    runtime = RecordingRuntime()
-    backend = RuntimeCandidateBackend(
-        runtime, SupervisedThenPolicy(supervised_steps=2), StepScheduling(), inference_runtime=runtime.inference
-    )
-    state: Mapping[str, Any] = {}
-    for step in range(4):
-        prepared = backend.prepare_step(TrainingBatch(f"batch-{step}"), state, step)
-        assert prepared.outcome == "skip"
-        state = prepared.state
-    assert [method for method, _ in runtime.prepared] == [
-        TrainingMethod("sft", SFT),
-        TrainingMethod("sft", SFT),
-        TrainingMethod("rl-objective", RL),
-        TrainingMethod("rl-objective", RL),
-    ]
-    # The selected method is logged with the job's metrics.
-    assert prepared.metrics["training_method"] == TrainingMethod("rl-objective", RL).to_dict()
-    assert backend.experiment_config()["training_method_selector"].endswith("SupervisedThenPolicy")
-
-    # A retry prepares the kept batch against the same committed state and selects the same method.
-    retry = backend.prepare_step(TrainingBatch("batch-1"), {"steps": 1}, 1)
-    assert runtime.prepared[-1][0] == TrainingMethod("sft", SFT)
-    assert retry.metrics["training_method"] == TrainingMethod("sft", SFT).to_dict()
+    def next_job(self, context: JobPlanContext) -> JobRequest:
+        if context.finished_jobs < self.supervised_jobs:
+            return JobRequest({"method": TrainingMethod("sft", SFT).to_dict()})
+        return JobRequest({"method": TrainingMethod("rl-objective", RL).to_dict()})
 
 
-@pytest.mark.unit
-def test_the_backend_refuses_a_selector_that_returns_no_method() -> None:
-    class Broken(TrainingMethodSelector):
-        def select(self, batch: TrainingBatch, algorithm_state: Mapping[str, Any]) -> TrainingMethod:
-            return "sft"  # type: ignore[return-value]
-
-    runtime = RecordingRuntime()
-    with pytest.raises(TypeError, match="TrainingMethodSelector"):
-        RuntimeCandidateBackend(runtime, "sft", StepScheduling(), inference_runtime=runtime.inference)  # type: ignore[arg-type]
-    backend = RuntimeCandidateBackend(runtime, Broken(), StepScheduling(), inference_runtime=runtime.inference)
-    with pytest.raises(TypeError, match=r"Broken\.select must return a TrainingMethod"):
-        backend.prepare_step(TrainingBatch("batch"), {}, 0)
-    assert runtime.prepared == []
+def batch(name: str) -> JobData:
+    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
 
 
 @pytest.mark.unit
 def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> None:
-    runtime = RecordingRuntime()
-    recipe = StagedRecipe(training_runtime=runtime, runtime=runtime.inference)
-    selector = recipe.training_method_selector()
-    assert isinstance(selector, FixedTrainingMethodSelector)
-    assert selector.select(TrainingBatch("batch"), {"steps": 40}) == TrainingMethod("sft")
+    recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=ONE_SAMPLE_JOBS)
+    plan = recipe.job_plan()
+    assert isinstance(plan, FixedJobPlan)
+    assert plan.request.parameters["method"] == TrainingMethod("sft").to_dict()
+    assert "learning_rate_schedule" not in plan.experiment_config()
     trainer = recipe.build("scenario", SQLiteRecordStore())
-    backend = trainer.candidate_backend
-    assert isinstance(backend, RuntimeCandidateBackend)
-    assert backend.experiment_config()["objective"] == "sft"
-    assert "learning_rate_schedule" not in backend.experiment_config()
+    assert trainer.job_loop is not None
+    assert (
+        trainer.job_loop.plan.next_job(JobPlanContext(batch("b"), 40, JobOutcome("j", "stub", "finished")))
+        == plan.request
+    )
 
 
 @pytest.mark.unit
-def test_a_recipe_selector_reaches_the_runtime_through_the_default_build() -> None:
+def test_a_recipe_job_plan_reaches_the_component_through_the_default_build() -> None:
     class SwitchingRecipe(StagedRecipe):
-        def training_method_selector(self) -> TrainingMethodSelector:
-            return SupervisedThenPolicy(supervised_steps=1)
+        def job_plan(self) -> JobPlan:
+            return SupervisedThenPolicy(supervised_jobs=1)
 
-    runtime = RecordingRuntime()
-    trainer = SwitchingRecipe(training_runtime=runtime, runtime=runtime.inference).build(
+    component = StubTrainingComponent()
+    trainer = SwitchingRecipe(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS).build(
         "scenario", SQLiteRecordStore()
     )
-    backend = trainer.candidate_backend
-    assert isinstance(backend, RuntimeCandidateBackend)
-    backend.prepare_step(TrainingBatch("first"), {}, 0)
-    backend.prepare_step(TrainingBatch("second"), {"steps": 1}, 1)
-    assert [method.objective for method, _ in runtime.prepared] == ["sft", "rl-objective"]
+    loop = trainer.job_loop
+    assert loop is not None and isinstance(loop.plan, SupervisedThenPolicy)
+    loop.submit(JobLoopState(), batch("first"))
+    loop.submit(JobLoopState(finished_jobs=1, last_job=JobOutcome("j", "stub", "finished")), batch("second"))
+    assert [TrainingMethod.from_dict(job.parameters["method"]) for job in component.submitted] == [
+        TrainingMethod("sft", SFT),
+        TrainingMethod("rl-objective", RL),
+    ]
+
+
+@pytest.mark.unit
+def test_the_job_loop_refuses_a_plan_that_returns_no_job_request() -> None:
+    class Broken(JobPlan):
+        def next_job(self, context: JobPlanContext) -> JobRequest:
+            return "sft"  # type: ignore[return-value]
+
+    component = StubTrainingComponent()
+    with pytest.raises(TypeError, match="plan must be a JobPlan"):
+        JobLoop(component, "sft", AlwaysSelectCheckpointPlugin(), scenario="s")  # type: ignore[arg-type]
+    loop = JobLoop(component, Broken(), AlwaysSelectCheckpointPlugin(), scenario="s")
+    with pytest.raises(TypeError, match=r"Broken\.next_job must return a JobRequest"):
+        loop.submit(JobLoopState(), batch("b"))
+    assert component.submitted == []

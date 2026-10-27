@@ -6,8 +6,8 @@ the teacher reads beyond the student's request is the recipe's policy
 nothing); rendering it with the served model's chat template and shipping it
 as ``teacher_tokens`` beside the student's policy tensors is the mechanism
 they share, :func:`recorded_sample` and :meth:`TeacherRenderer.teacher_tokens`.
-A recipe whose teacher context comes from other samples of the same batch, as
-SDPO's does, composes the request in ``make_batch`` and renders it with the
+A recipe whose teacher context comes from other samples of the same job data, as
+SDPO's does, composes the request in ``make_job_data`` and renders it with the
 same two.
 """
 
@@ -19,8 +19,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Self, cast
 
-from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
+from reef.core.job_data import TrajectoryItem
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext

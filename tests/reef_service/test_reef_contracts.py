@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.runtime_stubs import StubTrainingRuntime
+from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import (
     Artifact,
@@ -27,7 +27,7 @@ from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface, create_weight_surface
 from reef.train import TrainStepResult
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -46,9 +46,9 @@ class WeightRecipe(Recipe):
 
 
 def weight_dispatcher(tmp_path, initial, *, training: bool = False):
-    """A dispatcher of weight scenarios; ``training`` gives them a training runtime, so they record serving versions."""
+    """A dispatcher of weight scenarios; ``training`` gives them a training component, so they record serving versions."""
     return Dispatcher(
-        WeightRecipe(training_runtime=StubTrainingRuntime()) if training else WeightRecipe(),
+        WeightRecipe(**runtime_bindings()) if training else WeightRecipe(),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
@@ -263,7 +263,7 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 def test_recipe_pipeline_has_no_update_algorithm() -> None:
     runtime = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
-    assert runtime.trainer.pipeline.output_schema is TrainingBatch
+    assert runtime.trainer.pipeline.output_schema is JobData
     assert runtime.trainer.candidate_backend is None
 
 
@@ -716,9 +716,7 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
     checkpoint = root / f"checkpoint-{version}"
     checkpoint.mkdir()
     (checkpoint / "model.txt").write_text(version)
-    dispatcher.registry.get(scenario).commit(
-        TrainStepResult(state=None, runtime_load_id=version, checkpoint_path=str(checkpoint))
-    )
+    dispatcher.registry.get(scenario).commit(TrainStepResult(state=None, artifact=Artifact.local(checkpoint)))
 
 
 @pytest.mark.unit
@@ -1124,7 +1122,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
-    dispatcher.registry.get("math").commit(TrainStepResult(state="no artifact"))
+    dispatcher.registry.get("math").commit(TrainStepResult(state={"label": "no artifact"}))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head: there is no candidate to publish.
     assert dispatcher.get_or_create_scenario("math").scenario_step == 1
@@ -1134,7 +1132,9 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
         version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
-        dispatcher.registry.get(scenario).commit(TrainStepResult(state=version, artifact=Artifact.local(candidate)))
+        dispatcher.registry.get(scenario).commit(
+            TrainStepResult(state={"version": version}, artifact=Artifact.local(candidate))
+        )
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
     assert dispatcher.get_or_create_scenario("code").scenario_step == 2
@@ -1161,7 +1161,9 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
     candidate.mkdir()
 
     with pytest.raises(ArtifactPublicationError, match="repository failed"):
-        dispatcher.registry.get("chat").commit(TrainStepResult(state="new", artifact=Artifact.local(candidate)))
+        dispatcher.registry.get("chat").commit(
+            TrainStepResult(state={"label": "new"}, artifact=Artifact.local(candidate))
+        )
 
     assert (
         runtime.repository.current_artifact,

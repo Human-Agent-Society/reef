@@ -1,6 +1,6 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
 # OpenClawRL Compose owns PRM and user-simulation services independently.
-# Reef assembles driver + HTTP and a local Ray runtime for Slime.
+# Reef trains with Slime in its HTTP service on a local Ray runtime.
 # The whole method is the cookbook `openclawrl` recipe: its judging stage
 # correlates sessions from the harness's conversation-unique
 # x-reef-tag-session value, with trace matching as a fallback, and judges next
@@ -78,17 +78,18 @@ pipeline:
       # tempered scale.)
       prm_timeout_s: 3600
       prm_max_hint_candidates: 3
-  task2batch:
+  task2job:
     config:
-      # The judged population, one JSON line per batch (upstream's
-      # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
+      # The judged population, one JSON line per job (upstream's
+      # OPENCLAW_PRM_RECORD_FILE). A job's reward mean cannot distinguish
       # "the judges disagree" from "the judges never ran".
       prm_record_file: /var/lib/reef/prm-records.jsonl
 training:
   backend: slime
   ready-timeout: 900
   ray-namespace: reef
-  ray-actor-name: reef-train-bridge
   # A step with long assembled episodes can exceed the 300 s default; a
   # timed-out worker retry then collides with the still-running job's
   # RUNNING marker (observed live as "operator recovery required").

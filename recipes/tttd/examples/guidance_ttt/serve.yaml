@@ -1,4 +1,5 @@
-# Colocated Qwen3-8B LoRA stack (tttd recipe) for summary-only Guidance-TTT.
+# Qwen3-8B LoRA stack (tttd recipe) for summary-only Guidance-TTT on four GPUs:
+# two for the actor (tensor parallel 2) and two for two single-GPU engines.
 # The cardinalities and sequence limits below are deployment inputs, not
 # algorithm constants; harness/config.py reads the same values so a
 # qualification and a full run cannot silently disagree.
@@ -11,7 +12,7 @@ reef:
   ready-timeout: 120
 
 inference:
-  num-gpus: "${training.config.num_gpus}"
+  num-gpus: "2"
   tensor-parallel-size: "1"
   options:
     context-length: "${training.config.seq_length}"
@@ -31,12 +32,14 @@ pipeline:
     config:
       groups_per_step: 2
       rollouts_per_group: 4
+  task2job:
+    config:
+      # One job is the whole grid, groups_per_step x rollouts_per_group samples: the same value as global-batch-size.
+      job_samples: 8
 training:
   backend: slime
-  colocate: true
   ready-timeout: 3600
   ray-namespace: reef
-  ray-actor-name: reef-train-bridge
   timeout-s: 7200
   config:
     num_gpus: 2
@@ -64,7 +67,7 @@ training:
     disable-rollout-global-dataset: true
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
-    num-gpus-per-node: "${training.config.num_gpus}"
+    num-gpus-per-node: "4"
     tensor-model-parallel-size: "${training.config.tensor_parallel_size}"
     pipeline-model-parallel-size: "1"
     context-parallel-size: "1"
@@ -92,8 +95,6 @@ training:
       - linear_proj
       - linear_fc1
       - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
     optimizer: "adam"
     lr: "4e-5"
     lr-decay-style: "constant"
@@ -126,7 +127,7 @@ storage:
   artifact-cache-dir: ${GUIDANCE_STATE_DIR}/artifact-cache
   agent-record-dir: ${GUIDANCE_STATE_DIR}/agent-record
 
-# Service processes launch locally; Slime owns distributed GPU model workers.
+# Service processes launch locally; Slime's training workers and the engines run on Ray.
 execution:
   training: ray
   rollout: ray

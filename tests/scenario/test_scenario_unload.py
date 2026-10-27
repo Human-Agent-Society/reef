@@ -44,11 +44,11 @@ class StepBackend(CandidateBackend):
             self.started.set()
             assert self.resume.wait(10), "the test did not release the cycle"
         step = scenario_step + 1
-        artifact_path = self.artifact_dir / f"{batch.batch_id.replace(':', '-')}-{step}"
+        artifact_path = self.artifact_dir / f"{batch.data_id.replace(':', '-')}-{step}"
         artifact_path.mkdir(parents=True)
         (artifact_path / "model.txt").write_text(f"step {step}", encoding="utf-8")
         self.result = TrainStepResult({"steps": step}, metrics={}, artifact=Artifact.local(artifact_path))
-        return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
+        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
 
     def evaluate(self, candidate):
         return EvaluationResult("test", "1", {})
@@ -72,6 +72,7 @@ class StepRecipe(Recipe):
             candidate_backend=self.backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            default_job_samples=1,
         )
 
 

@@ -58,7 +58,7 @@ proposer keyword.
 
 It calls `evolution.models.proposer`, and refuses to run when
 that name is not configured. The model sees all retained candidate
-compositions and scores, the parent each came from, the current trace batch, the
+compositions and scores, the parent each came from, the traces of the current step, the
 validation task names, and the adapter's Reef node vocabulary. It returns one
 parent id and one complete composition. In `full_history` mode the parent may
 be any retained candidate; `incumbent_only` is the greedy control.

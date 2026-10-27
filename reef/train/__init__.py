@@ -1,27 +1,30 @@
 """Training domain: the loop, and the pluggable backends that execute it.
 
 One package, mirroring how a well-scoped training subsystem is usually
-organized: a coordinator (:class:`Trainer`) that turns raw records into
-reserved, typed batches (:class:`TrainingPipeline` and its three stages), and one
-:class:`CandidateBackend` lifecycle. Harness evolution implements it directly;
-Weight recipes map their batches through ``RuntimeCandidateBackend`` and delegate
-coordination of separate training and inference runtimes to ``RuntimeScheduler``.
+organized: a :class:`Trainer` that turns raw records into reserved, typed
+job data (:class:`TrainingPipeline` and its three stages) and trains it. A
+weight trainer submits each job's data to a training component through
+``reef.train.jobs.JobLoop``; harness evolution implements the
+:class:`CandidateBackend` lifecycle directly.
 The GPU stack is reached by full path so importing ``reef.train`` itself stays light.
 
-``algos/`` turns a reserved batch into a ``StepSignal`` — the same
-computation no matter which backend executes it; the recipe's ``StepScheduling``
-(``reef.core.batches``) says how the runtime cuts one batch into optimizer
-steps. ``Trainer`` runs the recipe's candidate evaluation (``reef.evaluation``)
-between prepare and settle.
+``algos/`` turns a job's data into a ``TrainingSignal``, the same computation
+whichever training component runs it; how the component cuts the data into
+optimizer steps is the job's ``StepScheduling`` (``reef.train.algos.schedule``).
+A harness trainer runs the recipe's candidate evaluation
+(``reef.evaluation``) between prepare and settle; a weight trainer's job loop
+runs it on each checkpoint that a job saves.
 
 The package does not import recipes or service assembly. ``CordisRecipe``
-lives in ``reef.recipe.cordis``. Slime component preparation lives in
-``reef.train.slime_backend.driver``; Reef's service layer assembles components
-and ``reef.runtime.deployment`` owns their lifecycle. ``tinker_backend`` owns
-remote LoRA training, immutable samplers, and checkpoint manifests as a
-separate training runtime and inference runtime over one checkpoint store;
-SDK imports stay inside its client adapter, and method loss policy remains
-in the recipe package.
+lives in ``reef.recipe.cordis``. ``slime_backend.component`` and
+``tinker_backend.component`` are training components over
+``reef.train.local_jobs.LocalJobComponent``; Reef's service layer assembles
+them and ``reef.runtime.deployment`` owns their lifecycle. Each component
+saves checkpoints, and an inference runtime serves the published ones:
+Tinker's sampler (``reef.inference.tinker``) reads the checkpoint manifest of
+a release, and ``reef.runtime.serving`` loads a release's weight files.
+Tinker SDK imports stay inside its client adapter, and method loss policy
+remains in the recipe package.
 
 Tests and deployment configuration stay at repository level, never inside an
 integration subtree: ``tests/slime_backend/`` for runtime internals,
@@ -31,24 +34,23 @@ packages.
 """
 
 from reef.pipeline_context import PipelineContext
-from reef.task2batch import Task2Batch
-from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
+from reef.task2job import Task2Job
+from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
-from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrainStepResult, TrajectoryItem
+from reef.train.types import JobData, TaskItem, TrainDataItem, TrainStepResult, TrajectoryItem
 
 __all__ = [
     "CandidateBackend",
     "ComponentTrainer",
+    "JobData",
     "PipelineContext",
     "PreparedStep",
-    "StepExecution",
-    "Task2Batch",
+    "Task2Job",
     "TaskItem",
     "TrainDataItem",
     "TrainStepResult",
     "Trainer",
-    "TrainingBatch",
     "TrainingPipeline",
     "TrajectoryItem",
 ]

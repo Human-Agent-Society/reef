@@ -145,30 +145,15 @@ class ScenarioRegistry:
         self.loading: set[str] = set()
 
     @property
-    def training_scenario_name(self) -> str | None:
-        """The first-bound training scenario (the only one on a single-scenario runtime)."""
-        with self._lock:
-            return self._training_scenarios[0] if self._training_scenarios else None
-
-    @property
-    def training_scenario_names(self) -> tuple[str, ...]:
-        """Every scenario the training thread drives, in binding order."""
-        with self._lock:
-            return tuple(self._training_scenarios)
-
-    @property
     def training_status_scenario_names(self) -> tuple[str, ...]:
-        """Every loaded scenario with a local or dispatched training backend."""
+        """Every loaded scenario with a trainer that trains, in load order."""
         with self._lock:
             scenarios = tuple(self._scenarios.values())
-            dispatched = tuple(self._training_scenarios)
-        local = tuple(
+        return tuple(
             scenario.name
             for scenario in scenarios
-            if scenario.name not in dispatched
-            and any(component_trainer.trainer.candidate_backend is not None for component_trainer in scenario.trainers)
+            if any(component_trainer.trainer.trains for component_trainer in scenario.trainers)
         )
-        return (*dispatched, *local)
 
     @property
     def preload_errors(self) -> dict[str, str]:
@@ -370,10 +355,8 @@ class ScenarioRegistry:
     def remove(self, scenario: str) -> Scenario | None:
         """Drop every in-memory hold on the scenario; the instance, for the caller to close outside the state lock.
 
-        The training thread's list loses the name first, so a step already
-        in flight finds no scenario to commit to and no durable state to
-        reload; any preload error goes with it. The stored settings stay
-        until ``archive_store``. Call under ``lock_for(scenario)``.
+        Any preload error goes with it. The stored settings stay until
+        ``archive_store``. Call under ``lock_for(scenario)``.
         """
         with self._lock:
             dropped = self._scenarios.pop(scenario, None)
@@ -465,18 +448,25 @@ class ScenarioRegistry:
         finally:
             with self._lock:
                 self.loading.discard(scenario)
-        training_runtime = current.training_runtime
+        trains = current.training_component is not None
         with self._lock:
-            shared_runtime = training_runtime is not None and training_runtime.concurrent_training_scenarios
+            # Scenarios share a deployment only when its training component trains each job from the job's own
+            # start and its runtime serves each scenario its own weights, such as its own adapter.
+            shared = (
+                current.training_component is not None
+                and current.training_component.shares_scenarios
+                and current.runtime is not None
+                and current.runtime.shared_by_training_scenarios
+            )
             bound_scenario = self._training_scenarios[0] if self._training_scenarios else None
-            if training_runtime is not None and not shared_runtime and bound_scenario not in (None, scenario):
+            if trains and not shared and bound_scenario not in (None, scenario):
                 current.close()
                 raise ReefError(
                     f"training is already bound to scenario {bound_scenario!r}: a reef process "
                     f"trains one scenario for its lifetime, so {scenario!r} needs its own stack "
                     f"(restart this one, or run a second stack on other ports)"
                 )
-            if training_runtime is not None and scenario not in self._training_scenarios:
+            if trains and scenario not in self._training_scenarios:
                 self._training_scenarios.append(scenario)
             self._scenarios[scenario] = current
             self.last_used_at[scenario] = time.monotonic()

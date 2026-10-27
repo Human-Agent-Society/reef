@@ -1,17 +1,13 @@
 """Training errors that the training status and the operational metrics report.
 
-Each error belongs to one scenario and to the thread that recorded it. That
-thread is the training thread or the local worker of one component. Only
-that thread clears its own error. Thus a local cycle that succeeds does not
-hide a failed turn of the training thread.
+Each error belongs to one scenario and to the local worker that recorded
+it, one per component. Only that worker clears its own error. Thus a cycle
+of one component that succeeds does not hide a failure of another.
 """
 
 from __future__ import annotations
 
 from threading import Lock
-
-#: The training thread's name in the error record; local workers are named by their component.
-TRAINING_THREAD_SOURCE = "training"
 
 
 def local_error_source(component: str | None) -> str:
@@ -33,19 +29,19 @@ class TrainingErrors:
 
     def __init__(self) -> None:
         self.lock = Lock()
-        #: The last error for each (scenario, thread that recorded it).
+        #: The last error for each (scenario, worker that recorded it).
         self.errors: dict[tuple[str, str], str] = {}
         self.failure_counts: dict[str, int] = {}
         #: The last failure to build the training status. It is not specific to one scenario.
         self.status_build_error: str | None = None
 
-    def record(self, scenario: str, error: str, source: str = TRAINING_THREAD_SOURCE) -> None:
+    def record(self, scenario: str, error: str, source: str) -> None:
         """Keep ``error`` for ``scenario`` under ``source``, and count one failure."""
         with self.lock:
             self.errors[(scenario, source)] = error
             self.failure_counts[scenario] = self.failure_counts.get(scenario, 0) + 1
 
-    def clear(self, scenario: str, source: str = TRAINING_THREAD_SOURCE) -> None:
+    def clear(self, scenario: str, source: str) -> None:
         """Remove the error that ``source`` recorded for ``scenario``."""
         with self.lock:
             self.errors.pop((scenario, source), None)

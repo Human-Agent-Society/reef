@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 # Limit the locally managed Ray cluster to this training stack's GPU pool.
 # On an external cluster, its node configuration determines GPU visibility.
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 
 # This example ships three tasks. run.py and the harness derive the scenario and
 # state directory from TTTD_TASK; only serve.yaml needs these three, because a
@@ -27,8 +27,8 @@ export TTTD_TASK
 
 # The two values this script computes, because neither can be written down in
 # serve.yaml: the absolute state root (Ray workers and git resolve relative
-# paths from their own directories) and this machine's IP (slime binds the
-# training engines' router to it, not to localhost).
+# paths from their own directories) and this machine's IP (the serving
+# engines bind to it, not to localhost).
 export TTTD_STATE_DIR="$PWD/work/$TTTD_TASK"
 export REEF_INFERENCE_HOST=$(hostname -I | awk '{print $1}')
 mkdir -p "$TTTD_STATE_DIR"

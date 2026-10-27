@@ -11,11 +11,11 @@ Reproduction of [Learning to Discover at Test Time](https://arxiv.org/abs/2601.1
 ```text
 tttd/
   recipe.py        TTTDRecipe: training spec, loss family "tttd", default pipeline stages
-  processor.py     the stages: TTTDRecord2Record owns the grid; TTTDTasks and TTTDBatches read it
+  processor.py     the stages: TTTDRecord2Record owns the grid; TTTDTasks and TTTDJobData read it
   objective.py     shared grouped adaptive-entropic advantages and backend loss selection
   report.py        TTTDGroupedRolloutReport, the declared report schema
   tinker.py        remote importance-sampling loss and centered frozen-base KL
-  slime/           the training-plane objective: the grouped entropic loss
+  slime/           the Slime loss family: the grouped entropic loss
   examples/tttd/   the runnable search: Harbor tasks, PUCT archive, serve.yaml, results
   examples/guidance_ttt/  the summary-only guidance variant on the same recipe
 ```

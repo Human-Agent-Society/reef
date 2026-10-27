@@ -1,4 +1,5 @@
-# Colocated Qwen3-8B TTT-Discover LoRA stack for harbor/erdos_min_overlap.
+# Qwen3-8B TTT-Discover LoRA stack for harbor/erdos_min_overlap on four GPUs:
+# two for the actor (tensor parallel 2) and two for two single-GPU engines.
 # Every value is literal except the two run.sh computes: TTTD_STATE_DIR, the
 # absolute root all durable state hangs off, and REEF_INFERENCE_HOST, this
 # machine's IP.
@@ -11,7 +12,7 @@ reef:
   ready-timeout: 120
 
 inference:
-  num-gpus: "${training.config.num_gpus}"
+  num-gpus: "2"
   tensor-parallel-size: "1"
   options:
     context-length: "30000"
@@ -31,12 +32,14 @@ pipeline:
     config:
       groups_per_step: 8
       rollouts_per_group: 64
+  task2job:
+    config:
+      # One job is the whole grid, groups_per_step x rollouts_per_group samples: the same value as global-batch-size.
+      job_samples: 512
 training:
   backend: slime
-  colocate: true
   ready-timeout: 3600
   ray-namespace: reef
-  ray-actor-name: reef-train-bridge
   timeout-s: 7200
   config:
     num_gpus: 2
@@ -68,7 +71,7 @@ training:
     disable-rollout-global-dataset: true
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
-    num-gpus-per-node: "${training.config.num_gpus}"
+    num-gpus-per-node: "4"
     tensor-model-parallel-size: "2"
     pipeline-model-parallel-size: "1"
     context-parallel-size: "1"
@@ -96,8 +99,6 @@ training:
       - linear_proj
       - linear_fc1
       - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
     optimizer: "adam"
     lr: "4e-5"
     lr-decay-style: "constant"
@@ -127,7 +128,7 @@ storage:
   artifact-cache-dir: ${TTTD_STATE_DIR}/artifact-cache
   agent-record-dir: ${TTTD_STATE_DIR}/agent-record
 
-# Service processes launch locally; Slime owns distributed GPU model workers.
+# Service processes launch locally; Slime's training workers and the engines run on Ray.
 execution:
   training: ray
   rollout: ray

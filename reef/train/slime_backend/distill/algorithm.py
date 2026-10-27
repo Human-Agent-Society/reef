@@ -455,7 +455,7 @@ class DistillAlgorithm(SlimeAlgorithm):
     ) -> DistillAlgorithm:
         # A checkpoint teacher travels on args; a teacher engine is scored by the bound instance.
         if config is not None and not isinstance(config, DistillSettings):
-            raise TypeError(f"{self.loss_family} bridge algorithm config must be {self.settings_type.__name__}")
+            raise TypeError(f"{self.loss_family} algorithm config must be {self.settings_type.__name__}")
         if isinstance(config, DistillSettings) and config.teacher_url:
             teacher = TeacherEngine(
                 url=config.teacher_url,
@@ -467,7 +467,7 @@ class DistillAlgorithm(SlimeAlgorithm):
         return self
 
     def prepare_rollout(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
-        """Score with the teacher engine before tensorization and the training job marker."""
+        """Score with the teacher engine before tensorization."""
         if self.teacher is None:
             return {}
         return self.teacher.prepare(rollout_data)
@@ -484,7 +484,7 @@ class DistillAlgorithm(SlimeAlgorithm):
 
 
 def settings_from_args(args: Namespace) -> DistillSettings:
-    """The family's settings as the driver stamped them on ``args`` (worker side)."""
+    """The family's settings as the training component stamped them on ``args`` (worker side)."""
     return DistillSettings(
         teacher=args.distill_teacher,
         divergence=args.distill_divergence,
