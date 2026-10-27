@@ -28,16 +28,19 @@ from recipes.sao.examples.servelearnbench.harness import agent as reef_agent
 from recipes.sao.examples.servelearnbench.harness import campaign as campaign_results
 from recipes.sao.examples.servelearnbench.harness import config as campaign_config
 from recipes.sao.examples.servelearnbench.harness import report as reef_report
+from recipes.sao.examples.servelearnbench.recipe import RetailJobPlan, RetailSAORecipe
 from recipes.sao.processor import SAOJobData, SAOTasks
-from recipes.sao.recipe import SAORecipe
 from reef.core import AgentRecord, RequestType
+from reef.core.job_data import JobOutcome
 from reef.core.reports import ScoredRolloutReport
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ReportContext
 from reef.record2task.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
+from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
+from reef.train.jobs import JobPlanContext
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 
@@ -239,18 +242,30 @@ def test_training_barrier_never_succeeds_on_timeout(monkeypatch):
 def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeypatch):
     campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
-    checkpoint = {"operation": "training", "metrics": {"training_job": {"event": "checkpoint"}, "selected": True}}
-    newest = {**checkpoint, "release_id": "second"}
+    checkpoint = {
+        "operation": "training",
+        "metrics": {"training_job": {"event": "checkpoint", "job_id": "first", "step": 2}, "selected": True},
+    }
+    newest = {
+        **checkpoint,
+        "release_id": "second",
+        "metrics": {"selected": True, "training_job": {"event": "checkpoint", "job_id": "second", "step": 1}},
+    }
     older = {**checkpoint, "release_id": "first"}
     pending = {**checkpoint, "release_id": "pending", "pending": True}
     submitted = {"operation": "training", "metrics": {"training_job": {"event": "submitted"}}}
     finished = {"operation": "training", "metrics": {"training_job": {"event": "finished"}}}
+    # Recovered checkpoints may lack worker metrics, including actor_trained.
+    warmup = {
+        **checkpoint,
+        "metrics": {"selected": True, "training_job": {"event": "checkpoint", "job_id": "first", "step": 1}},
+    }
     # Open admission alone is insufficient while an asynchronous job still runs.
     states = iter([(True, 1), (False, 2), (True, 2)])
 
     def get(path):
         if path.endswith("/releases"):
-            return {"releases": [finished, pending, newest, submitted, older, {"operation": "creation"}]}
+            return {"releases": [finished, pending, newest, submitted, older, warmup, {"operation": "creation"}]}
         open_for_inference, finished_jobs = next(states)
         return {
             "error": None,
@@ -269,6 +284,11 @@ def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeyp
     assert campaign.training_releases(client, "retail") == [older, newest]
     release = campaign.wait_for_training(client, "retail", 2, 10)
     assert release == {**newest, "runtime_load_id": "v2"}
+    client.get.side_effect = None
+    client.get.return_value = {"releases": [warmup]}
+    assert campaign.training_releases(client, "retail") == []
+    monkeypatch.setenv("SAO_WARMUP", "0")
+    assert campaign.training_releases(client, "retail") == [warmup]
 
 
 def test_training_failure_does_not_wait_for_timeout(monkeypatch):
@@ -396,20 +416,20 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     assert setting_scores(official_rows)["n_test"] == test_count
 
 
-def test_default_plan_and_no_actor_guard(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("warmup", [0, 1, 3, 14])
+def test_warmup_adds_passes_without_consuming_actor_batches(monkeypatch, capsys, tmp_path, warmup):
     campaign = load_campaign(monkeypatch)
     monkeypatch.setenv("SAO_MICRO_BATCH", "16")
+    monkeypatch.setenv("SAO_WARMUP", str(warmup))
     monkeypatch.setattr(
         sys, "argv", ["run.py", "--method", "sao", "--output", str(tmp_path / "results.jsonl"), "--check-only"]
     )
     campaign.main()
     plan = json.loads(capsys.readouterr().out)["training_plan"]
-    assert (plan["training_batches"], plan["critic_only_batches"], plan["actor_updates"]) == (14, 1, 13)
+    assert (plan["training_batches"], plan["critic_only_batches"], plan["actor_updates"]) == (14 + warmup, warmup, 14)
+    assert plan["training_jobs"] == 14
+    assert sum(row["training_batches"] for row in plan["windows"]) == 14 + warmup
     assert [row["partial_batch_tasks"] for row in plan["windows"]] == [15, 12, 12, 56, 56, 57]
-    monkeypatch.setenv("SAO_WARMUP", "14")
-    with pytest.raises(SystemExit, match="2"):
-        campaign.main()
-    assert "no actor update" in capsys.readouterr().err
     assert not (tmp_path / "results.jsonl").exists()
 
 
@@ -469,12 +489,16 @@ def test_deployment_builds_declared_batch_pipeline(monkeypatch, tmp_path):
     monkeypatch.setenv("REEF_TOKEN", "test-token")
     monkeypatch.setenv("SAO_GPUS", "1")
     deployment = load_deployment(EXAMPLE / "serve.yaml")
-    stages = PipelineConfig.from_setting(deployment["pipeline"], spec=SAORecipe.pipeline_spec(), environ=os.environ)
+    stages = PipelineConfig.from_setting(
+        deployment["pipeline"], spec=RetailSAORecipe.pipeline_spec(), environ=os.environ
+    )
     pipeline = stages.build(PipelineContext("retail", report_type=ScoredRolloutReport))
     assert isinstance(pipeline.record2record, RetailBatchReports)
     assert pipeline.record2record.grouping.max_batch_size == 64
     assert pipeline.task2job.job_samples == 1
     assert pipeline.task2job.buffer_size == 64
+    assert deployment["reef"]["warmup_steps"] == 1
+    assert str(deployment["reef"]["training_backend_options"]["num-critic-only-steps"]) == "1"
 
 
 @pytest.mark.parametrize(
@@ -649,6 +673,20 @@ def test_declared_batch_waits_for_every_task_and_keeps_tail_rewards(count):
     prepared = prepare_slime_job(data, TrainingMethod("sao"), {}, StepScheduling(), step_size=64)
     assert prepared.payload["external_step_sizes"] == [count]
     assert prepared.metrics["optimizer_steps"] == 1
+    # First-job warmup repeats the exact rows, with a separate saved step per pass.
+    for warmup_steps in (0, 1, 3):
+        job_plan = RetailJobPlan(warmup_steps)
+        context = JobPlanContext(data, 0, None)
+        request = job_plan.next_job(context)
+        assert request == RetailJobPlan(warmup_steps).next_job(context)
+        method, scheduling = job_training(request.parameters)
+        repeated = prepare_slime_job(data, method, {}, scheduling, step_size=64).payload
+        assert repeated["external_step_sizes"] == [count] * (warmup_steps + 1)
+        assert repeated["samples"] == prepared.payload["samples"] * (warmup_steps + 1)
+        assert "advantages" not in repeated
+        assert request.parameters["save_interval"] == 1
+        later = job_plan.next_job(JobPlanContext(data, 1, JobOutcome("first", "slime", "finished")))
+        assert later.parameters["scheduling"]["epochs"] == 1
     assert active.acknowledge(data.data_id)
     assert not active.ready(1)
 

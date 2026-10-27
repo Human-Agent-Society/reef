@@ -18,6 +18,7 @@ servelearnbench/
   run.sh          starts reef serve, then runs the campaign
   run.py          the campaign: the ordered split, training batches, checkpoint resume, results.jsonl
   batching.py     keeps each declared task batch together, including window tails
+  recipe.py       adds critic warmup passes before the first batch's normal SAO update
   serve.yaml      the Reef stack: Qwen3-8B actor and critic, SAO, exact-token episodes
   harness/
     config.py     shared batch, micro-batch, warmup, and context settings
@@ -33,9 +34,9 @@ servelearnbench/
 | Actor | Dense Qwen3-8B, full-parameter updates |
 | Critic | Qwen3-8B value model; self-attention frozen, other parameters trainable |
 | Sample / batch | One complete task trajectory; up to 64 tasks per training batch; micro batch at most 16 |
-| Warmup | First training batch: critic only |
+| Warmup | One extra critic-only pass over the first batch, then reuse it for normal SAO training |
 | Critic cadence | Two critic updates per batch, including warmup |
-| Actor cadence | One update per batch after warmup |
+| Actor cadence | One update per batch, including the first batch after its extra warmup |
 | Learning rates | Actor `1e-6`; critic `5e-6` |
 | Evaluation | Each window's tests against the frozen weights at that window's end; no test reports or updates |
 | Context / per-call output | 40,960 / 16,384 tokens |
@@ -107,7 +108,8 @@ Each report names the complete task list for its batch. The record stage waits f
 The pipeline takes that complete group as one job; each trajectory keeps its own reward.
 The grouping does not create prompt comparison groups or change the SAO objective.
 It then waits for training and weight publication.
-Job submission does not count as a completed update. The driver waits for a selected checkpoint, the job's completion, and reopened inference admission.
+Job submission and critic-only checkpoints do not count as completed actor updates.
+The driver waits for the actor checkpoint, the job's completion, and reopened inference admission.
 No task spans a weight update. Test tasks use the final published actor and never submit reports.
 Keep `save-interval: "1"` so each completed batch publishes weights.
 A training timeout or service error aborts the run.
@@ -118,20 +120,26 @@ The launcher and result records use the same configuration.
 The configured full batch must be divisible by the micro batch; this stack uses data parallel size one.
 A window tail uses its actual sample count. Its final micro-batch may be smaller than 16.
 For example, a 57-task tail uses micro-batches of 16, 16, 16, and 9. Loss normalization uses 57 samples.
-Warmup counts training batches across the whole stream and does not restart at window boundaries.
-Each warmup batch performs two critic updates and no actor update.
+`SAO_WARMUP` adds critic-only passes over the first batch. It does not consume extra tasks or restart at window boundaries.
+Each warmup pass performs two critic updates and no actor update.
+The same first-batch trajectories then receive one normal SAO pass: two critic updates and one actor update.
+Tokens, rewards, and rollout log-probabilities stay unchanged. The training backend computes values and advantages again for each pass.
+The actor stays unchanged during warmup, so these trajectories still come from the current actor when normal training starts.
+With the default warmup of one, the first batch receives four critic updates in total and one actor update.
+Setting `SAO_WARMUP=0` skips the extra pass; larger values repeat critic warmup on that same first batch.
 This warmup is an implementation choice, not value pretraining.
 
 A batch never spans two windows. Every window's remaining serving tasks train as one smaller final batch.
 The driver waits for that batch's checkpoint and serving weights before starting the window's tests.
 Retail L1 has six windows with 79, 140, 140, 120, 120 and 121 serving tasks, plus 384 test tasks.
-At batch 64, all 720 serving tasks train in 14 batches; 208 tasks belong to the six smaller final batches.
-The default run has one critic-only batch and 13 actor updates. W0 trains 64 tasks for warmup, then updates the actor on 15 tasks.
-A W1-only run has three batches of 64, 64, and 12 tasks: one critic-only batch and two actor updates.
+At batch 64, all 720 serving tasks train in 14 normal batches; 208 tasks belong to the six smaller final batches.
+The default run has 14 actor updates and one extra critic-only pass: 15 training passes across 14 jobs.
+W0 warms up on its first 64 trajectories, trains actor and critic on those same trajectories, then trains the remaining 15.
+A W1-only run warms up on its first 64 trajectories and has three actor updates on batches of 64, 64, and 12 tasks.
 A small final batch is a full optimizer step at the configured learning rate, so it changes the update count and gradient noise.
 `--windows 1` selects W1. `--windows 1,2` selects two windows and carries training state between them.
 Window indices must be unique and increasing. Gaps are allowed.
-The launcher checks the plan before starting the GPU service.
+The launcher checks the plan before starting the GPU service and rejects a training plan with no serving tasks.
 A SAO plan with no actor update fails with an error, including smoke plans.
 Use `--check-only` with `run.py` to inspect a plan without starting Reef:
 
@@ -170,7 +178,8 @@ bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-to
 This runs the first window only: three serving tasks and two test tasks.
 Smoke selects up to `max(2, 2 * SAO_BATCH - 1)` serving tasks to exercise a partial batch.
 Each task has at most 20 model calls, with at most 64 output tokens per call.
-The first two serving tasks warm up the critic in one batch; the one-task tail also updates the actor.
+The first two serving tasks warm up the critic, then train actor and critic using the same trajectories.
+The one-task tail also trains actor and critic. This smoke produces three checkpoints and two actor updates.
 The output explicitly marks the run as smoke. Do not compare its score with the 8B pilot.
 Restore `SAO_BATCH=64 SAO_MICRO_BATCH=16 SAO_WARMUP=1` and the 8B model for the pilot.
 
@@ -178,7 +187,10 @@ Restore `SAO_BATCH=64 SAO_MICRO_BATCH=16 SAO_WARMUP=1` and the 8B model for the 
 
 `REEF_WORK/results.jsonl` contains configuration, scored episodes, committed training releases, and a summary.
 Episode rows include traces, token usage, inference receipts, ending reasons, and producing weight versions.
-Training rows record the actual `batch_size`. The summary counts `partial_batch_tasks`; `untrained_tail_tasks` is zero.
+Training rows record the actual `batch_size` and the actor checkpoint for each completed job.
+`training_releases` and `actor_updates` count actor updates; `critic_only_batches` counts extra warmup passes.
+Reef's release history also contains each critic-only checkpoint. Slime records progress between these checkpoints within the first job.
+The summary counts `partial_batch_tasks`; `untrained_tail_tasks` is zero.
 `test_score` is the combined mean of all test rewards, multiplied by 100; `window_scores` holds the same per window.
 These combined means mix categories and are not the official category scores.
 `category_scores` and `window_category_scores` contain the Hidden and Fully Specified means and task counts.
@@ -208,7 +220,8 @@ A fully collected pending batch keeps its original receipts; identical reports c
 A restart can assign a new runtime load ID to the same restored weights.
 The campaign accepts that ID only after checking the committed training history.
 
-Use `--stop-after-batches N` to stop after N total committed training batches.
+Use `--stop-after-batches N` to stop after N completed jobs with actor updates.
+The first boundary includes both the extra warmup passes and the first normal SAO update.
 Remove that option when resuming. For a small checkpoint-resume check, use fresh directories and the 0.6B smoke configuration:
 
 ```bash
@@ -216,8 +229,10 @@ bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-to
 bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-tokens 64 --resume
 ```
 
-Resume requires campaign format 3, which records batch membership and trains window tails.
-Older score-only-tail campaigns cannot resume under this changed training schedule.
+Resume requires campaign format 4, which reuses the first batch after critic warmup.
+Older campaigns cannot resume under this changed training schedule.
+The first job saves a checkpoint after every warmup pass and after its normal SAO pass.
+After a restart, Slime continues from the last saved pass. The driver keeps the same task reports and waits for the actor checkpoint.
 The driver does not repair incomplete optimizer checkpoints.
 If Slime reports an ambiguous interrupted training job, follow the [backend recovery instructions](../../../../docs/user-guide/troubleshooting.rst).
 A fresh run still requires empty directories. Never start two Reef services on the same storage.

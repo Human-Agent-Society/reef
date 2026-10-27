@@ -31,7 +31,9 @@ inference:
     tool-call-parser: qwen25
     reasoning-parser: qwen3
 recipe:
-  implementation: recipes.sao.recipe:SAORecipe
+  implementation: recipes.sao.examples.servelearnbench.recipe:RetailSAORecipe
+  config:
+    warmup_steps: ${SAO_WARMUP}
 pipeline:
   record2record:
     module: recipes.sao.examples.servelearnbench.batching:RetailBatchReports

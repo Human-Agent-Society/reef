@@ -31,20 +31,34 @@ BENCHMARK_REVISION = "57aa919b5ae71d60c38a7ed559262447406f1e8b"
 
 
 def training_releases(client: ReefClient, scenario: str) -> list[dict]:
-    """Return selected training checkpoints oldest first, excluding job lifecycle events."""
+    """Return selected actor-update checkpoints oldest first, excluding critic warmup and job lifecycle events."""
     try:
         response = client.get(f"/reef/scenarios/{quote(scenario, safe='')}/releases")
     except ReefClientError as error:
         if error.status == 404:
             return []
         raise
-    return [
+    checkpoints = [
         release
         for release in reversed(response["releases"])
         if release["operation"] == "training"
-        and not release.get("pending", False)
         and (release.get("metrics") or {}).get("training_job", {}).get("event") == "checkpoint"
+    ]
+    if not checkpoints:
+        return []
+    first_job = checkpoints[0]["metrics"]["training_job"]["job_id"]
+    warmup = training_config()["SAO_WARMUP"]
+    # Recovered checkpoints can lack worker metrics. The durable job ID and
+    # checkpoint step still distinguish warmup from the first actor update.
+    return [
+        release
+        for release in checkpoints
+        if not release.get("pending", False)
         and (release.get("metrics") or {}).get("selected") is True
+        and (
+            release["metrics"]["training_job"]["job_id"] != first_job
+            or release["metrics"]["training_job"]["step"] > warmup
+        )
     ]
 
 
@@ -205,15 +219,17 @@ def main() -> None:
     warmup = settings["SAO_WARMUP"] if args.method == "sao" else 0
     training_plan = {
         "windows": window_plan,
-        "training_batches": batch_total,
-        "critic_only_batches": min(warmup, batch_total),
-        "actor_updates": max(0, batch_total - warmup),
+        "training_jobs": batch_total,
+        "training_batches": batch_total + warmup,
+        "critic_only_batches": warmup,
+        "actor_updates": batch_total,
     }
+    if args.method == "sao" and window_plan:
+        # Warmup reuses the first job's data; it does not consume a normal actor batch.
+        window_plan[0]["training_batches"] += warmup
     print(json.dumps({"training_plan": training_plan}), flush=True)
-    if args.method == "sao" and batch_total <= warmup:
-        parser.error(
-            f"Plan has {batch_total} training batches and {warmup} warmup batches: no actor update. Reduce SAO_WARMUP or SAO_BATCH, or select more serving tasks"
-        )
+    if args.method == "sao" and batch_total == 0:
+        parser.error("Plan has no serving tasks: no actor update")
     if args.check_only:
         return
     client = ReefClient(os.environ["REEF_SERVICE_URL"], token=os.environ.get("REEF_TOKEN"), timeout_s=60)
@@ -226,7 +242,7 @@ def main() -> None:
     model_name = os.environ.get("REEF_MODEL_NAME") or Path(os.environ.get("MODEL_DIR", "reef")).name
     config = {
         "type": "config",
-        "campaign_format": 3,
+        "campaign_format": 4,
         "benchmark_revision": BENCHMARK_REVISION,
         "scenario": "retail_l1",
         "windows": windows,
@@ -239,6 +255,7 @@ def main() -> None:
         "global_batch_size": args.batch_size,
         "micro_batch_size": settings["SAO_MICRO_BATCH"],
         "critic_only_batches": settings["SAO_WARMUP"],
+        "warmup_policy": "reuse_first_batch",
         "context_length": settings["SAO_CONTEXT"],
         "tail_policy": "train_partial_batch",
         "untrained_tail_tasks": 0,
@@ -387,6 +404,8 @@ def main() -> None:
             "window_category_scores": window_categories,
             "windows": windows,
             "training_releases": expected_releases,
+            "critic_only_batches": warmup,
+            "actor_updates": expected_releases,
             "smoke": args.smoke,
             "ending_counts": ending_counts,
             "trained_tasks": trained_total,

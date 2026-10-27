@@ -14,9 +14,12 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
+from recipes.sao.examples.servelearnbench.recipe import RetailJobPlan
+from reef.runtime.durable_files import write_json
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import JobStatus, TrainingJob
-from reef.train.slime_backend.component import SlimeTrainingComponent
+from reef.train.jobs import JobPlanContext
+from reef.train.slime_backend.component import ROLLOUT_FILE, SlimeStart, SlimeTrainingComponent
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -200,6 +203,7 @@ class SaoStack:
         critic_steps_per_actor: int | None = 2,
         critic_only_steps: int = 0,
         critic_save_interval: int = 1,
+        start_rollout_id: int = 0,
         rank_metrics=None,
     ) -> None:
         template = str(tmp_path / "hf" / "{rollout_id}")
@@ -209,7 +213,7 @@ class SaoStack:
             loss_family="sao",
             global_batch_size=2,
             save_hf=template,
-            start_rollout_id=0,
+            start_rollout_id=start_rollout_id,
             critic_save=None if critic_root is None else str(critic_root),
             critic_save_interval=critic_save_interval,
             critic_steps_per_actor=critic_steps_per_actor,
@@ -304,6 +308,57 @@ def test_a_sao_critic_only_warmup_saves_without_moving_the_policy(tmp_path, sao_
     assert len(stack.critic.train_calls) == 2
     assert stack.actor.train_calls == []
     assert metrics["sao/actor_trained"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("progress", ["fresh", "warmup_saved", "warmup_recorded"])
+def test_retail_reuses_warmup_rows_and_resumes_before_the_first_actor_update(tmp_path, sao_stacks, progress):
+    data = JobData(
+        "first",
+        tuple(
+            policy_trajectory(f"task-{index}", (9, 1, 2), (1, 1), (-0.1, -0.2), 0.5, "inc:0", action_mask=(1, 1))
+            for index in range(2)
+        ),
+    )
+    request = RetailJobPlan(1).next_job(JobPlanContext(data, 0, None))
+    job = TrainingJob("first", "slime", None, data, request.parameters)
+    if progress != "fresh":
+        directory = tmp_path / "reef-jobs" / "first"
+        write_json(
+            directory / "job.json", {"start": None, "data": data.to_dict(), "parameters": dict(request.parameters)}
+        )
+        write_json(directory / ROLLOUT_FILE, {"rollout_id": 0, "step": 1})
+        for path in ("hf/0", "megatron/iter_0000000", "megatron-critic/iter_0000000"):
+            (tmp_path / path).mkdir(parents=True)
+        if progress == "warmup_recorded":
+            start = tmp_path / "reef-starts" / "rollout_0"
+            SlimeStart(0, None, {}, None).write(start)
+            checkpoint_storage(tmp_path, critic_root=tmp_path / "megatron-critic").complete("first", 0, reward=0.5)
+            write_json(
+                directory / "checkpoints.json",
+                {
+                    "checkpoints": [
+                        {"step": 1, "path": str(start), "release_path": str(tmp_path / "hf" / "0"), "metrics": {}}
+                    ]
+                },
+            )
+    stack = sao_stacks(tmp_path, critic_only_steps=1, start_rollout_id=0 if progress == "fresh" else 1)
+    stack.component.submit(job)
+    status = finished(stack.component, "first")
+    assert status.state == "finished", status.error
+    assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]
+    assert [rollout for rollout, _ in stack.actor.train_calls] == [1]
+    assert [rollout for rollout, _ in stack.critic.train_calls] == ([0, 0, 1, 1] if progress == "fresh" else [1, 1])
+    assert status.checkpoints[-1].metrics["sao/actor_trained"] == 1
+    calls = stack.component.batch_processor.calls
+    assert all(call["external_step_sizes"] == [2] for call in calls)
+    if progress == "fresh":
+        assert calls[0] == calls[1]
+        assert status.checkpoints[0].metrics["sao/actor_trained"] == 0
+    # Retrying the original reports/job cannot produce another actor update.
+    stack.component.submit(job)
+    assert stack.component.status("first") == status
+    assert len(stack.actor.train_calls) == 1
 
 
 @pytest.mark.unit
