@@ -82,12 +82,11 @@ that PR's required checks. See the
 `maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
 
 Tests in the same file stay in one worker, preserving
-module fixture reuse. In an activated development environment, install the same
-test runner plugin and reproduce the parallel run:
+module fixture reuse. The ``dev`` extra installs the same test runner plugin,
+so an activated development environment reproduces the parallel run:
 
 .. code:: bash
 
-   uv pip install pytest-xdist==3.8.0
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
      pytest tests/ -n 8 --dist loadfile
 

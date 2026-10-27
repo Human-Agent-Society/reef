@@ -169,8 +169,11 @@ The usual local checks are:
 
 ```bash
 pre-commit run --all-files
-pytest tests/
+pytest tests/ -n 8 --dist loadfile
 ```
+
+Run the suite in parallel, as CI does; `pytest-xdist` ships in the `dev`
+extra. Use `-n 0` for a serial run when you diagnose a failure.
 
 ### Keep the root READMEs synchronized
 
@@ -388,7 +391,7 @@ Before requesting review for Python changes, run:
 ```bash
 pre-commit run --all-files
 python -m mypy
-pytest tests/
+pytest tests/ -n 8 --dist loadfile
 ```
 
 ## Make a pull request

@@ -89,6 +89,8 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
+    # Runs the suite in parallel, as CI does (-n 8 --dist loadfile).
+    "pytest-xdist==3.8.0",
     "ruff==0.17.2",
 ]
 

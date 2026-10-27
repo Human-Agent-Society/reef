@@ -340,8 +340,12 @@ pre-commit run --files path/to/changed_file.py
 
 # Full checks before requesting review for Python changes.
 pre-commit run --all-files
-.venv/bin/python -m pytest tests/
+.venv/bin/python -m pytest tests/ -n 8 --dist loadfile
 ```
+
+Run the full suite in parallel, as CI does: `-n 8 --dist loadfile` keeps each
+file in one worker. `pytest-xdist` ships in the `dev` extra. Use `-n 0` for a
+serial run when you diagnose a failure.
 
 The full suite needs training dependencies even for collection. Some tests
 skip unavailable optional runtimes; others import Slime and torch directly.
@@ -351,7 +355,7 @@ CI uses `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` for
 Git LFS test isolation. Record skipped or unavailable checks honestly.
 
 For full-suite coverage on Python 3.12, use
-`.venv/bin/python -m pytest tests --cov=reef --cov-report=term`.
+`.venv/bin/python -m pytest tests -n 8 --dist loadfile --cov=reef --cov-report=term`.
 The configured coverage floor applies to the whole package, not a focused run.
 
 Pre-commit includes repository-wide Python design, statement, and README
