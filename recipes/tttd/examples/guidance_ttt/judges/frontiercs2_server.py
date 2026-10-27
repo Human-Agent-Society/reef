@@ -9,7 +9,7 @@ payload tar the platform expects, and runs the task's own verifier once in
 
 Only what a FrontierCS 2 agent may read comes back: the train score and the
 task-approved metrics. Reference values and per-workload decisions stay in the
-verifier's evidence file. In ``eval`` mode the private verdict is returned as
+verifier's result file. In ``eval`` mode the private verdict is returned as
 ``beats_reference``; only the final Harbor verifier asks for it.
 
 Each evaluation runs ``apptainer exec`` on its own CPU set, sized by the

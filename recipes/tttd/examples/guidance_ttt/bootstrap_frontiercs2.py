@@ -88,8 +88,8 @@ def main() -> None:
         if result.valid:
             target.write_text(code if code.endswith("\n") else code + "\n")
             target.with_suffix(".md").write_text(summary.strip() + "\n")
-            provenance = {"executor": config.backend.safe_dict(), "attempt": attempt, "train_score": result.raw_score}
-            target.with_suffix(".json").write_text(json.dumps(provenance, indent=2) + "\n")
+            metadata = {"executor": config.backend.safe_dict(), "attempt": attempt, "train_score": result.raw_score}
+            target.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
             print(f"wrote {target}")
             return
     raise SystemExit(f"no accepted bootstrap after {args.attempts} attempts")
