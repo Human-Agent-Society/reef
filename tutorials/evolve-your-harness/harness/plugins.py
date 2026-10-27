@@ -8,9 +8,9 @@ installed. Each class delegates to its module's ``propose`` or ``evaluate``.
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree.mutations import Mutation
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
@@ -42,10 +42,10 @@ class SelfProposer(Proposer):
         return evolution.propose(nodes, samples, models, requests=requests, entries=entries)
 
 
-class AnswerScorer(EpisodeScorer):
-    """``evolution.evaluate``: exact last-line answer grading of the episode's final assistant text."""
+class AnswerScorer(RolloutScorer):
+    """``evolution.evaluate``: exact last-line answer grading of the rollout's final assistant text."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return evolution.evaluate(task, result)
 
 
@@ -68,8 +68,8 @@ class NativeSelfProposer(Proposer):
         return native_evolution.propose(nodes, samples, models)
 
 
-class NativeAnswerScorer(EpisodeScorer):
+class NativeAnswerScorer(RolloutScorer):
     """``native_evolution.evaluate``: the same grading over the native-jsonl trajectory."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return native_evolution.evaluate(task, result)

@@ -59,7 +59,7 @@ from reef.train.pipeline import TrainingPipeline
 MODULE = "tests.reef_recipe.test_generated_tasks"
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 #: The ``rollout`` job parameter of the recipe's task jobs.
-ROLLOUT = {"episodes_per_task": 2}
+ROLLOUT = {"rollouts_per_task": 2}
 
 # ------------------------------------------------------------------------------------------- the reported half
 
@@ -94,7 +94,7 @@ def report(
     if task is not None:
         metadata["task"] = {"name": task, "path": f"/tasks/{task}", "digest": "ab" * 32}
     if arm is not None:
-        metadata["episode"] = {"id": record_id, "labels": {"arm": arm, **(labels or {})}}
+        metadata["rollout"] = {"id": record_id, "labels": {"arm": arm, **(labels or {})}}
     if metadata:
         payload["metadata"] = metadata
     return AgentRecord.create(
@@ -148,7 +148,7 @@ def handed_out_names(p: TrainingPipeline) -> list[str]:
 
 
 def sample(task: str, index: int, reward: float) -> TrajectorySample:
-    """One episode's sample in the task group ``task``, as the training component's rollout makes it."""
+    """One rollout's sample in the task group ``task``, as the training component's rollout makes it."""
     trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, "r1")
     return dataclasses.replace(trajectory, group_id=task)
 
@@ -383,7 +383,7 @@ def train_job(
 ) -> list[str]:
     """Train the handed-out task job as the trainer and the training component do, and return its task names.
 
-    The trainer commits the job's submission, then the job's end. Each task's episodes earn ``rewards[name]``,
+    The trainer commits the job's submission, then the job's end. Each task's rollouts earn ``rewards[name]``,
     1.0 and 0.0 by default. A job with ``error`` failed and reports no metrics.
     """
     data = p.build_job_data(BATCH_SIZE)
@@ -392,8 +392,8 @@ def train_job(
     # The trainer releases the consumed IDs once the submission's commit is durable.
     p.release_records(p.releasable_record_ids())
     if error is None:
-        episode_rewards = {name: list((rewards or {}).get(name, (1.0, 0.0))) for name in names}
-        outcome = JobOutcome("job", "tinker", "finished", {"rollout_rewards": episode_rewards, "rollout_samples": 4})
+        rollout_rewards = {name: list((rewards or {}).get(name, (1.0, 0.0))) for name in names}
+        outcome = JobOutcome("job", "tinker", "finished", {"rollout_rewards": rollout_rewards, "rollout_samples": 4})
     else:
         outcome = JobOutcome("job", "tinker", "failed", error=error)
     p.job_ended(outcome)
@@ -430,7 +430,7 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     data = p.build_job_data(BATCH_SIZE)
     assert [item.metadata["task"]["name"] for item in data.samples] == names
     assert all(isinstance(item, TaskSample) and (item.task_path / "instruction.md").is_file() for item in data.samples)
-    assert service.writes == [] and service.episode_requests == [], "Reef runs no episode of a task job"
+    assert service.writes == [] and service.rollout_requests == [], "Reef runs no rollout of a task job"
     assert task_generator.results == [], "no result before the job ends"
 
     train_job(p, dict.fromkeys(names, (0.25, 0.25)))
@@ -446,7 +446,7 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
 
 
 @pytest.mark.unit
-def test_eval_tasks_are_saved_without_episodes(tmp_path: Path) -> None:
+def test_eval_tasks_are_saved_without_rollouts(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     pipeline, _ = rounds(tmp_path, task_generator, eval_fraction=1.0)
     assert not looked(pipeline), "no eval task is handed out"
@@ -732,7 +732,7 @@ def test_a_job_end_saves_each_tasks_first_result_from_its_rewards_and_sends_the_
     saved = rollout_results(store)
     assert saved[ran] == TaskRolloutResult(ran, (1.0, 0.0))
     assert saved[none_ran] == TaskRolloutResult(
-        none_ran, error="no episode of the task ran", infrastructure_failure=True
+        none_ran, error="no rollout of the task ran", infrastructure_failure=True
     )
     assert task_generator.result_generations == [0] and 0 in delivered_generations(store)
     assert p.status()["submitted_tasks"] == 0 and stage_taken(p) == 0
@@ -1029,9 +1029,9 @@ def test_a_generator_setting_that_names_no_usable_generator_is_refused(generator
 
 
 def test_the_rollout_settings_of_a_task_job_are_no_sample2job_config() -> None:
-    sample2job = {"module": "reef.recipe.generated_tasks:GeneratedTaskJobData", "config": {"episodes_per_task": 4}}
+    sample2job = {"module": "reef.recipe.generated_tasks:GeneratedTaskJobData", "config": {"rollouts_per_task": 4}}
     recipe = generated_pipeline_recipe({}, {"sample2job": sample2job})
-    with pytest.raises(RecipeConfigError, match="unknown config fields: episodes_per_task"):
+    with pytest.raises(RecipeConfigError, match="unknown config fields: rollouts_per_task"):
         recipe.build_pipeline(PipelineContext("one"))
 
 

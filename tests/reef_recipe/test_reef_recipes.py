@@ -490,11 +490,11 @@ def test_cordis_recipe_reads_the_evolution_batch_size(tmp_path: Path, monkeypatc
     from reef.recipe.cordis import CordisRecipe
 
     (tmp_path / "batch_size_strategies.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))

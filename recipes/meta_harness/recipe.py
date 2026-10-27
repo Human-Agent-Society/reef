@@ -1,7 +1,7 @@
 """Configuration and per-scenario binding for the Meta-Harness method.
 
 ``MetaHarnessRecipe`` reuses ``CordisRecipe`` for trace batching, model
-bindings, adapter resolution, paired episodes, scoring, and publication.  It
+bindings, adapter resolution, paired rollouts, scoring, and publication.  It
 only binds the history-aware proposal policy and its population selector.
 
 Example recipe section::
@@ -11,7 +11,7 @@ Example recipe section::
       config:
         evolution:
           adapter: pi
-          evaluate: harness.scoring:score_episode
+          evaluate: harness.scoring:score_rollout
           tasks: ["validation task one", "validation task two"]
           models:
             proposer: {url: https://api.openai.com, model: gpt-5, api_key_env: OPENAI_API_KEY}
@@ -19,7 +19,7 @@ Example recipe section::
             archive: ${REEF_WORK}/meta-harness
             mode: full_history
             max_candidates: 20
-            max_target_episodes: 200
+            max_target_rollouts: 200
             max_nodes: 32
 
 The archive path is a post-commit JSON mirror.  Reef's algorithm state is
@@ -81,7 +81,7 @@ class MetaHarnessRecipe(CordisRecipe):
     proposer_model: str = "proposer"
     kinds: tuple[str, ...] = ()
     max_candidates: int = 0
-    max_target_episodes: int = 0
+    max_target_rollouts: int = 0
     max_nodes: int = 32
     name: str = "meta_harness"
 
@@ -97,7 +97,7 @@ class MetaHarnessRecipe(CordisRecipe):
             raise ValueError("evolution.meta_harness.model must not be empty")
         for label, value in (
             ("max_candidates", self.max_candidates),
-            ("max_target_episodes", self.max_target_episodes),
+            ("max_target_rollouts", self.max_target_rollouts),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"evolution.meta_harness.{label} must be a non-negative integer")
@@ -139,7 +139,7 @@ class MetaHarnessRecipe(CordisRecipe):
             "proposer_model": model.strip(),
             "kinds": tuple(kinds),
             "max_candidates": _non_negative_int(block, "max_candidates", 0),
-            "max_target_episodes": _non_negative_int(block, "max_target_episodes", 0),
+            "max_target_rollouts": _non_negative_int(block, "max_target_rollouts", 0),
             "max_nodes": _positive_int(block, "max_nodes", 32),
         }
 
@@ -169,12 +169,12 @@ class MetaHarnessRecipe(CordisRecipe):
                 store=store,
                 descriptor=descriptor,
                 tasks=self.tasks,
-                episode_repeats=self.episode_repeats,
+                rollout_repeats=self.rollout_repeats,
                 mode=self.mode,
                 model=self.proposer_model,
                 kinds=self.kinds,
                 max_candidates=self.max_candidates,
-                max_target_episodes=self.max_target_episodes,
+                max_target_rollouts=self.max_target_rollouts,
                 max_nodes=self.max_nodes,
             )
         bound = dataclasses.replace(self, propose=propose)

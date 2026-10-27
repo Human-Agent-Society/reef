@@ -1,4 +1,4 @@
-"""The generator service: a served model writes Harbor tasks, and Reef checks them and runs their episodes.
+"""The generator service: a served model writes Harbor tasks, and Reef checks them and runs their rollouts.
 
 The generated-task recipe (``reef.recipe.generated_tasks``) and the deployment's task generator
 (:class:`reef.recipe.generated_tasks.TaskGenerator`) run inside the Reef service, where nothing may block the trainer
@@ -11,7 +11,7 @@ and the recipe and the generator drive it over HTTP:
 - ``harbor``: the reply held to the authoring rules, the task written with ``reef.core.tasks``, tasks
   deduplicated by content, Harbor's oracle and nop agents run through the ``harbor`` command line, a split
   per generation.
-- ``terminus``: Terminus 2 for the generator's episodes, whose episode is still verified when the agent fills its
+- ``terminus``: Terminus 2 for the generator's rollouts, whose rollout is still verified when the agent fills its
   context or a send-keys to its terminal fails (selected by ``import_path``; the only module here that imports
   harbor).
 - ``inputs``: ``TaskGenerationRequest``, what a task generator is asked for, and the materials the designer
@@ -57,13 +57,13 @@ from reef.record2sample.generator.harbor import (
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.generator.service import (
+    GeneratorRollouts,
     GeneratorService,
     HarborChecks,
     JobRunner,
     ReadinessProbe,
-    ReefTaskEpisodes,
+    ReefGeneratorRollouts,
     TaskChecks,
-    TaskEpisodes,
     readiness_probes,
 )
 
@@ -77,6 +77,7 @@ __all__ = [
     "GeneratedHarborTask",
     "Generator",
     "GeneratorError",
+    "GeneratorRollouts",
     "GeneratorService",
     "HarborChecks",
     "HarborReply",
@@ -88,9 +89,8 @@ __all__ = [
     "ProposedTask",
     "ReadinessProbe",
     "ReefDesigner",
-    "ReefTaskEpisodes",
+    "ReefGeneratorRollouts",
     "TaskChecks",
-    "TaskEpisodes",
     "TaskGenerationRequest",
     "TaskNameConflict",
     "WrittenTask",

@@ -12,7 +12,7 @@ the reference implementation ([lasgroup/SDPO](https://github.com/lasgroup/SDPO)
 at `7c457fc1b1f6`), which the task image clones.
 
 ```text
-run.sh                          starts the Reef stack and runs the episode
+run.sh                          starts the Reef stack and runs the rollout
 run.py                          runs the Harbor task under the harness through reef-eval
 harness/agent.py                runs the stage in the task container
 harbor/chemistry/
@@ -68,7 +68,7 @@ cd recipes/sdpo/examples/sciknoweval
 ```
 
 `run.sh` starts the stack from `serve.yaml`, waits for it and runs the
-episode. The stack takes eight GPUs: four for the actor and four for the
+rollout. The stack takes eight GPUs: four for the actor and four for the
 serving engines. The run's state goes to `work/`.
 
 ## Results

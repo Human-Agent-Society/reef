@@ -4,7 +4,7 @@ opencode's boot mutates its own composition directories: it injects a
 ``$schema`` key into config files that lack one (an in-place edit of a
 rendered file, invisible to the residue scan), writes a ``.gitignore``, and
 npm-installs ``@opencode-ai/plugin`` with a ``node_modules`` tree and
-lockfiles. The whitelist below names exactly those artifacts so the episode
+lockfiles. The whitelist below names exactly those artifacts so the rollout
 inverse tolerates them and nothing else.
 
 ``process_config`` checks what the declaration cannot state: an agent must

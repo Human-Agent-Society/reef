@@ -16,23 +16,23 @@ import pytest
 
 from recipes.gepa.archive import Archive
 from recipes.gepa.method import GEPAProposer, ScoreFeedback
-from reef.evaluation.harness import EpisodeEvaluationWorker, EpisodeScorer
+from reef.evaluation.harness import RolloutEvaluationWorker, RolloutScorer
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import run_episode
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import run_rollout
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent import launch_pi
 from reef.sandbox.config import build_executor
 from reef.sandbox.e2b import E2BExecutor
-from reef.sandbox.process import EpisodeTimeout
+from reef.sandbox.process import RolloutTimeout
 from reef.train.cordis_backend.backend import _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_E2B") != "1", reason="opt-in paid E2B/OpenRouter test")
 
 
-class MarkerScorer(EpisodeScorer):
+class MarkerScorer(RolloutScorer):
     def __call__(self, task, result):
         for event in result.trajectory:
             message = event.get("message", event)
@@ -52,7 +52,7 @@ def model_endpoint():
         def do_POST(self):
             if (
                 self.path not in ("/v1/chat/completions", "/v1/responses")
-                or self.headers.get("Authorization") != "Bearer episode-test"
+                or self.headers.get("Authorization") != "Bearer rollout-test"
             ):
                 self.send_error(403)
                 return
@@ -86,19 +86,19 @@ def model_endpoint():
 
 
 @pytest.mark.parametrize("adapter,api", [("pi", "openai"), ("codex", "responses")])
-def test_real_agent_episode_through_generic_executor(adapter, api, model_endpoint, tmp_path):
+def test_real_agent_rollout_through_generic_executor(adapter, api, model_endpoint, tmp_path):
     descriptor = get_adapter(adapter)
     configured = build_executor({"executor": "e2b", "sandbox": {"forward_ports": [model_endpoint]}})
     executor, _ = configured.for_program(AdapterProgram(descriptor))
     binding = ModelBinding(
         base_url=f"http://127.0.0.1:{model_endpoint}",
         model=os.environ.get("REEF_E2B_TEST_MODEL", "openai/gpt-4.1-mini"),
-        api_key="episode-test",
+        api_key="rollout-test",
         api=api,
         max_output_tokens=256,
     )
     files = render_composition(binding.compose_nodes(descriptor), descriptor)
-    result = run_episode(
+    result = run_rollout(
         descriptor,
         files,
         "Reply exactly REEF_E2B_OK. Do not use tools.",
@@ -117,7 +117,7 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
     executor, _ = build_executor({"executor": "e2b"}).for_program(AdapterProgram(get_adapter("pi")))
     assert isinstance(executor, E2BExecutor)
     session = replace(executor, binary="python3", timeout_s=90).open()
-    root = tmp_path / "episode"
+    root = tmp_path / "rollout"
     workspace = root / "workspace"
     state = root / "state"
     workspace.mkdir(parents=True)
@@ -149,7 +149,7 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
         )
         assert outcome.exit_code == 0, outcome.stderr
         assert config.read_text() == "original" and (workspace / "answer.txt").read_text() == "ok"
-        with pytest.raises(EpisodeTimeout):
+        with pytest.raises(RolloutTimeout):
             session.launch(
                 ["python3", "-c", "import subprocess,time; subprocess.Popen(['sleep','120']); time.sleep(120)"],
                 root=root,
@@ -163,19 +163,19 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
         session.close()
 
 
-def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
+def test_cordis_and_gepa_score_real_remote_rollouts(model_endpoint, tmp_path):
     descriptor = get_adapter("pi")
     configured = build_executor({"executor": "e2b", "sandbox": {"forward_ports": [model_endpoint]}})
     executor, _ = configured.for_program(AdapterProgram(descriptor))
     binding = ModelBinding(
         base_url=f"http://127.0.0.1:{model_endpoint}",
         model=os.environ.get("REEF_E2B_TEST_MODEL", "openai/gpt-4.1-mini"),
-        api_key="episode-test",
+        api_key="rollout-test",
         max_output_tokens=256,
     )
     scorer = MarkerScorer()
     task = "Reply exactly REEF_E2B_OK. Do not use tools."
-    worker = EpisodeEvaluationWorker(descriptor, scorer, None, 180, executor, True)
+    worker = RolloutEvaluationWorker(descriptor, scorer, None, 180, executor, True)
     scored = worker.run(
         render_composition(binding.compose_nodes(descriptor), descriptor), task, models=ModelBindings(binding)
     )
@@ -185,7 +185,7 @@ def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
         descriptor=descriptor,
         binary=None,
         executor=executor,
-        score_episode=scorer,
+        score_rollout=scorer,
         feedback=ScoreFeedback(),
         minibatch_size=1,
         rng_seed=0,

@@ -320,7 +320,7 @@ def create_harness(monkeypatch, modules, tmp_path, *, env=None):
 
 
 def play(monkeypatch, modules, harness, task, tools, responses):
-    """Run one episode of the harness against ``task`` and ``tools`` with a scripted model; return the context."""
+    """Run one rollout of the harness against ``task`` and ``tools`` with a scripted model; return the context."""
     capture = Capture()
     model = Model(responses, capture)
     server = SimpleNamespace(server_address=("127.0.0.1", 29123), stopped=False)
@@ -830,7 +830,7 @@ def test_week_records_close_weeks_over_the_credit_window(monkeypatch) -> None:
         {"receipt": "r-2", "tokens": 25, "week": 0, "decision": "next_week"},
         {"receipt": "r-3", "tokens": 37, "week": 1, "decision": "next_week"},
     ]
-    # The last weeks close with the episode's final cash, valued as cash alone.
+    # The last weeks close with the rollout's final cash, valued as cash alone.
     closed = {week: (cash_end, value_end) for week, cash_end, value_end, _credit in records.finished_weeks(970_000.0)}
     assert closed[2] == (970_000.0, 970_000.0)
     rows = records.summary(970_000.0)
@@ -894,11 +894,11 @@ def test_training_pacer_forgives_a_batch_the_trainer_never_commits(monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
-# One episode through the Harbor agent (harness/harbor_agent.py)
+# One rollout through the Harbor agent (harness/harbor_agent.py)
 
 
 @pytest.mark.unit
-def test_harness_plays_the_episode_and_reports_each_week_to_reef(monkeypatch, tmp_path) -> None:
+def test_harness_plays_the_rollout_and_reports_each_week_to_reef(monkeypatch, tmp_path) -> None:
     modules = load_modules(monkeypatch)
     harness = create_harness(monkeypatch, modules, tmp_path)
     simulation = Simulation()
@@ -1004,7 +1004,7 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch, tmp
 
 
 @pytest.mark.unit
-def test_harness_ends_the_episode_when_the_engine_times_out(monkeypatch, tmp_path) -> None:
+def test_harness_ends_the_rollout_when_the_engine_times_out(monkeypatch, tmp_path) -> None:
     modules = load_modules(monkeypatch)
     harness = create_harness(monkeypatch, modules, tmp_path)
     simulation = Simulation()
@@ -1066,7 +1066,7 @@ def test_scorer_locates_the_single_run_and_prefers_the_checkpointed_database(tmp
 
 
 @pytest.mark.unit
-def test_entrypoint_runs_one_episode_and_drains_training(monkeypatch, capsys) -> None:
+def test_entrypoint_runs_one_rollout_and_drains_training(monkeypatch, capsys) -> None:
     calls = []
 
     class Lab:
@@ -1091,7 +1091,7 @@ def test_entrypoint_runs_one_episode_and_drains_training(monkeypatch, capsys) ->
 
     runpy.run_path(str(EXAMPLE_DIR / "run.py"))
 
-    # One episode: the policy adapts inside the episode it is scored on.
+    # One rollout: the policy adapts inside the rollout it is scored on.
     (lab, task, agent, tags), *rest = calls
     assert not rest
     assert str(task.relative_to(EXAMPLE_DIR)) == "harbor"

@@ -77,7 +77,7 @@ from reef.train.types import JobData, Sample
 
 
 class _SlowBackend(_ComponentBackend):
-    """The same cycle whose evaluation waits for the test to let it go, as a minutes long episode run would."""
+    """The same cycle whose evaluation waits for the test to let it go, as a minutes long rollout run would."""
 
     def __init__(self, component: str, artifact_dir: Path) -> None:
         super().__init__(component, artifact_dir)
@@ -459,7 +459,7 @@ def test_a_failed_instruction_of_a_scenario_that_is_gone_starts_no_worker(
     old = _scenario(dispatcher)
     dispatcher.delete_scenario("agent")
     monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_instruction", lambda error: True)
-    dispatcher.local_workers.fail_instruction(old, RuntimeError("episode failed"), HARNESS)
+    dispatcher.local_workers.fail_instruction(old, RuntimeError("rollout failed"), HARNESS)
     with dispatcher.local_workers.lock:
         assert dispatcher.local_workers.workers == {}
 

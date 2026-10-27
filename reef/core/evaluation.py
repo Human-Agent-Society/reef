@@ -150,6 +150,26 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
 
+class RolloutRunner[RequestT, RolloutT](ABC):
+    """Runs rollouts: each request names a task, and the policy and environment that run it.
+
+    Values: an implementation holds what all its rollouts share, such as the model endpoint and the
+    environment. ``RequestT`` is what one rollout needs beyond that: a task directory for the Harbor agent
+    runner (``TaskRolloutRunner``), and a harness tree with its task for the harness tree runner
+    (``HarnessRolloutEvaluator``). ``RolloutT`` is the result of one rollout, with its trajectory.
+    Purpose: a harness evaluation, a checkpoint evaluation and training on tasks run their rollouts through it.
+    To run a task ``count`` times, a caller repeats its request ``count`` times.
+    """
+
+    @abstractmethod
+    def run_rollouts(self, requests: Sequence[RequestT]) -> list[RolloutT]:
+        """Run one rollout of each request: the result has one rollout per request, in request order."""
+
+    @abstractmethod
+    def rollout_score(self, rollout: RolloutT) -> RolloutScore:
+        """The score of one rollout that ``run_rollouts`` gave."""
+
+
 @dataclass(frozen=True)
 class UpdateCandidate:
     """One update that has been produced but not selected for serving.
@@ -289,6 +309,7 @@ __all__ = [
     "CheckpointCandidate",
     "EvaluationResult",
     "RolloutKind",
+    "RolloutRunner",
     "RolloutScore",
     "RolloutScores",
     "SelectionDecision",

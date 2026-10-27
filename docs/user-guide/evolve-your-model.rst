@@ -269,9 +269,9 @@ Run Harbor tasks and report
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 
-Each task directory runs one episode with a Harbor agent (``terminus-2`` unless
+Each task directory runs one rollout with a Harbor agent (``terminus-2`` unless
 ``--agent-json`` names another) whose model calls go through Reef, so every
-inference is a record. When the verifier scores the episode, one report reaches
+inference is a record. When the verifier scores the rollout, one report reaches
 ``/reef/report``: the reward as the score, the receipts as the references, and
 the task's name, path and digest under ``metadata.task``. The recipe's reported
 processor turns those records into training samples like any other report.

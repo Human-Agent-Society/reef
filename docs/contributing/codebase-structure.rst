@@ -94,7 +94,7 @@ import a concrete integration.
 |                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | proposing candidates, training loops,      |
-|                         | episodes, built-in selection policies, and the           | artifact publication                       |
+|                         | rollouts, built-in selection policies, and the           | artifact publication                       |
 |                         | ``evaluation`` plugin configuration                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/sample2job/``    | shaping the samples of the selected record set units     | which records train, the training loop,    |
@@ -113,7 +113,7 @@ import a concrete integration.
 |                         | materialization, release heads                           | behavior                                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/harness/``       | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
-|                         | episodes, trajectories                                   |                                            |
+|                         | rollouts, trajectories                                   |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
 |                         | and environment lifecycle through Harbor                 | policy                                     |

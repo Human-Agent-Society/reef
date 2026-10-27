@@ -428,7 +428,7 @@ Harness evolution: worker executor selection
 --------------------------------------------
 
 Harness evolution evaluates external model endpoints, so it does not require
-a local GPU. ``EpisodeScorer.execution_requirements()`` declares local worker
+a local GPU. ``RolloutScorer.execution_requirements()`` declares local worker
 needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
 supplies the worker count and resources from ``execution.evolution``. The
 selector chooses ``uni`` for one local worker and ``mp`` for multiple local
@@ -450,7 +450,7 @@ explicitly for a cluster.
 ``execution.evolution`` accepts a backend, named profile, or inline object.
 Its backend defaults to ``auto``. Omitted resources keep the scorer's
 declared requirements (by default one CPU and zero GPUs per worker). ``workers`` is the
-fixed worker-group size. It is not an episode count or a separate
+fixed worker-group size. It is not a rollout count or a separate
 business-level concurrency limit. For ``uni/mp``, CPU requests describe
 capacity but do not reserve cores or enforce a CPU quota. Ray maps them to
 ``num_cpus``/``num_gpus`` per actor. These are scheduling reservations, not
@@ -458,28 +458,28 @@ hard CPU limits.
 
 Set workers and resources under ``execution.evolution``. In Python, pass
 ``worker_executor=ExecutorSettings(workers=..., resources=WorkerResources(...))``.
-``evolution.executor`` still means ``local`` or ``sandbox`` episode isolation;
+``evolution.executor`` still means ``local`` or ``sandbox`` rollout isolation;
 it is NOT renamed to ``uni``/``mp``. Sandbox preflight runs on the execution
-node too. A custom episode executor must preserve its own isolation and
-owner-loss cleanup. Built-in local episodes in remote/process workers use a
-POSIX owner lease, so loss of a worker also kills the episode process group.
-Commands must not detach. Worker loss can leave temporary episode
+node too. A custom rollout executor must preserve its own isolation and
+owner-loss cleanup. Built-in local rollouts in remote/process workers use a
+POSIX owner lease, so loss of a worker also kills the rollout process group.
+Commands must not detach. Worker loss can leave temporary rollout
 directories.
 
 To retain an in-process callback, choose ``uni`` with exactly one worker.
 With ``mp`` each rank gets its own copy of the scorer. Mutable scorer state is
 not shared or merged back into the recipe. The parent keeps ownership of
-proposal, composition, selection and publication. Only episode execution and
+proposal, composition, selection and publication. Only rollout execution and
 scoring cross the worker boundary. Candidate and current results keep their
 pairing order.
 
 Each backend/scenario starts one fixed pool of
 ``execution.evolution.workers`` ranks on its first nonempty evaluation. It
 reuses the pool across evaluations. Workers and lazy scorer/model
-initialization persist. Each episode still gets a fresh harness subprocess
+initialization persist. Each rollout still gets a fresh harness subprocess
 and temporary directory.
 
-Reef keeps the upstream step records and per-episode stage paths. Uni/MP
+Reef keeps the upstream step records and per-rollout stage paths. Uni/MP
 workers write records on the same host. Ray/custom workers return a
 compressed record with each successful RPC, so the parent process owns the
 durable path without shared storage. Reef extracts archives with Python's

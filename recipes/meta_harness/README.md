@@ -2,12 +2,12 @@
 
 Meta-Harness is full-history search over a fixed model's harness. This method
 represents every candidate as a complete Reef composition, so the same search
-works with any Reef adapter and any episode scorer. It has no Harbor,
+works with any Reef adapter and any rollout scorer. It has no Harbor,
 Terminal-Bench, Terminus, or coding-agent dependency.
 
 The implementation is a specialization of Reef's existing harness-evolution
 recipe. Reef still owns node validation, adapter rendering, model binding,
-episode execution, timeouts, residue policy, finite-score checks, selection
+rollout execution, timeouts, residue policy, finite-score checks, selection
 settlement, artifact publication, and scenario commits. Meta-Harness adds only
 the population-aware proposal and selection policies.
 
@@ -19,7 +19,7 @@ recipe:
   config:
     evolution:
       adapter: pi
-      evaluate: my_harness.scoring:EpisodeScore
+      evaluate: my_harness.scoring:RolloutScore
       tasks:
         - First validation task
         - Second validation task
@@ -37,18 +37,18 @@ recipe:
         archive: ${REEF_WORK}/meta-harness
         mode: full_history
         max_candidates: 20
-        max_target_episodes: 200
+        max_target_rollouts: 200
         max_nodes: 32
 
 inference:
   upstream-model: model-under-test
 ```
 
-`evaluate` names a standard Reef episode scorer class:
+`evaluate` names a standard Reef rollout scorer class:
 
 ```python
-class EpisodeScore(EpisodeScorer):
-    def score(self, task: str, result: EpisodeResult) -> float:
+class RolloutScore(RolloutScorer):
+    def score(self, task: str, result: RolloutResult) -> float:
         ...
 ```
 
@@ -127,8 +127,8 @@ future parent. Selection is a strict improvement in mean validation score over
 the score the incumbent was admitted on, which reproduces upstream's frontier:
 it keeps the highest recorded score. Reef's paired gate
 still measures both sides, so this method spends two evaluations per iteration
-where upstream spends one; budgets expressed in episodes are not directly
-comparable to upstream's iteration counts. Failed episodes count as zero; a
+where upstream spends one; budgets expressed in rollouts are not directly
+comparable to upstream's iteration counts. Failed rollouts count as zero; a
 non-finite score is rejected by Reef before settlement.
 
 The [Terminal-Bench example](examples/terminal_bench/README.md) runs the shared
@@ -152,8 +152,8 @@ names are SHA-256 encoded into filenames so they cannot escape the directory.
 On restart Reef ignores the file as input and rewrites a stale mirror from the
 committed algorithm state.
 
-`max_target_episodes` counts both sides of Reef's paired gate: candidate and
-incumbent, multiplied by `episode_repeats`. A proposal is not started unless
+`max_target_rollouts` counts both sides of Reef's paired gate: candidate and
+incumbent, multiplied by `rollout_repeats`. A proposal is not started unless
 the complete next gate fits. Zero disables a budget; Reef's shared
 `max_steps`, `max_model_calls_per_step`, executor, timeout, and residue options
 remain available as usual.

@@ -18,7 +18,7 @@ from tests.reef_service.test_harness_example import NODES, PLAN_MARKER, REQUEST,
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.recipe.reefine import evolution
 
 CHAT = {"id": "chat", "name": "agent_command", "config": {"name": "chat", "text": "# chat\n\nChat mode is on."}}

@@ -1,4 +1,4 @@
-"""The model bindings reef hands to methods and episodes: one value per
+"""The model bindings reef hands to methods and rollouts: one value per
 endpoint, translated per API dialect, with the named set a method may call."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from urllib.request import Request
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
 from reef.harness.tree.render import render_composition
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -136,7 +136,7 @@ def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monke
     """``usage`` rides the response object and ``last_usage`` keeps it for a
     wrapper of ``chat``, normalised to input/output tokens; a stream folds its
     usage in from the chunk or event that carried it."""
-    from reef.harness.episodes.model_binding import usage_of
+    from reef.harness.rollouts.model_binding import usage_of
 
     binding = ModelBinding("http://up", "m")
     assert binding.last_usage() is None
@@ -327,7 +327,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
 
 
 def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
 
     binding = ModelBinding("http://up", "m")
     _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "answer", "reasoning": "old"}}]})
@@ -339,7 +339,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 
 def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(monkeypatch) -> None:
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
     from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     record: list[dict[str, Any]] = []
@@ -361,7 +361,7 @@ def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(mo
 
 
 def test_reasoning_fragments_do_not_merge_unidentified_blocks_or_stringify_null_signatures() -> None:
-    from reef.harness.episodes.model_binding import _merge_reasoning_details
+    from reef.harness.rollouts.model_binding import _merge_reasoning_details
 
     details: list[Any] = []
     _merge_reasoning_details(details, [{"type": "reasoning.text", "index": 0, "text": "step", "signature": None}])
@@ -428,11 +428,11 @@ def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> Non
 def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> None:
     module = tmp_path / "demo_client_models.py"
     module.write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     import sys
@@ -476,7 +476,7 @@ def test_unknown_api_is_refused() -> None:
         ModelBinding("http://up", "m", api="cohere")
 
 
-def test_episode_templates_follow_the_dialect() -> None:
+def test_rollout_templates_follow_the_dialect() -> None:
     pi = get_adapter("pi")
     openai = render_composition(ModelBinding("http://up", "m", api_key="k").compose_nodes(pi), pi)
     responses = render_composition(ModelBinding("http://up", "m", api_key="k", api="responses").compose_nodes(pi), pi)
@@ -494,7 +494,7 @@ def test_episode_templates_follow_the_dialect() -> None:
 def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> None:
     """A local endpoint needs no key, but pi refuses to start without one.
 
-    Rendering the empty string made every evaluation episode exit 1 with
+    Rendering the empty string made every evaluation rollout exit 1 with
     "No API key found for the selected model" before reaching the endpoint,
     so both sides of the gate scored 0 and no proposal could ever publish.
     """
@@ -557,11 +557,11 @@ def test_from_config_reads_the_key_from_the_named_environment_variable() -> None
 def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     module = tmp_path / "demo_models.py"
     module.write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     import sys
@@ -623,7 +623,7 @@ def test_provider_metadata_is_selected_by_exact_model_and_cached(
     monkeypatch: pytest.MonkeyPatch, parameters: list[str], reasoning: bool
 ) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.episodes.model_binding import provider_model_metadata
+    from reef.harness.rollouts.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
     reply = {
@@ -652,7 +652,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.episodes.model_binding import provider_model_metadata
+    from reef.harness.rollouts.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
 
@@ -686,7 +686,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
 
 def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pytest.LogCaptureFixture) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.episodes.model_binding import provider_model_metadata
+    from reef.harness.rollouts.model_binding import provider_model_metadata
 
     complete_body = json.dumps(
         {"data": [{"id": "served", "context_length": 640_000, "supported_parameters": []}]}

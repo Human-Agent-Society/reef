@@ -233,8 +233,8 @@ from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
-from reef.harness.episodes.vendor_install import version_probe_env
-from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.rollouts.vendor_install import version_probe_env
+from reef.harness.rollouts.version_check import ships_version_check
 from reef.harness.step_result import design_sections, next_action, rejection_text
 
 
@@ -871,7 +871,7 @@ class CaptureProxy:
     call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
     and hands the release id an answer names to ``observer``.
 
-    With ``is_rollout``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
+    With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
     record of it, and the captured response holds the whole training block. A streaming agent still gets a
     stream, which the proxy makes from the complete answer."""
 
@@ -884,7 +884,7 @@ class CaptureProxy:
         tags: Mapping[str, str] | None = None,
         observer: ReleaseObserver | None = None,
         listen_host: str = "127.0.0.1",
-        is_rollout: bool = False,
+        is_unrecorded: bool = False,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -892,10 +892,10 @@ class CaptureProxy:
         fixed: dict[str, str] = {"x-reef-scenario": scenario}
         if token:
             fixed["authorization"] = f"Bearer {token}"
-        if is_rollout:
+        if is_unrecorded:
             fixed[ROLLOUT_HEADER] = "1"
         self._config = ServeConfig(
-            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_rollout
+            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
         )
         #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = _Tags(self._config, fixed)
@@ -1385,7 +1385,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             if subdir in path.parents and not is_client_state(descriptor, path)
         )
     env = os.environ.copy()
-    # What an interactive run needs beyond the episode env, {root} naming the install root (a directory
+    # What an interactive run needs beyond the rollout env, {root} naming the install root (a directory
     # outside the relocated composition is read in place); the person's own setting wins.
     for key, value in descriptor.client_env.items():
         env.setdefault(key, value.replace("{root}", str(install_root)))

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from tests.reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 import reef.evaluation.harness as reef_evaluation_harness
 from reef.core.plugins import PluginReference
@@ -46,7 +46,7 @@ def _evaluation(scores: tuple[float | str | list[float | str], ...]) -> Evaluati
         for index, value in enumerate(scores)
     ]
     return EvaluationResult(
-        evaluator="harness_episode_pairs",
+        evaluator="harness_rollout_pairs",
         evaluator_version="1",
         metrics={"candidate_scores": tasks, "current_scores": []},
     )
@@ -103,15 +103,15 @@ def test_the_floor_plugin_gates_the_candidate_alone() -> None:
     assert calls == [(candidate, ("candidate",))]
 
 
-def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(tmp_path: Path, monkeypatch) -> None:
+def test_a_candidate_only_evaluation_runs_no_current_rollout_and_still_settles(tmp_path: Path, monkeypatch) -> None:
     sides: list[str] = []
-    original = reef_evaluation_harness.run_episode
+    original = reef_evaluation_harness.run_rollout
 
     def spy(descriptor, files, prompt, **kwargs):
         sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
         return original(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(reef_evaluation_harness, "run_episode", spy)
+    monkeypatch.setattr(reef_evaluation_harness, "run_rollout", spy)
     b = backend(tmp_path, lambda n, s, m: MARKER)
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     candidate = prepared.candidate
@@ -128,19 +128,19 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
     assert set(evaluation.metrics) == {
         "candidate_scores",
         "current_scores",
-        "episode_failures",
-        "episode_repeats",
+        "rollout_failures",
+        "rollout_repeats",
         "candidate_failures",
         "candidate_residue",
         "candidate_score",
         "candidate_agents",
         "candidate_paths",
-        # What each candidate episode was graded on, so a rejected step names the task and the reply.
-        "candidate_episodes",
+        # What each candidate rollout was graded on, so a rejected step names the task and the reply.
+        "candidate_rollouts",
         "evaluation_sides",
     }
-    (episode,) = evaluation.metrics["candidate_episodes"]
-    assert set(episode) == {"task", "score", "failure", "reply"} and episode["score"] == 1.0
+    (rollout,) = evaluation.metrics["candidate_rollouts"]
+    assert set(rollout) == {"task", "score", "failure", "reply"} and rollout["score"] == 1.0
     # The default pair is unchanged and records no evaluation_sides.
     paired = b.evaluate(candidate).metrics
     assert sides == ["candidate", "candidate", "current"] and "evaluation_sides" not in paired
@@ -189,11 +189,11 @@ def test_a_candidate_that_misses_the_floor_reverts_and_carries_the_manifest_unto
 def write_floor_module(tmp_path: Path, monkeypatch) -> None:
     """Make ``demo_floor:Propose`` and ``demo_floor:Evaluate`` importable for a Cordis recipe config."""
     (tmp_path / "demo_floor.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -334,7 +334,7 @@ def _instruction(text: str = "add a rule", request_id: str = "req-1") -> JobData
 
 def test_step_progress_carries_the_proposers_activity_as_it_happens(tmp_path: Path, monkeypatch) -> None:
     """Each model call shows while it waits and once it answers, so the request page can tell a long call."""
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
 
     seen: list[tuple] = []
     held: dict[str, CordisBackend] = {}
@@ -378,12 +378,12 @@ def test_step_progress_names_the_phase_while_a_step_runs_and_clears_when_it_sett
     assert seen == [StepProgress("req-1", "proposing", seen[0].started_at, None)]
     assert before <= seen[0].started_at <= time.time()
     evaluating = b.step_progress
-    assert evaluating == replace(seen[0], phase="evaluating") and evaluating.episodes_total is None
+    assert evaluating == replace(seen[0], phase="evaluating") and evaluating.rollouts_total is None
     candidate = prepared.candidate
     assert candidate is not None
     evaluation = b.evaluate(candidate)
-    # One task, one repeat, both sides: the evaluation's size once the episodes are laid out.
-    assert b.step_progress == replace(evaluating, episodes_total=2)
+    # One task, one repeat, both sides: the evaluation's size once the rollouts are laid out.
+    assert b.step_progress == replace(evaluating, rollouts_total=2)
     b.settle_step(prepared, ScoreComparisonPlugin(b).decide(candidate, evaluation))
     assert b.step_progress is None
 
@@ -410,7 +410,7 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
     recorded = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda n, s, m, requests=(): MARKER),
-        score_episode=resolve_episode_scorer(evaluate),
+        score_rollout=resolve_rollout_scorer(evaluate),
         tasks=("task one",),
         models=MODEL,
         binary=str(make_binary(tmp_path)),
@@ -426,7 +426,7 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
 
 @pytest.mark.unit
 def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path, monkeypatch) -> None:
-    """Told where Reef answers inference, episodes sample the release the scenario serves through it."""
+    """Told where Reef answers inference, rollouts sample the release the scenario serves through it."""
     from reef.recipe.base import ServedEndpoint
 
     write_floor_module(tmp_path, monkeypatch)

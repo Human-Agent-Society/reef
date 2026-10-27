@@ -194,7 +194,7 @@ def test_the_driver_reads_results_and_mutations_as_the_page_does(run_module) -> 
     }
     assert run_module.tally_parts(always) == (1, 1, 1)
     assert run_module.tally(always) == "1 / 1 / 1"
-    # A failed episode scores None and ranks below every number, as reef's own tally ranks it.
+    # A failed rollout scores None and ranks below every number, as reef's own tally ranks it.
     failed = {
         "selection": {
             "evaluation": {"metrics": {"candidate_scores": [1.0, None, 1.0], "current_scores": [1.0, 1.0, 0.0]}}

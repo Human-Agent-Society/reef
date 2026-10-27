@@ -2,7 +2,7 @@
 
 Opt-in: this runs a Docker container and spends real model calls, so it is
 gated on a task and a model rather than a stub. Everything cheaper — that the
-episode reaches the runner with its tree (``test_terminus_episode.py``) and
+rollout reaches the runner with its tree (``test_terminus_rollout.py``) and
 that Harbor accepts what the runner builds (``test_terminus_agent.py``) —
 runs in CI.
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.trajectory import TerminusAtifReader
+from reef.harness.rollouts.trajectory import TerminusAtifReader
 from reef.harness.tree.render import render_composition
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
@@ -59,7 +59,7 @@ def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path,
     events = TerminusAtifReader()(sessions)
     assert events and events[0]["type"] == "verifier"
     # The verifier has to have run. Accepting an empty reward here would let
-    # this pass on an episode whose container never built.
+    # this pass on a rollout whose container never built.
     assert not events[0]["error"], events[0]["error"]
     assert events[0]["rewards"], "the verifier scored nothing"
     assert exit_code == 0

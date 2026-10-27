@@ -1,4 +1,4 @@
-"""The native adapter: a loop inside the tree whose tools and events are nodes, driven through the real episode engine.
+"""The native adapter: a loop inside the tree whose tools and events are nodes, driven through the real rollout engine.
 
 A stdlib HTTP server plays the served model: it answers by conversation state
 (write a file, then read it back, then answer), so the whole loop, the tool
@@ -17,15 +17,15 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from reef.evaluation import BackendAlwaysSelectPlugin
 from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import run_episode
-from reef.harness.episodes.trajectory import reader_for
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import run_rollout
+from reef.harness.rollouts.trajectory import reader_for
 from reef.harness.runners.native import (
     _DEFAULTS,
     MAX_COMPLETION_TOKENS,
@@ -122,7 +122,7 @@ def _call(name, arguments, call_id):
 
 
 class _FakeModel(ThreadingHTTPServer):
-    """Answers /v1/chat/completions by conversation state, so every episode gets the same script."""
+    """Answers /v1/chat/completions by conversation state, so every rollout gets the same script."""
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -188,9 +188,9 @@ def fake_model():
 
 
 def _launcher(tmp_path: Path) -> str:
-    """The episode binary: this interpreter running the native loop, like an installed reef-native.
+    """The rollout binary: this interpreter running the native loop, like an installed reef-native.
 
-    The child gets no PYTHONPATH from the episode engine, so the source
+    The child gets no PYTHONPATH from the rollout engine, so the source
     checkout is put on sys.path the way pytest does for this process."""
     root = Path(__file__).resolve().parents[2]
     path = tmp_path / "reef-native"
@@ -206,11 +206,11 @@ def _seed_nodes(entries=SEED_NODES):
     return [(entry["name"], entry["config"]) for entry in entries]
 
 
-def _episode(tmp_path: Path, model, nodes, prompt="put hello in notes.txt and read it back"):
+def _rollout(tmp_path: Path, model, nodes, prompt="put hello in notes.txt and read it back"):
     descriptor = get_adapter("native")
     binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
     files = render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)
-    return run_episode(descriptor, files, prompt, binary=_launcher(tmp_path))
+    return run_rollout(descriptor, files, prompt, binary=_launcher(tmp_path))
 
 
 def _events(trajectory, type_):
@@ -398,7 +398,7 @@ def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: 
 
 
 def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path: Path, fake_model) -> None:
-    result = _episode(tmp_path, fake_model, [*_seed_nodes(), ("rules", {"text": "Be brief."})])
+    result = _rollout(tmp_path, fake_model, [*_seed_nodes(), ("rules", {"text": "Be brief."})])
     kinds = [event["type"] for event in result.trajectory]
     # The seed graph reproduces the fixed loop it replaced: without the stage events the sequence is the old one.
     assert [kind for kind in kinds if not kind.startswith("stage/")] == [
@@ -500,7 +500,7 @@ def test_native_loop_records_provider_reasoning_without_changing_reply_or_tool_r
 
     model = ThinkingModel()
     try:
-        result = _episode(tmp_path, model, _seed_nodes())
+        result = _rollout(tmp_path, model, _seed_nodes())
         messages = [event["data"] for event in _events(result.trajectory, "assistant/message")]
         assert result.exit_code == 0
         assert {key: messages[0][key] for key in reasoning} == reasoning
@@ -517,7 +517,7 @@ def test_native_loop_records_provider_reasoning_without_changing_reply_or_tool_r
 def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     model = _FlakyModel()
     try:
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *EVENT_HOOKS])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *EVENT_HOOKS])
     finally:
         model.shutdown()
         model.server_close()
@@ -582,9 +582,9 @@ def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     assert step_two[-1] == {"role": "user", "content": "Writes are disabled here."}
 
 
-def test_a_module_that_cannot_load_ends_the_episode_in_error(tmp_path: Path, fake_model) -> None:
+def test_a_module_that_cannot_load_ends_the_rollout_in_error(tmp_path: Path, fake_model) -> None:
     broken = ("native_hook", {"name": "broken", "event": "pre_step", "code": "raise RuntimeError('no')\n"})
-    result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), broken])
+    result = _rollout(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), broken])
     assert result.exit_code == 1 and fake_model.requests == []
     assert [event["type"] for event in result.trajectory] == ["session", "turn/start", "turn/end"]
     reason = result.trajectory[-1]["data"]["reason"]
@@ -596,7 +596,7 @@ def test_a_module_that_cannot_load_ends_the_episode_in_error(tmp_path: Path, fak
 def test_seed_loop_guard_reminds_the_model_at_the_third_repeat(tmp_path: Path) -> None:
     model = _RepeatingModel()
     try:
-        result = _episode(tmp_path, model, _seed_nodes())
+        result = _rollout(tmp_path, model, _seed_nodes())
     finally:
         model.shutdown()
         model.server_close()
@@ -628,7 +628,7 @@ def test_a_long_tool_result_is_saved_under_the_workspace(tmp_path: Path) -> None
     )
     model = _DumpModel()
     try:
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), dump])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), dump])
     finally:
         model.shutdown()
         model.server_close()
@@ -654,7 +654,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
         propose=resolve_proposer(
             lambda nodes, samples, models: Mutation("create", "shout", {"name": "native_tool", "config": TOOL[1]})
         ),
-        score_episode=resolve_episode_scorer(final_answer),
+        score_rollout=resolve_rollout_scorer(final_answer),
         tasks=("put hello in notes.txt and read it back",),
         models=binding,
         binary=_launcher(tmp_path),
@@ -757,7 +757,7 @@ def test_invoke_runs_only_what_the_gate_allows(tmp_path: Path) -> None:
 
 
 def test_pre_execute_hooks_deny_by_capability_and_ask_with_no_one_to_answer(tmp_path: Path, fake_model) -> None:
-    result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), *PRE_EXECUTE_HOOKS])
+    result = _rollout(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), *PRE_EXECUTE_HOOKS])
     header = result.trajectory[0]["data"]
     assert header["capabilities"] == {
         "execute": ["exec", "write", "network"],
@@ -955,14 +955,14 @@ def test_native_graph_renders_sorted_json_and_checks_its_allow_list() -> None:
 def test_a_tree_without_a_graph_runs_the_seed_graph_and_a_bad_graph_is_a_load_error(
     tmp_path: Path, fake_model
 ) -> None:
-    result = _episode(tmp_path, fake_model, _seed_nodes(SEED_TOOLS))
+    result = _rollout(tmp_path, fake_model, _seed_nodes(SEED_TOOLS))
     assert result.trajectory[0]["data"]["graph"] == "seed"
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
     descriptor = get_adapter("native")
     binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
     files = dict(render_composition([*_seed_nodes(SEED_TOOLS), *binding.compose_nodes(descriptor)], descriptor))
     files["native/graphs/main.json"] = '{"name": "main", "start": "x", "stages": {}, "edges": []}\n'
-    broken = run_episode(descriptor, files, "hi", binary=_launcher(tmp_path))
+    broken = run_rollout(descriptor, files, "hi", binary=_launcher(tmp_path))
     assert broken.exit_code == 1 and [event["type"] for event in broken.trajectory] == [
         "session",
         "turn/start",
@@ -982,7 +982,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
     model = _ProseThenIntegerModel()
     try:
         # The interpreter alone: the verify stage fails, injects its message, and the next answer passes.
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", VERIFY_GRAPH)])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", VERIFY_GRAPH)])
         exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "check"]
         assert [(e["outcome"], e["to"], e["last_line"]) for e in exits] == [
             ("fail", "think", "The sieve finds 9592 primes below 100000."),
@@ -1002,7 +1002,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
                     "update", "main", {"name": "native_graph", "config": VERIFY_GRAPH}
                 )
             ),
-            score_episode=resolve_episode_scorer(final_line),
+            score_rollout=resolve_rollout_scorer(final_line),
             tasks=(
                 "[sieve] how many primes are below 100000? Reply with the count as a plain integer alone on the last line.",
             ),
@@ -1221,7 +1221,7 @@ def test_a_branch_stage_routes_on_the_steps_used_and_the_last_text(tmp_path: Pat
                 {"from": "route", "when": "else", "to": "think"},
             ],
         )
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
         exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
         assert [(e["outcome"], e["to"], e["case"]) for e in exits] == [
             ("else", "think", "else"),
@@ -1254,7 +1254,7 @@ def test_a_branch_stage_counts_tool_errors(tmp_path: Path) -> None:
             {"from": "route", "when": "stuck", "to": "quit"},
             {"from": "route", "when": "else", "to": "think"},
         ]
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
         exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
         assert [(e["outcome"], e.get("value")) for e in exits] == [("else", None), ("stuck", 2)]
         assert result.trajectory[-1]["data"]["reason"] == {"kind": "gave_up"} and len(model.requests) == 2
@@ -1297,7 +1297,7 @@ def test_a_compact_stage_summarizes_the_older_span_and_logs_the_policy(tmp_path:
         # A window this small is over the ratio after the first tool result, but the only older span would split
         # that result from its call, so nothing fires; after the second result the first pair is summarized.
         window = ("config", {"target": "models", "data": {"context_window": 120}})
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
         compacted = [e["data"] for e in result.trajectory if e["type"] == "context/compacted"]
         assert len(compacted) == 1 and compacted[0]["fired"] is True and compacted[0]["step"] == 2
         assert compacted[0]["summary"] == "wrote hello to notes.txt" and compacted[0]["dropped"] == 2
@@ -1360,7 +1360,7 @@ def test_a_compact_stage_below_the_ratio_or_without_a_summary_drops_nothing(tmp_
             ],
         }
         window = ("config", {"target": "models", "data": {"context_window": 120}})
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
         exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "squeeze"]
         assert exits[0]["fired"] is False and "error" not in exits[0], "below the ratio at the start"
         failed = [e["data"] for e in result.trajectory if e["type"] == "context/compacted"]
@@ -1514,7 +1514,7 @@ class _ProbingModel(_FakeModel):
 
 
 @pytest.mark.sandbox
-def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
+def test_a_sandboxed_rollout_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
     require_nested_jail()
     model = _ProbingModel()
     try:
@@ -1525,12 +1525,12 @@ def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path
             {"name": "probe", "description": "probe", "parameters": {}, "code": PROBE, "capabilities": []},
         )
         files = render_composition([*_seed_nodes(SEED_TOOLS), probe, *binding.compose_nodes(descriptor)], descriptor)
-        # The launcher and the checkout live outside the episode root, so the jail binds them like a base path.
+        # The launcher and the checkout live outside the rollout root, so the jail binds them like a base path.
         checkout = Path(__file__).resolve().parents[2]
         executor = SandboxExecutor(
             egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
         )
-        result = run_episode(
+        result = run_rollout(
             descriptor, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
         )
     finally:
@@ -1666,7 +1666,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
     model = _TeamModel()
     try:
         nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), CHECKER]
-        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        result = _rollout(tmp_path, model, nodes, prompt="how many primes are below 100000?")
         headers = [e["data"] for e in result.trajectory if e["type"] == "session"]
         # The agent's file sorts before the root's, so the root's final answer is the trajectory's last text.
         assert [(h["agent"], h["turn"], h.get("parent")) for h in headers] == [
@@ -1680,7 +1680,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         assert answers == ["verified: the count is 9592", "the count is 9592", "The checker agrees: 9592"]
         # What the parent read: the agent's text as a user message, attributed to it.
         handed = [e["data"] for e in result.trajectory if e["type"] == "user/message"]
-        # The parent's step counter already carries the checker's step: budgets draw from the episode total.
+        # The parent's step counter already carries the checker's step: budgets draw from the rollout total.
         assert handed == [
             {
                 "step": 2,
@@ -1706,7 +1706,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         checker_request = next(r for r in model.requests if "You are the checker" in r["messages"][0]["content"])
         assert [t["function"]["name"] for t in checker_request["tools"]] == ["read_file"]
         # Per agent work, as the verdict will carry it.
-        from reef.harness.episodes.trajectory import agent_work
+        from reef.harness.rollouts.trajectory import agent_work
 
         assert agent_work(result.trajectory) == {
             "checker": {
@@ -1720,7 +1720,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
             "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 0, "output_tokens": 0},
         }
         session_files = sorted(p.name for p in (tmp_path).rglob("*.jsonl"))
-        assert session_files == []  # the episode root is gone; the files were read into the trajectory
+        assert session_files == []  # the rollout root is gone; the files were read into the trajectory
     finally:
         model.shutdown()
         model.server_close()
@@ -1735,7 +1735,7 @@ def test_then_hands_an_agents_text_down_a_pipeline_and_the_last_text_returns(tmp
             ("native_agent", {**CHECKER[1], "then": ["writer"]}),
             WRITER,
         ]
-        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        result = _rollout(tmp_path, model, nodes, prompt="how many primes are below 100000?")
         headers = [
             (h["data"]["agent"], h["data"]["turn"], h["data"]["task"]) for h in _events(result.trajectory, "session")
         ]
@@ -1769,7 +1769,7 @@ def test_an_agent_that_spends_its_budget_ends_with_budget_and_the_parent_routes_
     model = _BusyChecker()
     try:
         nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), CHECKER]
-        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        result = _rollout(tmp_path, model, nodes, prompt="how many primes are below 100000?")
         checker_end = next(e["data"] for e in result.trajectory if e["type"] == "turn/end" and e["data"]["turn"] == 2)
         assert checker_end["reason"] == {"kind": "max-steps", "steps": 2}
         exits = [
@@ -1782,7 +1782,7 @@ def test_an_agent_that_spends_its_budget_ends_with_budget_and_the_parent_routes_
         assert handed[0]["content"] == "checker ended with budget"
         # A tool call cap ends the turn the same way, before the call runs.
         capped = ("native_agent", {**CHECKER[1], "max_steps": 6, "max_tool_calls": 1})
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), capped])
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), capped])
         checker_end = next(e["data"] for e in result.trajectory if e["type"] == "turn/end" and e["data"]["turn"] == 2)
         assert checker_end["reason"] == {"kind": "max-tool-calls", "tool_calls": 1}
         assert len([e for e in result.trajectory if e["type"] == "tool/call"]) == 1
@@ -1803,7 +1803,7 @@ def test_an_ask_inside_an_agent_ends_its_turn_and_the_parent_reads_the_reason(tm
             },
         )
         nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), CHECKER, approve]
-        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        result = _rollout(tmp_path, model, nodes, prompt="how many primes are below 100000?")
         checker_end = next(e["data"] for e in result.trajectory if e["type"] == "turn/end" and e["data"]["turn"] == 2)
         assert checker_end["reason"] == {"kind": "ask", "reason": "read x?"}
         # The call never ran: no tool/result in the checker's turn, and no APPROVAL_REQUIRED error for the model.
@@ -1823,16 +1823,16 @@ def test_an_ask_inside_an_agent_ends_its_turn_and_the_parent_reads_the_reason(tm
         model.server_close()
 
 
-# -- the tree travels as a file: the episode form boots from the entries list --------
+# -- the tree travels as a file: the rollout form boots from the entries list --------
 
 
-def _tree_episode(tmp_path: Path, model, entries, tree_entries=None, prompt="put hello in notes.txt and read it back"):
-    """An episode on the rendered files plus the entries list; ``tree_entries`` may differ from the render to probe the boot."""
+def _tree_rollout(tmp_path: Path, model, entries, tree_entries=None, prompt="put hello in notes.txt and read it back"):
+    """A rollout on the rendered files plus the entries list; ``tree_entries`` may differ from the render to probe the boot."""
     descriptor = get_adapter("native")
     binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
     files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
     files.update(tree_files(descriptor, entries if tree_entries is None else tree_entries))
-    return run_episode(descriptor, files, prompt, binary=_launcher(tmp_path))
+    return run_rollout(descriptor, files, prompt, binary=_launcher(tmp_path))
 
 
 def _comparable(trajectory):
@@ -1850,8 +1850,8 @@ def _comparable(trajectory):
 
 def test_a_root_with_an_entries_list_boots_from_it_and_logs_the_same_events(tmp_path: Path, fake_model) -> None:
     entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
-    from_files = _episode(tmp_path, fake_model, _seed_nodes(entries))
-    from_tree = _tree_episode(tmp_path, fake_model, entries)
+    from_files = _rollout(tmp_path, fake_model, _seed_nodes(entries))
+    from_tree = _tree_rollout(tmp_path, fake_model, entries)
     assert from_files.trajectory[0]["data"]["tree"] == "files"
     assert from_tree.trajectory[0]["data"]["tree"] == "tree.json"
     assert _comparable(from_tree.trajectory) == _comparable(from_files.trajectory)
@@ -1929,7 +1929,7 @@ def test_from_root_prefers_the_entries_list_and_admits_it_through_the_plugins(tm
         NativeHost.from_root(root, tmp_path / "again")
 
 
-def test_an_entries_list_that_cannot_load_ends_the_episode_naming_the_entry(tmp_path: Path, fake_model) -> None:
+def test_an_entries_list_that_cannot_load_ends_the_rollout_naming_the_entry(tmp_path: Path, fake_model) -> None:
     broken = {
         "id": "broken",
         "name": "native_tool",
@@ -1940,7 +1940,7 @@ def test_an_entries_list_that_cannot_load_ends_the_episode_naming_the_entry(tmp_
             "code": "def helper(args, workdir):\n    return 1\n",
         },
     }
-    result = _tree_episode(tmp_path, fake_model, [*SEED_TOOLS, broken])
+    result = _tree_rollout(tmp_path, fake_model, [*SEED_TOOLS, broken])
     assert result.exit_code == 1 and [e["type"] for e in result.trajectory] == ["session", "turn/start", "turn/end"]
     error = result.trajectory[-1]["data"]["reason"]["error"]
     assert error["code"] == "LOAD_ERROR"
@@ -2071,7 +2071,7 @@ def test_a_tool_whose_top_level_exits_fails_each_call_and_the_turn_ends(tmp_path
     )
     model = _ProbeTwiceModel()
     try:
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), probe], prompt="probe twice")
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), probe], prompt="probe twice")
     finally:
         model.shutdown()
         model.server_close()
@@ -2106,7 +2106,7 @@ def test_a_builtin_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Pat
     assert denied["error"]["code"] == "SANDBOX_FAILED" and "no module file" in denied["error"]["message"]
 
 
-def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_published_tree(
+def test_the_native_backend_carries_the_entries_list_into_rollouts_and_the_published_tree(
     tmp_path: Path, fake_model
 ) -> None:
     binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
@@ -2114,15 +2114,15 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
     backend = CordisBackend(
         descriptor=get_adapter("native"),
         propose=resolve_proposer(lambda nodes, samples, models: brief),
-        score_episode=resolve_episode_scorer(lambda task, result: 1.0),
+        score_rollout=resolve_rollout_scorer(lambda task, result: 1.0),
         tasks=("put hello in notes.txt and read it back",),
         models=binding,
         binary=_launcher(tmp_path),
         seed=SEED_NODES,
     )
-    episode = backend._episode_evaluator.render(SEED_NODES)
-    assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
-    assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
+    rollout = backend._rollout_evaluator.render(SEED_NODES)
+    assert json.loads(rollout["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
+    assert "base_url" in rollout["native/models.json"]  # the binding rides beside the list, never in it
     batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
@@ -2205,7 +2205,7 @@ def test_a_search_with_no_answer_is_a_miss_named_in_the_stage_detail(tmp_path: P
     monkeypatch.setattr(graphs, "NATIVE_PATTERN_TIMEOUT_S", 0.3)
     model = _LongA()
     try:
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)], prompt="go")
+        result = _rollout(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)], prompt="go")
     finally:
         model.shutdown()
     exits = {e["data"]["stage"]: e["data"] for e in _events(result.trajectory, "stage/exit")}

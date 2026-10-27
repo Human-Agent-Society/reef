@@ -298,7 +298,7 @@ tree with an executable to make a running harness (`Harness adapters
 <../developer-guide/harness-adapters.rst>`__). For weight
 serving, a LoRA/PEFT adapter layered on a frozen base model.
 
-Episode
+Rollout
 -------
 
 One headless run of the agent under test against one task, in a throwaway root

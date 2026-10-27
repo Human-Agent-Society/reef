@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from reef.sandbox.modal import ModalExecutor, ModalSession
-from reef.sandbox.process import EpisodeTimeout, SandboxProgram
+from reef.sandbox.process import RolloutTimeout, SandboxProgram
 from reef.sandbox.remote import deployment_owner
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_MODAL") != "1", reason="opt-in paid Modal test")
@@ -62,7 +62,7 @@ def test_a_process_runs_jailed_in_a_modal_sandbox_and_reaches_the_host_through_t
     executor, binary = ModalExecutor(app_name="reef-tests", owner=deployment_owner(tmp_path)).for_program(Cowsay())
     assert isinstance(executor, ModalExecutor) and binary == "cowsay"
     executor.preflight()
-    root = tmp_path / "episode"
+    root = tmp_path / "rollout"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
     (workspace / "task.md").write_text("say hi")
@@ -82,7 +82,7 @@ def test_a_process_runs_jailed_in_a_modal_sandbox_and_reaches_the_host_through_t
         assert "hi" in (workspace / "answer.txt").read_text()
         assert (workspace / "fetched.txt").read_text().strip() == ANSWER
         assert (workspace / "jail.txt").read_text().strip() == "read-only"
-        with pytest.raises(EpisodeTimeout):
+        with pytest.raises(RolloutTimeout):
             session.launch(["sleep", "60"], root=root, workspace=workspace, env={}, timeout=3)
     finally:
         session.close()

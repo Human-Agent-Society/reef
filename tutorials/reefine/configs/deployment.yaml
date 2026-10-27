@@ -29,7 +29,7 @@ recipe:
       # that the tree still works (the model binding, the tools, the extensions load), not that the requested
       # change does; the step page's design and review notes and the person judge the change itself.
       selection: floor
-      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
+      # Every step's proposer calls, parsed proposal and evaluation rollouts, so a row can be read back.
       step_record_dir: tutorials/reefine/work/deployment/steps
       # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
       proposals_dir: tutorials/reefine/work/deployment/proposals

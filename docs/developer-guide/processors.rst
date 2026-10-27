@@ -557,20 +557,20 @@ Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 
 - ``RejectedTask(task, reason)``: the candidate failed validation or
   conflicted with the task store, so it was never published.
-- ``HeldOutTask(task)``: the task is in the eval split. It runs no episodes. A
+- ``HeldOutTask(task)``: the task is in the eval split. It runs no rollouts. A
   generator must not use it as training feedback or as experience for later
   generations.
 - ``RolledOutTask(task, rollout_rewards)``: the first rollout of the train task
-  ran. ``rollout_rewards`` holds one verifier reward for each training episode
+  ran. ``rollout_rewards`` holds one verifier reward for each training rollout
   that ran, as the rollout's policy scored it before it trained on it. An
-  episode that ran without a reward counts as 0.
+  rollout that ran without a reward counts as 0.
 - ``FailedTask(task, error, infrastructure_failure)``: the first rollout ran no
-  episode. ``infrastructure_failure`` is true when the task could not run at
+  rollout. ``infrastructure_failure`` is true when the task could not run at
   all, for example because the sandbox failed; it is not a failure of the
   solver. It is false when the generator service refused the task.
 
-The generator service scores an episode whose verifier ran past its timeout
-as 0, and reports it, so a training episode of that kind trains. The task's
+The generator service scores a rollout whose verifier ran past its timeout
+as 0, and reports it, so a training rollout of that kind trains. The task's
 oracle passed the same verifier, so the timeout is the agent's.
 
 The recipe splits the work across its stages. A round is not a record set,
@@ -581,7 +581,7 @@ gives the round number and its sessions to the record-to-sample stage
 ``BackgroundJobWorker``, outside the trainer lock, and tells the record stage
 when the round ends. One generation runs at a time.
 
-A generation job runs no episodes. It:
+A generation job runs no rollouts. It:
 
 1. Asks the generator for tasks with the configured ``description`` and the
    round's source sessions.
@@ -597,19 +597,19 @@ sessions again, so it finishes the same generation. A round that made train
 tasks puts them in the task pool. A task identical to one that
 was already published is rejected as a duplicate.
 
-Saved tasks train as task jobs. Reef runs no episode of them: the training
+Saved tasks train as task jobs. Reef runs no rollout of them: the training
 component rolls each job's tasks out on its own sampler, at the job's start
-weights, and trains on their episodes. ``GeneratedTaskJobData`` drives the
+weights, and trains on their rollouts. ``GeneratedTaskJobData`` drives the
 loop through the stage's own-job-data hooks:
 
 1. When no tasks are handed out, the stage takes up to ``tasks_per_step``
    tasks from its task pool as the next job's data: the ``TaskSample`` values.
 2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
-   tells the component how many episodes of each task to run, and with which
+   tells the component how many rollouts of each task to run, and with which
    agent and sandbox. The Tinker component runs them, assembles one sample
-   from each episode that ran, scored with the task's verifier reward, and
+   from each rollout that ran, scored with the task's verifier reward, and
    trains on the groups of at least two samples. It reports each task's
-   episode rewards in the job's metrics (``rollout_rewards``).
+   rollout rewards in the job's metrics (``rollout_rewards``).
 3. The commit of the submission consumes the tasks: each is marked trained
    in the task store once that commit is durable. The tasks stay in the pool
    until the job ends.
@@ -634,8 +634,8 @@ generation's results to ``record_results``. A generation can therefore close
 after later generations started. A generation whose delivery fails waits for
 the next job, and later generations still go out.
 
-A generator can run episodes of a task through the generator service, as
-SPADE does for its hint plays; those episodes are not records, and do not
+A generator can run rollouts of a task through the generator service, as
+SPADE does for its hint plays; those rollouts are not records, and do not
 train.
 The ``task_group`` objective centers and scales each reward within its task
 group, on Tinker's ``importance_sampling`` loss. The record stage trains on no
@@ -678,13 +678,13 @@ tasks that trained.
 After a restart, the record-to-sample stage continues with the next generation number.
 It puts the train tasks that did not train back in the task pool and sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
-A task whose episodes were running at the stop has no result, so it runs again.
+A task whose rollouts were running at the stop has no result, so it runs again.
 ``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the task pool size.
 
 Container operations run in the generator service, ``reef.record2sample.generator``.
 The record-to-sample stage calls this service over HTTP. The task store is the
 source of each task; the service's tasks root holds staged copies. Staging the
-same task again under its name returns the staged copy, so episodes that a stop
+same task again under its name returns the staged copy, so rollouts that a stop
 interrupted, or a service that restarted with an empty tasks root, can still
 run a saved task. The ``generator`` deployment
 section configures the service that ``reef serve`` starts.

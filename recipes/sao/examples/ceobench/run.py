@@ -1,4 +1,4 @@
-"""One CEO-Bench episode, trained while it is played.
+"""One CEO-Bench rollout, trained while it is played.
 
     solve  — reef-eval runs the harbor/ task under our agent; the benchmark's
              bash agent plays the configured number of days with every model
@@ -10,13 +10,13 @@
              week, and the engine serves the updated adapter
     verify — Harbor's verifier scores the finished run from its world.nmdb
 
-This is test-time training: the policy adapts inside the episode it is
+This is test-time training: the policy adapts inside the rollout it is
 scored on. ``CEOBENCH_SEED`` (default ``42``) and ``CEOBENCH_DAYS`` (default
-``500``) pick the episode. Replicates are independent runs from the base
+``500``) pick the rollout. Replicates are independent runs from the base
 model, one stack each: a Reef process trains one scenario for its lifetime,
 so a second seed on the same stack would start from the first seed's adapter.
-After the episode the loop waits for the scenario's version chain to stop
-growing, so the adapter on disk is the one the episode ended with.
+After the rollout the loop waits for the scenario's version chain to stop
+growing, so the adapter on disk is the one the rollout ended with.
 """
 
 import asyncio
@@ -38,9 +38,9 @@ TOKEN = os.environ.get("REEF_TOKEN", "reef-local")
 SEED = int(os.environ.get("CEOBENCH_SEED", "42"))
 DAYS = int(os.environ.get("CEOBENCH_DAYS", "500"))
 #: Training is quiescent once the release count holds for this long: longer than one
-#: step, or the drain would return while the episode's last batch is still training.
+#: step, or the drain would return while the rollout's last batch is still training.
 TRAIN_QUIET_S = 900.0
-#: Ceiling on waiting for one episode's training steps before moving on with a warning.
+#: Ceiling on waiting for one rollout's training steps before moving on with a warning.
 TRAIN_DRAIN_TIMEOUT_S = 7200.0
 
 
@@ -94,8 +94,8 @@ def wait_for_training() -> int:
 async def main() -> None:
     lab = Lab(HERE / "work" / "lab")
     agent = {"name": "harness:HarborAgent", "model_name": MODEL, "kwargs": {"seed": SEED, "days": DAYS}}
-    # The scenario is part of the episode's identity: the untrained baseline and a trained
-    # episode on the same seed are two rows, not one recorded twice.
+    # The scenario is part of the rollout's identity: the untrained baseline and a trained
+    # rollout on the same seed are two rows, not one recorded twice.
     row = await lab.run(str(HERE / "harbor"), agent, tags={"seed": SEED, "days": DAYS, "scenario": SCENARIO})
     print(f"seed {SEED}: reward {row.rewards}")
     if row.tags.get("error"):

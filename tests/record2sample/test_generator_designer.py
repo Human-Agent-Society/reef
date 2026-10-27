@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.harness.test_task_episode_runner import StandInReef
+from tests.harness.test_task_rollout_runner import StandInReef
 
 from reef.record2sample.generator import (
     DesignerError,

@@ -1,5 +1,5 @@
-"""Guarantees of reef.harness.episodes.run, hermetic: a fake harness binary is
-driven through the real descriptor, render, and episode path (CI installs
+"""Guarantees of reef.harness.rollouts.run, hermetic: a fake harness binary is
+driven through the real descriptor, render, and rollout path (CI installs
 neither pi nor opencode)."""
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, _remove_episode_root, run_episode
-from reef.harness.episodes.trajectory import (
+from reef.harness.rollouts.run import RolloutError, RolloutResult, _remove_rollout_root, run_rollout
+from reef.harness.rollouts.trajectory import (
     ClaudeSessionReader,
     CodexSessionReader,
     DeepseekSessionReader,
@@ -189,24 +189,24 @@ def pi_files() -> dict[str, str]:
     return render_composition([("rules", {"text": "Answer briefly."})], get_adapter("pi"))
 
 
-def test_pi_episode_collects_exit_stdout_and_trajectory(tmp_path: Path) -> None:
-    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+def test_pi_rollout_collects_exit_stdout_and_trajectory(tmp_path: Path) -> None:
+    result = run_rollout(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
     assert result.exit_code == 0
     assert [json.loads(line)["type"] for line in result.stdout.splitlines()] == ["agent_start", "agent_end"]
     assert [event["type"] for event in result.trajectory] == ["session", "agent_end"]
     assert result.residue == ()  # session storage is declared, nothing else appeared
 
 
-def test_episode_relocates_the_composition_and_pins_offline(tmp_path: Path) -> None:
-    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+def test_rollout_relocates_the_composition_and_pins_offline(tmp_path: Path) -> None:
+    result = run_rollout(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
     session, agent_end = result.trajectory
     assert session["offline"] == "1"  # PI_OFFLINE rode the relocation env
     assert agent_end["rules"] == "Answer briefly.\n"  # the rendered tree is what the binary read
     assert agent_end["prompt"] == "list files"
 
 
-def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
-    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+def test_rollout_root_is_removed_after_the_run(tmp_path: Path) -> None:
+    result = run_rollout(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
     root = Path(result.trajectory[0]["root"])
     assert not root.exists()
 
@@ -214,66 +214,66 @@ def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
 def test_an_adapter_without_host_env_keeps_no_service_variable_and_roots_in_the_temp_directory(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Only terminus declares host_env and is_root_bind_mounted; every other episode stays hermetic, on macOS too."""
+    """Only terminus declares host_env and is_root_bind_mounted; every other rollout stays hermetic, on macOS too."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
-    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+    result = run_rollout(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
     session = result.trajectory[0]
     assert session["docker_host"] is None
     assert Path(session["root"]).parent == Path(tempfile.gettempdir())
 
 
-def test_episode_cleanup_repairs_permissions(tmp_path: Path) -> None:
+def test_rollout_cleanup_repairs_permissions(tmp_path: Path) -> None:
     root = tmp_path / "root"
     locked = root / "locked"
     locked.mkdir(parents=True)
     (locked / "credential").write_text("secret")
     locked.chmod(0)
     try:
-        _remove_episode_root(root)
+        _remove_rollout_root(root)
     finally:
         if locked.exists():
             locked.chmod(stat.S_IRWXU)
     assert not root.exists()
 
 
-def test_episode_cleanup_failure_is_not_suppressed(tmp_path: Path, monkeypatch) -> None:
+def test_rollout_cleanup_failure_is_not_suppressed(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "root"
     root.mkdir()
 
     def fail(*_args, **_kwargs):
         raise OSError("locked")
 
-    monkeypatch.setattr("reef.harness.episodes.run.shutil.rmtree", fail)
-    with pytest.raises(EpisodeError, match=r"cannot remove episode root.*locked"):
-        _remove_episode_root(root)
+    monkeypatch.setattr("reef.harness.rollouts.run.shutil.rmtree", fail)
+    with pytest.raises(RolloutError, match=r"cannot remove rollout root.*locked"):
+        _remove_rollout_root(root)
 
 
 def test_nonzero_exit_code_is_reported_not_raised(tmp_path: Path) -> None:
-    result = run_episode(get_adapter("pi"), pi_files(), "fail", binary=fake_binary(tmp_path, PI_FAKE))
+    result = run_rollout(get_adapter("pi"), pi_files(), "fail", binary=fake_binary(tmp_path, PI_FAKE))
     assert result.exit_code == 3
 
 
-def test_opencode_episode_whitelists_boot_mutations_and_reports_residue(tmp_path: Path) -> None:
+def test_opencode_rollout_whitelists_boot_mutations_and_reports_residue(tmp_path: Path) -> None:
     files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("opencode"))
-    result = run_episode(get_adapter("opencode"), files, "list files", binary=fake_binary(tmp_path, OPENCODE_FAKE))
+    result = run_rollout(get_adapter("opencode"), files, "list files", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert result.exit_code == 0
     assert [event["role"] for event in result.trajectory] == ["user", "assistant", "assistant"]
     assert result.trajectory[0]["content"] == [{"id": "prt_00", "type": "text", "text": "list files"}]
     assert result.residue == ("stray.txt",)  # boot mutations and the npm cache tolerated, the stray file is a finding
 
 
-def test_opencode_episode_grades_the_final_answer_of_its_session(tmp_path: Path) -> None:
+def test_opencode_rollout_grades_the_final_answer_of_its_session(tmp_path: Path) -> None:
     """The reader joins each message to its parts, so the grader finds the text of the last assistant turn."""
     files = render_composition([], get_adapter("opencode"))
-    result = run_episode(get_adapter("opencode"), files, "Run it.", binary=fake_binary(tmp_path, OPENCODE_FAKE))
+    result = run_rollout(get_adapter("opencode"), files, "Run it.", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert final_assistant_text(result.trajectory) == "reef-ok"
     assert evaluate("[health] Run the shell command `echo reef-ok`.", result) == 1.0
 
 
-def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
+def test_codex_rollout_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
     files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("codex"))
-    result = run_episode(get_adapter("codex"), files, "list files", binary=fake_binary(tmp_path, CODEX_FAKE))
+    result = run_rollout(get_adapter("codex"), files, "list files", binary=fake_binary(tmp_path, CODEX_FAKE))
     assert result.exit_code == 0
     assert json.loads(result.stdout)["item"]["text"] == "done"
     assert [event["type"] for event in result.trajectory] == ["session_meta", "event_msg"]
@@ -304,28 +304,28 @@ print("done")
 """
 
 
-def test_hermes_episode_whitelists_what_hermes_writes_at_boot_and_on_a_skill_load(tmp_path: Path) -> None:
+def test_hermes_rollout_whitelists_what_hermes_writes_at_boot_and_on_a_skill_load(tmp_path: Path) -> None:
     files = render_composition([("skill", {"name": "notes", "text": "Keep notes."})], get_adapter("hermes"))
-    result = run_episode(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
+    result = run_rollout(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
     assert result.exit_code == 0
     assert [event["type"] for event in result.trajectory] == ["session", "message"]
     # The credential pool, its lock, the default rules file, the log and the skill usage counts with their lock.
     assert result.residue == ()
 
 
-def test_claude_episode_runs_with_the_updater_and_its_update_commands_off(tmp_path: Path) -> None:
-    """The episode env sets both updater switches, and the agent's shell commands inherit them, so a claude update
+def test_claude_rollout_runs_with_the_updater_and_its_update_commands_off(tmp_path: Path) -> None:
+    """The rollout env sets both updater switches, and the agent's shell commands inherit them, so a claude update
     or claude install run there keeps the pinned version."""
     files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("claude"))
-    result = run_episode(get_adapter("claude"), files, "list files", binary=fake_binary(tmp_path, CLAUDE_FAKE))
+    result = run_rollout(get_adapter("claude"), files, "list files", binary=fake_binary(tmp_path, CLAUDE_FAKE))
     assert result.exit_code == 0
     assert [event["env"] for event in result.trajectory] == [{"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}]
     assert result.residue == ()
 
 
-def test_missing_binary_raises_episode_error(tmp_path: Path) -> None:
-    with pytest.raises(EpisodeError, match="not found"):
-        run_episode(get_adapter("pi"), pi_files(), "x", binary=str(tmp_path / "no-such-binary"))
+def test_missing_binary_raises_rollout_error(tmp_path: Path) -> None:
+    with pytest.raises(RolloutError, match="not found"):
+        run_rollout(get_adapter("pi"), pi_files(), "x", binary=str(tmp_path / "no-such-binary"))
 
 
 def test_pi_reader_tolerates_exactly_one_torn_tail(tmp_path: Path) -> None:
@@ -389,7 +389,7 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
 
 
 @pytest.mark.parametrize("answer, expected_score", [("reef-ok", 1.0), ("wrong", 0.0), (None, 0.0)])
-def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str | None, expected_score: float) -> None:
+def test_codex_rollout_grades_assistant_output_text(tmp_path: Path, answer: str | None, expected_score: float) -> None:
     events = [
         {
             "type": "response_item",
@@ -419,7 +419,7 @@ def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str 
     trajectory = CodexSessionReader()(tmp_path)
     expected_reply = None if answer is None else f"Output:\n{answer}"
     assert final_assistant_text(trajectory) == expected_reply
-    result = EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
+    result = RolloutResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
     assert evaluate("[health] Reply with the shell command's output", result) == expected_score
     assert trajectory == tuple(events)
 
@@ -502,25 +502,25 @@ child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 open({str(tmp_path)!r} + "/child.pid", "w").write(str(child.pid))
 time.sleep(60)
 """
-    with pytest.raises(EpisodeError, match="timed out"):
-        run_episode(get_adapter("pi"), pi_files(), "x", binary=fake_binary(tmp_path, hang), timeout=1.5)
+    with pytest.raises(RolloutError, match="timed out"):
+        run_rollout(get_adapter("pi"), pi_files(), "x", binary=fake_binary(tmp_path, hang), timeout=1.5)
     child_pid = int((tmp_path / "child.pid").read_text())
     time.sleep(0.2)  # give the group kill a beat to land
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
 
 
-def test_render_path_may_not_escape_the_episode_root(tmp_path: Path) -> None:
+def test_render_path_may_not_escape_the_rollout_root(tmp_path: Path) -> None:
     files = {**pi_files(), "../escape.txt": "x"}
-    with pytest.raises(EpisodeError, match="escapes the episode root"):
-        run_episode(get_adapter("pi"), files, "x", binary=fake_binary(tmp_path, PI_FAKE))
+    with pytest.raises(RolloutError, match="escapes the rollout root"):
+        run_rollout(get_adapter("pi"), files, "x", binary=fake_binary(tmp_path, PI_FAKE))
     assert not (tmp_path.parent / "escape.txt").exists()
 
 
-def test_colliding_render_paths_raise_episode_error(tmp_path: Path) -> None:
+def test_colliding_render_paths_raise_rollout_error(tmp_path: Path) -> None:
     files = {"a": "file", "a/b": "needs a to be a directory"}
-    with pytest.raises(EpisodeError, match="cannot write render path"):
-        run_episode(get_adapter("pi"), files, "x", binary=fake_binary(tmp_path, PI_FAKE))
+    with pytest.raises(RolloutError, match="cannot write render path"):
+        run_rollout(get_adapter("pi"), files, "x", binary=fake_binary(tmp_path, PI_FAKE))
 
 
 def test_opencode_reader_rejects_a_non_object_document(tmp_path: Path) -> None:

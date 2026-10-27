@@ -2,13 +2,13 @@ Write a harness method
 ======================
 
 A harness method decides what change to try and how to score an evaluation
-episode. Reef applies the change to a candidate harness, runs the evaluation,
+rollout. Reef applies the change to a candidate harness, runs the evaluation,
 records the result, and follows the selection and publication policies.
 
 See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the
 evolution workflow and a runnable example.
 
-A method provides a ``Proposer`` and an ``EpisodeScorer``. A custom selection
+A method provides a ``Proposer`` and an ``RolloutScorer``. A custom selection
 plugin is optional:
 
 .. code:: python
@@ -16,7 +16,7 @@ plugin is optional:
    class MyProposer(Proposer):
        def propose(self, nodes, samples, models, **keywords) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
 
-   class MyScorer(EpisodeScorer):
+   class MyScorer(RolloutScorer):
        def score(self, task, result) -> float: ...
 
    class MySelection(SelectionPlugin):  # optional
@@ -68,7 +68,7 @@ Reef also passes these keyword arguments on every call:
   property is true and ``evolution.proposer_agent`` is configured; otherwise
   it is ``None``. It provides the agent's adapter,
   installed binary, executor, record directory, timeouts, and ``calls``
-  budget and record. The agent executor is separate from episode execution.
+  budget and record. The agent executor is separate from rollout execution.
   See ``reef.recipe.reefine.agent`` for a use of this argument.
 
 For model calls the agent process makes outside ``models``, use
@@ -95,14 +95,14 @@ Reef evaluates request mutations and applies the same ``evolution.publish``
 policy as for other steps. Pending agent proposals and periodic rollback
 rechecks cannot take over the step assigned to a request.
 
-Score an episode
+Score a rollout
 ~~~~~~~~~~~~~~~~
 
-``EpisodeScorer.score(task, result)`` scores one completed episode. Reef
+``RolloutScorer.score(task, result)`` scores one completed rollout. Reef
 calls it for each side the selection policy evaluates; ``floor`` evaluates
 only the candidate. The ``result`` contains the exit code, stdout, stderr,
-and parsed ``trajectory``. Episodes that could not run do not reach the
-scorer. ``VerifierRewardScorer`` scores a Harbor task episode by its
+and parsed ``trajectory``. Rollouts that could not run do not reach the
+scorer. ``VerifierRewardScorer`` scores a Harbor task rollout by its
 verifier's reward.
 
 Other method options
@@ -145,7 +145,7 @@ This method adds a rules node the first time a step's samples contain a failure:
 
 .. code:: python
 
-   from reef.evaluation.harness import EpisodeScorer
+   from reef.evaluation.harness import RolloutScorer
    from reef.train.cordis_backend import Mutation, Proposer
 
    RULE = "State the final answer alone on the last line.\n"
@@ -162,7 +162,7 @@ This method adds a rules node the first time a step's samples contain a failure:
            return Mutation("create", "final-line-rule", {"name": "rules", "config": {"text": RULE}})
 
 
-   class ExactAnswer(EpisodeScorer):
+   class ExactAnswer(RolloutScorer):
        def score(self, task, result):
            """1.0 when the final assistant text ends with the task's expected answer."""
            text = _final_text(result.trajectory) or ""

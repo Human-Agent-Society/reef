@@ -6,7 +6,7 @@
 2. Its own task jobs: the train tasks of the scenario's ``imported-tasks`` store that have not trained, up to
    ``tasks_per_job`` of them in one job. The tasks arrive by ``POST /reef/scenarios/{scenario}/tasks`` or by
    the deployment's ``task-import`` section. The training component rolls them out on its own sampler and
-   trains on their episodes.
+   trains on their rollouts.
 
 ``ImportedTaskEvaluation`` evaluates every artifact that the trainer publishes on the store's eval tasks: an
 evaluation job from the artifact's checkpoint, which rolls the tasks out and trains nothing.

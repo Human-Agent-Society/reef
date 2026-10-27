@@ -704,7 +704,7 @@ def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
 def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_failed(tmp_path):
     """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
     evaluation, and keeps the proposed change and the method's notes, so the pages show what was tried."""
-    from tests.support._strategies import resolve_episode_scorer
+    from tests.support._strategies import resolve_rollout_scorer
 
     from reef.harness.tree.mutations import Mutation
     from reef.service.release_page import failed_words
@@ -716,9 +716,9 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
         return StepProposal((marker,), {"design": "one rules entry"})
 
     def score(task, result):
-        raise ValueError("the scorer could not read the episode")
+        raise ValueError("the scorer could not read the rollout")
 
-    recipe = replace(_recipe(tmp_path, propose), score_episode=resolve_episode_scorer(score), training_mode="manual")
+    recipe = replace(_recipe(tmp_path, propose), score_rollout=resolve_rollout_scorer(score), training_mode="manual")
     dispatcher = _dispatcher(tmp_path, recipe)
     try:
         dispatcher.get_or_create_scenario("s")
@@ -726,7 +726,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
         assert _wait(lambda: _committed_skip(dispatcher, "broken scorer") == "instruction failed")
         row = _committed_row(dispatcher, "broken scorer")
         assert row["failed_stage"] == "evaluating"
-        assert row["error"] == "ValueError: the scorer could not read the episode"
+        assert row["error"] == "ValueError: the scorer could not read the rollout"
         assert row["proposal_notes"]["design"] == "one rules entry"
         assert [mutation["id"] for mutation in row["mutations"]] == ["r1"]
         assert failed_words(row).startswith("The step failed during its evaluation")

@@ -9,9 +9,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree.mutations import Mutation
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
@@ -39,8 +39,8 @@ class NightProposer(Proposer):
         return skillclaw.propose(nodes, samples, models)
 
 
-class ProbeScorer(EpisodeScorer):
-    """Exact last-line grading of the probe episodes (:func:`skillclaw.evaluate`)."""
+class ProbeScorer(RolloutScorer):
+    """Exact last-line grading of the probe rollouts (:func:`skillclaw.evaluate`)."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return skillclaw.evaluate(task, result)

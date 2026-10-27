@@ -654,7 +654,7 @@ def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None
     try:
         service = RequestService(dispatcher)
         headers = {"x-reef-scenario": "agent"}
-        # An episode runs for a loaded scenario's step, so its calls find the scenario loaded.
+        # A rollout runs for a loaded scenario's step, so its calls find the scenario loaded.
         assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
@@ -724,7 +724,7 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
                 assert (await response.json())["choices"][0]["message"]["content"] == "ok"
                 missing = await client.post("/reef/scenarios/agent/evaluation/v1/nothing", json={})
                 assert missing.status == 404
-                # An evaluation call never creates a scenario: only a loaded one has episodes.
+                # An evaluation call never creates a scenario: only a loaded one has rollouts.
                 unknown = await client.post(
                     "/reef/scenarios/other/evaluation/v1/chat/completions", json={"messages": []}
                 )
@@ -741,33 +741,33 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
 
 
 class _ClosingBackend(_FileBackend):
-    """A backend whose close waits for the episode call in flight, as a worker pool's close waits for its batch."""
+    """A backend whose close waits for the rollout call in flight, as a worker pool's close waits for its batch."""
 
     def __init__(
-        self, label: str, artifact_dir: Path, closing: threading.Event, episode_done: threading.Event
+        self, label: str, artifact_dir: Path, closing: threading.Event, rollout_done: threading.Event
     ) -> None:
         super().__init__(label, artifact_dir)
         self.closing = closing
-        self.episode_done = episode_done
+        self.rollout_done = rollout_done
 
     def close(self) -> None:
         self.closing.set()
-        self.episode_done.wait(10)
+        self.rollout_done.wait(10)
 
 
 @dataclass(frozen=True)
-class _EpisodeTreeRecipe(_TreeRecipe):
-    """The tree recipe whose backend closes only once its evaluation episode has made its last call."""
+class _RolloutTreeRecipe(_TreeRecipe):
+    """The tree recipe whose backend closes only once its evaluation rollout has made its last call."""
 
     closing: threading.Event = field(default_factory=threading.Event)
-    episode_done: threading.Event = field(default_factory=threading.Event)
+    rollout_done: threading.Event = field(default_factory=threading.Event)
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=threshold_pipeline,
-            candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.episode_done),
+            candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.rollout_done),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
@@ -778,9 +778,9 @@ class _EpisodeTreeRecipe(_TreeRecipe):
 
 @pytest.mark.unit
 def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_scenario_back(tmp_path: Path) -> None:
-    """A delete closes the scenario's backend, which waits for the evaluation episode in flight; the episode's call
+    """A delete closes the scenario's backend, which waits for the evaluation rollout in flight; the rollout's call
     must not wait for the scenario the delete holds, and must not create the scenario again once the delete ends."""
-    harness = _EpisodeTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
+    harness = _RolloutTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
     dispatcher = _serve(CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe()}), tmp_path)
     service = RequestService(dispatcher)
     try:
@@ -791,7 +791,7 @@ def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_s
         assert harness.closing.wait(10)
         answers: list[str] = []
 
-        def episode_call() -> None:
+        def rollout_call() -> None:
             try:
                 asyncio.run(
                     service.infer_with_data(
@@ -807,18 +807,18 @@ def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_s
             except UnknownScenario:
                 answers.append("unknown")
             finally:
-                harness.episode_done.set()
+                harness.rollout_done.set()
 
-        calling = threading.Thread(target=episode_call)
+        calling = threading.Thread(target=rollout_call)
         calling.start()
         calling.join(5)
-        assert not calling.is_alive(), "the episode call waited for the scenario the delete holds"
+        assert not calling.is_alive(), "the rollout call waited for the scenario the delete holds"
         deleting.join(10)
         assert not deleting.is_alive() and deleted["scenario"] == "agent"
         assert answers == ["unknown"]
         assert dispatcher.get_or_create_scenario("agent", allow_implicit_creation=False) is None
     finally:
-        harness.episode_done.set()
+        harness.rollout_done.set()
         dispatcher.close()
 
 
@@ -835,7 +835,7 @@ class _CaptureHandler(_EchoHandler):
 
 @pytest.mark.unit
 def test_an_evaluation_call_runs_every_hook_but_the_evaluated_components(tmp_path: Path) -> None:
-    """An episode runs its own candidate of one component, so that component's served hooks stay out of its calls:
+    """A rollout runs its own candidate of one component, so that component's served hooks stay out of its calls:
     evaluating the harness keeps the served request defaults, evaluating the config drops them."""
     dispatcher = _serve(_composite(tmp_path), tmp_path)
     handler = _CaptureHandler()
@@ -902,11 +902,11 @@ def test_only_a_composite_evaluates_through_the_service(
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     settings = ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
-    assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="episode")
+    assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="rollout")
     if composite:
         assert built["hold"] is True
         assert built["recipe"].components["harness"].endpoint == ServedEndpoint(
-            "http://127.0.0.1:8900", token="episode", component="harness"
+            "http://127.0.0.1:8900", token="rollout", component="harness"
         )
     else:
         assert built["hold"] is False and built["recipe"].endpoint is None

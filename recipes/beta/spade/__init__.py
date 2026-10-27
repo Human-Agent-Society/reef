@@ -1,6 +1,6 @@
 """SPADE (arXiv:2608.19197): self play in adaptive synthetic executable environments, as a task generator.
 
-Reef knows one task format, Harbor, and writes and checks Harbor tasks and runs their episodes in ``reef.record2sample.generator``.
+Reef knows one task format, Harbor, and writes and checks Harbor tasks and runs their rollouts in ``reef.record2sample.generator``.
 The built-in generated-task recipe runs the tasks and trains on them. What SPADE adds is the generator:
 the Environment Designer's adversarial experience section, the hint arm each task asks for, and the hint
 based regret as the Designer's signal.
