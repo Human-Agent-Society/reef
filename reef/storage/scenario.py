@@ -67,7 +67,7 @@ class ScenarioStore(ABC):
     def tasks(self) -> TaskStorage:
         """Opens the generated task stores of this scenario.
 
-        Each record-to-task stage opens its own store name. The stores close
+        Each record-to-sample stage opens its own store name. The stores close
         with this session. They survive a restart if ``durable`` is true.
         """
 

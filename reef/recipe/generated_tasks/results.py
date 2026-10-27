@@ -35,7 +35,7 @@ class TaskRolloutResult:
     name, in exactly one of two cases. The episodes ran: ``rollout_rewards`` is a non-empty tuple of finite
     numbers, ``error`` is empty and ``infrastructure_failure`` is false. No episode ran: ``rollout_rewards`` is
     empty and ``error`` is non-empty; ``infrastructure_failure`` says whether the task could not run at all.
-    Purpose: the record-to-task stage makes it when a train task's rollout ends, or when a restart finds a task
+    Purpose: the record-to-sample stage makes it when a train task's rollout ends, or when a restart finds a task
     that trained without one. It saves it as ``rollout(task_name)``; the delivery turns it into the generator's
     ``RolledOutTask`` or ``FailedTask`` (:meth:`generated`).
     """

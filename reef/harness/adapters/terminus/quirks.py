@@ -8,8 +8,9 @@ others, with nothing that marks them as commands.
 
 One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around
-the runner and Harbor's remote E2B environment for the terminal task: the
-task container alone does not isolate evolved Python in the outer runner.
+the runner and a remote Harbor environment for the terminal task
+(``REMOTE_TASK_ENVIRONMENTS``): the task container alone does not isolate
+evolved Python in the outer runner.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 from reef.harness.tree.render import RenderError
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
+from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 
 class TerminusAdapterRenderer(AdapterRenderer):
@@ -49,19 +51,23 @@ class TerminusExecutionValidator(ExecutionValidator):
             extension = extension_source(files)
         except TerminusTreeError as exc:
             raise EpisodeLaunchError(str(exc)) from exc
+        remote = " or ".join(sorted(REMOTE_TASK_ENVIRONMENTS))
         if isinstance(executor, SandboxExecutor):
-            if executor.env.get(ENVIRONMENT_ENV) != "e2b":
+            environment = executor.env.get(ENVIRONMENT_ENV, "")
+            credentials = REMOTE_TASK_ENVIRONMENTS.get(environment)
+            if credentials is None:
                 raise EpisodeLaunchError(
-                    "terminus Docker cannot run under evolution.executor: sandbox; "
-                    "set REEF_TERMINUS_ENVIRONMENT=e2b and include it in evolution.sandbox.env_from"
+                    "terminus Docker cannot run under evolution.executor: sandbox; set REEF_TERMINUS_ENVIRONMENT to "
+                    f"a remote task environment ({remote}) and include it in evolution.sandbox.env_from"
                 )
-            if not executor.egress_hosts or not executor.env.get("E2B_API_KEY"):
+            if not executor.egress_hosts or not all(executor.env.get(name) for name in credentials):
                 raise EpisodeLaunchError(
-                    "sandboxed terminus requires egress_hosts and E2B_API_KEY in sandbox.env_from"
+                    f"sandboxed terminus on {environment} requires egress_hosts and "
+                    f"{', '.join(credentials)} in sandbox.env_from"
                 )
         elif extension is not None:
             raise EpisodeLaunchError(
-                "terminus code_extension requires evolution.executor: sandbox with remote E2B tasks"
+                f"terminus code_extension requires evolution.executor: sandbox with remote tasks ({remote})"
             )
 
 

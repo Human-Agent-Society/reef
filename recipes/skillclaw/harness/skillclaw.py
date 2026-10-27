@@ -34,7 +34,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 
@@ -68,7 +68,7 @@ def _report_index() -> dict[str, dict[str, Any]]:
     return index
 
 
-def _fallback_meta(sample: TrajectoryItem) -> dict[str, Any]:
+def _fallback_meta(sample: TrajectorySample) -> dict[str, Any]:
     """Task metadata derived from the trace alone, for a sample without a
     saved report. The -1.0 sentinel is the unscored report, never a grade.
 
@@ -108,7 +108,7 @@ def _fallback_meta(sample: TrajectoryItem) -> dict[str, Any]:
     }
 
 
-def digest(sample: TrajectoryItem, meta: dict[str, Any]) -> dict[str, Any]:
+def digest(sample: TrajectorySample, meta: dict[str, Any]) -> dict[str, Any]:
     """One task's aggregated session from its recorded traffic and verdict."""
     from reef.core.trajectories import recorded_payload, source_record_id
 
@@ -169,7 +169,7 @@ def _pool_mutations(incumbent: dict[str, str], evolved: dict[str, str]) -> Seque
 
 def propose(
     nodes: tuple[tuple[str, Any], ...],
-    samples: tuple[TrajectoryItem, ...],
+    samples: tuple[TrajectorySample, ...],
     models: ModelBindings,
 ) -> Sequence[object] | None:
     """One night step over a day of traffic: incumbent pool in, mutations out.

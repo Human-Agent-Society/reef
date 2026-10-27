@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from numbers import Real
 from typing import Any, Literal
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
 
 
@@ -350,7 +350,7 @@ class SlimeAlgorithm(ABC):
 
     # --- stage 2: shape row ---
 
-    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
+    def shape_sample_row(self, sample: TrajectorySample) -> list[Any]:
         """Shape one Reef sample into this family's wire row.
 
         Default: ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``.

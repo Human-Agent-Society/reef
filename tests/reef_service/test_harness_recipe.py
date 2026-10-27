@@ -1475,8 +1475,8 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
         config=config(
             pipeline={
                 "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
-                "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
-                "task2job": {"config": {"buffer_size": 6}},
+                "record2sample": {"module": "reef.train.cordis_backend.processor:InferenceSamples"},
+                "sample2job": {"config": {"buffer_size": 6}},
             },
             batch_size=2,
         ),
@@ -1484,21 +1484,21 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     )
     trainer = records.build("demo", SQLiteRecordStore())
     assert type(trainer.pipeline.record2record).__name__ == "InferenceRecord2Record"
-    assert type(trainer.pipeline.record2task).__name__ == "InferenceTasks"
-    assert type(trainer.pipeline.task2job).__name__ == "TraceJobData"
+    assert type(trainer.pipeline.record2sample).__name__ == "InferenceSamples"
+    assert type(trainer.pipeline.sample2job).__name__ == "TraceJobData"
     # evolution.batch_size is the default job_samples.
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 6)
 
     reported = CordisRecipe.from_environment({}, config=config(), runtime=proxy)
     trainer = reported.build("demo", SQLiteRecordStore())
     assert type(trainer.pipeline.record2record).__name__ == "ReportRecord2Record"
-    assert type(trainer.pipeline.record2task).__name__ == "TraceTasks"
-    assert type(trainer.pipeline.task2job).__name__ == "TraceJobData"
+    assert type(trainer.pipeline.record2sample).__name__ == "TraceSamples"
+    assert type(trainer.pipeline.sample2job).__name__ == "TraceJobData"
     # The default buffer holds the data of four jobs.
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (1, 4)
     # The stage config sets job_samples over evolution.batch_size.
     sized = CordisRecipe.from_environment(
-        {}, config=config(pipeline={"task2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy
+        {}, config=config(pipeline={"sample2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy
     ).build("demo", SQLiteRecordStore())
     assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 12)
 
@@ -1518,11 +1518,11 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     ):
         with pytest.raises(RecipeConfigError, match=message):
             CordisRecipe.from_environment(
-                {}, config=config(pipeline={"task2job": {"config": stage_config}}, batch_size=2), runtime=proxy
+                {}, config=config(pipeline={"sample2job": {"config": stage_config}}, batch_size=2), runtime=proxy
             ).build("demo", SQLiteRecordStore())
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment(
-            {}, config=config(pipeline={"task2job": {"config": {"batch_policy": "records"}}}), runtime=proxy
+            {}, config=config(pipeline={"sample2job": {"config": {"batch_policy": "records"}}}), runtime=proxy
         ).build("demo", SQLiteRecordStore())
 
 

@@ -7,7 +7,7 @@ baseline author on the same sessions. A pass-rate band marks the tasks the solve
 generated-task recipe runs the tasks and trains on them.
 
 - ``sources``: the sources file (session records and their repositories) and the session renderer.
-- ``author``: the author contract and its two implementations: the agent, pi in an E2B sandbox behind a
+- ``author``: the author contract and its two implementations: the agent, pi in a cloud sandbox (E2B or Modal) behind a
   gateway that records its model calls on Reef, and the one-reply prompt Designer.
 - ``checks``: the task checks: Harbor's oracle and nop agents, and the test review.
 - ``generator``: ``AutoEnvScalingGenerator``: the sessions walked with a cursor, admission and the history

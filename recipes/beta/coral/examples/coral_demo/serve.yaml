@@ -23,7 +23,7 @@ pipeline:
   record2record:
     config:
       group_size: 2        # two scored siblings release a training group
-  task2job:
+  sample2job:
     config:
       job_samples: 4       # one optimizer step: the same value as global-batch-size
 training:

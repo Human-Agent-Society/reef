@@ -105,7 +105,7 @@ def test_a_shared_runtime_trains_each_scenario_on_the_one_training_component(tmp
         _train(dispatcher, runtime, "math")
         _train(dispatcher, runtime, "code")
         # Each scenario submitted its own job of its own records, and each one's checkpoint became its head.
-        assert [source_record_id(job.data.items[0]) for job in component.submitted] == ["math-i1", "code-i1"]
+        assert [source_record_id(job.data.samples[0]) for job in component.submitted] == ["math-i1", "code-i1"]
         for scenario, version in (("math", "w1"), ("code", "w2")):
             head = dispatcher.current_artifact(scenario).materialize()
             assert (Path(head.local_path) / VERSION_FILE).read_text() == version

@@ -51,10 +51,10 @@ SFT has three pipeline stages
 - ``SFTRecord2Record`` makes each report its own record set. It never drops a
   record set unit as stale. An SFT target is fixed text, not tokens that an older model
   version sampled. Thus the stage takes no ``max_staleness`` and refuses the key.
-- ``SFTTasks`` makes one ``TrajectoryItem`` from each report. The item has the
+- ``SFTSamples`` makes one ``TrajectorySample`` from each report. The item has the
   rendered tokens and an empty ``rollout_log_probs``.
 - ``SFTJobData`` puts the tasks into job data in arrival order. One job's
-  data holds ``pipeline.task2job.config.job_samples`` samples. It also takes
+  data holds ``pipeline.sample2job.config.job_samples`` samples. It also takes
   uploaded ATIF trajectories (see `Train on whole conversations`_).
 
 The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
@@ -111,7 +111,7 @@ Train on whole conversations
 A complete conversation, such as an agent episode with tool calls, can train
 every agent turn at once. Upload it as an ATIF trajectory
 (`Upload trajectories <../../reference/http-api.rst#upload-trajectories>`__).
-``SFTTasks`` renders each uploaded trajectory into one sample:
+``SFTSamples`` renders each uploaded trajectory into one sample:
 
 - The steps become chat messages: an ``agent`` step is an assistant turn with
   its tool calls, and each observation result is a tool message.
@@ -158,12 +158,12 @@ config.
    recipe:
      implementation: reef.recipe.sft:SFTRecipe
    pipeline:
-     record2task:
+     record2sample:
        config:
          tokenizer_path: /models/Qwen3-8B
          target: response
          max_tokens: 8192
-     task2job:
+     sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
    training:
@@ -177,12 +177,12 @@ config.
 
 .. config::
 
-   pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the request and the target with the engine's chat template.
-   pipeline.record2task.config.target | demonstration | ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
-   pipeline.record2task.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The recipe skips a longer report and counts it in ``sft_overflow_reports``. 0 disables the limit. Set it to the trainer's sequence length.
-   pipeline.record2task.config.chat_template_kwargs | {} | the chat template arguments of every render, for example ``{enable_thinking: false}``. Set ``inference.handler-config.chat_template_kwargs`` to the same value, so the samples render as the engine serves.
-   pipeline.task2job.config.job_samples | required | the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
-   pipeline.task2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job. Reef releases the oldest reports beyond it.
+   pipeline.record2sample.config.tokenizer_path | required | the served model's tokenizer directory. It renders the request and the target with the engine's chat template.
+   pipeline.record2sample.config.target | demonstration | ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
+   pipeline.record2sample.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The recipe skips a longer report and counts it in ``sft_overflow_reports``. 0 disables the limit. Set it to the trainer's sequence length.
+   pipeline.record2sample.config.chat_template_kwargs | {} | the chat template arguments of every render, for example ``{enable_thinking: false}``. Set ``inference.handler-config.chat_template_kwargs`` to the same value, so the samples render as the engine serves.
+   pipeline.sample2job.config.job_samples | required | the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
+   pipeline.sample2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job. Reef releases the oldest reports beyond it.
    training.config.global_batch_size | none | the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
 
 A hybrid-thinking template such as Qwen3.5's or Qwen3.8's renders thinking
@@ -199,7 +199,7 @@ string, so write the mapping in each:
        chat_template_kwargs:
          enable_thinking: false
    pipeline:
-     record2task:
+     record2sample:
        config:
          chat_template_kwargs:
            enable_thinking: false
@@ -238,7 +238,7 @@ with every job:
            packing_length: 8192
          save_interval: 50
    pipeline:
-     task2job:
+     sample2job:
        config:
          job_samples: 4096
 

@@ -15,7 +15,7 @@ let results = [];
 let currentStep;
 let session;
 
-// Resolve the installation on this executor, including a remote E2B template.
+// Resolve the installation on this executor, including a cloud sandbox's image.
 let binary;
 for (const directory of process.env.PATH.split(delimiter)) {
   const candidate = join(directory, "pi");

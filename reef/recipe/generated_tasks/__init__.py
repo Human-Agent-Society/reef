@@ -2,17 +2,17 @@
 
 The deployment configures the three stages in its ``pipeline`` section, and
 names the generator (:class:`reef.recipe.generated_tasks.TaskGenerator`) in
-``pipeline.record2task.config.generator``. The recipe does not depend on the
+``pipeline.record2sample.config.generator``. The recipe does not depend on the
 generator's method:
 
 - ``generator``: the contract of the task generator: ``TaskGenerator``,
   ``TaskValidationResult`` and ``GeneratedTaskResult``, one of
   ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
-  (``reef.record2task.generator.inputs``).
+  (``reef.record2sample.generator.inputs``).
 - ``processor``: the three stages. ``GeneratedTaskRecord2Record`` holds the
   source sessions and starts each task-generation round when it is due;
-  ``GeneratedTaskTasks`` runs the rounds (generate, validate, send the results
+  ``GeneratedTaskSamples`` runs the rounds (generate, validate, send the results
   back); and ``GeneratedTaskJobData`` hands the saved tasks to the training
   component as task jobs, which the component rolls out on its own sampler.
 - ``results``: each train task's first rollout result and the generations
@@ -21,7 +21,7 @@ generator's method:
   importance sampling loss.
 - ``recipe``: the objective and the report contract.
 
-The generator service (``reef.record2task.generator``) writes and checks the tasks; the training component
+The generator service (``reef.record2sample.generator``) writes and checks the tasks; the training component
 runs their training episodes.
 """
 
@@ -35,7 +35,11 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
-from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskRecord2Record, GeneratedTaskTasks
+from reef.recipe.generated_tasks.processor import (
+    GeneratedTaskJobData,
+    GeneratedTaskRecord2Record,
+    GeneratedTaskSamples,
+)
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 
 __all__ = [
@@ -44,7 +48,7 @@ __all__ = [
     "GeneratedTaskRecipe",
     "GeneratedTaskRecord2Record",
     "GeneratedTaskResult",
-    "GeneratedTaskTasks",
+    "GeneratedTaskSamples",
     "HeldOutTask",
     "RejectedTask",
     "RolledOutTask",

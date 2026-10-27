@@ -1,9 +1,9 @@
 """The task generator contract of the generated-task recipe: the generator, its validation results, and task results.
 
 A deployment selects one :class:`TaskGenerator` in its
-``pipeline.record2task.config.generator`` setting. The recipe asks the
+``pipeline.record2sample.config.generator`` setting. The recipe asks the
 generator for tasks with a ``TaskGenerationRequest``
-(:mod:`reef.record2task.generator.inputs`), validates each one, runs the
+(:mod:`reef.record2sample.generator.inputs`), validates each one, runs the
 valid ones, and sends the results back to the generator. This module holds the
 values, their field validation, and the generator interface. Consumers own
 file reads, transport limits, and execution.
@@ -19,7 +19,7 @@ from typing import Any, Self
 
 from reef.core.plugins import Plugin
 from reef.core.tasks import HarborTask
-from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator.inputs import TaskGenerationRequest
 
 
 @dataclass(frozen=True)
@@ -150,7 +150,7 @@ GeneratedTaskResult = RejectedTask | HeldOutTask | RolledOutTask | FailedTask
 class TaskGenerator(Plugin, ABC):
     """Makes tasks for one scenario, and adapts to how the agent did on them.
 
-    A deployment names the class in ``pipeline.record2task.config.generator``. Reef calls
+    A deployment names the class in ``pipeline.record2sample.config.generator``. Reef calls
     :meth:`from_config` once for each scenario. A generator gets what it needs
     from its config and from these calls only; it does not read the recipe's
     settings.

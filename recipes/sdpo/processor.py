@@ -1,7 +1,7 @@
 """SDPO's pipeline stages: a whole sampling step as one batch.
 
 ``SDPORecord2Record`` groups the reports of one sampling step;
-``SDPOTasks`` turns each rollout into a task and owns the teacher's renderer
+``SDPOSamples`` turns each rollout into a task and owns the teacher's renderer
 and windows; ``SDPOJobData`` batches one complete step. The teacher's request
 is composed once the step's other rollouts are known
 (:meth:`SDPOJobData.make_job_data`), with the reference's reprompt template
@@ -34,12 +34,12 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.distill import TeacherRenderer, normalize_messages_for_template, recorded_sample
-from reef.record2task.samples import recorded_request, recorded_response
-from reef.task2job import Task2Job, Task2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
+from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.distill import TeacherRenderer, normalize_messages_for_template, recorded_sample
+from reef.record2sample.samples import recorded_request, recorded_response
+from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 #: The reference's reprompt strings (``sdpo.yaml`` at the pin), used verbatim.
 REPROMPT_TEMPLATE = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
@@ -144,7 +144,7 @@ class SDPORecord2Record(ReportRecord2Record):
 
 @dataclass(frozen=True)
 class SDPOTeacherSettings(SampleAssemblySettings):
-    """The config of ``SDPOTasks``: the teacher's tokenizer and windows, and the sample assembly."""
+    """The config of ``SDPOSamples``: the teacher's tokenizer and windows, and the sample assembly."""
 
     tokenizer_path: str = config_option("", help="The served model's tokenizer, which renders the teacher prompt.")
     max_teacher_prompt_tokens: int = config_option(
@@ -165,8 +165,8 @@ class SDPOTeacherSettings(SampleAssemblySettings):
             raise ValueError("SDPO needs 0 < max_teacher_prompt_tokens <= max_teacher_tokens")
 
 
-class SDPOTasks(ReportTasks):
-    """One rollout as one task, with its grid coordinates, request, and response for the teacher prompt.
+class SDPOSamples(ReportSamples):
+    """One rollout as one sample, with its grid coordinates, request, and response for the teacher prompt.
 
     The grid comes from the record stage. The stage owns the teacher's
     renderer and windows (config: ``tokenizer_path``,
@@ -201,10 +201,10 @@ class SDPOTasks(ReportTasks):
             )
         return cls(settings, record2record)
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed = context.parsed_report
         if not isinstance(parsed, SDPOReport):
-            raise ValueError("SDPOTasks requires the SDPOReport schema")
+            raise ValueError("SDPOSamples requires the SDPOReport schema")
         if parsed.group >= self.groups_per_step or parsed.rollout >= self.rollouts_per_group:
             raise ValueError("SDPO report coordinates exceed the configured sampling grid")
         # The score picks the demonstrating rollouts; the teacher's distribution is the target.
@@ -229,7 +229,7 @@ class SDPOTasks(ReportTasks):
 
 
 @dataclass(frozen=True)
-class SDPODemonstrationSettings(Task2JobSettings):
+class SDPODemonstrationSettings(Sample2JobSettings):
     """The config of ``SDPOJobData``: which sibling the teacher reads, whether it reads the feedback, the buffer and the job size."""
 
     success_reward_threshold: float = config_option(0.5, help="An attempt at or above this score is correct.")
@@ -250,7 +250,7 @@ class SDPODemonstrationSettings(Task2JobSettings):
             raise ValueError("success_reward_threshold must be finite")
 
 
-class SDPOJobData(Task2Job):
+class SDPOJobData(Sample2Job):
     """One complete sampling step, one job's data; the teacher's context comes from the step's other rollouts.
 
     A report names its rollout's coordinates in the step's grid
@@ -262,17 +262,19 @@ class SDPOJobData(Task2Job):
     (no successful sibling, no feedback) keeps the plain request and a sample
     weight of 0, so an all-unsuccessful step still takes its optimizer step,
     as the reference does. The teacher's renderer and windows come from
-    ``SDPOTasks``. A teacher sequence over ``max_teacher_tokens`` fails the
+    ``SDPOSamples``. A teacher sequence over ``max_teacher_tokens`` fails the
     step instead of dropping part of the grid. ``max_job_samples`` is the
     grid, so the trainer refuses a larger ``job_samples``, and one job's data
     is exactly one grid. Set ``job_samples`` to the grid.
     """
 
-    def __init__(self, context: PipelineContext, settings: SDPODemonstrationSettings, record2task: SDPOTasks) -> None:
-        self.renderer = record2task.renderer
-        self.max_teacher_prompt_tokens = record2task.max_teacher_prompt_tokens
-        self.max_teacher_tokens = record2task.max_teacher_tokens
-        self.enable_thinking = record2task.enable_thinking
+    def __init__(
+        self, context: PipelineContext, settings: SDPODemonstrationSettings, record2sample: SDPOSamples
+    ) -> None:
+        self.renderer = record2sample.renderer
+        self.max_teacher_prompt_tokens = record2sample.max_teacher_prompt_tokens
+        self.max_teacher_tokens = record2sample.max_teacher_tokens
+        self.enable_thinking = record2sample.enable_thinking
         self.success_reward_threshold = settings.success_reward_threshold
         self.allow_own_success_as_demonstration = settings.allow_own_success_as_demonstration
         self.remove_thinking_from_demonstration = settings.remove_thinking_from_demonstration
@@ -283,7 +285,7 @@ class SDPOJobData(Task2Job):
             context,
             settings.buffer_size,
             settings.job_samples,
-            max_job_samples=record2task.groups_per_step * record2task.rollouts_per_group,
+            max_job_samples=record2sample.groups_per_step * record2sample.rollouts_per_group,
         )
 
     @classmethod
@@ -293,15 +295,17 @@ class SDPOJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         settings = SDPODemonstrationSettings.parse(config, plugin_class=cls)
-        if not isinstance(record2task, SDPOTasks):
-            raise PluginConfigError(f"{cls.__name__} needs SDPOTasks as record2task, not {type(record2task).__name__}")
-        return cls(context, settings, record2task)
+        if not isinstance(record2sample, SDPOSamples):
+            raise PluginConfigError(
+                f"{cls.__name__} needs SDPOSamples as record2sample, not {type(record2sample).__name__}"
+            )
+        return cls(context, settings, record2sample)
 
-    def demonstration(self, sample: TrajectoryItem, samples: Sequence[TrajectoryItem]) -> str | None:
+    def demonstration(self, sample: TrajectorySample, samples: Sequence[TrajectorySample]) -> str | None:
         """The response of the first successful sibling in rollout order, or None when the question has none."""
         group = sample.metadata["sdpo"]["group"]
         for candidate in samples:
@@ -315,12 +319,12 @@ class SDPOJobData(Task2Job):
             return THINKING_BLOCK.sub("", response) if self.remove_thinking_from_demonstration else response
         return None
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         job_data = JobData(data_id, items)
         samples = sorted(
             trajectories(job_data), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])
         )
-        result: list[TrajectoryItem] = []
+        result: list[TrajectorySample] = []
         solutions_used = feedback_used = 0
         for sample in samples:
             data = sample.metadata["sdpo"]
@@ -376,6 +380,6 @@ __all__ = [
     "SDPOGrouping",
     "SDPOJobData",
     "SDPORecord2Record",
-    "SDPOTasks",
+    "SDPOSamples",
     "SDPOTeacherSettings",
 ]

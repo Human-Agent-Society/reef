@@ -20,7 +20,7 @@ TEST_DIRECTORIES = {
     "plugin_contracts",
     "recipes",
     "record2record",
-    "record2task",
+    "record2sample",
     "reef_client",
     "reef_recipe",
     "reef_service",
@@ -31,7 +31,7 @@ TEST_DIRECTORIES = {
     "smoke",
     "storage",
     "surface",
-    "task2job",
+    "sample2job",
     "tinker_backend",
     "train",
 }

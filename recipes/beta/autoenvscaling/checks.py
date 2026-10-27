@@ -23,8 +23,8 @@ from dataclasses import asdict, dataclass, field
 from recipes.beta.autoenvscaling.author import ModelReplies
 from reef.core.prompts import untrusted_text
 from reef.core.tasks import HarborTask
-from reef.record2task.generator.client import Generator, WrittenTask
-from reef.record2task.generator.designer import DesignerError
+from reef.record2sample.generator.client import Generator, WrittenTask
+from reef.record2sample.generator.designer import DesignerError
 
 # A check that is off does not run; one that measures records its result; one that refuses also keeps a task out.
 CHECK_MODES = ("off", "measure", "refuse")

@@ -29,7 +29,7 @@ from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
-from reef.train.types import JobData, TrajectoryItem
+from reef.train.types import JobData, TrajectorySample
 
 TOKENS = ("REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN")
 #: The release format of Tinker's exported adapters at the configs' LoRA rank.
@@ -123,7 +123,7 @@ class SampleObjective(TrainingObjective):
 
     def prepare(self, batch, state):
         return TrainingSignal(
-            "train", {"steps": state.get("steps", 0) + 1}, advantages=tuple(1.0 for _ in batch.items)
+            "train", {"steps": state.get("steps", 0) + 1}, advantages=tuple(1.0 for _ in batch.samples)
         )
 
 
@@ -144,7 +144,7 @@ def environment(monkeypatch):
 
 def item(sample):
     # ``sample`` makes another rollout: a job is its rows, so a new step trains new rows.
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": "test"},
@@ -206,7 +206,7 @@ def train(component, inference, objective, scenario, sample, start=None):
     """Run one job to its end, then serve its checkpoint for ``scenario``; return the checkpoint and its version."""
     data = JobData("b", (item(sample),))
     parameters = {"method": TrainingMethod(objective.name).to_dict()}
-    job_id = job_id_for(component.name, start, data.to_dict()["items"], parameters)
+    job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, data, parameters))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":

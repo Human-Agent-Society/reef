@@ -17,7 +17,7 @@ from recipes.openclawrl.examples.openclawrl.user_sim.personas import (
     student_violations,
 )
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
-from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLTasks
+from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from reef.train.pipeline import TrainingPipeline
 
 CLEAN_REPLY = """Sure, here is the working.
@@ -148,8 +148,8 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
     processor = TrainingPipeline(
         context,
         record2record=stage,
-        record2task=OpenClawRLTasks(),
-        task2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
+        record2sample=OpenClawRLSamples(),
+        sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     # Two stale leftovers from before a weight swap, then a fresh generation.
     processor.observe_serving_runtime_load_id("v1")
@@ -157,9 +157,9 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
     batch = processor.build_job_data(3)
-    versions = {sample.training.get("runtime_load_id", None) for sample in batch.items}
+    versions = {sample.training.get("runtime_load_id", None) for sample in batch.samples}
     assert versions == {"v2"}
-    assert len(batch.items) == 3
+    assert len(batch.samples) == 3
 
 
 @pytest.mark.unit
@@ -173,8 +173,8 @@ def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
     processor = TrainingPipeline(
         context,
         record2record=stage,
-        record2task=OpenClawRLTasks(),
-        task2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
+        record2sample=OpenClawRLSamples(),
+        sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     _judged_turns(processor, worker, ["v1", "v1"])
     # All-one-version queue below batch size: nothing is dropped, not ready yet.

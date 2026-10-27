@@ -42,6 +42,7 @@ from reef.harness.runners.terminus.tree import (
     terminus_kwargs,
 )
 from reef.sandbox.process import ISOLATION_ENV
+from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 #: Harbor's default when the tree has no code extension.
 AGENT_NAME = "terminus-2"
@@ -86,8 +87,8 @@ def agent_spec(root: str, tree: dict[str, str]) -> dict[str, Any]:
     spec: dict[str, Any] = {"name": AGENT_NAME, "model_name": str(model)}
     extension = extension_source(tree)
     if extension is not None:
-        if os.environ.get(ISOLATION_ENV) != "bwrap" or os.environ.get(ENVIRONMENT_ENV) != "e2b":
-            raise TerminusTreeError("terminus code_extension must run inside Reef's sandbox with remote E2B tasks")
+        if os.environ.get(ISOLATION_ENV) != "bwrap" or os.environ.get(ENVIRONMENT_ENV) not in REMOTE_TASK_ENVIRONMENTS:
+            raise TerminusTreeError("terminus code_extension must run inside Reef's sandbox with remote tasks")
         path, code = extension
         # Harbor imports this class in the same runner process. A content name
         # prevents two candidates with the same node name from sharing a module.
@@ -216,8 +217,9 @@ def run(task: str) -> int:
     trials = Path(os.environ.get(TRIALS_DIR_ENV) or sessions.parent / "trials")
     trials.mkdir(parents=True, exist_ok=True)
     environment = os.environ.get(ENVIRONMENT_ENV, "docker")
-    if environment not in ("docker", "e2b"):
-        raise TerminusTreeError(f"unsupported terminus environment {environment!r}; use docker or e2b")
+    if environment != "docker" and environment not in REMOTE_TASK_ENVIRONMENTS:
+        choices = ", ".join(("docker", *sorted(REMOTE_TASK_ENVIRONMENTS)))
+        raise TerminusTreeError(f"unsupported terminus environment {environment!r}; use one of {choices}")
 
     names_before_run = {path.name for path in trials.iterdir()}
     row = asyncio.run(

@@ -8,7 +8,11 @@ from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
-from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskRecord2Record, GeneratedTaskTasks
+from reef.recipe.generated_tasks.processor import (
+    GeneratedTaskJobData,
+    GeneratedTaskRecord2Record,
+    GeneratedTaskSamples,
+)
 from reef.train.pipeline import PipelineSpec
 
 
@@ -17,11 +21,11 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     """Group relative advantages per generated task, on Tinker's importance sampling loss.
 
     The recipe binds the objective and the report contract. Its stages are
-    ``GeneratedTaskRecord2Record``, ``GeneratedTaskTasks``, and
+    ``GeneratedTaskRecord2Record``, ``GeneratedTaskSamples``, and
     ``GeneratedTaskJobData``; the deployment's ``pipeline`` section gives
     their config: the rounds, the task generator, and the generator service
-    in ``record2task``, the source sessions and the pace of the rounds in
-    ``record2record``, and the tasks of one job in ``task2job``. Without that
+    in ``record2sample``, the source sessions and the pace of the rounds in
+    ``record2record``, and the tasks of one job in ``sample2job``. Without that
     section, no round runs and nothing trains. Each job is a task job: the
     training component rolls its tasks out, as ``recipe.config.job_parameters.rollout``
     says (the Tinker component's ``RolloutSettings``), which the recipe
@@ -55,5 +59,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(
-            record2record=GeneratedTaskRecord2Record, record2task=GeneratedTaskTasks, task2job=GeneratedTaskJobData
+            record2record=GeneratedTaskRecord2Record,
+            record2sample=GeneratedTaskSamples,
+            sample2job=GeneratedTaskJobData,
         )
