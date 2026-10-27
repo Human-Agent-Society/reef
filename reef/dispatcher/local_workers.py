@@ -1,17 +1,19 @@
-"""Local backend workers: one thread per scenario component whose backend runs in this process.
+"""Training workers: one thread per scenario component that trains.
 
-A local cycle prepares a candidate outside the scenario's registry lock,
-because the preparation can take minutes (for example, a harness evaluation).
-Then it commits the candidate under that lock. The workers share the cycle
-locks with dispatched training turns. They also close the instances that a
-reload replaced.
+A cycle prepares the trainer's next commit outside the scenario's registry
+lock, because the preparation can take minutes (a harness step's evaluation,
+a training job's checkpoint evaluation). Then it commits under that lock. A
+worker whose trainer has a training job or a pipeline background job (such
+as a judge call) running looks again every ``POLL_SECONDS``, since a job's
+checkpoints and a judgment arrive without a new record.
+The workers also close the instances that a reload replaced.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 from typing import Literal
@@ -23,8 +25,8 @@ from reef.scenario.scenario import Scenario
 
 logger = logging.getLogger(__name__)
 
-#: How soon a local worker that stood aside for closed admission looks again.
-STOOD_ASIDE_RETRY_SECONDS = 5.0
+#: How soon a worker whose trainer has a training job or a pipeline background job running looks again.
+POLL_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -36,19 +38,15 @@ class LocalBackendWorker:
 @dataclass
 class ScenarioCycles:
     lock: Lock = field(default_factory=Lock)
-    waiting_for_admission: set[str | None] = field(default_factory=set)
     replaced: list[Scenario] = field(default_factory=list)
 
 
 class LocalTrainingWorkers:
-    """Own local worker lifetime and cycles, dispatched turns, and scenario replacement.
+    """Own worker lifetime and cycles, and scenario replacement.
 
     Service starts held or running. Opening releases held workers; stopping and closed never reopen.
-    Each scenario runs one step at a time under its cycle lock: a local cycle,
-    or a dispatched turn of the training thread. A colocated job also takes
-    the cycle locks of all other scenarios in name order; workers yield while
-    it waits. Replaced instances close only after the step that uses them
-    releases its lock.
+    Each scenario runs one cycle at a time under its cycle lock. Replaced
+    instances close only after the cycle that uses them releases its lock.
 
     Lock order: cycle locks -> registry scenario lock -> coordination lock -> training errors lock.
     Never wait for a cycle lock, join a worker, or close a scenario while holding the coordination lock.
@@ -56,18 +54,13 @@ class LocalTrainingWorkers:
     closure therefore tries the cycle lock without waiting.
     """
 
-    def __init__(
-        self, registry: ScenarioRegistry, errors: TrainingErrors, training_ready: Event, *, held: bool
-    ) -> None:
-        """``training_ready`` is the wake event of the training thread. A wake of a weight-training scenario sets it."""
+    def __init__(self, registry: ScenarioRegistry, errors: TrainingErrors, *, held: bool) -> None:
         self.registry = registry
         self.errors = errors
-        self.training_ready = training_ready
         #: The coordination lock.
         self.lock = Lock()
         self.phase: Literal["held", "running", "stopping", "closed"] = "held" if held else "running"
         self.closed = Event()
-        self.turn_waiting = Event()
         self.workers: dict[tuple[str, str | None], LocalBackendWorker] = {}
         self.scenarios: dict[str, ScenarioCycles] = {}
 
@@ -94,29 +87,34 @@ class LocalTrainingWorkers:
         worker.ready.set()
 
     def wake(self, current: Scenario) -> None:
-        """Wake each trainer of ``current`` that has a backend: the training thread, or a local worker."""
-        if current.training_runtime is not None:
-            self.training_ready.set()
+        """Wake the worker of each trainer of ``current`` that trains."""
         for component_trainer in current.trainers:
-            backend = component_trainer.trainer.candidate_backend
-            if backend is not None and not backend.dispatched:
+            if component_trainer.trainer.trains:
+                self.start(current.name, component_trainer.component)
+
+    def resume(self, current: Scenario) -> None:
+        """Start the worker of each weight trainer of ``current`` that has a job running or records to train.
+
+        A loaded scenario resumes the job a restart left running, and the
+        records that arrived before it, without waiting for a new record.
+        """
+        for component_trainer in current.trainers:
+            trainer = component_trainer.trainer
+            if trainer.job_loop is not None and (trainer.job_running or trainer.holds_untrained_records()):
                 self.start(current.name, component_trainer.component)
 
     def remove(self, scenario: str) -> None:
         """Unregister workers without joining them under the registry lock."""
         with self.lock:
             workers = [self.workers.pop(key) for key in tuple(self.workers) if key[0] == scenario]
-            state = self.scenarios.get(scenario)
-            if state is not None:
-                state.waiting_for_admission.clear()
         for worker in workers:
             worker.ready.set()
 
     def wait(self, scenario: str, component: str | None, ready: Event) -> bool:
-        with self.lock:
-            state = self.scenarios.get(scenario)
-            waiting = state is not None and component in state.waiting_for_admission
-        ready.wait(timeout=STOOD_ASIDE_RETRY_SECONDS if waiting else None)
+        current = self.registry.get_optional(scenario)
+        trainer = None if current is None else current.trainer_for(component)
+        polling = trainer is not None and trainer.needs_polling()
+        ready.wait(timeout=POLL_SECONDS if polling else None)
         ready.clear()
         with self.lock:
             # A worker for a reloaded instance with the same key replaces this worker. Then this worker stops.
@@ -153,17 +151,6 @@ class LocalTrainingWorkers:
         with self.lock:
             return self.phase == "running"
 
-    def check_admission(self, current: Scenario, component: str | None) -> bool:
-        runtime = current.runtime
-        admission_open = runtime is None or runtime.inference_admission_status.get("open", True)
-        with self.lock:
-            state = self.scenarios.setdefault(current.name, ScenarioCycles())
-            if admission_open:
-                state.waiting_for_admission.discard(component)
-            else:
-                state.waiting_for_admission.add(component)
-        return admission_open
-
     # -- Local cycles ----------------------------------------------------
 
     def run_worker(self, scenario: str, component: str | None, ready: Event) -> None:
@@ -176,8 +163,7 @@ class LocalTrainingWorkers:
 
     def drain(self, scenario: str, component: str | None) -> None:
         try:
-            # A dispatched job waiting for its turn goes before the next cycle; it wakes the workers after.
-            while not self.turn_waiting.is_set() and self.cycles_run() and self.process_step(scenario, component):
+            while self.cycles_run() and self.process_step(scenario, component):
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
@@ -196,14 +182,11 @@ class LocalTrainingWorkers:
             # Deleted while a harness step was in flight: the step ends without
             # a commit and without an error, as documented in http-api.rst.
             return False
-        if current.trainer_for(component).candidate_backend is None:
-            raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
-        if not self.check_admission(current, component):
-            return False
+        if not current.trainer_for(component).trains:
+            raise RuntimeContractError(f"scenario {scenario!r} component {component!r} does not train")
         self.errors.clear(scenario, local_error_source(component))
-        # A scenario runs one step at a time. A local cycle holds the cycle lock
-        # from preparation to commit, and a dispatched turn holds it from
-        # reservation to acknowledgement. Thus the head does not move under a step.
+        # A scenario runs one cycle at a time. A cycle holds the cycle lock
+        # from preparation to commit. Thus the head does not move under a step.
         with self.cycle(scenario):
             if not self.cycles_run():
                 return False
@@ -214,13 +197,6 @@ class LocalTrainingWorkers:
             if state is InstanceState.REPLACED:
                 # Reloaded while this worker waited: look again on the rebuilt instance, whose rows are unread.
                 return True
-            # The job whose turn this worker waited for may have left admission closed.
-            if not self.check_admission(current, component):
-                return False
-            if current.is_job_reserved:
-                # A dispatched step is still out, for example while checkpoint storage is blocked.
-                # Its turn wakes this worker when the step ends.
-                return False
             try:
                 result = current.prepare_training_step(component)
             except Exception as exc:
@@ -240,7 +216,7 @@ class LocalTrainingWorkers:
                     )
                     return False
                 if state is not InstanceState.CURRENT:
-                    # The training thread rebuilt the scenario after a failed turn, or a delete removed it.
+                    # A reload replaced the scenario, or a delete removed it.
                     # The result belongs to the old instance, so the step ends without a commit. A rebuilt
                     # instance has not read these rows: look again on it.
                     return state is InstanceState.REPLACED
@@ -264,7 +240,7 @@ class LocalTrainingWorkers:
             if state is InstanceState.CURRENT:
                 self.wake(current)
 
-    # -- Cycle locks and dispatched turns --------------------------------
+    # -- Cycle locks -----------------------------------------------------
 
     def cycle_lock(self, scenario: str) -> Lock:
         with self.lock:
@@ -279,35 +255,6 @@ class LocalTrainingWorkers:
             # A cycle is a use of the scenario. Its idle time starts when its last cycle ends.
             self.registry.touch(scenario)
             self.close_replaced_instances(scenario)
-            # The training thread skips a scenario while a local cycle holds its lock. Wake it now.
-            current = self.registry.get_optional(scenario)
-            if current is not None and current.training_runtime is not None:
-                self.training_ready.set()
-
-    def dispatched_turn(self, current: Scenario, component: str | None) -> ExitStack:
-        """Hold the cycle locks of all other scenarios through a colocated job's execution, commit and acknowledgement.
-
-        The training thread holds the cycle lock of ``current`` already.
-        """
-        backend = current.trainer_for(component).candidate_backend
-        if backend is None or not backend.colocated:
-            return ExitStack()
-        names = {loaded.name for loaded in self.registry.loaded_scenarios()}
-        with self.lock:
-            names.update(self.scenarios)
-        names.discard(current.name)
-        names_in_order = sorted(names)
-        self.turn_waiting.set()
-        try:
-            with ExitStack() as turn:
-                # The callbacks run after the turn releases every lock, also when it acquired only some.
-                for name in names_in_order:
-                    turn.callback(self.close_replaced_instances, name)
-                for name in names_in_order:
-                    turn.enter_context(self.cycle_lock(name))
-                return turn.pop_all()
-        finally:
-            self.turn_waiting.clear()
 
     # -- Scenario replacement and reload ---------------------------------
 
@@ -348,10 +295,7 @@ class LocalTrainingWorkers:
             return replaced
 
     def reload_after_local_failure(self, current: Scenario) -> None:
-        """Reload durable state after a failed local cycle; do not wake the failing worker.
-
-        The cycle holds the scenario's cycle lock, so no dispatched job is reserved.
-        """
+        """Reload durable state after a failed cycle; do not wake the failing worker."""
         if not current.store.durable:
             return
         with self.registry.lock_instance(current) as state:

@@ -72,7 +72,7 @@ Reef 的每个学习周期分为四步，下表同时列出各步骤对应的模
 |---|---|---|
 | **1&nbsp;·&nbsp;Serve** | 响应 Agent 请求，记录每次交互。 | [`service/`](reef/service) — Agent 请求与交互记录<br>[`runtime/`](reef/runtime) — 推理与 artifact 更新 |
 | **2&nbsp;·&nbsp;Observe** | 将反馈匹配到已记录的交互。 | [`storage/records.py`](reef/storage/records.py) — 已存储的交互与反馈<br>[`record2record/`](reef/record2record) — 反馈匹配与条件判定 |
-| **3&nbsp;·&nbsp;Grow** | 从符合条件的记录中产出一次更新。 | [`recipe/`](reef/recipe) — recipe 接入<br>[`train/`](reef/train) — 训练管线、批次与更新任务 |
+| **3&nbsp;·&nbsp;Grow** | 从符合条件的记录中产出一次更新。 | [`recipe/`](reef/recipe) — recipe 接入<br>[`train/`](reef/train) — 训练管线、训练任务数据（job data）与训练任务 |
 | **4&nbsp;·&nbsp;Commit** | 应用配置的选择策略并发布通过的更新。 | [`evaluation/`](reef/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史<br>[`surface/`](reef/surface) — artifact 分发 |
 
 
@@ -189,7 +189,7 @@ reef.post(
 
 #### 观察学习与进化
 
-反馈积累到一定数量后，recipe 会执行一次训练，并将更新后的权重同步至推理运行时。
+反馈积累到一定数量后，Reef 会向训练组件提交一个训练任务。任务保存的检查点通过评估后，推理运行时会将其作为新版本加载。
 后续推理请求直接使用当前版本，无需重启 Reef。
 
 ### Harness 进化部署

@@ -1,257 +1,150 @@
-"""Slime components borrow connections and share one Reef-owned allocation."""
-
-import sys
-from types import ModuleType, SimpleNamespace
+"""The Slime component's Ray session and its one reservation of the training GPUs."""
 
 import pytest
 
-from reef.inference import engine_control
-from reef.inference.sglang import service as inference_service
-from reef.inference.sglang.config import SGLangConfig
-from reef.runtime.deployment import ModelDeploymentPlan
 from reef.runtime.executor.placement import ModelGpuLayout
-from reef.service.training_driver import ModelDeployment
 from reef.train.slime_backend import resources
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 
 @pytest.fixture
-def resource_runtime(monkeypatch):
-    events = []
-    allocation = SimpleNamespace(id="shared")
-    placements = {"actor": (allocation, [], []), "rollout": (allocation, [], [])}
-    state = SimpleNamespace(events=events, placements=placements, failure=None, config=None, initialized=False)
+def ray_session(monkeypatch):
+    """Ray's session and the GPU reservation, recorded in one ordered event list."""
 
-    def event(name):
-        events.append(name)
-        if name == state.failure:
-            raise RuntimeError(f"failed {name}")
+    class Session:
+        def __init__(self):
+            self.events = []
+            self.failure = None
+            self.initialized = False
+            self.options = None
+            self.layout = None
+
+        def event(self, name):
+            self.events.append(name)
+            if name == self.failure:
+                raise RuntimeError(f"failed {name}")
+
+    session = Session()
 
     def connect(**kwargs):
-        state.initialized = True
-        state.ray_options = kwargs
-        event("connect")
+        session.initialized = True
+        session.options = kwargs
+        session.event("connect")
 
     def disconnect():
-        state.initialized = False
-        event("disconnect")
+        session.initialized = False
+        session.event("disconnect")
 
-    def allocate(layout):
-        state.layout = layout
-        event("allocate")
-        return SimpleNamespace(
-            training=placements["actor"],
-            inference=placements["rollout"],
-            release=lambda: event("release-" + allocation.id),
-        )
+    class Reservation:
+        training = "training-bundles"
 
-    monkeypatch.setattr(resources, "reserve_model_gpus", allocate)
-    for name, values in (
-        ("slime.ray.utils", {"add_default_ray_env_vars": lambda values: values}),
-        ("reef.train.slime_backend.reef_adapters.worker_hooks", {"reef_rollout_env_vars": lambda: {"TEST": "1"}}),
-    ):
-        module = ModuleType(name)
-        module.__dict__.update(values)
-        monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(resources.ray, "is_initialized", lambda: state.initialized)
+        def release(self):
+            session.event("release")
+
+    def reserve(layout):
+        session.layout = layout
+        session.event("reserve")
+        return Reservation()
+
+    monkeypatch.setattr(resources, "reserve_model_gpus", reserve)
+    monkeypatch.setattr(resources.ray, "is_initialized", lambda: session.initialized)
     monkeypatch.setattr(resources.ray, "init", connect)
     monkeypatch.setattr(resources.ray, "shutdown", disconnect)
     monkeypatch.setattr(resources.ray, "nodes", list)
-
-    class Executor:
-        def __init__(self, config):
-            state.config = config
-            self.workers = ("inference-controller",)
-            event("create-inference")
-
-        def rpc(self, rank, method, **kwargs):
-            event(method)
-
-        def shutdown(self):
-            event("kill-controller")
-
-        @classmethod
-        def from_workers(cls, workers):
-            return SimpleNamespace(workers=workers, owned=False, rpc=lambda rank, method, **kwargs: event(method))
-
-    monkeypatch.setattr(engine_control, "RayExecutor", Executor)
-    return state
+    return session
 
 
-def plan_for(state, *, colocate=False):
-    args = SimpleNamespace(
+def component_resources(*, use_critic=False):
+    args = SlimeArguments(
         actor_num_nodes=1,
         actor_num_gpus_per_node=2,
-        rollout_num_gpus=4,
-        rollout_num_gpus_per_engine=2,
-        colocate=colocate,
-        rollout_external=False,
-        use_critic=False,
+        use_critic=use_critic,
     )
-    allocation = resources.SlimeDeploymentResources(
-        args,
-        ray_address="external",
-        namespace="test",
-        runtime_env={"env_vars": {"PYTHONPATH": "/repo"}},
-    )
-
-    class Training:
-        weight_transfer_protocols = (inference_service.INFERENCE_PROTOCOL,)
-
-        def start(self, supplied):
-            assert supplied is allocation
-            state.events.append("training-start")
-
-        def attach_weight_transport(self, session):
-            assert session.receiver.owned is False
-            state.events.append("training-attach")
-
-        def check_health(self):
-            pass
-
-        def close(self):
-            state.events.append("training-close")
-
-    return ModelDeploymentPlan(
-        allocation,
-        inference_service.SGLangInferenceService(SGLangConfig("model", 4, 2, 4, env_vars={"TEST": "1"})),
-        Training(),
+    return resources.SlimeDeploymentResources(
+        args, ray_address="external", namespace="test", runtime_env={"env_vars": {"PYTHONPATH": "/repo"}}
     )
 
 
-@pytest.mark.parametrize("colocate", [False, True])
-def test_deployment_allocates_once_and_closes_training_inference_then_reservations(resource_runtime, colocate):
-    plan = plan_for(resource_runtime, colocate=colocate)
-    owner = ModelDeployment(plan)
-    assert resource_runtime.events == []
-    owner.start()
-    config = resource_runtime.config
-    assert config.options["num_gpus"] == 0 and config.options["num_cpus"] == 1
-    assert config.workers[0].args[1] is resource_runtime.placements["rollout"]
-    assert resource_runtime.layout == ModelGpuLayout(training_gpus=2, inference_gpus=4, colocate=colocate)
-    assert plan.resources.placement_groups["critic"] is None
-    assert resource_runtime.ray_options == {
+@pytest.mark.parametrize("use_critic", [False, True])
+def test_the_component_connects_once_reserves_its_training_gpus_and_releases_them_before_disconnecting(
+    ray_session, use_critic
+):
+    owned = component_resources(use_critic=use_critic)
+    owned.start()
+    # The serving engines reserve their own GPUs on the inference component: the component reserves training GPUs.
+    assert ray_session.layout == ModelGpuLayout(training_gpus=2, inference_gpus=0)
+    # The actor and the critic share the training bundles.
+    assert owned.placement_groups == {
+        "actor": "training-bundles",
+        "critic": "training-bundles" if use_critic else None,
+    }
+    assert ray_session.options == {
         "address": "external",
         "namespace": "test",
         "runtime_env": {
-            "env_vars": {"PYTHONPATH": "/repo", resources.DEPLOYMENT_ENV: plan.resources._process_lease},
+            "env_vars": {"PYTHONPATH": "/repo", resources.DEPLOYMENT_ENV: owned._process_lease},
             "worker_process_setup_hook": "reef.runtime.executor.process_guard.install",
         },
     }
-    owner.close()
-    owner.close()
-    assert resource_runtime.events == [
-        "connect",
-        "allocate",
-        "create-inference",
-        "check_health",
-        "prepare_training_connection",
-        "training-start",
-        "training-attach",
-        "check_health",
-        "training-close",
-        "shutdown",
-        "kill-controller",
-        "release-shared",
-        "disconnect",
-    ]
+    with pytest.raises(RuntimeError, match="only be started once"):
+        owned.start()
+    owned.close()
+    owned.close()
+    assert ray_session.events == ["connect", "reserve", "release", "disconnect"]
+    assert owned.placement_groups == {}
 
 
-@pytest.mark.parametrize(
-    "failure", ["allocate", "create-inference", "check_health", "prepare_training_connection", "release-shared"]
-)
-def test_partial_failure_always_disconnects_the_owned_ray_job(resource_runtime, failure):
-    resource_runtime.failure = failure
-    owner = ModelDeployment(plan_for(resource_runtime))
+@pytest.mark.parametrize("failure", ["reserve", "release"])
+def test_a_failed_reservation_or_release_still_disconnects_the_owned_session(ray_session, failure):
+    ray_session.failure = failure
+    owned = component_resources()
     with pytest.raises(RuntimeError, match=failure):
-        owner.start()
-        owner.close()
-    owner.close()
-    assert resource_runtime.events[-1] == "disconnect"
-    if failure != "allocate":
-        assert resource_runtime.events.count("release-shared") == 1
+        owned.start()
+        owned.close()
+    owned.close()
+    assert ray_session.events[-1] == "disconnect"
+    assert ray_session.events.count("disconnect") == 1
 
 
-def test_existing_client_session_is_not_disconnected(resource_runtime):
-    resource_runtime.initialized = True
-    owner = ModelDeployment(plan_for(resource_runtime))
+def test_an_existing_client_session_is_not_disconnected(ray_session):
+    ray_session.initialized = True
+    owned = component_resources()
     with pytest.raises(RuntimeError, match="own Ray client session"):
-        owner.start()
-    assert resource_runtime.events == []
-    assert resource_runtime.initialized is True
+        owned.start()
+    owned.close()
+    assert ray_session.events == []
+    assert ray_session.initialized is True
 
 
 @pytest.mark.parametrize("confirmed", [True, False])
-def test_failed_component_shutdown_requires_process_retirement(resource_runtime, monkeypatch, confirmed):
-    plan = plan_for(resource_runtime)
-    owner = ModelDeployment(plan)
-    owner.start()
-    resource_runtime.failure = "shutdown"
-    plan.resources._nodes = ["node"]
+def test_closing_retires_the_deployments_processes_before_disconnecting(ray_session, monkeypatch, confirmed):
+    owned = component_resources()
+    owned.start()
+    owned._nodes = ["node"]
 
     def retire():
-        resource_runtime.events.append("retire-processes")
+        ray_session.events.append("retire-processes")
         if not confirmed:
             raise RuntimeError("process cleanup unconfirmed")
 
-    monkeypatch.setattr(plan.resources, "_retire_processes", retire)
+    monkeypatch.setattr(owned, "_retire_processes", retire)
     if confirmed:
-        owner.close()
+        owned.close()
     else:
         with pytest.raises(RuntimeError, match="unconfirmed"):
-            owner.close()
-    assert resource_runtime.events[-2:] == ["retire-processes", "disconnect"]
+            owned.close()
+    assert ray_session.events[-3:] == ["release", "retire-processes", "disconnect"]
 
 
-def test_training_worker_loss_fails_operations_health_without_waiting_for_another_job(tmp_path):
-    from reef.runtime.executor.failure import ExecutorFailedError
-    from reef.runtime.executor.uniproc import UniProcExecutor
-    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-    from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingBackend
-
-    class TrainingGroup:
-        def __init__(self):
-            self.executor = UniProcExecutor.from_workers([object()])
-
-        def register_failure_listener(self, listener):
-            self.executor.register_failure_listener(listener)
-
-    group = TrainingGroup()
-    operations = SlimeTrainingBackend(
-        group,
-        batch_processor=SimpleNamespace(),
-        args=SlimeArguments(global_batch_size=1),
-        save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"),
-    )
-    try:
-        operations.start()
-        operations.check_health()
-        group.executor._fail("worker died", rank=0)
-        with pytest.raises(ExecutorFailedError, match="worker died"):
-            operations.check_health()
-    finally:
-        group.executor.shutdown()
-
-
-@pytest.mark.parametrize(
-    ("rollout_num_gpus", "rollout_external", "expected"),
-    [
-        (4, False, ModelGpuLayout(8, 4)),
-        (0, True, ModelGpuLayout(8, 0, external_inference=True)),
-        # inference.backend: none starts no engine; every model GPU trains.
-        (0, False, ModelGpuLayout(8, 0, external_inference=True)),
-    ],
-)
-def test_the_reservation_holds_only_the_gpus_of_local_engines(rollout_num_gpus, rollout_external, expected):
-    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-
+@pytest.mark.parametrize(("rollout_num_gpus", "rollout_external"), [(4, False), (0, True), (0, False)])
+def test_the_reservation_holds_only_the_training_gpus(rollout_num_gpus, rollout_external):
     layout = resources.model_gpu_layout(
         SlimeArguments(
-            actor_num_nodes=1,
+            actor_num_nodes=2,
             actor_num_gpus_per_node=8,
             rollout_num_gpus=rollout_num_gpus,
             rollout_external=rollout_external,
-            colocate=False,
         )
     )
-    assert layout == expected
-    assert layout.total == 8 + rollout_num_gpus
+    assert layout == ModelGpuLayout(16, 0)
+    assert layout.total == 16

@@ -11,8 +11,8 @@
 # the vocabulary as one bucket, and detached per-token importance weights capped
 # at 2.
 #
-# GPU budget: four GPUs, the actor (tensor parallel 4) colocated with four
-# single-GPU rollout engines. A step runs three forwards over the batch (the
+# GPU budget: eight GPUs, four for the actor (tensor parallel 4) and four for
+# four single-GPU rollout engines. A step runs three forwards over the batch (the
 # student's top-K selection, the teacher, and the training forward), so
 # max-tokens-per-gpu and mem-fraction-static are the knobs to tune first if a
 # step runs out of memory. run.sh mints REEF_TOKEN per run directory.
@@ -26,9 +26,7 @@ reef:
 inference:
   model-path: ${SDPO_MODEL_PATH}
   timeout-s: 3600
-  # Four single-GPU engines colocated with the four actor ranks
-  # (training.colocate): the actor offloads to the host while the engines
-  # serve, the engines release their memory while the actor trains.
+  # Four single-GPU engines on their own four GPUs.
   num-gpus: "4"
   tensor-parallel-size: "1"
   options:
@@ -44,13 +42,12 @@ inference:
       repetition_penalty: 1.0
 recipe:
   implementation: recipes.sdpo.recipe:SDPORecipe
-  config:
-    max-staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
 # The sdpo recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The sampling grid: one step is groups_per_step questions by rollouts_per_group attempts.
+  # The staleness limit, and the sampling grid: one step is groups_per_step questions by rollouts_per_group attempts.
   record2record:
     config:
+      max_staleness: 0               # on-policy: the stage waits for each step's release before sampling again
       groups_per_step: 32            # MUST equal the stage's SDPO_GROUPS_PER_STEP
       rollouts_per_group: 8          # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
   # The teacher's tokenizer and windows.
@@ -61,13 +58,14 @@ pipeline:
       max_teacher_tokens: 18944         # the trainer's seq-length; a longer teacher sequence fails the step
       enable_thinking: false
   # What the teacher reads: a correct sibling's response, and the feedback when enabled.
-  task2batch:
+  task2job:
     config:
+      # The fewest samples of one job: the whole grid, which is one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
       success_reward_threshold: 0.5        # the task's reward is binary
       include_environment_feedback: false  # Section 3's generalization sweep disables it
 training:
   backend: slime
-  colocate: true
   ready-timeout: 3600
   timeout-s: 7200
   config:
@@ -98,7 +96,7 @@ training:
     micro-batch-size: "1"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "4"
-    num-gpus-per-node: "4"
+    num-gpus-per-node: "8"
     tensor-model-parallel-size: "4"
     pipeline-model-parallel-size: "1"
     context-parallel-size: "1"       # the distillation loss and teacher pass support cp 1 only

@@ -201,9 +201,9 @@ def test_null_is_rejected_where_the_field_is_not_optional(tmp_path, section, fie
 def test_null_is_kept_for_optional_fields(tmp_path):
     raw = {
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001", "upstream-api-key": None},
-        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"max-staleness": None}},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"training-mode": None}},
     }
-    with pytest.raises(DeployConfigError, match=r"recipe\.config\.max-staleness does not accept null"):
+    with pytest.raises(DeployConfigError, match=r"recipe\.config\.training-mode does not accept null"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     raw["recipe"]["config"] = {}
     raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}

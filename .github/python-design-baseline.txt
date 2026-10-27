@@ -8,4 +8,3 @@ PYD002|reef/harness/episodes/trajectory.py|_CallableTrajectoryReader.__init__|fn
 PYD002|reef/runtime/interfaces.py|InferenceStream.__init__|close
 PYD002|reef/runtime/deployment.py|_CallableRuntimeFactory.__init__|fn
 PYD002|reef/train/slime_backend/reef_adapters/training_job/storage.py|CheckpointStorage.__init__|measure,disk_usage
-PYD003|reef/train/slime_backend/reef_adapters/weight_updaters/base.py|SynchronizedWeightUpdateMixin|_on_chunk

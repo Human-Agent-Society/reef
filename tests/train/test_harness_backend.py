@@ -22,15 +22,15 @@ from reef.harness.tree import HarnessTree, TreeKind, TreePatch
 from reef.train.harness_backend.contract import RejectedProposal, SampleSource, StepOutcome, TreeProposal
 from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.harness_backend.state import HarnessState
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 PLAIN = TreePatch(changed_rules("plain rules\n"))
 REQUEST = TrainingRequest("tighten the rules", "s", "base", "ask-1")
 
 
-def batch(step: int, *samples, request: TrainingRequest | None = None) -> TrainingBatch:
-    return TrainingBatch(f"demo:{step}", tuple(samples), request=request)
+def batch(step: int, *samples, request: TrainingRequest | None = None) -> JobData:
+    return JobData(f"demo:{step}", tuple(samples), request=request)
 
 
 def published(releases: TreeReleases, release_id: str, result: TrainStepResult) -> HarnessTree:

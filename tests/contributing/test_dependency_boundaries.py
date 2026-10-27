@@ -181,7 +181,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
     assert all(
         any(
             target == contract or target.startswith(contract + ".")
-            for contract in ("reef.storage.records", "reef.storage.scenario")
+            for contract in ("reef.storage.records", "reef.storage.scenario", "reef.storage.tasks")
         )
         for target in _imports_of(imported, "reef.storage")
     )
@@ -311,11 +311,11 @@ def test_checkpoint_storage_import_does_not_require_ray() -> None:
     )
 
 
-def test_slime_step_preparation_resolves_tttd_torch_lazily() -> None:
+def test_slime_job_preparation_resolves_tttd_torch_lazily() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['torch'] = None; "
-        "from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step; "
-        "assert callable(prepare_slime_step)"
+        "from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job; "
+        "assert callable(prepare_slime_job)"
     )
 
 
@@ -327,16 +327,15 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
     )
 
 
-def test_slime_training_operations_import_does_not_load_megatron_stack() -> None:
+def test_slime_training_component_import_does_not_load_megatron_stack() -> None:
     _assert_isolated_import(
         "import sys, types; "
         "ray = types.ModuleType('ray'); "
         "ray.remote = lambda **kwargs: lambda actor: actor; "
         "sys.modules['ray'] = ray; "
-        "from reef.train.slime_backend.reef_adapters.bridge "
-        "import SlimeTrainingBackend; "
-        "assert SlimeTrainingBackend; "
-        "assert 'slime.ray.placement_group' not in sys.modules"
+        "from reef.train.slime_backend.component import SlimeTrainingComponent; "
+        "assert SlimeTrainingComponent; "
+        "assert not [name for name in sys.modules if name.startswith(('megatron', 'torch', 'slime.ray'))]"
     )
 
 
@@ -406,22 +405,23 @@ def test_package_scan_includes_relative_local_and_facade_imports() -> None:
     assert _imported_modules(tree, package="reef.scenario") == ["reef.storage.commits", "reef", "reef.Scenario"]
 
 
-def test_training_publication_import_requires_no_model_framework() -> None:
+def test_training_jobs_and_serving_import_require_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.publication import TrainingPublication, WeightPublisher; "
-        "from reef.runtime.scheduler import TrainingExecution, TrainingBackend"
+        "from reef.runtime.jobs import TrainingComponent, TrainingJob; "
+        "from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime; "
+        "from reef.train.jobs import JobLoop; "
+        "from reef.train.local_jobs import LocalJobComponent"
     )
 
 
-def test_inference_recovery_and_update_lock_require_no_model_framework() -> None:
+def test_inference_recovery_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
         "from reef.runtime.recovery import InferenceControl; "
-        "from reef.runtime.recovery import EngineHealthMonitor; "
-        "from reef.runtime.publication import WeightUpdateLock"
+        "from reef.runtime.recovery import EngineHealthMonitor"
     )
 
 
@@ -438,10 +438,10 @@ def test_runtime_directory_has_only_its_owned_modules() -> None:
     expected = {
         "interfaces.py",
         "jobs.py",
-        "scheduler.py",
+        "durable_files.py",
         "deployment.py",
-        "publication.py",
         "recovery.py",
+        "residency.py",
         "serving.py",
         "executor",
     }
@@ -453,21 +453,26 @@ def test_runtime_directory_has_only_its_owned_modules() -> None:
 
 def test_runtime_modules_follow_their_dependency_order() -> None:
     # Include imports inside functions: delaying an import does not make a
-    # publication/recovery dependency cycle a valid module boundary.
+    # serving/deployment dependency cycle a valid module boundary.
     allowed = {
         "interfaces.py": (),
         "jobs.py": (),
-        "publication.py": ("reef.runtime.interfaces",),
-        "recovery.py": ("reef.runtime.interfaces", "reef.runtime.publication"),
-        "scheduler.py": ("reef.runtime.interfaces", "reef.runtime.publication", "reef.runtime.recovery"),
+        "durable_files.py": (),
+        "recovery.py": ("reef.runtime.interfaces",),
+        "residency.py": ("reef.runtime.interfaces",),
         "deployment.py": (
             "reef.runtime.interfaces",
-            "reef.runtime.publication",
+            "reef.runtime.jobs",
             "reef.runtime.recovery",
-            "reef.runtime.scheduler",
             "reef.runtime.executor",
         ),
-        "serving.py": ("reef.runtime.interfaces", "reef.runtime.publication", "reef.runtime.deployment"),
+        "serving.py": (
+            "reef.runtime.interfaces",
+            "reef.runtime.jobs",
+            "reef.runtime.recovery",
+            "reef.runtime.residency",
+            "reef.runtime.deployment",
+        ),
         "executor": ("reef.runtime.interfaces", "reef.runtime.executor"),
     }
     root = REPO_ROOT / "reef/runtime"
@@ -480,29 +485,6 @@ def test_runtime_modules_follow_their_dependency_order() -> None:
             assert any(
                 target == prefix or target.startswith(prefix + ".") for prefix in allowed[owner]
             ), f"{path.relative_to(REPO_ROOT)} imports {target} against the runtime dependency order"
-
-
-def test_runtime_scheduler_does_not_depend_on_connection_adapters() -> None:
-    module = importlib.import_module("reef.runtime.scheduler")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.runtime")
-    assert _imports_of(imported, "reef.runtime.executor") == []
-
-
-def test_backend_operations_do_not_depend_on_coordinator_implementation() -> None:
-    paths = [REPO_ROOT / "reef/runtime/interfaces.py"]
-    for directory in ("reef/train", "reef/inference"):
-        paths.extend(sorted((REPO_ROOT / directory).rglob("*.py")))
-    for path in paths:
-        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
-        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        # Scheduling helpers share one module now. Recipe adapters may consume
-        # RuntimeScheduler and native engines may use InferenceMemory, but a
-        # backend must not construct or reach into the remote coordinator.
-        assert _imports_of(imported, "reef.runtime.scheduler.TrainingCoordinator") == [], str(
-            path.relative_to(REPO_ROOT)
-        )
-        assert "reef.runtime.scheduler" not in imported, str(path.relative_to(REPO_ROOT))
-        assert "reef.runtime.scheduler.*" not in imported, str(path.relative_to(REPO_ROOT))
 
 
 def test_inference_backends_never_import_training_implementations() -> None:
@@ -581,7 +563,7 @@ def test_record_to_task_contract_depends_only_on_record2record() -> None:
                 ), f"{path.relative_to(REPO_ROOT)} imports {target}"
 
 
-def test_task_to_batch_stage_depends_only_on_contracts_below_training() -> None:
+def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
     # The pipeline and the recipes import the stage, so it never imports them.
     allowed = (
         "reef.core",
@@ -590,9 +572,9 @@ def test_task_to_batch_stage_depends_only_on_contracts_below_training() -> None:
         "reef.record2record",
         "reef.record2task",
         "reef.storage.tasks",
-        "reef.task2batch",
+        "reef.task2job",
     )
-    paths = [*sorted((REPO_ROOT / "reef" / "task2batch").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]
+    paths = [*sorted((REPO_ROOT / "reef" / "task2job").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]
     for path in paths:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):

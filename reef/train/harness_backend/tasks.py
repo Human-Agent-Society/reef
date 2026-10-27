@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.storage.tasks import TaskStore

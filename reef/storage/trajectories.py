@@ -3,8 +3,8 @@
 A client can upload an ATIF trajectory to train on directly. An uploaded
 trajectory is not a record. The trajectory store keeps the uploaded trajectories
 of one scenario in upload order. A trainer reads them after its cursor and gives
-them to the task-to-batch stage. A commit lists the uploaded trajectories that
-its batch consumed, by :func:`consumed_trajectory_id`, so a rebuilt trainer
+them to the task-to-job stage. A commit lists the uploaded trajectories that
+its job data consumed, by :func:`consumed_trajectory_id`, so a rebuilt trainer
 skips them. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
 """
@@ -14,8 +14,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from reef.core.batches import TrajectoryItem
 from reef.core.errors import ReefError
+from reef.core.job_data import TrajectoryItem
 
 #: Marks the ID of a consumed uploaded trajectory in a commit, so that it cannot be a record ID.
 CONSUMED_TRAJECTORY_PREFIX = "trajectory:"
@@ -43,7 +43,7 @@ class StoredTrajectory:
     Purpose: ``TrajectoryStore.page`` makes it. The trainer reads it:
     ``sequence`` moves the trainer's cursor,
     ``consumed_trajectory_id(trajectory_id)`` tells whether a commit consumed
-    it, and the pipeline batches ``trajectory``.
+    it, and the pipeline puts ``trajectory`` into job data.
     """
 
     sequence: int

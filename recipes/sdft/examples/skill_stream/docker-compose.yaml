@@ -19,12 +19,16 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # Four GPUs: the actor ranks with the rollout engines colocated.
+              # Eight GPUs: four for the actor ranks, four for the rollout engines.
               device_ids:
                 - "${REEF_GPU_0}"
                 - "${REEF_GPU_1}"
                 - "${REEF_GPU_2}"
                 - "${REEF_GPU_3}"
+                - "${REEF_GPU_4}"
+                - "${REEF_GPU_5}"
+                - "${REEF_GPU_6}"
+                - "${REEF_GPU_7}"
               capabilities: [gpu]
     volumes:
       - ${MODEL_DIR}:/root/models

@@ -23,7 +23,7 @@ from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.contract import TreeProposal
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 TEXT = "add a skill that texts me when the run is blocked"
 
@@ -388,7 +388,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     backend, _ = harness_backend(tmp_path, extending, reads_requests=True)
     initial = backend.initial_state()
-    result = backend_step(backend, TrainingBatch("demo:instruction:ask-1", (), request=request), initial)
+    result = backend_step(backend, JobData("demo:instruction:ask-1", (), request=request), initial)
     if added_count > 2:
         assert result.metrics["skipped"] == "proposal requires 9 items; at most 8"
         assert "selected" not in result.metrics and result.artifact is None

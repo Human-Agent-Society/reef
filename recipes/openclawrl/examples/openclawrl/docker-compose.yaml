@@ -11,7 +11,7 @@ services:
         condition: service_healthy
     command: reef serve -c /workspace/Reef/${REEF_CONFIG}
     # Host networking: the per-task containers reach reef on the machine's IP,
-    # and slime binds the training engines' router to that same IP.
+    # and the serving engines bind to that same IP.
     network_mode: host
     ipc: host
     shm_size: 32gb

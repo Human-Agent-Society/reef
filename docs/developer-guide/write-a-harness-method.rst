@@ -46,8 +46,8 @@ class with no arguments and refuses a non-empty ``config``.
 A small method
 --------------
 
-This method adds one rule to ``rules.md`` the first time a batch contains a
-failure, and scores an episode by its final answer. The ``[fib]`` prefix is a
+This method adds one rule to ``rules.md`` the first time a step's samples
+contain a failure, and scores an episode by its final answer. The ``[fib]`` prefix is a
 convention of this method: Reef passes the task text through unchanged.
 
 .. code:: python
@@ -63,7 +63,7 @@ convention of this method: Reef passes the task text through unchanged.
 
    class FinalLineRule(Proposer):
        def propose(self, context: ProposalContext) -> TreeProposal | None:
-           """Add the rule after a failing batch; once the rules hold it, skip the step."""
+           """Add the rule after a failing sample; once the rules hold it, skip the step."""
            if all((sample.metadata.get("reward") or 0.0) > 0.0 for sample in context.samples):
                return None
            rules = context.tree.files.get("rules.md", "")
@@ -100,8 +100,8 @@ The context
 | ``descriptor``       | The adapter the tree renders for: the kinds and config targets a tree  |
 |                      | may hold there.                                                        |
 +----------------------+------------------------------------------------------------------------+
-| ``samples``          | The step's trace samples (ATIF ``TrajectoryItem`` values) in batch     |
-|                      | order. Read the reward and feedback from ``sample.metadata``           |
+| ``samples``          | The step's trace samples (ATIF ``TrajectoryItem`` values) in the order |
+|                      | of its job data. Read the reward and feedback from ``sample.metadata`` |
 |                      | (``reward`` is absent for unscored traffic) and the original provider  |
 |                      | exchanges with ``reef.core.trajectories.recorded_payloads``.           |
 +----------------------+------------------------------------------------------------------------+
@@ -274,8 +274,8 @@ with ``RecipeConfigError``. See `Manual training
 ``session``, ``release_id``, ``requires``, and ``client``, the requesting
 client's report of its machine. The text is client text: see `Untrusted
 input`_. In ``manual`` mode, ``samples`` is empty. In ``hybrid`` mode, it
-holds up to ``evolution.batch_size`` samples from the next automatic batch,
-and may be empty.
+holds up to ``job_samples`` samples from the next automatic job data, and
+may be empty.
 
 Return ``requires`` in the proposal when the change needs something on the
 person's machine that the request did not name: an ``env`` variable, a
@@ -370,7 +370,7 @@ each failing trace.
 Configure a deployment
 ----------------------
 
-The recipe config names the plugin classes, the tasks, the batch size, and
+The recipe config names the plugin classes, the tasks, the step size, and
 the seed, the directory that holds the first tree:
 
 .. code:: yaml
@@ -432,17 +432,18 @@ or Reef resolves it against the working directory. See `Harness evolution
 keys <../reference/configuration.rst#harness-evolution-keys>`__ for every
 field.
 
-Two batching modes
-~~~~~~~~~~~~~~~~~~
+Two trace sources
+~~~~~~~~~~~~~~~~~
 
-The deployment's ``pipeline`` section selects the source of each batch.
-``recipe.config.evolution.batch_size`` (default 1) sets the number of
-traces in one batch.
+The deployment's ``pipeline`` section selects the source of each step's
+traces. ``pipeline.task2job.config.job_samples`` sets the number of traces
+in one step. Without it, ``recipe.config.evolution.batch_size`` (default 1)
+gives the number.
 
-- The recipe's default stages batch valid reports with explicit scores. Use
+- The recipe's default stages train on valid reports with explicit scores. Use
   them when a grader, test, or user action supplies an outcome.
-- The inference stages batch recorded inference requests and do not require
-  reports. A step starts every ``batch_size`` requests. These samples carry
+- The inference stages train on recorded inference requests and do not require
+  reports. A step starts every ``job_samples`` requests. These samples carry
   no ``reward``, which the proposer must handle. The SkillClaw night example
   judges its own unscored samples later. Name the stages as follows:
 

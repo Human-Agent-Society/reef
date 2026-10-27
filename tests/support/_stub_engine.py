@@ -1,9 +1,9 @@
-"""A CPU stand-in for the SGLang engines: the control surface Reef's coordinator drives, as Ray actors.
+"""A CPU stand-in for the SGLang engines: the control surface Reef drives, as Ray actors.
 
 Selected with ``inference.backend: tests.support._stub_engine:create_inference``.
 It borrows the deployment's reservation like SGLang does, accepts Reef's
-adapter-file transfer, and records every adapter it was asked to load so a
-test can check what a hosted trainer published.
+adapter files, and records every adapter it was asked to load so a test can
+check what Reef served.
 """
 
 from __future__ import annotations
@@ -13,13 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.runtime.deployment import (
-    WEIGHT_FILES_PROTOCOL,
-    DeploymentResources,
-    InferenceConnection,
-    InferenceResources,
-    InferenceService,
-)
+from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceResources, InferenceService
 from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.interfaces import InferenceBackend
@@ -76,8 +70,8 @@ class StubControl:
 
         return ray.get([engine.get_runtime_load_id.remote() for engine in self.engines])
 
-    def get_updatable_engines_and_lock(self) -> tuple[Any, ...]:
-        return self.engines, None, 0, [], [], []
+    def updatable_engines(self) -> list[Any]:
+        return self.engines
 
     def pause_generation_for_update(self) -> None:
         self.paused = True
@@ -89,23 +83,8 @@ class StubControl:
         self.terminated += 1
         return 0
 
-    def recover_updatable_engines(self) -> tuple[Any, ...]:
-        return self.get_updatable_engines_and_lock()
-
-    def prepare_training_connection(self) -> None:
-        return
-
-    def offload(self, tags: Any = None) -> None:
-        raise AssertionError("a hosted trainer never offloads the engines")
-
-    def onload(self, tags: Any = None) -> None:
-        raise AssertionError("a hosted trainer never onloads")
-
-    def onload_weights(self) -> None:
-        raise AssertionError("a hosted trainer never onloads")
-
-    def onload_kv(self) -> None:
-        raise AssertionError("a hosted trainer never onloads")
+    def recover_updatable_engines(self) -> int:
+        return 0
 
     def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> None:
         import ray
@@ -144,7 +123,6 @@ class StubEngineService(InferenceService):
     """Start the control actor in the deployment's Ray session on the reserved inference bundles."""
 
     connection_protocol = PROTOCOL
-    supported_transfer_protocols = (PROTOCOL, WEIGHT_FILES_PROTOCOL)
 
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = dict(config)
@@ -172,9 +150,6 @@ class StubEngineService(InferenceService):
             )
         )
         return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._control.workers))
-
-    def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
-        connection.control.rpc(0, "prepare_training_connection", timeout=30)
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
         return SGLangInferenceBackend(connection.control)

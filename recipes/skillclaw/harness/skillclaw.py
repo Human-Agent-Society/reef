@@ -33,7 +33,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree import TreePatch

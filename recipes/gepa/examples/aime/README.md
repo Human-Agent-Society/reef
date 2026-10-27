@@ -116,7 +116,7 @@ read the archive from the latest commit and draw the iteration's plan as the
 proposer will (its parent choice and its three training problems), render the
 tree with a model binding pointed back at the embedded service, run each
 problem as a Pi episode, score it, find its recorded request by problem text,
-and report the score against it. The third report closes the batch
+and report the score against it. The third report fills the step's job data
 (`evolution.batch_size: 3`) and schedules the training step, which is where
 the method proposes, evaluates, and publishes. Rounds stop when the archive
 reaches the metric-call budget.

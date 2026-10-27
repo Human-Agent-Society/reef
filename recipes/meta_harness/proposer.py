@@ -1,7 +1,7 @@
 """The history-aware proposer of Meta-Harness.
 
 The proposer gives one configured model the complete committed population,
-the current trace batch, and the files the adapter takes. The reply chooses
+the traces of the current step, and the files the adapter takes. The reply chooses
 any known parent and returns one complete tree, which the step validates and
 states as a patch against the served tree. Scores reach the population when
 the next step folds in the evaluation (``population_for_step``).
@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings

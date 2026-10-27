@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support._candidate_evaluation_plugin import CheckpointEvaluator
+from tests.support.runtime_stubs import StubInferenceRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
 from reef.evaluation import CandidateEvaluationConfig, build_candidate_evaluation
@@ -26,13 +27,12 @@ def evaluation_config(*, score: float = 0.25, threshold: float = 0.8) -> dict:
 
 @pytest.mark.unit
 def test_plugin_class_builds_scenario_local_candidate_evaluator() -> None:
-    runtime = StubTrainingRuntime()
     config = CandidateEvaluationConfig.from_dict(
         evaluation_config(),
         environ={"EVALUATION_TOKEN": "secret"},
     )
 
-    evaluator = build_candidate_evaluation(config, **runtime_bindings(runtime), scenario="math")
+    evaluator = build_candidate_evaluation(config, runtime=StubInferenceRuntime(), scenario="math")
 
     assert evaluator.scenario == "math"
     assert evaluator.token == "secret"
@@ -41,20 +41,21 @@ def test_plugin_class_builds_scenario_local_candidate_evaluator() -> None:
 
 @pytest.mark.unit
 def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
-    runtime = StubTrainingRuntime()
     config = SAORecipe.service_config({}, model_path="/models/student")
     config["evaluation"] = evaluation_config()
+    config["pipeline"] = {"task2job": {"config": {"job_samples": 1}}}
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config=config,
-        **runtime_bindings(runtime),
+        **runtime_bindings(),
     )
 
     trainer = recipe.build("math", SQLiteRecordStore())
 
-    assert trainer.candidate_evaluator is not None
-    assert trainer.candidate_evaluator.scenario == "math"
-    assert trainer.candidate_evaluator.token == "secret"
+    evaluator = trainer.job_loop.evaluator
+    assert isinstance(evaluator, CheckpointEvaluator)
+    assert evaluator.scenario == "math"
+    assert evaluator.token == "secret"
 
 
 @pytest.mark.unit
@@ -72,8 +73,7 @@ def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
     ],
 )
 def test_invalid_evaluation_plugins_fail_before_training(config, match) -> None:
-    runtime = StubTrainingRuntime()
     recipe_config = SAORecipe.service_config({}, model_path="/models/student")
     recipe_config["evaluation"] = config
     with pytest.raises(RecipeConfigError, match=match):
-        SAORecipe.from_environment({}, config=recipe_config, **runtime_bindings(runtime))
+        SAORecipe.from_environment({}, config=recipe_config, **runtime_bindings())

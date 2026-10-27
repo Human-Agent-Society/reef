@@ -6,12 +6,12 @@
   its ``teacher_context``.
 - ``processor`` — ``SDFTTasks``, the shared ``DistillTasks`` with the
   demonstration appended to the recorded request, the reference's layout:
-  one rollout with its demonstration, one batch unit.
+  one rollout with its demonstration, one record set unit.
 - ``objective`` — the backend-agnostic training objective.
 - ``slime`` — the Slime loss family: a thin family on the backend's
   distillation base (``reef.train.slime_backend.distill``), which runs the
   self-teacher forward pass and the per-token divergence. Imported by the
-  training driver and workers only; this package's public surface never
+  Slime training component and workers only; this package's public surface never
   loads it.
 """
 

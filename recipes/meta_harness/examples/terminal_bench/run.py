@@ -82,6 +82,9 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
     """Use persistent artifacts and SQLite records so a new process can resume.
 
     The recipe's seed is the base release of a new scenario, as the service makes it, so the search starts there.
+
+    ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
+    cycle that its preload starts would commit the same replayed step a second time.
     """
     return Dispatcher(
         recipe,
@@ -92,6 +95,7 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
             bootstrap_files=recipe.base_artifact_files() or {},
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
+        hold_local_cycles=True,
     )
 
 

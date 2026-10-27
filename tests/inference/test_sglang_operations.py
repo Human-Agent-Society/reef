@@ -32,9 +32,6 @@ class Receiver:
     def continue_generation_after_update(self):
         self.paused = False
 
-    def prepare_training_connection(self):
-        self.paused = True
-
     def shutdown(self):
         self.closed = True
 
@@ -57,20 +54,6 @@ def test_service_adapts_only_compatible_connections_without_owning_workers():
 
     with pytest.raises(ValueError, match="incompatible SGLang"):
         service.backend(InferenceConnection("other-protocol", executor))
-
-
-def test_preparing_weight_transfer_fences_only_a_compatible_receiver():
-    receiver = Receiver()
-    executor = UniProcExecutor.from_workers([receiver])
-    service = SGLangInferenceService(SGLangConfig("model", 1, 1, 1))
-    with pytest.raises(ValueError, match="incompatible SGLang"):
-        service.prepare_weight_transfer(InferenceConnection("other-protocol", executor))
-    assert not receiver.paused
-
-    connection = InferenceConnection(INFERENCE_PROTOCOL, executor)
-    service.prepare_weight_transfer(connection)
-    assert receiver.paused
-    assert not receiver.closed
 
 
 @pytest.mark.parametrize("versions", ["weights:1", [None], [1], [""], {"engine": "weights:1"}])
@@ -98,6 +81,42 @@ def test_receiver_preserves_pause_failure_without_attempting_resume():
     assert receiver.paused
 
 
+@pytest.mark.parametrize("replaced", [0, 2])
+def test_receiver_recovery_returns_the_refilled_engine_count(replaced):
+    receiver = Receiver()
+    receiver.recover_updatable_engines = lambda: replaced
+    assert SGLangInferenceBackend(UniProcExecutor.from_workers([receiver])).recover() == replaced
+
+
+@pytest.mark.parametrize("replaced", [-1, True, None, [object()]])
+def test_receiver_recovery_rejects_a_malformed_engine_count(replaced):
+    receiver = Receiver()
+    receiver.recover_updatable_engines = lambda: replaced
+    with pytest.raises(RuntimeError, match="invalid replaced-engine count"):
+        SGLangInferenceBackend(UniProcExecutor.from_workers([receiver])).recover()
+
+
+def test_worker_recovery_counts_the_dead_engines_it_refilled():
+    from reef.inference.sglang import worker as worker_module
+
+    group = SimpleNamespace(all_engines=[object(), None, None])
+    restarts = []
+
+    def restart_dead_engines():
+        restarts.append(len(group.all_engines))
+        group.all_engines = [engine or object() for engine in group.all_engines]
+
+    worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
+    worker.servers = {
+        "actor": SimpleNamespace(update_weights=True, server_groups=[group], recover=restart_dead_engines)
+    }
+    engines = worker_module._SGLangEngineGroup(worker)
+
+    assert engines.recover() == 2
+    assert engines.recover() == 0, "no dead engine: nothing to restart"
+    assert restarts == [3]
+
+
 @pytest.mark.parametrize("fail_second", [False, True])
 def test_initial_version_stamping_keeps_receiver_paused_on_partial_failure(monkeypatch, fail_second):
     versions = ["native:0", "native:0"]
@@ -111,7 +130,7 @@ def test_initial_version_stamping_keeps_receiver_paused_on_partial_failure(monke
             versions[1] = args[0]
 
     receiver = Receiver(versions)
-    receiver.get_updatable_engines_and_lock = lambda: ([object(), object()], None, 0, [], [], [])
+    receiver.updatable_engines = lambda: [object(), object()]
     monkeypatch.setattr(RayExecutor, "from_workers", lambda workers: EngineGroup())
     operations = SGLangInferenceBackend(UniProcExecutor.from_workers([receiver]))
     operations.pause()
@@ -138,7 +157,7 @@ def test_adapter_eviction_requires_every_engine_acknowledgement(monkeypatch, las
             return self.result
 
     engines = [Engine({"success": True}), Engine(last_result)]
-    receiver = SimpleNamespace(get_updatable_engines_and_lock=lambda: (engines, None, 0, [], [], []))
+    receiver = SimpleNamespace(updatable_engines=lambda: engines)
 
     class EngineGroup:
         def collective_rpc(self, method, *, kwargs, timeout):
@@ -219,9 +238,10 @@ def test_worker_reloads_full_weights_into_every_updatable_engine(monkeypatch):
         worker.load_weights_from_disk("/ckpt/hf", "inc:3")
 
 
-def test_engine_control_and_weight_transfer_skip_encoder_groups(monkeypatch):
+def test_engine_control_and_weight_loads_skip_encoder_groups(monkeypatch):
     from reef.inference.sglang import worker as worker_module
     from reef.inference.sglang.launch import SGLangEngineGroup, SGLangModel
+    from reef.runtime.recovery import InferenceControl
 
     calls = []
 
@@ -234,7 +254,7 @@ def test_engine_control_and_weight_transfer_skip_encoder_groups(monkeypatch):
             return self.result
 
     def engine(name):
-        methods = ("pause_generation", "flush_cache", "continue_generation", "check_weights")
+        methods = ("pause_generation", "flush_cache", "continue_generation")
         handle = SimpleNamespace(**{method: Remote(name, method) for method in methods})
         handle.get_runtime_load_id = Remote(name, "get_runtime_load_id", "weights:1")
         return handle
@@ -251,22 +271,15 @@ def test_engine_control_and_weight_transfer_skip_encoder_groups(monkeypatch):
     worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
     worker.config = config
     worker._health_monitors = []
-    worker.rollout_engine_lock = object()
     worker.servers = {"actor": SGLangModel([encoder, regular])}
-    worker._control = worker._create_control()
+    worker._control = InferenceControl(
+        worker_module._SGLangEngineGroup(worker), worker_module._SGLangInferenceMonitor(worker)
+    )
 
     assert worker.get_runtime_load_ids() == ["weights:1"]
     worker.pause_generation_for_update()
     worker.continue_generation_after_update()
-    worker.check_weights("snapshot")
-    engines, _lock, new_engines, gpu_counts, gpu_offsets, parallel_configs = worker.get_updatable_engines_and_lock()
-    assert (engines, new_engines, gpu_counts, gpu_offsets, parallel_configs) == (
-        regular.engines,
-        1,
-        [1],
-        [1],
-        [regular.parallel_config()],
-    )
+    assert worker.updatable_engines() == regular.engines
     assert worker.terminate_updatable_engines() == 1
     assert encoder.all_engines[0] is not None and regular.all_engines == [None]
     assert calls == [
@@ -274,5 +287,4 @@ def test_engine_control_and_weight_transfer_skip_encoder_groups(monkeypatch):
         ("regular", "pause_generation"),
         ("regular", "flush_cache"),
         ("regular", "continue_generation"),
-        ("regular", "check_weights"),
     ]

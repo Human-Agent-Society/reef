@@ -24,7 +24,7 @@ from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import FailureManifest, FailureRecord
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.manifest import MANIFEST_KIND, advance, fingerprint, normalize_cause
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 LAUNCH_CAUSE = "harness binary '/tmp/pytest-123/no-such-binary' not found"
 LAUNCH_FINGERPRINT = "75b82de293902cee"
@@ -38,8 +38,8 @@ def backend(tmp_path: Path, propose, binary: str | None = None) -> HarnessBacken
     return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
 
 
-def batch() -> TrainingBatch:
-    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+def batch() -> JobData:
+    return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 # -- schema pin ------------------------------------------------------------

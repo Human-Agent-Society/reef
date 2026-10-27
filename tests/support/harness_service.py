@@ -23,7 +23,7 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.scenario.scenario import Scenario
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 
 def harness_repository(tmp_path: Path, base_files: Mapping[str, str]) -> CachedRepositoryBackendFactory:
@@ -37,13 +37,18 @@ def harness_repository(tmp_path: Path, base_files: Mapping[str, str]) -> CachedR
     return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
 
 
-def harness_dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
-    """A dispatcher over ``recipe`` with a seeded repository and a durable commit history."""
+def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: bool = False) -> Dispatcher:
+    """A dispatcher over ``recipe`` with a seeded repository and a durable commit history.
+
+    A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
+    same step a second time.
+    """
     return Dispatcher(
         recipe,
         harness_repository(tmp_path, recipe.base_artifact_files() or {}),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        hold_local_cycles=hold_local_cycles,
     )
 
 
@@ -81,9 +86,9 @@ def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
     return result
 
 
-def backend_step(backend: HarnessBackend, batch: TrainingBatch, state: Mapping[str, Any]) -> TrainStepResult:
+def backend_step(backend: HarnessBackend, data: JobData, state: Mapping[str, Any]) -> TrainStepResult:
     """One step of ``backend`` as the trainer runs it, selected by score comparison; a failure aborts the step."""
-    prepared = backend.prepare_step(batch, state, 0)
+    prepared = backend.prepare_step(data, state, 0)
     if prepared.candidate is None:
         return TrainStepResult(prepared.state, prepared.metrics)
     selection = ScoreComparisonPlugin(backend)

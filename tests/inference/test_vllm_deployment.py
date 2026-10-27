@@ -62,7 +62,6 @@ def test_config_derives_reef_serving_options():
         (base_values(num_gpus=3), "whole number of engines"),
         (base_values(gpus_per_engine=2, gpus_per_node=1), "fit on one node"),
         (base_values(num_gpus=4), "requires router_url"),
-        (base_values(check_weights=True), "no weights checker"),
         (base_values(pause_mode="drain"), "unknown vLLM pause mode"),
         (base_values(options={"tensor_parallel_size": 2}), "derives these vLLM options"),
         (base_values(options={"kv-offloading-size": 4}), "replaces the configured KV connector"),

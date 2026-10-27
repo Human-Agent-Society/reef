@@ -1,10 +1,10 @@
-"""The OpenClaw-RL record-to-task and task-to-batch stages: one judged turn, one sample.
+"""The OpenClaw-RL record-to-task and task-to-job stages: one judged turn, one sample.
 
 A computed-feedback recipe. The correlation and the judge are
 :class:`~recipes.openclawrl.judging.OpenClawRLJudging`, which runs in the
 record-to-record stage :class:`~recipes.openclawrl.judging.OpenClawRLRecord2Record`.
-This file validates the tensors (``make_sample``), shapes the batch
-(``make_batch``), and writes the PRM record file. Rewards pass through raw
+This file validates the tensors (``make_sample``), shapes the data
+(``make_job_data``), and writes the PRM record file. Rewards pass through raw
 (upstream ``--n-samples-per-prompt 1``; no grouping, no normalization).
 """
 
@@ -28,8 +28,8 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2task import JudgedTasks, Record2Task
 from reef.record2task.samples import make_policy_trajectory
-from reef.task2batch import BufferSettings, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, policy_row_violation
+from reef.task2job import Task2Job, Task2JobSettings
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem, policy_row_violation
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class OpenClawRLTasks(JudgedTasks):
         #    it is what step 2 needs, and a property would not narrow it.)
         if judgment.score is None:
             return None
-        # 2. The policy tensors must satisfy the bridge contract, and the
+        # 2. The policy tensors must satisfy the Slime row contract, and the
         #    top-K capture must cover every response token.
         sample = make_policy_trajectory(record, judgment.score)
         if (
@@ -88,29 +88,29 @@ class OpenClawRLTasks(JudgedTasks):
 
 
 @dataclass(frozen=True)
-class OpenClawRLBatchSettings(BufferSettings):
-    """The config of ``OpenClawRLBatches``: the buffer and the PRM record file."""
+class OpenClawRLJobSettings(Task2JobSettings):
+    """The config of ``OpenClawRLJobData``: the buffer, the job size, and the PRM record file."""
 
     # Upstream's OPENCLAW_PRM_RECORD_FILE.
     prm_record_file: str = config_option(
-        "", help="The file that gets one JSON line for each batch: the judged population. Empty disables it."
+        "", help="The file that gets one JSON line for each job: the judged population. Empty disables it."
     )
 
 
-class OpenClawRLBatches(Task2Batch):
-    """Judged turns into batches, and the PRM record file.
+class OpenClawRLJobData(Task2Job):
+    """Judged turns into job data, and the PRM record file.
 
-    Config: :class:`OpenClawRLBatchSettings`. The PRM record file reports
+    Config: :class:`OpenClawRLJobSettings`. The PRM record file reports
     what the judging of ``record2record`` saw, so the stage needs the
     scenario's ``OpenClawRLRecord2Record``.
     """
 
     def __init__(
-        self, context: PipelineContext, settings: OpenClawRLBatchSettings, record2record: OpenClawRLRecord2Record
+        self, context: PipelineContext, settings: OpenClawRLJobSettings, record2record: OpenClawRLRecord2Record
     ) -> None:
-        super().__init__(context, settings.buffer_size)
+        super().__init__(context, settings.buffer_size, settings.job_samples)
         # What the judge actually saw goes to the PRM record file, one line
-        # per batch. Upstream persists this per turn; without it a batch mean
+        # per job. Upstream persists this per turn; without it a job mean
         # is the only visible number. A file, not a log line: reef configures
         # no logging, so anything below WARNING is discarded.
         record_file = settings.prm_record_file.strip()
@@ -127,39 +127,39 @@ class OpenClawRLBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = OpenClawRLBatchSettings.parse(config, plugin_class=cls)
+        settings = OpenClawRLJobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2record, OpenClawRLRecord2Record):
             raise PluginConfigError(
                 f"{cls.__name__} needs OpenClawRLRecord2Record as record2record, not {type(record2record).__name__}"
             )
         return cls(context, settings, record2record)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
         samples = tuple(task for task in tasks if isinstance(task, TrajectoryItem))
         if len(samples) != len(tasks):
             raise TypeError("OpenClaw-RL tasks must be trajectories")
-        self.write_record_line(samples, batch_id)
-        return TrainingBatch(
-            batch_id,
+        self.write_record_line(samples, data_id)
+        return JobData(
+            data_id,
             tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
         )
 
-    def write_record_line(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> None:
-        """Append this batch's judged population to the PRM record file.
+    def write_record_line(self, samples: tuple[TrajectoryItem, ...], data_id: str) -> None:
+        """Append this job's judged population to the PRM record file.
 
-        One line per batch: what the judges returned since the previous one,
+        One line per job: what the judges returned since the previous one,
         the reward mix that reached the trainer, and how correlation is doing
-        overall. A batch mean alone cannot distinguish "the judges disagree"
+        overall. A job mean alone cannot distinguish "the judges disagree"
         from "the judges never ran", and neither can it show which next
         states are being judged.
         """
         record = {
-            "batch_id": batch_id,
+            "data_id": data_id,
             "scenario": self.scenario,
             "samples": len(samples),
             "rewards": dict(sorted(collections.Counter(f"{trajectory_reward(s):+.0f}" for s in samples).items())),
             "judged": dict(sorted(self.openclawrl_judging.judged.items())),
-            # Cumulative, unlike the per-batch counters above: these answer
+            # Cumulative, unlike the per-job counters above: these answer
             # "is correlation working" for the run as a whole.
             "correlation": asdict(self.openclawrl_judging.index.stats),
         }

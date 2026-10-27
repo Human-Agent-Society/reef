@@ -25,7 +25,7 @@ from reef.service.request_service import RequestService
 from reef.service.wire import parse_request_headers
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
-    ArtifactActivator,
+    ArtifactLoader,
     ComponentSurface,
     InferenceHooks,
     InferenceLease,
@@ -50,21 +50,16 @@ def _tree(root: Path, files: Mapping[str, str]) -> Path:
     return root
 
 
-class _RecordingActivator(ArtifactActivator):
+class _RecordingActivator(ArtifactLoader):
     """Record which component content each lifecycle call received."""
 
     def __init__(self) -> None:
         self.activated: list[str] = []
-        self.loaded: list[str] = []
 
     def recover(
         self, current: ArtifactRef | None, checkpoint: ArtifactRef, runtime: ServingRuntime | None
     ) -> ArtifactRef:
         return checkpoint
-
-    def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str:
-        self.loaded.append(artifact.ref.content_id)
-        return artifact.ref.release_id
 
     def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         self.activated.append(artifact.ref.content_id)
@@ -187,8 +182,6 @@ def test_surface_routes_each_capability_to_its_component(tmp_path: Path) -> None
     assert validator.seen == [weights.ref.content_id]
     surface.activate(first, None)
     assert activator.activated == [weights.ref.content_id]
-    surface.load(first, None)
-    assert activator.loaded == [weights.ref.content_id]
 
     # A release that keeps the served weights does not activate them again.
     evolved = Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "evolved"}))
@@ -347,7 +340,6 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
     recipe = _TwoComponentRecipe()
     activator = recipe.activator
     activator.activated.clear()
-    activator.loaded.clear()
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
@@ -398,30 +390,27 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
             after_harness.ref.release_id,
         ]
 
-        # A publication naming no component replaces the committing trainer's own; unknown names are refused,
-        # and live weights cannot carry the harness.
+        # A publication naming no component replaces the committing trainer's own; unknown names are refused.
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "x"}))))
         assert surface.files.read_files(scenario.repository.materialize(scenario.current_artifact_ref())) == {
             "AGENTS.md": "x"
         }
         with pytest.raises(ReefError, match="serves no component"):
             scenario.commit(TrainStepResult(state={}, artifact=evolved, component="config"))
-        # A version without saved weights is refused where the result is built.
-        with pytest.raises(ValueError, match="runtime_load_id names saved weights"):
-            TrainStepResult(state={}, runtime_load_id="inc:2")
 
         # Rolling back to the harness-only step restores the base weights and evolved harness together.
+        served_before = len(activator.activated)
         scenario.rollback(after_harness.ref.release_id)
         restored = scenario.repository.materialize(scenario.current_artifact_ref())
         assert restored.ref.content_id == after_harness.ref.content_id
         assert restored.ref.release_id != after_harness.ref.release_id
-        assert activator.loaded == [base_weights]
+        assert activator.activated[served_before:] == [base_weights]
         assert surface.files.read_files(restored) == {"AGENTS.md": "evolved"}
 
         # Rolling back to the base keeps the served weights and only restores the seed harness.
         scenario.rollback(base.ref.release_id)
         seed = scenario.repository.materialize(scenario.current_artifact_ref())
-        assert activator.loaded == [base_weights]
+        assert activator.activated[served_before:] == [base_weights]
         assert surface.files.read_files(seed) == {"AGENTS.md": "seed"}
 
         # A harness step held for review is promoted onto the weights served by then, not the weights of its day.
@@ -457,7 +446,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert promoted_weights.components is not None
         assert promoted_weights.components.entries[WEIGHTS].content_id == held_weights.ref.content_id
         assert surface.files.read_files(promoted_weights) == {"AGENTS.md": "newest"}
-        assert activator.loaded[-1] == held_weights.ref.content_id
+        assert activator.activated[-1] == held_weights.ref.content_id
         # That promote changed no tree: the harness head and catalog stay at the newest harness step.
         assert service.harness_head(headers) == newest_release
         assert service.harness_manifest(headers)["release_id"] == newest_release

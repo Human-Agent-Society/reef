@@ -12,7 +12,7 @@ before it samples the next parent, and ``selection.GEPASelection`` decides
 the step on the archive's stored means.
 
 The parent's minibatch costs no episodes when the parent is the served tree:
-the step already batched that tree's real recorded traffic, scores included.
+the step's job data already holds that tree's real recorded traffic, scores included.
 Any other parent and every child run through ``context.trials``. The
 archive's metric-call count follows GEPA's accounting regardless (the seed's
 validation, every parent and child minibatch, every accepted candidate's
@@ -26,7 +26,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings

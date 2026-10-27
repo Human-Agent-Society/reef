@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest

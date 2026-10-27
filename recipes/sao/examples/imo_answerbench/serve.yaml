@@ -2,14 +2,14 @@
 #
 # SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) samples one
 # rollout per prompt with no comparison group, and trains on the global batch
-# size of them per optimizer step (the paper: 128). This smoke config
-# sets global_batch_size 1 so the dispatcher runs a full train step the moment a
-# rollout's score arrives; that is a different estimator from the paper's and
-# is only here so the loop is visible end to end on two GPUs. The value model
+# size of them per optimizer step (the paper: 128). This smoke config sets
+# global_batch_size 1 and job_samples to match, so Reef submits a training job
+# as soon as one rollout is scored. That is a different estimator from the
+# paper's, and it is only here so the loop is visible end to end on two GPUs. The value model
 # computes advantages in-backend via skip-observation GAE, so reef ships no
 # advantages and the family turns Slime's advantage pass on itself. The critic
-# actor colocates on the actor GPUs (fractional placement), so the GPU budget
-# is the same as a critic-free run: actor + rollout.
+# shares the actor's GPU (Slime's fractional placement), so the GPU budget
+# is the same as a critic-free run: one actor GPU and one serving GPU.
 #
 # Reduced-model smoke: 2 GPUs, Qwen2.5-1.5B-Instruct. Scale seq-length,
 # model, and GPU counts up for a real run; the objective settings below are the
@@ -37,15 +37,20 @@ inference:
   model-path: ~/models/Qwen2.5-1.5B-Instruct
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
-  config:
-    max-staleness: 18
+pipeline:
+  record2record:
+    config:
+      max_staleness: 18
+  task2job:
+    config:
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
 training:
   backend: slime
   ready-timeout: 900
-  # One SAO training RPC covers critic_steps_per_actor value steps *plus* the
-  # actor step, a checkpoint save, and a weight publish, so it outlasts an
-  # inference request by a wide margin. Match the bridge ceiling instead of
-  # the client default to avoid a stale RUNNING marker.
+  # One SAO training call to the workers covers critic_steps_per_actor value
+  # steps *plus* the actor step and a checkpoint save, so it outlasts an
+  # inference request by a wide margin. This bounds each such call.
   timeout-s: 14400
   config:
     # Relative paths resolve against the directory reef serve runs from. The

@@ -12,14 +12,15 @@ from typing import Any
 
 from tests.support._threshold_processor import threshold_pipeline
 
+from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.runtime.interfaces import InferenceRuntime, TrainingMethod, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
-from reef.train.algos import StepScheduling
 from reef.train.backend import ComponentReleases
-from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
+from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.trainer import Trainer
 
 
@@ -29,6 +30,8 @@ class TestPolicyRecipe(WeightTrainingRecipe):
 
     _: KW_ONLY
     min_score: float = float("-inf")
+    #: The staleness limit of the record stage.
+    max_staleness: int = 0
     name: str = "test_policy"
 
     @classmethod
@@ -38,12 +41,12 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         *,
         config: Mapping[str, Any] | None = None,
         runtime: InferenceRuntime | None = None,
-        training_runtime: TrainingRuntime | None = None,
+        training_component: TrainingComponent | None = None,
     ) -> TestPolicyRecipe:
         del environ, config
-        if not isinstance(training_runtime, TrainingRuntime):
-            raise TypeError("TestPolicyRecipe requires a TrainingRuntime")
-        return cls(training_runtime, runtime=runtime)
+        if not isinstance(training_component, TrainingComponent):
+            raise TypeError("TestPolicyRecipe requires a TrainingComponent")
+        return cls(training_component, runtime=runtime)
 
     def build(
         self,
@@ -58,15 +61,16 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: threshold_pipeline(context, accept_multi_turn=True),
-            candidate_backend=RuntimeCandidateBackend(
-                self.training_runtime,
-                FixedTrainingMethodSelector(TrainingMethod("sft")),
-                StepScheduling(),
-                inference_runtime=self.runtime,
+            pipeline_factory=lambda context: threshold_pipeline(
+                context, accept_multi_turn=True, max_staleness=self.max_staleness
+            ),
+            job_loop=JobLoop(
+                self.training_component,
+                FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
+                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            max_staleness=self.max_staleness,
+            default_job_samples=1,
         )

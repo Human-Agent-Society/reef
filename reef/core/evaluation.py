@@ -23,6 +23,36 @@ class UpdateCandidate:
             raise ValueError("candidate_id must be a non-empty string")
 
 
+@dataclass(frozen=True, kw_only=True)
+class CheckpointCandidate(UpdateCandidate):
+    """A checkpoint that a weight trainer's job saved and that Reef has not decided to serve.
+
+    Values: ``training_job_id`` (non-empty) and ``step`` (a non-negative int) name the checkpoint within its
+    job, and ``candidate_id`` is ``"<training_job_id>:<step>"``. ``release_path`` is the non-empty directory
+    that Reef publishes when it serves the checkpoint (``SavedCheckpoint.release_path``). ``training_metrics``
+    is the training component's telemetry for it. Purpose: ``JobLoop.decide`` makes the value, and the
+    recipe's candidate evaluation reads it.
+    """
+
+    training_job_id: str
+    step: int
+    release_path: str
+    training_metrics: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.training_job_id, str) or not self.training_job_id:
+            raise ValueError("CheckpointCandidate.training_job_id must be a non-empty string")
+        if isinstance(self.step, bool) or not isinstance(self.step, int) or self.step < 0:
+            raise ValueError("CheckpointCandidate.step must be a non-negative int")
+        if not isinstance(self.release_path, str) or not self.release_path:
+            raise ValueError("CheckpointCandidate.release_path must be a non-empty string")
+        if self.candidate_id != f"{self.training_job_id}:{self.step}":
+            raise ValueError("CheckpointCandidate.candidate_id must be '<training_job_id>:<step>'")
+        if not isinstance(self.training_metrics, Mapping):
+            raise TypeError("CheckpointCandidate.training_metrics must be a mapping")
+
+
 @dataclass(frozen=True)
 class EvaluationResult:
     """Measurements produced by evaluating one candidate against the incumbent."""
@@ -94,13 +124,26 @@ class CandidateEvaluator(ABC):
 
 
 class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
-    """Measure a candidate and decide whether it passes the publication gate."""
+    """Measure a candidate and decide whether Reef serves it."""
+
+    def evaluate_and_decide(self, candidate: UpdateCandidate) -> SelectionDecision:
+        """Evaluate ``candidate`` and decide on that evaluation.
+
+        Raise ``ValueError`` when the decision does not carry the evaluation
+        that ``evaluate`` returned, since Reef records the two together.
+        """
+        evaluation = self.evaluate(candidate)
+        decision = self.decide(candidate, evaluation)
+        if decision.evaluation is not evaluation:
+            raise ValueError("candidate evaluator must retain the evaluation result supplied by Reef")
+        return decision
 
 
 __all__ = [
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
+    "CheckpointCandidate",
     "EvaluationResult",
     "SelectionDecision",
     "UpdateCandidate",

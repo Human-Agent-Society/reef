@@ -61,7 +61,7 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.sandbox.process import SandboxExecutor
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 NATIVE = get_adapter("native")
 SHOUT_PARAMETERS = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
@@ -664,7 +664,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
         final_answer,
         ("put hello in notes.txt and read it back",),
     )
-    batch = TrainingBatch("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+    batch = JobData("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_tree.files
@@ -996,7 +996,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
                 "[sieve] how many primes are below 100000? Reply with the count as a plain integer alone on the last line.",
             ),
         )
-        batch = TrainingBatch("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+        batch = JobData("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         prepared = backend.prepare_step(batch, backend.initial_state(), 0)
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_tree.files["native/graphs/main.json"]) == SEED_GRAPH
@@ -1946,7 +1946,7 @@ def test_the_binding_rides_in_the_episode_render_and_the_published_tree_is_the_s
     )
     episode = backend.evaluator.render(HarnessTree(NATIVE_SEED_FILES))
     assert json.loads(episode["native/models.json"])["base_url"] == fake_model.base_url
-    batch = TrainingBatch("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+    batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None
     evaluator = BackendAlwaysSelectPlugin(backend)

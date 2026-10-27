@@ -25,8 +25,9 @@ from reef.recipe.reefine.agent import AgentProposer, AgentRun
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
-from reef.sandbox.e2b import E2BSession, pack
+from reef.sandbox.e2b import E2BSession
 from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome
+from reef.sandbox.remote import pack
 from reef.train.harness_backend.calls import StepCalls, budgeted_bindings
 from reef.train.harness_backend.contract import AgentHost, ProposalContext, TreeProposal
 
@@ -489,14 +490,16 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
 def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
     from reef.recipe.errors import RecipeConfigError
     from reef.recipe.harness import proposer_agent_settings
-    from reef.sandbox.e2b import E2BExecutor, deployment_owner
+    from reef.sandbox.e2b import E2BExecutor
+    from reef.sandbox.modal import ModalExecutor
     from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
+    from reef.sandbox.remote import deployment_owner
 
     assert proposer_agent_settings(None, {}) == (None, 1800.0, 300.0)
     executor, timeout_s, trial_s = proposer_agent_settings({"sandbox": "none", "timeout_s": 60}, {})
     assert isinstance(executor, LocalExecutor) and (timeout_s, trial_s) == (60.0, 300.0)
     assert isinstance(proposer_agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"})[0], LocalExecutor)
-    with pytest.raises(RecipeConfigError, match="'bwrap', 'e2b' or 'none'"):
+    with pytest.raises(RecipeConfigError, match="one of 'bwrap', 'e2b', 'modal', 'none'"):
         proposer_agent_settings({"sandbox": "docker"}, {})
     # E2B: the key from the section, else the environment; none at all is refused at startup.
     with pytest.raises(RecipeConfigError, match=r"sandbox is e2b, but .*E2B_API_KEY"):
@@ -512,6 +515,14 @@ def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
         {"sandbox": "e2b", "e2b_api_key": "e2b-cfg", "e2b_template": "mine"}, {"E2B_API_KEY": "e2b-env"}
     )[0]
     assert isinstance(configured, E2BExecutor) and (configured.api_key, configured.template) == ("e2b-cfg", "mine")
+    # Modal: the provider's options from the section, the deployment that names its sandboxes, and the timeout.
+    monkeypatch.setattr(ModalExecutor, "preflight", lambda self: None)
+    modal_executor = proposer_agent_settings(
+        {"sandbox": "modal", "modal_app": "reef-proposers", "timeout_s": 90}, {}, proposals_dir=Path("/tmp/props")
+    )[0]
+    assert isinstance(modal_executor, ModalExecutor)
+    assert (modal_executor.app_name, modal_executor.timeout_s) == ("reef-proposers", 90.0)
+    assert modal_executor.owner == deployment_owner(Path("/tmp/props"))
     monkeypatch.undo()
     with pytest.raises(RecipeConfigError, match="positive number"):
         proposer_agent_settings({"timeout_s": 0}, {})

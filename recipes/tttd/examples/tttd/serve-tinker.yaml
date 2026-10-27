@@ -25,6 +25,10 @@ pipeline:
     config:
       groups_per_step: 2
       rollouts_per_group: 2
+  task2job:
+    config:
+      # One job is the whole grid, groups_per_step x rollouts_per_group samples: the same value as batch-size.
+      job_samples: 4
 training:
   backend: tinker
   ready-timeout: 1800

@@ -50,6 +50,32 @@ def test_native_inference_factory_rejects_non_native_executor_aliases(executor):
         )
 
 
+@pytest.mark.parametrize("pause_mode", ["retract", "in_place"])
+def test_only_regular_engines_retract_their_requests_at_a_load(pause_mode):
+    values = {
+        "model_path": "model",
+        "num_gpus": 2,
+        "gpus_per_engine": 1,
+        "gpus_per_node": 2,
+        "pause_mode": pause_mode,
+        "models": (
+            {
+                "name": "actor",
+                "groups": (
+                    {"worker_type": "prefill", "num_gpus": 1, "gpus_per_engine": 1},
+                    {"worker_type": "decode", "num_gpus": 1, "gpus_per_engine": 1},
+                ),
+            },
+        ),
+    }
+    if pause_mode == "in_place":
+        # A PD deployment keeps in-flight KV across a load and remains valid.
+        deployment.create_inference(values).close()
+        return
+    with pytest.raises(ValueError, match="regular SGLang engines"):
+        deployment.create_inference(values)
+
+
 def test_native_factory_validates_lora_receiver_schema_before_allocation(monkeypatch):
     checks = []
     monkeypatch.setattr(deployment, "require_lora_tensor_request_schema", lambda: checks.append("tensor"))
@@ -83,31 +109,6 @@ from reef.inference.sglang.deployment import create_inference
 service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
 assert service.config.options['disable_radix_cache'] is True
 service.close()
-""",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_slime_input_mapping_imports_no_receiver_implementation_or_framework():
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """
-import json
-import sys
-from types import SimpleNamespace
-sys.modules.update(dict.fromkeys(('reef.inference.sglang', 'sglang', 'torch', 'megatron')))
-from reef.train.slime_backend.inference import inference_config
-from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
-values = inference_config(SimpleNamespace(hf_checkpoint='model', rollout_num_gpus=1, rollout_num_gpus_per_engine=1, num_gpus_per_node=1, seed=1, offload_rollout=False, fp16=False, use_rollout_routing_replay=False, megatron_lora_rank=0, disjoint_prefix_sharing=False))
-assert values['model_path'] == 'model'
-assert values['executor'] == 'auto'
-json.dumps(values)
-assert not any(name.startswith('reef.inference.sglang.') for name in sys.modules)
 """,
         ],
         capture_output=True,

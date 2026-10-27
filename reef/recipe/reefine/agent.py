@@ -33,7 +33,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters.descriptor import AdapterDescriptor

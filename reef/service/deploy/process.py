@@ -84,16 +84,11 @@ class ProcessWorker:
     def _service_env(self, svc: Mapping[str, Any]) -> dict[str, str]:
         """The environment a service and its ready probe run under.
 
-        The bridge driver's readiness marker lives under ``run_dir`` with the
-        stack's pid and log files, so two stacks on one machine never share
-        one; the driver reads the path from ``REEF_BRIDGE_READY_FILE``.
-
         Append the recipe source root so inherited packages keep precedence.
         A service's explicit env map can still replace the whole variable.
         """
         env = dict(os.environ)
         env["REEF_CONFIG"] = str(self.config_path)
-        env["REEF_BRIDGE_READY_FILE"] = str(self.run_dir / "bridge.ready")
         if self.source_root is not None:
             env["PYTHONPATH"] = _with_path_entry(env.get("PYTHONPATH"), self.source_root)
         for k, v in (svc.get("env") or {}).items():
@@ -262,8 +257,6 @@ class ProcessWorker:
         fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as handle:
             yaml.safe_dump(config, handle, sort_keys=False)
-        # Never accept a stale bridge-ready marker from a previous launch.
-        (self.run_dir / "bridge.ready").unlink(missing_ok=True)
         return self.describe()
 
     def probe(self, name: str, timeout: float = 5.0) -> bool:

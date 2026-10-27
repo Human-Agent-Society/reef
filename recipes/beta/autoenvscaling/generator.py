@@ -54,7 +54,7 @@ from reef.record2task.generator.client import DuplicateTask, Generator, Generato
 from reef.record2task.generator.designer import parse_harbor_reply
 from reef.record2task.generator.harbor import GeneratedHarborTask, OracleResult, dockerfile_logical_lines, harbor_task
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.sandbox.e2b import E2BExecutor
+from reef.sandbox.config import remote_executor
 from reef.sandbox.process import SandboxUnavailable
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,8 @@ DEFAULT_MAX_MODEL_CALLS = 250
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700.0
 DEFAULT_AGENT_API = "openai"
 DEFAULT_AGENT_TOKEN_ENV = "REEF_TOKEN"
+# The cloud sandbox the agent runs in: a provider of reef.sandbox.config.REMOTE_EXECUTORS.
+DEFAULT_AGENT_SANDBOX = "e2b"
 # The Designer: the coding agent, or the generator service's one-reply prompt Designer on the same sessions.
 AUTHORS = ("agent", "prompt")
 DEFAULT_AUTHOR = "agent"
@@ -135,6 +137,8 @@ CONFIG_KEYS = frozenset(
         "agent_reef_url",
         "agent_token_env",
         "agent_timeout_seconds",
+        "agent_sandbox",
+        "agent_sandbox_options",
         "max_model_calls",
         "behaviour_rule",
         "review",
@@ -385,8 +389,9 @@ def task_author(
     """The author the config names, its model calls recorded under ``scenario``: the coding agent, or with
     ``author: prompt`` the one-reply prompt Designer on the agent's model settings.
 
-    Credentials come from ``environ``: the Reef token from the variable ``agent_token_env`` names, the E2B key
-    from ``E2B_API_KEY``.
+    The agent runs in the cloud sandbox ``agent_sandbox`` names (``e2b`` by default, or ``modal``), with that
+    provider's options from ``agent_sandbox_options``. Credentials come from ``environ``: the Reef token from the
+    variable ``agent_token_env`` names, and the sandbox provider's own (``E2B_API_KEY``, or Modal's token).
     """
     kind = config.get("author", DEFAULT_AUTHOR)
     if kind not in AUTHORS:
@@ -407,8 +412,11 @@ def task_author(
             api=api,
             has_behaviour_rule=has_behaviour_rule,
         )
-    executor = E2BExecutor(api_key=environ.get("E2B_API_KEY", ""))
-    # Fails now, not mid-generation, without a key or the e2b package.
+    options = config.get("agent_sandbox_options") or {}
+    if not isinstance(options, Mapping):
+        raise ValueError("agent_sandbox_options must be a mapping of the sandbox provider's options")
+    executor = remote_executor(str(config.get("agent_sandbox", DEFAULT_AGENT_SANDBOX)), options, environ)
+    # Fails now, not mid-generation, without the provider's credentials or package.
     executor.preflight()
     timeout_seconds = float(config.get("agent_timeout_seconds", DEFAULT_AGENT_TIMEOUT_SECONDS))
     max_model_calls = int(config.get("max_model_calls", DEFAULT_MAX_MODEL_CALLS))

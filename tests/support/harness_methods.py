@@ -24,7 +24,7 @@ from tests.support._strategies import resolve_episode_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings

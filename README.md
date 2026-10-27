@@ -73,7 +73,7 @@ modules implement each step.
 |---|---|---|
 | **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
 | **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`storage/records.py`](reef/storage/records.py) — stored interactions and feedback<br>[`record2record/`](reef/record2record) — feedback matching and eligibility |
-| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — the training pipeline, batches, and update jobs |
+| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — the training pipeline, job data, and training jobs |
 | **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`evaluation/`](reef/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
@@ -196,9 +196,10 @@ for recipes that read more than a scalar. The endpoint will validate the
 
 #### Watch it learn and grow
 
-Once the recipe has enough feedback, it runs a training step and synchronizes
-the updated weights to the serving runtime. Later inference requests use the
-current version without restarting Reef.
+Once the recipe has enough feedback, Reef submits a training job to the
+training component. When a checkpoint that the job saved passes evaluation,
+the inference runtime loads it as the new release. Later inference requests
+use the current version without restarting Reef.
 
 ### Harness-evolving deployment
 

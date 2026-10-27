@@ -34,7 +34,7 @@ from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 
@@ -227,7 +227,7 @@ def _backend(
 
 
 def _step(backend: HarnessBackend) -> TrainStepResult:
-    return backend_step(backend, TrainingBatch("demo:1"), backend.initial_state())
+    return backend_step(backend, JobData("demo:1"), backend.initial_state())
 
 
 @pytest.mark.unit
