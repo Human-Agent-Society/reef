@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.train.algos.registry import loss_family_refs
 from reef.train.types.rows import policy_row_violation
 
@@ -57,7 +57,7 @@ class TokenRow:
             raise ValueError("Tinker advantages must be finite")
 
     @classmethod
-    def from_item(cls, item: TrajectoryItem, advantage: float, *, rollout_log_probs: bool = True) -> TokenRow:
+    def from_item(cls, item: TrajectorySample, advantage: float, *, rollout_log_probs: bool = True) -> TokenRow:
         """The row of ``item``; ``rollout_log_probs`` requires one rollout log probability per response token."""
         training = item.training
         logprobs = tuple(training.get("rollout_log_probs", ())) if rollout_log_probs else ()

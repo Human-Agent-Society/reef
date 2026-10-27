@@ -53,14 +53,14 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
-from reef.record2task.traces import TraceTasks
+from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
+from reef.sample2job.traces import TraceJobData
 from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
-from reef.task2job.traces import TraceJobData
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import AgentExecution, HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Promoter, Proposer
@@ -292,7 +292,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2job=TraceJobData)
+        return PipelineSpec(record2record=ReportRecord2Record, record2sample=TraceSamples, sample2job=TraceJobData)
 
     @property
     def harness_adapter(self) -> str | None:

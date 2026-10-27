@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from recipes.openclawrl.judging import OpenClawRLRecord2Record
-from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLTasks
+from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLSamples
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.train.pipeline import PipelineSpec
 
@@ -18,13 +18,13 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     (``OpenClawRLRecord2Record``) correlates main-turn records into sessions:
     it prefers a harness-supplied session tag and falls back to trace
     matching. It judges each turn by its next state against the PRM's SGLang
-    server. ``OpenClawRLTasks`` and ``OpenClawRLJobData`` batch the judged
+    server. ``OpenClawRLSamples`` and ``OpenClawRLJobData`` batch the judged
     turns directly, with no external grader. The training objective then
     applies the verbatim upstream top-K select objective.
 
     The deployment's ``pipeline`` section configures the stages: the
     sessions and the PRM judge in ``record2record``, and the PRM record file
-    in ``task2job``. Without ``prm_url`` the recipe is correlate-only:
+    in ``sample2job``. Without ``prm_url`` the recipe is correlate-only:
     sessions resolve, nothing trains, and records stay compactable. A batch
     holds Slime's ``--global-batch-size`` of judged turns (each
     turn-sample is its own rollout). Teacher
@@ -45,5 +45,5 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(
-            record2record=OpenClawRLRecord2Record, record2task=OpenClawRLTasks, task2job=OpenClawRLJobData
+            record2record=OpenClawRLRecord2Record, record2sample=OpenClawRLSamples, sample2job=OpenClawRLJobData
         )

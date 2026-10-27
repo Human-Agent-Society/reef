@@ -1,7 +1,7 @@
 """The generated-task stages: tasks generated and saved here, rolled out from the task pool, and trained here.
 
 When a round is due, the record stage (``GeneratedTaskRecord2Record``) gives a ``TaskGenerationRound`` to
-``GeneratedTaskTasks``, which runs it as one generation job on a private worker, off the trainer's thread. A
+``GeneratedTaskSamples``, which runs it as one generation job on a private worker, off the trainer's thread. A
 generation job:
 
 1. Asks the generator for tasks, with the round's source sessions when the record stage gave any.
@@ -40,7 +40,7 @@ from typing import Any, Self
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord
 from reef.core.config import config_option
-from reef.core.job_data import JobOutcome, TaskItem
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
@@ -68,12 +68,12 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import Record2Task, TaskResult
-from reef.record2task.generator.client import Generator, HttpGenerator
-from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.record2sample import Record2Sample, SampleResult
+from reef.record2sample.generator.client import Generator, HttpGenerator
+from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.sample2job import Sample2Job
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
-from reef.task2job import Task2Job
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)
 
@@ -218,11 +218,11 @@ def task_counts(store: TaskStore) -> dict[str, int]:
     }
 
 
-def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskItem:
+def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSample:
     """The task that the task pool holds for a saved train task, with its generation and the digest of its files."""
     path = store.path(stored.files_digest)
     task = read_harbor_task(path)
-    return TaskItem(
+    return TaskSample(
         path,
         source_agent_record_ids=task.source_agent_record_ids,
         metadata={
@@ -260,7 +260,7 @@ class TaskGenerationRound:
     process have increasing numbers. ``sources`` holds at most
     ``source_records_per_round`` source sessions, in arrival order.
     Purpose: ``GeneratedTaskRecord2Record`` makes it when a round is due.
-    ``GeneratedTaskTasks`` runs it.
+    ``GeneratedTaskSamples`` runs it.
     """
 
     round_number: int
@@ -283,11 +283,11 @@ class RoundResult:
     its sessions; such a round does not count toward the round limit.
     ``retry`` is True when the generation is incomplete, so the next round
     takes the same sessions again and finishes it.
-    Purpose: ``GeneratedTaskTasks.finished_rounds`` makes it when a round ends.
+    Purpose: ``GeneratedTaskSamples.finished_rounds`` makes it when a round ends.
     ``GeneratedTaskRecord2Record.advance`` reads it.
     """
 
-    tasks: tuple[TaskItem, ...] = ()
+    tasks: tuple[TaskSample, ...] = ()
     counts: bool = True
     retry: bool = False
 
@@ -299,7 +299,7 @@ class GenerationJob(SupportsReceipt):
     Values: ``receipt`` is ``generation-<generation>``. ``generation`` is a non-negative generation number of
     the task store. ``source_records`` holds the records of the round's source sessions that no complete
     generation used, each record once; it is empty for a description-only generation.
-    Purpose: ``GeneratedTaskTasks.start_round`` makes it; its worker runs it in ``run_generation``.
+    Purpose: ``GeneratedTaskSamples.start_round`` makes it; its worker runs it in ``run_generation``.
     """
 
     generation: int
@@ -318,12 +318,12 @@ class GenerationOutcome(SupportsReceipt):
     is complete in the task store. A complete generation holds in ``tasks`` its published train tasks that
     have not trained, and its ``error`` is empty or names a delivery to the generator that failed. An
     incomplete generation ran out of attempts: it holds no task, and ``error`` names the last failure.
-    Purpose: the worker hands it back from ``run``; ``GeneratedTaskTasks.finished_rounds`` turns it into a
+    Purpose: the worker hands it back from ``run``; ``GeneratedTaskSamples.finished_rounds`` turns it into a
     ``RoundResult``.
     """
 
     generation: int
-    tasks: tuple[TaskItem, ...]
+    tasks: tuple[TaskSample, ...]
     is_complete: bool
     error: str
 
@@ -337,7 +337,7 @@ class DeliveryJob(SupportsReceipt):
     """A job that sends the generator the results it has not received.
 
     Values: ``receipt`` is ``DELIVERY_RECEIPT``.
-    Purpose: ``GeneratedTaskTasks`` submits it at a start and after each task job's end; its worker runs it.
+    Purpose: ``GeneratedTaskSamples`` submits it at a start and after each task job's end; its worker runs it.
     """
 
 
@@ -347,7 +347,7 @@ class DeliveryOutcome(SupportsReceipt):
 
     Values: ``receipt`` is ``DELIVERY_RECEIPT``. ``error`` is the error of the last generation whose delivery
     failed, or empty when every deliverable generation reached the generator.
-    Purpose: the worker hands it back; ``GeneratedTaskTasks.finished_rounds`` reads ``error`` into its status.
+    Purpose: the worker hands it back; ``GeneratedTaskSamples.finished_rounds`` reads ``error`` into its status.
     """
 
     error: str
@@ -429,7 +429,7 @@ class TaskGroupSettings(Record2RecordSettings):
 
 @dataclass(frozen=True)
 class RoundSettings(PluginSettings):
-    """The config of ``GeneratedTaskTasks``."""
+    """The config of ``GeneratedTaskSamples``."""
 
     rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
     generator: Mapping[str, Any] | None = config_option(
@@ -460,7 +460,7 @@ class RoundSettings(PluginSettings):
         if self.rounds > 0 and not self.description.strip():
             raise ValueError("rounds need a description (what the tasks are about)")
         if self.generator is not None:
-            TaskGenerator.reference(self.generator, setting="pipeline.record2task.config.generator")
+            TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
 
 
 @dataclass(frozen=True)
@@ -486,7 +486,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
     ``max_staleness``. A terminal report owns its sources. No report trains: the training component trains on
     the episodes of the task jobs, which are not records.
 
-    The stage starts no round until ``resume_rounds`` gives it the record-to-task stage that runs the rounds,
+    The stage starts no round until ``resume_rounds`` gives it the record-to-sample stage that runs the rounds,
     the next round number, the complete generations of the task store, and the round limit. The limit counts
     the rounds that finished a generation and the rounds whose generation ran out of attempts; a round of
     sessions that a complete generation already used does not count. A restart counts complete generations
@@ -509,12 +509,12 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
     def __init__(self, context: PipelineContext, settings: TaskGroupSettings) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
         super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
-        #: The task pool, which the task-to-job stage owns; a round's train tasks join it.
+        #: The task pool, which the sample-to-job stage owns; a round's train tasks join it.
         self.task_pool: TaskPool | None = None
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
         self.refill_tasks = settings.refill_tasks
-        self.runner: GeneratedTaskTasks | None = None
+        self.runner: GeneratedTaskSamples | None = None
         self.next_round = 0
         self.completed_rounds = 0
         self.round_limit = 0
@@ -537,7 +537,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         self.task_pool = task_pool
 
     def resume_rounds(
-        self, runner: GeneratedTaskTasks, *, next_round: int, completed_rounds: int, round_limit: int
+        self, runner: GeneratedTaskSamples, *, next_round: int, completed_rounds: int, round_limit: int
     ) -> None:
         """Set the runner, the next round number, the rounds that finished a generation, and the round limit."""
         self.runner = runner
@@ -636,10 +636,10 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         return {**super().operational_metrics(), "waiting_source_sessions": len(self.waiting_sources)}
 
 
-class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
-    """The record-to-task stage of generated tasks: the runner of the generations, and of each task's episodes.
+class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
+    """The record-to-sample stage of generated tasks: the runner of the generations, and of each task's episodes.
 
-    The record stage forms no record set, so the stage makes no task from records.
+    The record stage forms no record set, so the stage makes no sample from records.
 
     The record stage starts a round when it is due (``start_round``). The stage runs the round's generation
     on its worker: it generates tasks from the round's description and source sessions, validates them and
@@ -672,7 +672,7 @@ class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
         self.generation_deadline_seconds = settings.generation_deadline_seconds
         if self.rounds > 0:
             if task_generator is None:
-                raise ValueError("rounds need a task generator: set pipeline.record2task.config.generator")
+                raise ValueError("rounds need a task generator: set pipeline.record2sample.config.generator")
             if generator_service is None:
                 generator_url = settings.generator_url
                 if not generator_url or "${" in generator_url:
@@ -733,7 +733,7 @@ class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
             )
         task_generator = None
         if settings.generator is not None:
-            generator = TaskGenerator.reference(settings.generator, setting="pipeline.record2task.config.generator")
+            generator = TaskGenerator.reference(settings.generator, setting="pipeline.record2sample.config.generator")
             task_generator = TaskGenerator.referenced_class(generator).from_config(
                 generator.config, scenario=context.scenario, environ=environ
             )
@@ -742,7 +742,7 @@ class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
     def push(self, record_set: RecordSet) -> None:
         raise TypeError(f"{type(self).__name__} makes no tasks from records: its record stage forms no record set")
 
-    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+    def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
         return ()
 
     def start_round(self, generation_round: TaskGenerationRound) -> bool:
@@ -970,12 +970,12 @@ class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
         return error
 
 
-class GeneratedTaskJobData(Task2Job):
+class GeneratedTaskJobData(Sample2Job):
     """Hand saved tasks to the training component as task jobs, and save each task's result when its job ends.
 
     The stage owns the task pool: the record stage adds each round's train tasks to it, and a restart puts the
     train tasks that did not train back in it. On each ``advance`` with no tasks handed out, the stage takes up
-    to ``tasks_per_step`` of them as the next job's data: the ``TaskItem`` values themselves. The training
+    to ``tasks_per_step`` of them as the next job's data: the ``TaskSample`` values themselves. The training
     component rolls them out on its own sampler and trains on their episodes (a task job; see the Tinker
     component's ``rollout`` job parameter). When the trainer commits the job's submission, the commit lists
     ``rollout:<task use>``; the store marks the tasks trained once that commit is durable. The tasks stay
@@ -984,7 +984,7 @@ class GeneratedTaskJobData(Task2Job):
     When the job's end is durable, ``job_ended`` gives a result to each trained task without one: its rewards
     in the job's ``rollout_rewards`` metric, or an infrastructure failure. One task job runs at a time, so
     such a task belongs to the ended job, or to an earlier job that a rollback cancelled. A second call for
-    the same end saves nothing new. The record-to-task stage then sends the finished generations' results to
+    the same end saves nothing new. The record-to-sample stage then sends the finished generations' results to
     the generator.
     """
 
@@ -998,18 +998,18 @@ class GeneratedTaskJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         settings = TaskJobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2record, GeneratedTaskRecord2Record) or not isinstance(
-            record2task, GeneratedTaskTasks
+            record2sample, GeneratedTaskSamples
         ):
             raise PluginConfigError(
-                f"{cls.__name__} needs GeneratedTaskRecord2Record and GeneratedTaskTasks, "
-                f"not {type(record2record).__name__} and {type(record2task).__name__}"
+                f"{cls.__name__} needs GeneratedTaskRecord2Record and GeneratedTaskSamples, "
+                f"not {type(record2record).__name__} and {type(record2sample).__name__}"
             )
-        return cls(context, settings, record2record=record2record, record2task=record2task)
+        return cls(context, settings, record2record=record2record, record2sample=record2sample)
 
     def __init__(
         self,
@@ -1017,15 +1017,15 @@ class GeneratedTaskJobData(Task2Job):
         settings: TaskJobSettings,
         *,
         record2record: GeneratedTaskRecord2Record,
-        record2task: GeneratedTaskTasks,
+        record2sample: GeneratedTaskSamples,
     ) -> None:
         super().__init__(context, None, None)
         self.record2record = record2record
-        self.record2task = record2task
+        self.record2sample = record2sample
         self.tasks_per_step = settings.tasks_per_step
         self.task_pool = TaskPool()
         record2record.attach_task_pool(self.task_pool)
-        store = record2task.task_store
+        store = record2sample.task_store
         if store is not None:
             for generation, stored in available_tasks(store):
                 self.task_pool.add(stored.name, task_item(store, generation, stored), group_key=generation)
@@ -1037,8 +1037,8 @@ class GeneratedTaskJobData(Task2Job):
         #: The tasks of the jobs submitted in this process that did not end; they leave the pool at the end.
         self.submitted_tasks: tuple[PooledTask, ...] = ()
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
     def advance(self) -> None:
         """Hand out the next job's tasks when none are handed out."""
@@ -1051,7 +1051,7 @@ class GeneratedTaskJobData(Task2Job):
         task_uses = tuple(f"{batch}/{task_name_of(task)}" for task in taken)
         self.handed_out = HandedOutTasks(batch, task_uses, taken)
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         if self.handed_out is None:
             return None
         return tuple(task.item for task in self.handed_out.tasks)
@@ -1069,8 +1069,8 @@ class GeneratedTaskJobData(Task2Job):
     def release_own_ids(self, ids: frozenset[str]) -> None:
         durable = [job for job in self.trained_rollouts if job.consumed_ids & ids]
         for job in durable:
-            if self.record2task.task_store is not None:
-                self.record2task.task_store.mark_trained(task_names=job.task_names)
+            if self.record2sample.task_store is not None:
+                self.record2sample.task_store.mark_trained(task_names=job.task_names)
         self.trained_rollouts = [job for job in self.trained_rollouts if job not in durable]
 
     def job_ended(self, outcome: JobOutcome) -> None:
@@ -1080,7 +1080,7 @@ class GeneratedTaskJobData(Task2Job):
         if not isinstance(rewards, Mapping):
             raise TypeError("a task job's rollout_rewards metric must map task names to rewards")
         error = outcome.error or "no episode of the task ran"
-        store = self.record2task.task_store
+        store = self.record2sample.task_store
         if store is not None:
             trained = store.trained_task_names()
             saved = rollout_results(store)
@@ -1090,14 +1090,16 @@ class GeneratedTaskJobData(Task2Job):
                         continue
                     values = tuple(rewards.get(name) or ())
                     if values:
-                        self.record2task.save_result(TaskRolloutResult(name, values))
+                        self.record2sample.save_result(TaskRolloutResult(name, values))
                     else:
-                        self.record2task.save_result(TaskRolloutResult(name, error=error, infrastructure_failure=True))
+                        self.record2sample.save_result(
+                            TaskRolloutResult(name, error=error, infrastructure_failure=True)
+                        )
         if self.submitted_tasks:
             self.task_pool.drop(self.submitted_tasks)
             self.submitted_tasks = ()
         self.record2record.task_job_ended(finished=outcome.event == "finished")
-        self.record2task.deliver_later()
+        self.record2sample.deliver_later()
 
     def status(self) -> Mapping[str, Any]:
         handed_out = self.handed_out

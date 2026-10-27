@@ -282,27 +282,27 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
             config(
                 pipeline={
                     "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
-                    "record2task": {"module": "reef.record2task.traces:InferenceTasks"},
-                    "task2job": {"config": {"buffer_size": 6}},
+                    "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
+                    "sample2job": {"config": {"buffer_size": 6}},
                 },
                 batch_size=2,
             ),
             runtime=proxy,
         )
     )
-    stages = (records.pipeline.record2record, records.pipeline.record2task, records.pipeline.task2job)
-    assert [type(stage).__name__ for stage in stages] == ["InferenceRecord2Record", "InferenceTasks", "TraceJobData"]
+    stages = (records.pipeline.record2record, records.pipeline.record2sample, records.pipeline.sample2job)
+    assert [type(stage).__name__ for stage in stages] == ["InferenceRecord2Record", "InferenceSamples", "TraceJobData"]
     # evolution.batch_size is the default job_samples.
     assert (records.job_samples, records.pipeline.buffer_size) == (2, 6)
 
     reported = trainer_of(from_config(config(), runtime=proxy))
-    stages = (reported.pipeline.record2record, reported.pipeline.record2task, reported.pipeline.task2job)
-    assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceTasks", "TraceJobData"]
+    stages = (reported.pipeline.record2record, reported.pipeline.record2sample, reported.pipeline.sample2job)
+    assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceSamples", "TraceJobData"]
     # The default buffer holds the data of four jobs.
     assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 4)
     # The stage config sets job_samples over evolution.batch_size.
     sized = trainer_of(
-        from_config(config(pipeline={"task2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy)
+        from_config(config(pipeline={"sample2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy)
     )
     assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 12)
 
@@ -322,10 +322,12 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     ):
         with pytest.raises(RecipeConfigError, match=message):
             trainer_of(
-                from_config(config(pipeline={"task2job": {"config": stage_config}}, batch_size=2), runtime=proxy)
+                from_config(config(pipeline={"sample2job": {"config": stage_config}}, batch_size=2), runtime=proxy)
             )
     with pytest.raises(RecipeConfigError, match="batch_policy"):
-        trainer_of(from_config(config(pipeline={"task2job": {"config": {"batch_policy": "records"}}}), runtime=proxy))
+        trainer_of(
+            from_config(config(pipeline={"sample2job": {"config": {"batch_policy": "records"}}}), runtime=proxy)
+        )
 
 
 def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> None:

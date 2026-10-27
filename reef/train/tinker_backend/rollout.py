@@ -1,6 +1,6 @@
 """Tinker's own rollouts: a task job's Harbor episodes, sampled on Tinker at the job's start weights.
 
-A task job holds ``TaskItem`` values. Before it trains, the component runs ``episodes_per_task`` episodes of
+A task job holds ``TaskSample`` values. Before it trains, the component runs ``episodes_per_task`` episodes of
 each task with ``TaskEpisodeRunner``: the agent works in the task's sandbox, the task's verifier scores the
 episode, and each model call goes through the runner's capture proxy to a ``SamplerEndpoint`` on this host. The
 endpoint samples Tinker's sampler of the job's start, so the rollouts sample the weights that the job trains.
@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import TaskItem, TrajectoryItem
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.episodes.tasks import TaskEpisode, TaskEpisodeRunner, TaskLab
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.runtime.interfaces import UpstreamStatusError, inference_aborted
 from reef.tinker.sampling import TinkerSampler, sample_chat
 
@@ -103,11 +103,11 @@ class TaskRollouts:
     component trains ``samples`` and reports ``rewards`` in the job's metrics.
     """
 
-    samples: tuple[TrajectoryItem, ...]
+    samples: tuple[TrajectorySample, ...]
     rewards: Mapping[str, tuple[float, ...]]
 
     def __post_init__(self) -> None:
-        if any(not isinstance(sample, TrajectoryItem) for sample in self.samples):
+        if any(not isinstance(sample, TrajectorySample) for sample in self.samples):
             raise TypeError("task rollouts train trajectories")
         groups = [sample.group_id for sample in self.samples]
         seen: list[str | None] = []
@@ -189,7 +189,7 @@ class SamplerEndpoint:
             self.server = None
 
 
-def task_name(task: TaskItem) -> str:
+def task_name(task: TaskSample) -> str:
     """The name of a task: its generated name, else its directory's name."""
     identity = task.metadata.get("task")
     if isinstance(identity, Mapping) and isinstance(identity.get("name"), str) and identity["name"]:
@@ -197,7 +197,7 @@ def task_name(task: TaskItem) -> str:
     return task.task_path.name
 
 
-def episode_sample(episode: TaskEpisode, group: str, assembly: SampleAssembly) -> TrajectoryItem | None:
+def episode_sample(episode: TaskEpisode, group: str, assembly: SampleAssembly) -> TrajectorySample | None:
     """The sample of one episode in ``group``, or None when it has no calls, an aborted call, or does not assemble.
 
     An episode that ran without a reward scores 0.
@@ -221,7 +221,7 @@ def episode_sample(episode: TaskEpisode, group: str, assembly: SampleAssembly) -
 
 
 async def roll_out(
-    tasks: Sequence[TaskItem],
+    tasks: Sequence[TaskSample],
     settings: RolloutSettings,
     sampler: TinkerSampler,
     sampler_path: str | None,
@@ -258,13 +258,13 @@ async def roll_out(
         )
         limit = asyncio.Semaphore(settings.concurrency)
 
-        async def run(task: TaskItem) -> TaskEpisode:
+        async def run(task: TaskSample) -> TaskEpisode:
             async with limit:
                 return await runner.run_async(task.task_path)
 
         runs = [task for task in tasks for _ in range(settings.episodes_per_task)]
         episodes = await asyncio.gather(*(run(task) for task in runs))
-    samples: list[TrajectoryItem] = []
+    samples: list[TrajectorySample] = []
     rewards: dict[str, tuple[float, ...]] = {}
     for index, task in enumerate(tasks):
         name = task_name(task)

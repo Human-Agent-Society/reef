@@ -18,7 +18,7 @@ from threading import Event, Thread
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks, threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support.harness_service import harness_repository
 from tests.support.harness_steps import PI_SEED, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
@@ -276,7 +276,7 @@ class RecordingComponent(StubTrainingComponent):
         self.trained_data: list[list[str]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.trained_data.append([source_record_id(sample) for sample in job.data.items])
+        self.trained_data.append([source_record_id(sample) for sample in job.data.samples])
         return super().train(job)
 
 
@@ -525,8 +525,8 @@ class ProtectAllPipeline(TrainingPipeline):
         super().__init__(
             context,
             record2record=ReportRecord2Record(context, ReportGrouping()),
-            record2task=ThresholdTasks(),
-            task2job=ThresholdJobData(context, None, None),
+            record2sample=ThresholdSamples(),
+            sample2job=ThresholdJobData(context, None, None),
         )
         self._seen: set[str] = set()
 

@@ -33,7 +33,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -426,7 +426,7 @@ class AgentProposer(Proposer):
 def answer_with_agent(
     tree: HarnessTree,
     request: TrainingRequest,
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     host: AgentHost,
     provider: MultimodalProvider | None,

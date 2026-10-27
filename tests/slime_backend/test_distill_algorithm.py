@@ -21,7 +21,7 @@ from reef.core.trajectories import source_record_id
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import DistillAlgorithm, DistillSettings, settings_from_args
 from reef.train.slime_backend.loss_families import register_loss_family, resolve_loss_family, unregister_loss_family
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 STUDENT_TOKENS = [5, 6, 7, 1, 2, 3]  # three prompt ids, three response ids
 STUDENT_LOSS_MASK = [1, 1, 1]
@@ -54,7 +54,7 @@ def toy_family():
         unregister_loss_family("toydistill")
 
 
-def _sample() -> TrajectoryItem:
+def _sample() -> TrajectorySample:
     sample = policy_trajectory("i1", STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, "v0")
     return sample.with_training(teacher_tokens=TEACHER_TOKENS)
 

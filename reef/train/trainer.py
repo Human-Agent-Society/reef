@@ -22,7 +22,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
-from reef.core.job_data import JobOutcome, TrajectoryItem
+from reef.core.job_data import JobOutcome, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -121,7 +121,7 @@ class Trainer:
         ``default_job_samples`` is None or a positive int: ``evolution.batch_size``
         for harness evolution, and None for a weight trainer, whose
         deployment sets the size. The trainer's ``job_samples`` is the
-        task-to-job stage's ``job_samples``, which is ``default_job_samples``
+        sample-to-job stage's ``job_samples``, which is ``default_job_samples``
         unless the stage config sets it; the stage checks its own size rules.
         A trainer that trains with no ``job_samples``, through a stage that
         trains more than its own job data, is a ``PluginConfigError``.
@@ -145,11 +145,11 @@ class Trainer:
         if pipeline.training_mode != training_mode:
             pipeline.close()
             raise ValueError("pipeline_factory must preserve the requested training_mode")
-        stage = pipeline.task2job
+        stage = pipeline.sample2job
         if trains and stage.job_samples is None and not stage.trains_own_job_data_only:
             pipeline.close()
             raise PluginConfigError(
-                f"{type(stage).__name__} has no job_samples: set pipeline.task2job.config.job_samples, "
+                f"{type(stage).__name__} has no job_samples: set pipeline.sample2job.config.job_samples, "
                 "the fewest samples one training job trains"
             )
         if candidate_backend is not None:
@@ -206,7 +206,7 @@ class Trainer:
         #: The fewest samples one job trains: automatic job data holds at least this many. None when the
         #: trainer trains nothing (it reads every record and is never ready) and when its stage trains only
         #: its own job data.
-        self.job_samples = pipeline.task2job.job_samples if self.trains else None
+        self.job_samples = pipeline.sample2job.job_samples if self.trains else None
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
@@ -341,7 +341,7 @@ class Trainer:
                     return True
             return self._pipeline.background_jobs_running()
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded trajectory (``TrainingPipeline.uploaded_sample``), under the lock.
 
         Admission calls it from a request thread; the lock keeps the pipeline's stages, such as a tokenizer,
@@ -443,7 +443,7 @@ class Trainer:
     def _build_validated_job_data(self) -> JobData:
         """Build the next job's data and hold the pipeline to its declared schema.
 
-        ``Task2Job.output_schema`` is the recipe's published contract for
+        ``Sample2Job.output_schema`` is the recipe's published contract for
         what the training component or candidate backend receives; enforcing it at the only place
         job data enters the trainer turns a drifting recipe into a loud error
         instead of a backend-side shape failure.
@@ -454,7 +454,7 @@ class Trainer:
         schema = self._pipeline.output_schema
         if not isinstance(data, schema):
             raise TypeError(
-                f"{type(self._pipeline.task2job).__name__} declared output_schema "
+                f"{type(self._pipeline.sample2job).__name__} declared output_schema "
                 f"{schema.__name__} but built {type(data).__name__}"
             )
         return data

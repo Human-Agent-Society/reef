@@ -32,7 +32,7 @@ pipeline:
     config:
       groups_per_step: 2
       rollouts_per_group: 4
-  task2job:
+  sample2job:
     config:
       # One job is the whole grid, groups_per_step x rollouts_per_group samples: the same value as global-batch-size.
       job_samples: 8

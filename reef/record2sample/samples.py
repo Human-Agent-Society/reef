@@ -1,9 +1,9 @@
-"""Readers of recorded inferences, and the sample builders that record-to-task stages use.
+"""Readers of recorded inferences, and the sample builders that record-to-sample stages use.
 
 The report reader ``report_score`` lives in ``reef.record2record.reports``.
 ``recorded_request`` and ``recorded_response`` read the messages, tools and
 answer text of a recorded inference; the sample builders turn one inference
-record — or an ordered multi-call episode — into a ``TrajectoryItem`` with the
+record — or an ordered multi-call episode — into a ``TrajectorySample`` with the
 tensors the training component requires.
 """
 
@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
 
@@ -150,7 +150,7 @@ def realign_latest_response(
 def make_policy_trajectory(
     item: AgentRecord,
     reward: float,
-) -> TrajectoryItem:
+) -> TrajectorySample:
     """Convert inference data and its evaluated reward into a sample.
 
     ``response.training`` attached by an inference backend is authoritative
@@ -227,7 +227,7 @@ def make_multi_turn_policy_trajectory(
     source_agent_record_id: str,
     realign_threshold: int = 1024,
     scaffold_tolerance: int = 0,
-) -> TrajectoryItem | None:
+) -> TrajectorySample | None:
     """Assemble one linear, terminally selected episode into one sample.
 
     This follows slime's trajectory builder: exact prompt extension appends

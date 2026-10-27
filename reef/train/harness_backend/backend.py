@@ -30,7 +30,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import EVALUATION_SIDES, FailureObservation, HarnessCandidate, HarnessEpisodeEvaluator
@@ -298,7 +298,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
     def propose(
         self,
         request: TrainingRequest | None,
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         evaluation_tasks: tuple[str, ...],
         state: HarnessState,
         head_tree: HarnessTree,

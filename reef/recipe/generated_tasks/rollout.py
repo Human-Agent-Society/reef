@@ -4,7 +4,7 @@ The training component rolls the tasks of a task job out itself; Reef runs no ep
 tasks are handed out at a time:
 
 1. When no tasks are handed out, ``GeneratedTaskJobData`` takes up to ``tasks_per_step`` tasks from its
-   ``TaskPool`` as the next job's data (``Task2Job.own_job_data``). Each task gets a task use ``u``, distinct
+   ``TaskPool`` as the next job's data (``Sample2Job.own_job_data``). Each task gets a task use ``u``, distinct
    within the hand-out.
 2. When the trainer commits the job's submission, the commit lists ``rollout:<task use>``; each task is
    marked trained once that ID is released after the commit is durable.
@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Hashable
 from dataclasses import dataclass
 
-from reef.core.job_data import TaskItem
+from reef.core.job_data import TaskSample
 
 #: The prefix of the ID that a commit lists for a task of a submitted task job.
 CONSUMED_ROLLOUT_PREFIX = "rollout:"
@@ -35,14 +35,14 @@ class PooledTask:
     Values: ``task_id`` identifies the task in its pool. ``arrival_index``
     orders the tasks of a pool. ``group_key`` names what the task came from,
     such as its generation. ``item`` is the task that the job rolls out.
-    Purpose: a ``TaskPool`` holds it; the task-to-job stage takes it from the
+    Purpose: a ``TaskPool`` holds it; the sample-to-job stage takes it from the
     pool for a task job, and drops it when the job ends.
     """
 
     task_id: Hashable
     arrival_index: int
     group_key: Hashable | None
-    item: TaskItem
+    item: TaskSample
 
 
 class TaskPool:
@@ -52,7 +52,7 @@ class TaskPool:
     ``task_id``; ``arrival_count`` is larger than the ``arrival_index`` of each task that ``add`` made.
     ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``drop`` removes taken tasks;
     ``add`` gives a new task a new index.
-    Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the task-to-job
+    Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the sample-to-job
     stage takes a job's tasks from it, and drops them when the job ends.
     """
 
@@ -70,7 +70,7 @@ class TaskPool:
         """Whether no task waits and no task job holds one."""
         return not self.waiting and not self.taken
 
-    def add(self, task_id: Hashable, item: TaskItem, *, group_key: Hashable | None = None) -> None:
+    def add(self, task_id: Hashable, item: TaskSample, *, group_key: Hashable | None = None) -> None:
         """Add a task after the waiting ones. A task with a waiting ID replaces it; a taken ID is refused."""
         if task_id in self.taken:
             raise ValueError(f"task {task_id!r} is in a task job")

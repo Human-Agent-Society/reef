@@ -40,7 +40,7 @@ beta/autoenvscaling/
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
-AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2task.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
 
 ## The generator
 
@@ -110,7 +110,7 @@ The generator's `config` keys:
 | `agent_sandbox` | `e2b` | the cloud sandbox the agent runs in: `e2b` or `modal` |
 | `agent_sandbox_options` | none | that provider's options, such as `e2b_template`, or `modal_app` and `modal_image` |
 
-Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
+Set `eval_fraction` and `split_seed` in `pipeline.record2sample.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
 ## The author
 
@@ -153,7 +153,7 @@ Everything else is the same for both authors: the cursor, admission, the checks,
 
 ```yaml
 pipeline:
-  record2task:
+  record2sample:
     config:
       generator:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
@@ -198,7 +198,7 @@ With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a gene
 
 The built-in generated-task recipe rolls a generation's tasks out only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, build the task pool first, then train from it:
 
-1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskTasks.run` generates, validates and saves one generation with no trainer, and runs no episodes. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
+1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no episodes. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
 
    ```python
    import os
@@ -206,7 +206,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.pipeline_context import PipelineContext
-   from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
+   from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
    from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings, next_generation
    from reef.storage.sqlite import SQLiteScenarioStorage
    from reef.storage.tasks import LocalTaskFileStore
@@ -225,7 +225,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
            generator_url=str(generator_config["generator_url"]),
        )
        record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
-       tasks = GeneratedTaskTasks(context, settings, record_stage, task_generator=generator)
+       tasks = GeneratedTaskSamples(context, settings, record_stage, task_generator=generator)
        try:
            for number in range(next_generation(tasks.task_store), rounds):
                await tasks.run(GenerationJob(receipt=f"generation-{number:05d}", generation=number))
@@ -240,7 +240,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
 2. **Train from the pool.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it puts their train tasks in the task pool and rolls them out, `tasks_per_step` at a time.
 
    ```bash
-   reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2task.config.rounds 4
+   reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2sample.config.rounds 4
    ```
 
 ## Requirements

@@ -187,7 +187,7 @@ class Scenario:
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         stepping = self.stepping_trainers()
         unsupported = [
-            f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.task2job).__name__})"
+            f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.sample2job).__name__})"
             for component_trainer in stepping
             if training_mode not in component_trainer.trainer.pipeline.supported_training_modes
         ]

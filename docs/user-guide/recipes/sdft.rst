@@ -49,23 +49,23 @@ How Reef implements it
 
 SDFT has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
-``ExclusiveReportRecord2Record`` makes each report its own record set. ``SDFTTasks``
+``ExclusiveReportRecord2Record`` makes each report its own record set. ``SDFTSamples``
 turns each report into a task. The shared ``DistillJobData`` stage puts
 the tasks into job data in arrival order. One job's data holds
-``pipeline.task2job.config.job_samples`` tasks.
+``pipeline.sample2job.config.job_samples`` tasks.
 
-``SDFTTasks`` extends the shared ``DistillTasks``. ``DistillTasks`` turns every
-``TeacherContextReport`` into one ``TrajectoryItem``. The item carries the
+``SDFTSamples`` extends the shared ``DistillSamples``. ``DistillSamples`` turns every
+``TeacherContextReport`` into one ``TrajectorySample``. The item carries the
 student's recorded tokens and ``teacher_tokens``. ``teacher_tokens`` is the
 teacher's request rendered with the served model's chat template and
 followed by the student's response ids.
 
-``SDFTTasks`` adds the demonstration block to the request's final user
+``SDFTSamples`` adds the demonstration block to the request's final user
 message. It adds the block as a new user message when the request ends in a
 tool result. ``context_template`` sets the block's text and its default is
 the reference implementation's wording. A harness that needs another layout
-subclasses ``SDFTTasks`` and overrides ``teacher_request``. The deployment
-names the subclass in ``pipeline.record2task.module``.
+subclasses ``SDFTSamples`` and overrides ``teacher_request``. The deployment
+names the subclass in ``pipeline.record2sample.module``.
 
 The ``sdft`` loss family is a thin family on the Slime backend's
 distillation base in ``reef/train/slime_backend/distill/``
@@ -124,11 +124,11 @@ no config.
      record2record:
        config:
          max_staleness: 0
-     record2task:
+     record2sample:
        config:
          tokenizer_path: /models/Qwen2.5-7B-Instruct
          max_teacher_tokens: 8192
-     task2job:
+     sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
    training:
@@ -142,14 +142,14 @@ key's place in ``pipeline``.
 
 .. config::
 
-   pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
-   pipeline.record2task.config.max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
-   pipeline.record2task.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
-   pipeline.task2job.config.job_samples | required | rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+   pipeline.record2sample.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
+   pipeline.record2sample.config.max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
+   pipeline.record2sample.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
+   pipeline.sample2job.config.job_samples | required | rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
    pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
 
-``SDFTTasks`` also takes the sample assembly's keys
+``SDFTSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
 ``scaffold_tolerance``).
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.record2task.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
-from reef.train.types import TrajectoryItem
+from reef.record2sample.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
+from reef.train.types import TrajectorySample
 
 TASK = {"name": "openenv-00012-003-deduction", "path": "/tasks/openenv-00012-003-deduction", "digest": "ab" * 32}
 
@@ -28,11 +28,11 @@ def report(*references: str, metadata: dict[str, object] | None = None) -> Agent
 class PlainAssembly(SampleAssembly):
     """An assembly whose single sample reads no tensors, so the test records can stay empty."""
 
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:
         return make_trajectory((record,), score)
 
 
-def assembled(metadata: dict[str, object] | None) -> TrajectoryItem:
+def assembled(metadata: dict[str, object] | None) -> TrajectorySample:
     assembly = PlainAssembly(SampleAssemblySettings())
     record = inference("rec-1")
     context = ReportContext(report=report("rec-1", metadata=metadata), score=1.0, inferences=(record,))

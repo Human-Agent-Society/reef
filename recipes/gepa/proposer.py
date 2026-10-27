@@ -26,7 +26,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -315,7 +315,7 @@ def summary(row: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key not in ("prompt", "minibatch")}
 
 
-def traffic(samples: Sequence[TrajectoryItem]) -> list[tuple[TrajectoryItem, tuple[str, str]]]:
+def traffic(samples: Sequence[TrajectorySample]) -> list[tuple[TrajectorySample, tuple[str, str]]]:
     """Each sample as its prompt and the answer the served tree gave.
 
     A recorded request with no user message carries no task to run again, so
