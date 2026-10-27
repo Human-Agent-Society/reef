@@ -16,28 +16,29 @@ from typing import Any
 import pytest
 import yaml
 from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_steps import TreeReleases
+from tests.support.harness_service import backend_step
+from tests.support.harness_steps import TreeReleases, harness_backend
 
 from reef.core import AgentRecord, RequestType
-from reef.core.plugins import PluginReference
 from reef.core.trajectories import recorded_payload
-from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
+from reef.evaluation.harness import EvaluationSettings, NoEvaluationPolicy
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.tree import HarnessTree, TreePatch
+from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
 from reef.train.backend import ComponentReleases
 from reef.train.pipeline import PipelineConfig
+from reef.train.types import JobData
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "recipes" / "skillclaw"
 
 # A pi stand-in for the probe episodes: it writes the session file the
-# runner reads back as the trajectory and answers nothing, so probes dead
-# tie at 0.0 and publishing is the selection policy's call alone.
+# runner reads back as the trajectory and answers nothing, so every probe
+# scores 0.0; the probes never decide the publish.
 PI_FAKE = """\
 #!/usr/bin/env python3
 import json, os, sys
@@ -164,7 +165,7 @@ def harness_stages() -> PipelineConfig:
     return PipelineConfig.from_setting({}, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
 
 
-# -- the night flow as the proposer ----------------------------------------
+# -- the night flow ----------------------------------------------------------
 
 
 def test_propose_maps_the_no_skill_bucket_to_a_new_skill_file(skillclaw, example, monkeypatch) -> None:
@@ -339,8 +340,8 @@ def test_driver_preserves_executor_profiles(driver, monkeypatch):
 
 def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, monkeypatch) -> None:
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
-    through reef's config loader and build the explicit implementation - selection
-    always, evolution.batch_size 60, the seed tree holding the seed_skills pool."""
+    through reef's config loader and build the explicit implementation - the night
+    method, policy none, evolution.batch_size 60, the seed tree holding the seed_skills pool."""
     from reef.service.deploy.config_utils import load_config
     from reef.storage.sqlite import SQLiteRecordStore
     from reef.surface import Surface
@@ -358,15 +359,19 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     config = load_config(EXAMPLE_DIR / "skillclaw.yaml")
     sections = recipe_config_from_file_layout(config)
     assert sections["implementation"] == "recipes.skillclaw.recipe:SkillClawRecipe"
+    # The trainer below opens the scenario's history and step records under the state directory.
+    sections["evolution"]["state_dir"] = str(tmp_path / "harness")
 
     built = build_recipe(str(sections["implementation"]), {}, config=sections, runtime=runtime())
     assert type(built).__name__ == "SkillClawRecipe"
     assert built.name == "skillclaw"
-    assert built.selection.plugin_class is BackendAlwaysSelectPlugin
+    assert isinstance(built.method, example["plugins"].NightMethod)
+    assert isinstance(built.scorer, example["plugins"].ProbeScorer) and built.evaluation.policy == "none"
     assert built.batch_size == 60
     assert built.seed == HarnessTree({"skills/alpha/SKILL.md": "---\nname: alpha\ndescription: d\n---\n\nBody.\n"})
-    assert len(built.tasks) == 3
-    assert all(any(task.startswith(prefix) for prefix in example["skillclaw"].ANSWERS) for task in built.tasks)
+    tasks = built.configured_tasks()
+    assert len(tasks) == 3
+    assert all(any(task.startswith(prefix) for prefix in example["skillclaw"].ANSWERS) for task in tasks)
 
     surface = built.build_surface("s")
     assert type(surface) is Surface
@@ -458,13 +463,13 @@ def _stub_backend() -> Any:
 def dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int) -> Any:
     plugins = example["plugins"]
     return example["skillclaw_recipe"].SkillClawRecipe(
-        plugins.NightProposer(),
-        plugins.ProbeScorer(),
-        ("[sieve] probe",),
-        binary=str(make_binary(tmp_path)),
+        method=plugins.NightMethod(),
+        evolution=EvolutionSettings(
+            binary=str(make_binary(tmp_path)), batch_size=batch_size, state_dir=str(tmp_path / "harness")
+        ),
+        evaluation=EvaluationSettings(tasks=("[sieve] probe",), policy="none"),
+        scorer=plugins.ProbeScorer(),
         seed=SEED,
-        selection=PluginReference(BackendAlwaysSelectPlugin),
-        batch_size=batch_size,
         pipeline_stages=harness_stages(),
         runtime=runtime(),
     )
@@ -473,9 +478,10 @@ def dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int) 
 def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
     """One day end to end on the embedded service: the day's traffic records
     with the served pool's catalog injected, the last report schedules the
-    background night (stubbed LLM, fake pi probes), selection always publishes
-    the composite night, the driver pulls the evolved pool from GET /reef/harness,
-    and a replayed report lands on its 409 without failing the day."""
+    background night (stubbed LLM, fake pi probes), policy none publishes
+    the composite night with its probe scores in the step's notes, the driver
+    pulls the evolved pool from GET /reef/harness, and a replayed report lands on
+    its 409 without failing the day."""
     from reef_client import ReefClient
 
     night_llm(
@@ -567,6 +573,9 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         assert list(patch) == ["skills/csv-median/SKILL.md"]
         assert "Sort, take the middle." in patch["skills/csv-median/SKILL.md"]
         assert "Sort, take the middle." in manifest["files"]["skills/csv-median/SKILL.md"]
+        assert manifest["evaluation"]["method_summary"] == "the night wrote skills/csv-median/SKILL.md"
+        # The probes ran on both pools and scored; they did not decide the publish.
+        assert manifest["evaluation"]["method_notes"] == {"probe_scores": {"served": [0.0], "night": [0.0]}}
 
         # The served pool's catalog section appears in the recorded request
         # payload - the batch the night received is those recorded payloads,
@@ -695,18 +704,23 @@ def test_the_recipe_yaml_is_valid_yaml_after_interpolation(monkeypatch) -> None:
     assert config["recipe"]["config"]["evolution"]["seed_skills"] == ""  # unset env seeds no skills
 
 
-def test_the_night_returns_a_tree_patch(skillclaw, example, monkeypatch) -> None:
+def test_a_night_whose_pool_fails_the_checks_skips_without_probes(skillclaw, example, tmp_path, monkeypatch) -> None:
+    """A night that writes a credential into a skill: the step skips with the problem, and no probe episode runs."""
     night_llm(
         example,
         monkeypatch,
         create={
             "action": "create_skill",
             "rationale": "r",
-            "skill": {"name": "fresh", "description": "d", "content": "body"},
+            "skill": {"name": "leaky", "description": "d", "content": "Use the key sk-abcdef1234567890ABCDEFGH."},
         },
     )
-    patch = skillclaw.propose(FILES, (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),), MODEL)
-    assert isinstance(patch, TreePatch) and list(patch.changes) == ["skills/fresh/SKILL.md"]
+    backend, _ = harness_backend(tmp_path, example["plugins"].NightMethod(), seed=SEED, evaluation={"policy": "none"})
+    night = JobData("night:1", (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),))
+    result = backend_step(backend, night, backend.initial_state(), NoEvaluationPolicy())
+    assert result.metrics["skipped"].startswith("skills/leaky/SKILL.md")
+    assert result.metrics["method_summary"] == "the night wrote skills/leaky/SKILL.md"
+    assert backend.history.episodes == [] and result.artifact is None
 
 
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:

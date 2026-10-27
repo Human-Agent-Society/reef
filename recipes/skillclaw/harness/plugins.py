@@ -1,24 +1,53 @@
-"""The plugin classes skillclaw.yaml names: ``evolution.propose`` and ``evolution.evaluate``.
+"""The plugin classes skillclaw.yaml names: ``evolution.method`` and ``evolution.evaluation.scorer``.
 
-Each delegates to its function in ``skillclaw.py``, which keeps its Reef
-training imports lazy.
+``NightMethod`` runs the night of ``skillclaw.py`` and then the probe
+episodes; ``ProbeScorer`` grades the probes with ``skillclaw.py``'s grader.
 """
 
 from __future__ import annotations
 
+from reef.core.job_data import TrajectorySample
 from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.run import EpisodeResult
-from reef.train.harness_backend.contract import ProposalContext, Proposer, TreeProposal
+from reef.train.harness_backend import Method, StepResult, Tools, Workspace
 
 from . import skillclaw
 
 
-class NightProposer(Proposer):
-    """The sealed night flow (:func:`skillclaw.propose`): one patch of the skill pool per night."""
+class NightMethod(Method):
+    """The sealed night flow (:func:`skillclaw.propose`) as one step: the day's traffic in, one patch of the pool out.
 
-    def propose(self, context: ProposalContext) -> TreeProposal | None:
-        patch = skillclaw.propose(context.tree.files, context.samples, context.models)
-        return None if patch is None else TreeProposal(patch)
+    Values: the method holds no state, so every instance behaves the same.
+    Purpose: skillclaw.yaml names it in ``evolution.method``; the harness
+    backend calls ``step`` once per night.
+
+    The night reads the ATIF trajectories of the step's traffic traces and
+    writes its patch to the workspace. The probe episodes then score the
+    served pool and the night's pool on the evaluation tasks, and the step's
+    notes keep both as ``probe_scores``. They decide nothing:
+    skillclaw.yaml's ``policy: none`` publishes every night that changes the
+    pool, and the next day's traffic measures it. A night that changes
+    nothing leaves the served pool, and the step skips.
+    """
+
+    def step(self, workspace: Workspace, tools: Tools) -> StepResult:
+        samples = tuple(TrajectorySample(trace.trajectory()) for trace in workspace.traces())
+        served = workspace.tree()
+        patch = skillclaw.propose(served.files, samples, tools.models)
+        if patch is None:
+            return StepResult(f"the night over {len(samples)} trace(s) changed no skill")
+        night = served.apply(patch)
+        workspace.write_tree(night)
+        summary = f"the night wrote {', '.join(sorted(patch.changes))}"
+        if not tools.check(night).passed:
+            # The backend skips the step and records the problems; a pool that fails its checks runs no probe.
+            return StepResult(summary)
+        tasks = workspace.tasks()
+        probes = {
+            side: [record.score for record in tools.evaluate(tree, tasks)]
+            for side, tree in (("served", served), ("night", night))
+        }
+        return StepResult(summary, {"probe_scores": probes})
 
 
 class ProbeScorer(EpisodeScorer):

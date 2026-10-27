@@ -1,12 +1,12 @@
 """The AIME benchmark as the GEPA method's task side: pins, scorer, feedback.
 
 Everything the method needs to know about AIME lives here, and nothing here
-knows about GEPA: ``evaluate`` and ``feedback`` are the two hooks
-``gepa.yaml`` names under ``evolution``, and the mechanism calls them with a
-task prompt and an episode result. The answer table is keyed by the prompt
-text because that is all the mechanism carries - ``evolution.tasks`` is a
-list of strings - so the splits are loaded once and indexed by problem
-statement.
+knows about GEPA beyond its ``Feedback`` hook: ``gepa.yaml`` names the scorer
+as ``evolution.evaluation.scorer`` and the feedback as the method's
+``feedback``, and Reef calls them with a task prompt and an episode result.
+The answer table is keyed by the prompt text because that is all an episode
+carries - ``evolution.evaluation.tasks`` is a list of strings - so the splits
+are loaded once and indexed by problem statement.
 
 The upstream quickstart's scoring rule and its feedback wording are
 reproduced here rather than imported: this example exists to show the Reef
@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
-from recipes.gepa.proposer import Feedback
+from recipes.gepa import Feedback
 from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.run import EpisodeResult
 
@@ -59,9 +59,8 @@ AIME_TEST_REVISION = "c94da77eb22bbd6439e62a323bec18493a421302"
 AIME_SPLIT_SIZES = {"train": 45, "validation": 45, "test": 150}
 AIME_DATASET_SHA256 = "74e81306a9a1debadd64c49a4ab3588615f7bb698b695a59c17c65dd3b895185"
 
-# The quickstart's seed prompt, and the extra node the multi-node variant
-# evolves beside it (REEF_GEPA_MULTI=1).
-RULES_SEED = "You are a helpful assistant. Answer the question. Put your final answer in the format '### <answer>'"
+# The extra node that the multi-node variant (REEF_GEPA_MULTI=1) evolves
+# beside the seed's rules.md.
 SKILL_SEED = """# AIME solver
 
 Solve each competition-math problem from first principles. Check the result,
@@ -70,8 +69,8 @@ then put only the final value after `###` on the last answer line.
 SKILL_SEED_NAME = "aime-solver"
 
 #: Prompt text to expected answer string, and prompt text to the optional
-#: context the feedback hook quotes. Filled by :func:`load_aime_splits`; the
-#: mechanism only ever passes tasks that came from those splits.
+#: context the feedback hook quotes. Filled by :func:`load_aime_splits`; Reef
+#: only ever passes tasks that came from those splits.
 ANSWERS: dict[str, str] = {}
 CONTEXTS: dict[str, dict[str, str]] = {}
 
@@ -103,7 +102,7 @@ class AIMEScorer(Feedback, EpisodeScorer):
 
 
 class AIMEAnswerScorer(EpisodeScorer):
-    """:func:`evaluate` over the benchmark splits registered in this process, as ``evolution.evaluate`` names it."""
+    """:func:`evaluate` over the splits registered in this process; ``evolution.evaluation.scorer`` names it."""
 
     def score(self, task: str, result: EpisodeResult) -> float:
         return _evaluate(ANSWERS, task, result)
@@ -160,7 +159,7 @@ def dataset_sha256(trainset, valset, testset) -> str:
 
 
 def register(*splits: Sequence[Mapping[str, Any]]) -> None:
-    """Index every split by problem statement, the only key the mechanism carries."""
+    """Index every split by problem statement, the only key an episode carries."""
     for split in splits:
         for example in split:
             ANSWERS[str(example["input"])] = str(example["answer"])

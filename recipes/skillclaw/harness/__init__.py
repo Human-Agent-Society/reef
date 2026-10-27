@@ -1,9 +1,9 @@
 """The SkillClaw harness package: what skillclaw.yaml's callable references name.
 
 ``harness.plugins`` holds the two classes skillclaw.yaml names:
-``NightProposer`` (the sealed night flow mapped to one patch of the skill
+``NightMethod`` (the sealed night flow mapped to one patch of the skill
 pool) and ``ProbeScorer`` (exact-answer probe grading); both delegate to
-``harness.skillclaw``. skillclaw.yaml sets ``selection: always``. The
+``harness.skillclaw``. skillclaw.yaml sets ``policy: none``. The
 cookbook recipe entry point lives at ``recipes.skillclaw.recipe``; its
 surface uses this package's ``catalog`` module to inject the served pool's
 catalog into every proxied request. The remaining modules are the sealed

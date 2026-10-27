@@ -56,7 +56,7 @@ def evaluate(task: str, result: EpisodeResult) -> float:
 
 
 class VerifierScorer(EpisodeScorer):
-    """:func:`evaluate` as the ``evolution.evaluate`` plugin terminal_bench.yaml names."""
+    """:func:`evaluate` as the ``evolution.evaluation.scorer`` plugin terminal_bench.yaml names."""
 
     def score(self, task: str, result: EpisodeResult) -> float:
         return evaluate(task, result)

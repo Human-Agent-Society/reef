@@ -1,14 +1,15 @@
 # Meta-Harness on Terminal-Bench
 
-Run the [Meta-Harness recipe](../../README.md) on the full pinned
+Run the [Meta-Harness method](../../README.md) on the full pinned
 Terminal-Bench 2 suite. See [Results](#results) for the comparison and
 [RESULTS.md](../../RESULTS.md) for the evaluation configuration and scope.
 The seed is vanilla Terminus 2, represented by a no-op `Agent(Terminus2)`
 module at `seed/extensions/agent.py`. The proposer rewrites that module,
-retains every valid candidate, and selects only strict improvements over the
-best recorded mean score.
+the search retains every valid candidate, and Reef selects only strict
+improvements over the best recorded mean score.
 
-The example uses Reef's shared Meta-Harness recipe and Terminus adapter.
+The example uses the Meta-Harness method, Reef's harness evolution recipe, and
+Reef's Terminus adapter.
 [Deviations](#deviations) documents the differences between the runnable setup
 and the comparison.
 
@@ -112,23 +113,28 @@ Sandbox `egress_hosts` enables networking, not hostname filtering; see the
 
 ## Implementation
 
-`run.sh` starts `run.py`, which embeds the configured recipe, Reef dispatcher,
+`run.sh` starts `run.py`, which embeds the configured recipe, a Reef dispatcher,
 SQLite storage, and Git LFS artifacts without an HTTP listener. Terminus calls
 the model endpoint directly.
 
 Each round renders the head release's tree for Terminus and records one
 rollout of it with its verifier report, rotating tasks by committed step. The
-recipe proposes a candidate, evaluates it and the incumbent on the selected
-suite, then commits the population and serving state together.
+method proposes a candidate from the search history. Reef evaluates it on the
+selected suite against the incumbent's cached scores, adds it to the history,
+and commits the step with the serving state.
 Rollouts and evaluations use Reef's executor, timeout, residue policy, and
 finite-score checks. Failed evaluation episodes score zero; rollout launch
 failures stop the run. Infrastructure failures are not automatically replaced.
+Before each rollout, `run.py` asks the method whether a budget is spent, so no
+rollout feeds a step that would propose nothing.
 
 Defaults allow four evaluated candidates and eight proposal attempts, including
-invalid or duplicate proposals: at most 1,424 evaluation episodes
-(`4 x 2 sides x suite size x 2 repeats`) plus eight feedback rollouts. Smaller
-runs scale the evaluation budget. Retrying uncommitted work can cost extra;
-these are search limits, not billing caps.
+invalid or duplicate proposals: at most 890 evaluation episodes (the seed and
+four candidates, each on 89 tasks with 2 repeats) plus eight feedback
+rollouts. Smaller runs scale the evaluation budget. A failed commit keeps its
+episodes in the history, and its retry reuses them; a candidate that a retry
+proposes in place of the failed one costs extra. These are search limits, not
+billing caps.
 
 ## Resume and output
 
@@ -139,23 +145,29 @@ per directory.
 Committed Reef state is authoritative. Restarts reuse recorded rollouts and
 replay pending reports. Failed commits cannot advance search or its summary.
 
-- `reef-data/`: SQLite records and scenario history. The history's method
-  state holds the population: candidates, parents, scores, and the hashes of
-  each proposal attempt's prompt and reply.
+- `harness/`: the search history (every candidate tree, its episodes and their
+  records, and each step's decision) and one record per step, which holds the
+  proposer's prompt and reply in `calls.json`.
+- `reef-data/`: SQLite records and the scenario's commits. Each commit holds
+  the method state: the replies that proposed no candidate.
 - `artifacts.git`, `artifact-work/`, `artifact-cache/`: published harnesses and
   their release chain.
-- `summary.json`: rebuilt from the latest commit: each candidate's scores, the
-  served id, proposer calls, and the evaluation episodes spent.
+- `summary.json`: rebuilt from the latest commit and the history of the steps
+  it covers: each candidate's parent, outcome, and scores, the served id, the
+  candidates generated, and the evaluation episodes spent.
 
 ## Deviations
 
 - **Suite:** full pinned dataset by default; reported scores use a fixed subset
   at the same revision.
-- **Schedule:** paired evaluations remeasure the incumbent but select against
-  its previously admitted score. The first baseline score vector arrives after the
-  first proposal. The comparison measures the baseline and each candidate once.
-- **Proposals:** one feedback rollout and the complete population feed the
-  recipe's prompt, not an upstream tool-using coding agent inspecting trial files.
+- **Schedule:** each evaluation pairs the candidate with the incumbent's
+  cached scores, so the incumbent does not run again, except an episode that
+  could not run, which runs again. The baseline's scores
+  arrive with the first candidate's evaluation. As in the comparison, the
+  baseline and each candidate run once.
+- **Proposals:** one feedback rollout, the complete population, and bounded
+  excerpts of the episode records feed the method's prompt, not an upstream
+  tool-using coding agent that reads the trial files.
 - **Requests:** Chat Completions/LiteLLM for the target; Responses with default
   reasoning for the proposer. The comparison uses Responses and `xhigh`, plus
   request and verifier adaptations not installed here.
@@ -175,6 +187,6 @@ pytest tests/recipes/meta_harness/test_meta_harness_terminal_bench.py \
 pre-commit run --all-files
 ```
 
-Tests mock model calls and episode launches, checking the real recipe,
+Tests mock model calls and episode launches, checking the real method, recipe,
 scoring, commits, publication, and recovery. They do not measure live benchmark
 performance or replace a Linux/E2B smoke run.

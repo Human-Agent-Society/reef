@@ -106,11 +106,13 @@ def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
 
 def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch):
     full = driver.configuration(tuple(driver.benchmark.MANIFEST["tasks"]), None, None)
-    assert len(full["evolution"]["tasks"]) == len(set(full["evolution"]["tasks"])) == 89
-    assert full["evolution"]["meta_harness"]["max_target_episodes"] == 1424
+    tasks = full["evolution"]["evaluation"]["tasks"]
+    assert len(tasks) == len(set(tasks)) == 89
+    # The seed and four candidates, each evaluated once on 89 tasks with two repeats.
+    assert full["evolution"]["method"]["config"]["max_target_episodes"] == 890
     short = driver.configuration(("task",), 1, 1)
     assert short["evolution"]["max_steps"] == 2
-    assert short["evolution"]["meta_harness"]["max_target_episodes"] == 2
+    assert short["evolution"]["method"]["config"]["max_target_episodes"] == 2
     original = driver.campaign_id(short)
     assert original != driver.campaign_id(full)
     monkeypatch.setenv("REEF_MODEL", "another-model")
@@ -143,9 +145,9 @@ def campaign(driver, monkeypatch, tmp_path):
         return episode(task, int("# improved" in files.get("terminus/context/agent.py", "")))
 
     monkeypatch.setattr(driver, "run_episode", launch)
-    monkeypatch.setattr("reef.evaluation.harness.run_episode", launch)
+    monkeypatch.setattr("reef.evaluation.harness.runner.run_episode", launch)
     config = driver.configuration(("task",), 1, 1)
-    recipe = driver.load_recipe(config)
+    recipe = driver.load_recipe(config, tmp_path)
     chat = Proposals(HarnessTree.read(driver.SEED))
     recipe = dataclasses.replace(recipe, models={"proposer": chat})
     return recipe, chat, launches, tmp_path
@@ -171,7 +173,12 @@ def test_search_commits_and_restart_resumes_from_the_commit_without_more_episode
         assert len(launches) == 3  # One recorded rollout and one paired evaluation.
         assert len(chat.prompts) == 1 and "terminus_episode" in chat.prompts[0]
         assert "target-test-key" not in chat.prompts[0]
-        assert driver.population(scenario).served_id == summary["served_id"]
+        served = driver.served_tree(scenario).checksum()
+        assert summary["served_id"] == served != recipe.seed.checksum()
+        assert [(candidate["outcome"], candidate["scores"]) for candidate in summary["candidates"]] == [
+            ("undecided", [0.0]),
+            ("served", [1.0]),
+        ]
     finally:
         dispatcher.close()
     # The summary is disposable: a restart rebuilds it from the latest durable commit.
@@ -207,9 +214,12 @@ def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(dri
     restarted = driver.open_campaign(recipe, directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
-        assert driver.search(scenario, recipe, directory)["generated_candidates"] == 1
-        assert len(launches) == 5  # The recorded rollout survives; only the evaluation is retried.
-        assert len(chat.prompts) == 2
+        summary = driver.search(scenario, recipe, directory)
+        # The replayed step proposes the same tree again: the failed attempt neither spent its budget nor made
+        # it a known tree, and the history's episodes score it without another launch.
+        assert (summary["generated_candidates"], summary["evaluation_episodes"]) == (1, 2)
+        assert summary["served_id"] != recipe.seed.checksum()
+        assert len(launches) == 3 and len(chat.prompts) == 2
     finally:
         restarted.close()
 

@@ -3,9 +3,9 @@
 GEPA keeps its whole search in one state object: every program
 it ever proposed, that program's per-instance validation scores, the Pareto
 front each instance induces, a round-robin cursor per candidate, and the
-metric-call budget spent so far. The recipe keeps this object as the method
-state Reef commits with each step (``Archive.to_state``), so a step that
-fails or is never committed cannot advance the search.
+metric-call budget spent so far. The method keeps this object in its
+``state/archive.json`` (``Archive.to_state``), which Reef commits with each
+step, so a step that fails or is never committed cannot advance the search.
 
 Two rules are GEPA's and are reproduced exactly:
 
@@ -40,9 +40,9 @@ class Candidate:
 
     texts: dict[str, str]
     parent: int | None = None
-    #: One score per ``evolution.tasks`` entry, in task order. ``None`` until
-    #: the selector records the mechanism's validation pass, which is what
-    #: makes a candidate eligible to become a parent.
+    #: One score per evaluation task, in task order. ``None`` until the next
+    #: step settles the candidate's validation pass, which is what makes a
+    #: candidate eligible to become a parent.
     val_scores: list[float] | None = None
     minibatch_scores: list[float] | None = None
     #: Round-robin index into this candidate's sorted component keys.
@@ -81,30 +81,35 @@ class Archive:
     """Every candidate the search has produced, and the budget it has spent.
 
     Values: ``served`` and ``pending`` are indexes into ``candidates`` or
-    ``None``; ``pending_step`` is set exactly when ``pending`` is. The
-    counts are ≥ 0, and the fields below say what each one holds.
-    Purpose: the GEPA proposer reads it from the committed method state with
+    ``None``; ``pending_step`` is set exactly when ``pending`` is, and
+    ``pending`` only while ``served`` is. The counts ``metric_calls``,
+    ``steps``, ``rejections`` and ``iteration`` are ≥ 0, and the fields below
+    say what each one holds. The constructor raises ``ValueError`` for a
+    value outside these conditions.
+    Purpose: ``GEPA.step`` reads it from ``state/archive.json`` with
     ``from_state``, folds in the latest evaluation with ``settle``, runs one
-    iteration on it, and returns ``to_state``; the selection reads it.
+    iteration on it, and writes ``to_state`` back.
     """
 
     candidates: list[Candidate] = field(default_factory=list)
-    #: The candidate the mechanism is serving, and the one a proposal is
-    #: stated against; ``pending`` is the candidate awaiting its validation
+    #: The candidate whose texts the served tree holds, the tree each child is
+    #: written over; ``pending`` is the candidate awaiting its validation
     #: pass, at most one, because a step settles before the next.
     served: int | None = None
     pending: int | None = None
-    #: The step that proposed the pending candidate: only that step's outcome is its validation pass.
+    #: The step that proposed the pending candidate: only that step's evaluation is its validation pass.
     pending_step: int | None = None
     metric_calls: int = 0
     #: GEPA iterations that reached a child evaluation, and how many of those
     #: the minibatch acceptance test rejected.
     steps: int = 0
     rejections: int = 0
-    #: One row per reflection: what the model was shown and what it wrote,
-    #: with the minibatch scores on both sides and the result. GEPA keeps the
-    #: same record in its run directory; without it a search outcome can only
-    #: be inferred from the candidate texts after the fact.
+    #: One row per reflection: the parent, the component, the minibatch scores
+    #: on both sides and the result. GEPA keeps the same record in its run
+    #: directory; without it a search outcome can only be inferred from the
+    #: candidate texts after the fact. The step's ``calls.json`` keeps what the
+    #: model was shown and what it wrote, so a row leaves both out: every step
+    #: commits the archive whole.
     proposals: list[dict[str, Any]] = field(default_factory=list)
     #: GEPA's one random stream, in its order: a parent draw, then a reshuffle
     #: of the training order at an epoch boundary. Committed with the state, so
@@ -114,6 +119,23 @@ class Archive:
     iteration: int = 0
     order: list[int] = field(default_factory=list)
     epoch: int = -1
+
+    def __post_init__(self) -> None:
+        for label, index in (("served", self.served), ("pending", self.pending)):
+            if index is not None and not 0 <= index < len(self.candidates):
+                raise ValueError(f"Archive.{label} must index one of the {len(self.candidates)} candidates")
+        if (self.pending is None) != (self.pending_step is None):
+            raise ValueError("Archive.pending_step must be set exactly when Archive.pending is")
+        if self.pending is not None and self.served is None:
+            raise ValueError("Archive.pending needs a served candidate")
+        for label, count in (
+            ("metric_calls", self.metric_calls),
+            ("steps", self.steps),
+            ("rejections", self.rejections),
+            ("iteration", self.iteration),
+        ):
+            if count < 0:
+                raise ValueError(f"Archive.{label} must be at least 0")
 
     @classmethod
     def from_state(cls, data: Mapping[str, Any] | None, *, rng_seed: int = 0) -> Archive:
@@ -159,7 +181,7 @@ class Archive:
 
     # -- growth --------------------------------------------------------------
 
-    def seed(self, texts: Mapping[str, str]) -> int:
+    def seed(self, texts: Mapping[str, str]) -> None:
         """Append ``texts`` as a parentless candidate and serve it.
 
         Used for the first boot and for a rollback: when the served tree no
@@ -169,7 +191,6 @@ class Archive:
         self.candidates.append(Candidate(texts=dict(texts), discovered_at=self.metric_calls))
         self.served = len(self.candidates) - 1
         self.clear_pending()
-        return self.served
 
     def add(self, texts: Mapping[str, str], parent: int, minibatch_scores: Sequence[float], step: int) -> int:
         """Append an accepted child as the pending candidate of ``step`` and return its index.
@@ -198,33 +219,36 @@ class Archive:
         self.rejections += 1
 
     def log_proposal(self, row: Mapping[str, Any]) -> None:
-        """Keep one reflection's full record: parent, component, minibatch,
-        prompt, reply, child scores, and whether the child was accepted."""
+        """Keep one reflection's record: parent, component, minibatch scores,
+        child scores, and whether the child was accepted."""
         self.proposals.append({"step": self.steps, **row})
 
     def record_validation(self, index: int, scores: Sequence[float]) -> None:
+        """Keep ``scores``, one per evaluation task, as the validation scores of candidate ``index``."""
         self.candidates[index].val_scores = [float(score) for score in scores]
 
-    def settle(self, candidate_scores: Sequence[float], served_scores: Sequence[float], selected: bool) -> None:
+    def settle(
+        self, candidate_scores: Sequence[float], served_scores: Sequence[float], selected: bool, *, repeats: int
+    ) -> None:
         """Fold one evaluated step into the archive: GEPA's validation pass and the update of the served candidate.
 
-        The pending candidate takes the step's candidate scores and is charged
-        for them; a served candidate that has no validation yet (the seed, on
-        the first evaluated step) takes the served scores, charged when it was
-        seeded. A selected step serves the pending candidate.
+        Each score is one task's mean over the ``repeats`` episodes the
+        evaluation ran for it. The pending candidate takes the step's
+        candidate scores and is charged one metric call per episode,
+        ``len(candidate_scores) * repeats``; a served candidate that has no
+        validation yet (the seed, on the first evaluated step) takes the
+        served scores, charged when it was seeded. A selected step serves the
+        pending candidate.
         """
         pending = self.pending
         if pending is not None:
             self.record_validation(pending, candidate_scores)
-            self.charge(len(candidate_scores))
+            self.charge(len(candidate_scores) * repeats)
         if self.served is not None and self.candidates[self.served].val_scores is None:
             self.record_validation(self.served, served_scores)
         if selected and pending is not None:
-            self.serve(pending)
+            self.served = pending
         self.clear_pending()
-
-    def serve(self, index: int) -> None:
-        self.served = index
 
     def clear_pending(self) -> None:
         self.pending = None
@@ -238,8 +262,9 @@ class Archive:
 
     def fronts(self) -> dict[int, set[int]]:
         """Task index to the candidates holding that task's best score."""
-        scored = [(index, candidate.val_scores) for index, candidate in enumerate(self.candidates)]
-        scored = [(index, scores) for index, scores in scored if scores]
+        scored = [
+            (index, candidate.val_scores) for index, candidate in enumerate(self.candidates) if candidate.val_scores
+        ]
         fronts: dict[int, set[int]] = {}
         best: dict[int, float] = {}
         for index, scores in scored:
@@ -253,15 +278,9 @@ class Archive:
         return fronts
 
     def mean_val(self, index: int) -> float:
+        """The mean validation score of candidate ``index``; 0.0 before it has one."""
         scores = self.candidates[index].val_scores
         return sum(scores) / len(scores) if scores else 0.0
-
-    def best(self) -> int:
-        """The archive's best candidate by mean validation score, first on ties."""
-        if not self.candidates:
-            raise ValueError("the GEPA archive holds no candidates")
-        means = [self.mean_val(index) for index in range(len(self.candidates))]
-        return means.index(max(means))
 
     # -- the iteration plan ---------------------------------------------------
 
@@ -275,16 +294,16 @@ class Archive:
         here as there. The draw is a function of the committed state, so a
         driver that reads the same state draws the same plan.
         """
-        rng = self._rng()
+        rng = self.generator()
         parent = self.select_parent(rng, valset_size)
         base = self.iteration * minibatch_size
         epoch = 0 if self.epoch == -1 else base // max(len(self.order), 1)
         if not self.order or epoch > self.epoch:
             self.epoch = epoch
-            self.order = _shuffled_epoch(trainset_size, minibatch_size, rng)
+            self.order = shuffled_epoch(trainset_size, minibatch_size, rng)
         start = base % len(self.order)
         plan = {"iteration": self.iteration, "parent": parent, "minibatch": self.order[start : start + minibatch_size]}
-        self.rng_state = _state_to_json(rng.getstate())
+        self.rng_state = rng_state_to_json(rng.getstate())
         self.iteration += 1
         return plan
 
@@ -294,16 +313,17 @@ class Archive:
         A deployment fed real traffic has no training order to plan, so only
         the parent is drawn.
         """
-        rng = self._rng()
+        rng = self.generator()
         parent = self.select_parent(rng, valset_size)
-        self.rng_state = _state_to_json(rng.getstate())
+        self.rng_state = rng_state_to_json(rng.getstate())
         self.iteration += 1
         return parent
 
-    def _rng(self) -> random.Random:
+    def generator(self) -> random.Random:
+        """GEPA's random stream where the committed state left it; a new one seeded ``rng_seed`` before any draw."""
         rng = random.Random(self.rng_seed)
         if self.rng_state is not None:
-            rng.setstate(_state_from_json(self.rng_state))
+            rng.setstate(rng_state_from_json(self.rng_state))
         return rng
 
     def select_parent(self, rng: random.Random, valset_size: int | None = None) -> int:
@@ -316,7 +336,7 @@ class Archive:
         then sits on every front: the same draw over ``valset_size`` copies of
         the served candidate keeps the generator in step.
         """
-        survivors = _remove_dominated(self.fronts(), [self.mean_val(index) for index in range(len(self.candidates))])
+        survivors = remove_dominated(self.fronts(), [self.mean_val(index) for index in range(len(self.candidates))])
         frequency: dict[int, int] = {}
         for task in sorted(survivors):
             for index in sorted(survivors[task]):
@@ -338,7 +358,7 @@ class Archive:
         return keys[position]
 
 
-def _shuffled_epoch(size: int, minibatch_size: int, rng: random.Random) -> list[int]:
+def shuffled_epoch(size: int, minibatch_size: int, rng: random.Random) -> list[int]:
     """GEPA's ``EpochShuffledBatchSampler`` epoch: a shuffle, padded up to a
     whole number of minibatches by repeating the least frequent id, ties to
     the one that appeared last."""
@@ -353,22 +373,24 @@ def _shuffled_epoch(size: int, minibatch_size: int, rng: random.Random) -> list[
     return order
 
 
-def _state_to_json(state: Any) -> list[Any]:
+def rng_state_to_json(state: Any) -> list[Any]:
+    """A ``random.Random`` state as JSON: its version, its internal state as a list, and its Gaussian cache."""
     version, internal, gauss = state
     return [version, list(internal), gauss]
 
 
-def _state_from_json(state: Sequence[Any]) -> Any:
+def rng_state_from_json(state: Sequence[Any]) -> Any:
+    """The ``random.Random`` state that ``rng_state_to_json`` wrote."""
     version, internal, gauss = state
     return (int(version), tuple(int(value) for value in internal), gauss)
 
 
-def _is_dominated(candidate: int, others: set[int], fronts: Mapping[int, set[int]]) -> bool:
+def is_dominated(candidate: int, others: set[int], fronts: Mapping[int, set[int]]) -> bool:
     """Whether every front holding ``candidate`` also holds one of ``others``."""
     return all(any(other in front for other in others) for front in fronts.values() if candidate in front)
 
 
-def _remove_dominated(fronts: Mapping[int, set[int]], scores: Sequence[float]) -> dict[int, set[int]]:
+def remove_dominated(fronts: Mapping[int, set[int]], scores: Sequence[float]) -> dict[int, set[int]]:
     """GEPA's ``remove_dominated_programs``: prune covered candidates.
 
     Candidates are considered worst-first, so when two of them cover each
@@ -386,7 +408,7 @@ def _remove_dominated(fronts: Mapping[int, set[int]], scores: Sequence[float]) -
         for candidate in programs:
             if candidate in dominated:
                 continue
-            if _is_dominated(candidate, set(programs) - {candidate} - dominated, fronts):
+            if is_dominated(candidate, set(programs) - {candidate} - dominated, fronts):
                 dominated.add(candidate)
                 removing = True
                 break

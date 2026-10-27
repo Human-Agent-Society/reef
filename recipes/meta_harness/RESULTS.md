@@ -1,8 +1,8 @@
 # Terminal-Bench reproduction results
 
 The [runnable example](examples/terminal_bench/README.md) runs the full pinned
-dataset through the current shared recipe and documents its differences from
-the internal runner used for these measurements.
+dataset through the current method and documents its differences from the
+internal runner used for these measurements.
 
 The comparison starts from vanilla Terminus 2 and runs a baseline plus four
 full-history iterations. Each measurement covers the same 30 tasks with two
@@ -46,12 +46,14 @@ in the internal run records.
 This is a method reproduction on 30 tasks, with shared API, sandbox, and verifier
 adaptations. It is not the paper's full benchmark or an unmodified upstream
 performance reference. The local campaign measured the baseline once and only
-new candidates thereafter; the reusable recipe uses Reef's paired evaluator.
-The campaign scripts, raw histories, and audit records remain internal.
+new candidates thereafter. The method now does the same: Reef's paired
+evaluation reads the incumbent's scores from its cache. The campaign scripts,
+raw histories, and audit records remain internal.
 
 These measurements used the local experiment runner, before the shared
 Terminus adapter supported Python extensions. They validate the search method;
 they are not benchmark measurements of the updated adapter. A focused contract
 test now loads the checked-in harness as a `code_extension` through the
-shared recipe, episode lifecycle, Terminus runner, and publication path, with
-process launch and the remote trial replaced by test doubles.
+method, the harness evolution recipe, the episode lifecycle, the Terminus
+runner, and the publication path, with process launch and the remote trial
+replaced by test doubles.

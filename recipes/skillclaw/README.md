@@ -2,14 +2,15 @@
 
 This example implements the SkillClaw method from [Evolving Skills for Autonomous Agents](https://arxiv.org/abs/2604.08377) using Reef's harness evolution engine (`reef.recipe.harness`). Each day, the agent runs a fixed task list with its current skills. Each night, SkillClaw reviews the day's sessions and proposes skill changes. Every proposed change is accepted unless the method chooses to skip it; the next day measures the updated skills.
 
-Reef stores the skill pool as a tree of `skills/<name>/SKILL.md` files and publishes each night's changes together as a new release that clients can pull. The method supplies a `Proposer` and an `EpisodeScorer` and selects with the built-in `selection: always`. The engine validates and evaluates the candidate tree, records each step, and publishes the tree it selects.
+Reef stores the skill pool as a tree of `skills/<name>/SKILL.md` files and publishes each night's changes together as a new release that clients can pull. The method supplies a `Method` (`NightMethod`) and an `EpisodeScorer` (`ProbeScorer`), and the evaluation policy is the built-in `none`: every candidate tree that passes the tree checks publishes. The engine validates the candidate tree, records each step, and publishes the tree.
 
 ## Directory layout
 
 ```text
 skillclaw/
-  skillclaw.yaml      the recipe the driver boots: explicit implementation, selection
-                      always, batch_size 60, probe tasks, seed skills
+  skillclaw.yaml      the recipe the driver boots: explicit implementation, the
+                      night method, policy none, batch_size 60, probe tasks,
+                      seed skills
   recipe.py           the Reef recipe subclass: build_surface returns
                       create_skill_surface([SkillCatalogModule(...)]) so every /v1
                       request carries the pool catalog; seed_skills seeds
@@ -34,7 +35,7 @@ skillclaw/
     skillclaw.py      the method: propose runs the sealed night flow and
                       maps the night's pool changes to one patch;
                       evaluate grades the probe episodes
-    plugins.py        NightProposer and ProbeScorer, the classes
+    plugins.py        NightMethod and ProbeScorer, the classes
                       skillclaw.yaml names; they call skillclaw.py
     night.py          the sealed night step: one decision per skill group
                       plus the no-skill bucket, merge and registry semantics
@@ -60,13 +61,13 @@ skillclaw/
 
 ## The method, mapped onto the mechanism
 
-`propose` is the sealed night, unchanged in shape: rebuild each task's session digest from the recorded traffic, summarize every session, judge the unscored ones, group by referenced skill, then one decision per skill group plus the no-skill bucket - `improve_skill`, `optimize_description`, `create_skill`, or `skip`. The decisions land on a scratch pool (merge and registry semantics included) and the pool diff becomes one patch: one `skills/<name>/SKILL.md` file per added or rewritten skill, evaluated as one candidate tree. The sealed night never removes a skill, so the patch removes no file. The night's LLM is the served model itself, through the same upstream binding the day uses.
+`propose` is the sealed night, unchanged in shape: rebuild each task's session digest from the recorded traffic, summarize every session, judge the unscored ones, group by referenced skill, then one decision per skill group plus the no-skill bucket - `improve_skill`, `optimize_description`, `create_skill`, or `skip`. The decisions land on a scratch pool (merge and registry semantics included) and the pool diff becomes one patch: one `skills/<name>/SKILL.md` file per added or rewritten skill, published as one candidate tree. The sealed night never removes a skill, so the patch removes no file. The night's LLM is the served model itself, through the same upstream binding the day uses.
 
 The day is the sealed day: each task runs in its WildClawBench container, the agent's model calls go through the embedded Reef service (which injects the served pool's catalog and records the exchange), and the benchmark's own checks and judge grade the outcome. The report references the task's recorded traffic, so the night learns from exactly what the proxy saw.
 
 The night trigger is the job's data: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day goes into one job's data - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
 
-The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe episodes (three exact-answer coding tasks) still run and their scores land in the release metrics, so every published pool release carries a measured before/after record without deciding on those scores.
+The evaluation policy is `policy: none`, so every applied night publishes in the paper's regime. After the night, `NightMethod` runs the probe episodes (three exact-answer coding tasks) on the served pool and on the night's pool through `tools.evaluate`, and the step's `method_notes` keep both lists of scores as `probe_scores`. Every published pool release therefore carries a measured before/after record, and the publish never depends on it. The served pool's scores come from the history after the first night, because that pool ran the same probes as the previous night's candidate.
 
 ## The two runs and the claim
 

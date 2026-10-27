@@ -10,31 +10,33 @@ minibatch of three training problems as Pi episodes against it with a model
 binding pointed back at this service, report each score against the request
 that episode recorded, and wait. The third report closes the batch
 (``evolution.batch_size: 3``), which is what schedules the step where the method
-proposes, evaluates on the 45 validation problems, and publishes on a strict
-mean improvement. Rounds stop at ``--budget`` metric calls; then the seed and
-the served trees are each scored on the sealed 150-problem test split
-through per-example checkpoints and ``summary.json`` puts those numbers beside
-the retained official record.
+proposes, the evaluation scores the candidate on the 45 validation problems,
+and a strict mean improvement publishes it. Rounds stop at ``--budget`` metric
+calls; then the seed and the served trees are each scored on the sealed
+150-problem test split through per-example checkpoints and ``summary.json``
+puts those numbers beside the retained official record.
 
 The work directory resumes: the scenario's commit history, which carries the
-archive as the method's committed state, and the checkpoints survive a
-restart. Each round reads the archive from the latest commit and draws the
-iteration's plan exactly as the proposer will (``archive_for_step``, ``sync``,
-``Archive.plan``), so the problems it sends are the minibatch GEPA's order
-names. ``--dry-run`` boots the recipe and prints the plan without a model call.
+method's ``archive.json``, the harness history under ``harness/``, and the
+checkpoints survive a restart. Each round reads the archive from the latest
+commit, settles it from the history, and draws the iteration's plan exactly as
+the method will (``archive_for_step``, ``Archive.plan``), so the problems it
+sends are the minibatch GEPA's order names. ``--dry-run`` boots the recipe and
+prints the plan without a model call.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -45,20 +47,23 @@ from aiohttp import web
 import harness
 from harness import aime
 from harness.heldout import CheckpointedEvaluator
-from recipes.gepa import components
+from recipes.gepa import GEPA
 from recipes.gepa.archive import Archive
-from recipes.gepa.proposer import archive_for_step, sync
+from recipes.gepa.components import texts_of
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
-from reef.evaluation.harness import evaluation_selection
+from reef.evaluation.harness import History, evaluation_selection
 from reef.harness import run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.delivery import HARNESS_COMPONENT
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
+from reef.recipe.harness import HISTORY_DIR, HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
@@ -89,7 +94,7 @@ KINDS = tuple(TreeKind(component) for component in COMPONENTS)
 # rendered models.json inside the episode root.
 EMBEDDED_KEY = "reef-embedded"
 EPISODE_TIMEOUT_S = 600.0
-# Episodes are independent: the mechanism's validation pass (gepa.yaml's
+# Episodes are independent: the evaluation's validation pass (gepa.yaml's
 # execution.evolution.workers), the driver's minibatch, and the test passes all run this
 # many at once. It only changes wall time, never sampling or scoring.
 WORKERS = int(os.environ["REEF_GEPA_WORKERS"])
@@ -97,7 +102,9 @@ STEP_TIMEOUT_S = 7200.0
 RESULTS = HERE / "results" / "quickstart-seed-0-2026-09-01" / "manifest.json"
 
 
-def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0, trainset_size: int) -> tuple[str, Any]:
+def load_recipe(
+    tasks: list[str], *, api_key: str, seed: int = 0, trainset_size: int
+) -> tuple[str, HarnessEvolutionRecipe]:
     """The recipe gepa.yaml declares, with the validation split filled in.
 
     This driver is the deployment: it owns the provider endpoint and hands it
@@ -107,22 +114,15 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0, trainset_size:
     config = load_config(HERE / "gepa.yaml")
     sections = recipe_config_from_file_layout(config)
     evolution = dict(sections["evolution"])
-    evolution["tasks"] = tasks
-    # Importable functions alone do not carry the driver's populated globals
-    # into spawn/Ray workers. Bind the example hooks to explicit task data;
-    # preserve user-supplied hooks when a config overrides either one.
-    scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
-    if evolution.get("evaluate") == "harness.aime:AIMEAnswerScorer":
-        evolution["evaluate"] = scorer
-    if evolution.get("feedback") == "harness.aime:AIMEFeedback":
-        evolution["feedback"] = scorer
-    # One --seed drives both random draws, the parent sampling and the minibatch order, which the proposer plans
+    evolution["evaluation"] = {**evolution["evaluation"], "tasks": tasks}
+    # One --seed drives both random draws, the parent sampling and the minibatch order, which the method plans
     # over the training split.
-    evolution["gepa"] = {**evolution["gepa"], "seed": seed, "trainset_size": trainset_size}
+    method = {**evolution["method"]["config"], "seed": seed, "trainset_size": trainset_size}
     seed_tree = HarnessTree.read(HERE / str(evolution["seed"]))
     if MULTI:
         seed_tree = seed_tree.apply(TreePatch({f"skills/{aime.SKILL_SEED_NAME}/SKILL.md": aime.SKILL_SEED}))
-        evolution["gepa"] = {**evolution["gepa"], "components": COMPONENTS}
+        method["components"] = COMPONENTS
+    evolution["method"] = {**evolution["method"], "config": method}
     seed_dir = WORK / "seed"
     if seed_dir.exists():
         shutil.rmtree(seed_dir)
@@ -136,17 +136,24 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0, trainset_size:
         inference_timeout_s=EPISODE_TIMEOUT_S,
     )
     recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
-    return recipe.name, recipe
+    if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, GEPA):
+        raise SystemExit("gepa.yaml must name the harness evolution recipe with recipes.gepa:GEPA as its method")
+    # Importable classes alone do not carry the driver's registered answers into spawn or Ray workers. The
+    # example's own hooks become one snapshot of the answers and contexts; a hook the config names otherwise stays.
+    snapshot = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
+    scorer = snapshot if isinstance(recipe.scorer, aime.AIMEAnswerScorer) else recipe.scorer
+    feedback = snapshot if isinstance(recipe.method.feedback, aime.AIMEFeedback) else recipe.method.feedback
+    return recipe.name, dataclasses.replace(recipe, scorer=scorer, method=GEPA(recipe.method.settings, feedback))
 
 
 @contextmanager
-def worker_runtime(recipe):
+def worker_runtime(recipe: HarnessEvolutionRecipe):
     """Ship only the example's harness package; nodes provide Reef and Pi.
 
     Ray reads RAY_ADDRESS when set; without it, start a local Ray runtime.
     Do not tear down an externally owned runtime when embedding this driver.
     """
-    selection, _ = evaluation_selection(recipe.score_episode, recipe.worker_executor)
+    selection, _ = evaluation_selection(recipe.scorer, recipe.worker_executor)
     if selection.settings.backend != "ray":
         yield
         return
@@ -169,7 +176,7 @@ def provider_key() -> str:
     return key
 
 
-def _default_headers_middleware(scenario: str) -> Any:
+def default_headers_middleware(scenario: str) -> Any:
     """Pi's requests ride this run's scenario: an episode knows only an
     OpenAI-compatible base url and sends no reef headers, so the missing
     scenario header is stamped in before routing."""
@@ -191,7 +198,7 @@ class RunService:
         *,
         scenario: str,
         recipe_name: str,
-        recipe: Any,
+        recipe: HarnessEvolutionRecipe,
         bootstrap_tree: Path,
         run_dir: Path,
         upstream_url: str,
@@ -201,6 +208,7 @@ class RunService:
     ) -> None:
         self.scenario = scenario
         self.recipe_name = recipe_name
+        self.recipe = recipe
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.dispatcher = Dispatcher(
@@ -209,7 +217,7 @@ class RunService:
             local_artifact_dir=run_dir / "staged",
             scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
         )
-        self._app = create_app(
+        self.app = create_app(
             self.dispatcher,
             inference_handler=inference_handler
             or HttpInferenceHandler(
@@ -218,37 +226,37 @@ class RunService:
                 timeout_s=EPISODE_TIMEOUT_S,
             ),
         )
-        self._app.middlewares.append(_default_headers_middleware(scenario))
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-        self._runner: web.AppRunner | None = None
+        self.app.middlewares.append(default_headers_middleware(scenario))
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.thread: threading.Thread | None = None
+        self.runner: web.AppRunner | None = None
 
     def start(self) -> None:
         # Scenario creation (or durable recovery from the commit history) happens
         # before any request lands.
         self.dispatcher.get_or_create_scenario(self.scenario)
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, name="reef-embedded", daemon=True)
-        self._thread.start()
-        asyncio.run_coroutine_threadsafe(self._serve(), self._loop).result(timeout=60)
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, name="reef-embedded", daemon=True)
+        self.thread.start()
+        asyncio.run_coroutine_threadsafe(self.serve(), self.loop).result(timeout=60)
 
-    async def _serve(self) -> None:
-        self._runner = web.AppRunner(self._app)
-        await self._runner.setup()
+    async def serve(self) -> None:
+        self.runner = web.AppRunner(self.app)
+        await self.runner.setup()
         # Episodes run on this host. Port 0 (tests) binds an ephemeral port,
         # read back here so the binding can point at it.
-        await web.TCPSite(self._runner, host="127.0.0.1", port=self.port).start()
+        await web.TCPSite(self.runner, host="127.0.0.1", port=self.port).start()
         if not self.port:
-            self.port = int(self._runner.addresses[0][1])
+            self.port = int(self.runner.addresses[0][1])
             self.base_url = f"http://127.0.0.1:{self.port}"
 
     def stop(self) -> None:
-        if self._loop is not None:
-            if self._runner is not None:
-                asyncio.run_coroutine_threadsafe(self._runner.cleanup(), self._loop).result(timeout=60)
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            if self._thread is not None:
-                self._thread.join(timeout=60)
+        if self.loop is not None:
+            if self.runner is not None:
+                asyncio.run_coroutine_threadsafe(self.runner.cleanup(), self.loop).result(timeout=60)
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            if self.thread is not None:
+                self.thread.join(timeout=60)
         self.dispatcher.close()
 
     def binding(self) -> ModelBinding:
@@ -262,6 +270,10 @@ class RunService:
         history = scenario.store.history()
         state = history[-1].algorithm_state if history else None
         return HarnessState() if state is None else HarnessState.from_json(state)
+
+    def history(self) -> History:
+        """The scenario's harness history (every candidate, episode and decision) as the latest step left it."""
+        return History(self.recipe.state_root(self.scenario) / HARNESS_COMPONENT / HISTORY_DIR)
 
     def records(self) -> RecordStore:
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)
@@ -306,12 +318,12 @@ def find_task_record(records: RecordStore, scenario: str, task_prompt: str, *, a
                 continue
             for message in messages:
                 if isinstance(message, dict) and message.get("role") == "user":
-                    if task_prompt in _user_text(message.get("content")):
+                    if task_prompt in user_text(message.get("content")):
                         latest = item
                     break
 
 
-def _user_text(content: Any) -> str:
+def user_text(content: Any) -> str:
     """A user message's text as the substring target for prompt matching.
 
     Pi sends content as a list of typed parts unless the quickstart extension
@@ -356,21 +368,29 @@ def pull_tree(client: Any, service: RunService, target: Path) -> dict[str, Any]:
 
 
 def episode_files(tree: HarnessTree, binding: ModelBinding, descriptor: AdapterDescriptor) -> dict[str, str]:
-    """``tree`` rendered with the transient endpoint: the episode input the mechanism's own evaluation renders."""
+    """``tree`` rendered with the transient endpoint: the episode input the step's evaluation renders."""
     return render_tree(tree, descriptor, binding.config_overlays(descriptor))
 
 
 def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict[str, Any]]:
-    """One Pi episode on one problem, scored the way the mechanism scores it."""
+    """One Pi episode on one problem, scored the way the step's evaluation scores it."""
     result = run_episode(get_adapter("pi"), files, task, binary=binary, timeout=EPISODE_TIMEOUT_S)
     response = aime.final_assistant_text(result.trajectory) or result.stdout
     return aime.evaluate(task, result), {"response": response, "exit_code": result.exit_code}
 
 
-def committed_archive(service: RunService, seed: int) -> Archive:
-    """The archive as the next step starts from it: the latest commit's method state, its evaluation folded in."""
+def committed_archive(service: RunService, tasks: Sequence[str], served: HarnessTree, seed: int) -> Archive:
+    """The archive as the next step starts from it: the latest commit's, settled from the history, current with
+    ``served``."""
     state = service.committed_state()
-    return archive_for_step(state.method_state, state.last_outcome, rng_seed=seed)
+    return archive_for_step(
+        state.method_files.get(ARCHIVE_FILE),
+        service.history(),
+        tasks,
+        texts_of(served, KINDS),
+        repeats=service.recipe.evaluation.repeats,
+        rng_seed=seed,
+    )
 
 
 def verify_binary(binary: str) -> str:
@@ -386,26 +406,25 @@ def verify_binary(binary: str) -> str:
 
 
 def search(
-    service: RunService, client: Any, binary: str, trainset: list, valset_size: int, budget: int, seed: int
+    service: RunService, client: Any, binary: str, trainset: list, validation: Sequence[str], budget: int, seed: int
 ) -> None:
     """Rounds until the archive's metric calls reach the budget.
 
     The method plans each iteration - the parent it will reflect from and the
     training problems it wants to see - from one seeded generator in GEPA's own
-    order. The plan is a function of the committed archive and the served tree,
-    so the driver draws the plan the proposer will and carries it out: the same
-    seed walks the same problems as ``gepa.optimize``, and a resumed run replays
-    the iteration it was in rather than drawing a new one."""
+    order. The plan is a function of the committed archive, the history and the
+    served tree, so the driver draws the plan the method will and carries it
+    out: the same seed walks the same problems as ``gepa.optimize``, and a
+    resumed run replays the iteration it was in rather than drawing a new one."""
     for _ in range(budget):
         served = HarnessTree(pull_tree(client, service, WORK / "served")["files"])
-        search_archive = committed_archive(service, seed)
-        sync(search_archive, components.texts_of(served, KINDS), valset_size)
+        search_archive = committed_archive(service, validation, served, seed)
         step = search_archive.iteration
         calls = search_archive.metric_calls
         print(f"round {step}: {calls}/{budget} metric calls, {len(search_archive.candidates)} candidates")
         if calls >= budget:
             return
-        plan = search_archive.plan(len(trainset), valset_size, 3)
+        plan = search_archive.plan(len(trainset), len(validation), 3)
         files = episode_files(served, service.binding(), get_adapter("pi"))
         # Records at or below this sequence are earlier rounds' leftovers; a
         # repeated problem must not match its own past session.
@@ -429,7 +448,9 @@ def search(
     print(f"stopped after {budget} rounds without reaching the metric-call budget")
 
 
-def test_passes(service: RunService, recipe: Any, client: Any, binary: str, testset: list) -> dict[str, float]:
+def test_passes(
+    service: RunService, recipe: HarnessEvolutionRecipe, client: Any, binary: str, testset: list
+) -> dict[str, float]:
     """The sealed split, once on the seed tree and once on the served one."""
     evaluator = CheckpointedEvaluator(WORK / "heldout", workers=WORKERS)
     tasks = [str(example["input"]) for example in testset]
@@ -508,9 +529,9 @@ def main() -> None:
         try:
             service.start()
             client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
-            search(service, client, binary, trainset, len(valset), args.budget, args.seed)
+            search(service, client, binary, trainset, tasks, args.budget, args.seed)
             scores = test_passes(service, recipe, client, binary, testset)
-            final = committed_archive(service, args.seed)
+            final = committed_archive(service, tasks, HarnessTree.read(WORK / "selected"), args.seed)
             summary = {
                 "scenario": SCENARIO,
                 "seed": args.seed,

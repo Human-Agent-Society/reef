@@ -1,8 +1,9 @@
 """SkillClaw's recipe: harness evolution plus the pool's delivery surface.
 
 ``skillclaw.yaml`` names this class as its dotted recipe reference
-(``recipes.skillclaw.recipe:SkillClawRecipe``). It changes three things over
-the harness evolution recipe:
+(``recipes.skillclaw.recipe:SkillClawRecipe``) and the night method in
+``evolution.method``. The recipe changes three things over the harness
+evolution recipe:
 
 - ``build_surface`` returns ``create_skill_surface([SkillCatalogModule(...)])``, so
   every ``/v1`` request the service proxies carries the served pool's
@@ -10,7 +11,7 @@ the harness evolution recipe:
   reaches the day's traffic through the proxy, not just through client pull.
   The same surface binds the catalog tree's admission rules, which the
   scenario runs before a pool is published or restored.
-  No harness tree is installed, so ``harness_adapter`` names none.
+- No harness tree is installed, so ``harness_adapter`` names none.
 - ``evolution.seed_skills`` (optional) names a directory of
   ``<name>/SKILL.md`` files - the benchmark's shipped skills library - and
   adds each as ``skills/<name>/SKILL.md`` to the seed tree, so the first
@@ -53,7 +54,13 @@ def seed_skills(skills_dir: Path) -> TreePatch:
 
 @dataclass(frozen=True)
 class SkillClawRecipe(HarnessEvolutionRecipe):
-    """Harness evolution with catalog-injecting delivery of the skill pool."""
+    """Harness evolution of a skill pool that every proxied request carries as a catalog.
+
+    Values: the fields of ``HarnessEvolutionRecipe``, with ``name``
+    ``skillclaw``; ``seed`` holds the ``evolution.seed_skills`` pool.
+    Purpose: skillclaw.yaml names it, run.py builds it, and the service
+    serves the pool through its skill surface.
+    """
 
     name: str = field(default="skillclaw", kw_only=True)
 
@@ -62,8 +69,9 @@ class SkillClawRecipe(HarnessEvolutionRecipe):
         evolution = settings.get("evolution")
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("evolution must be an object")
-        skills = evolution.get("seed_skills")
-        supplied = {key: value for key, value in evolution.items() if key != "seed_skills"}
+        # seed_skills is this recipe's own key: the base recipe refuses a key it does not know.
+        supplied = dict(evolution)
+        skills = supplied.pop("seed_skills", None)
         kwargs = super()._recipe_kwargs({**settings, "evolution": supplied}, values)
         if skills:
             if not isinstance(skills, str):

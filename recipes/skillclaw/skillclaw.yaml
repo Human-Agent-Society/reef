@@ -18,47 +18,54 @@ recipe:
       adapter: pi
       # The night trigger: the batch closes at the frozen day's task count, passing reports included.
       batch_size: 60
-      # The method module in the harness/ package: propose is the sealed night
-      # flow (one decision per skill group plus the no-skill bucket) mapped to
-      # one patch of the skill pool; evaluate grades the probe episodes.
-      propose: harness.plugins:NightProposer
-      evaluate: harness.plugins:ProbeScorer
-      # The SkillClaw regime: every non-skip night publishes; the probe episode
-      # scores are saved with the evaluation results. They do not decide which
-      # changes are published; the next day's traffic judges the pool.
-      selection: always
+      # The method in the harness/ package: the sealed night flow (one decision
+      # per skill group plus the no-skill bucket) mapped to one patch of the
+      # skill pool; it then runs the probe episodes and keeps their scores in
+      # the step's notes.
+      method: harness.plugins:NightMethod
       # The harness binary the probe episodes run headless, from the environment.
       binary: ${REEF_PI_BINARY}
-      # Three exact-answer probe tasks. Each prefix keys the expected answer
-      # in harness/skillclaw.py's answer table; each prompt pins the format the
-      # grader checks (the answer alone on the last line).
-      tasks:
-        - >-
-          [sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
-          integer alone on the last line.
-        - >-
-          [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the value
-          as a plain integer alone on the last line.
-        - |-
-          [csv] Compute the median of the value column in this csv:
-          id,value
-          1,12
-          2,47
-          3,3
-          4,88
-          5,21
-          6,56
-          7,9
-          8,74
-          9,30
-          Reply with the median as a plain integer alone on the last line.
       # The bootstrap pool: each <name>/SKILL.md under this directory - the
       # benchmark's shipped skills library, the sealed campaign's day-one pool -
       # joins the first tree as skills/<name>/SKILL.md. Empty (unset) seeds no
       # skills. The first tree carries no provider: the driver (run.py) hands
       # the recipe its model binding, which reef renders into each probe
-      # episode and passes to propose. The served pool never names an endpoint.
+      # episode and passes to the night. The served pool never names an endpoint.
       seed_skills: ${REEF_SC_SKILLS}
+      # Each scenario's proposals, history (the score cache) and step records,
+      # relative to the directory run.sh starts the driver in: this example's
+      # ./work, beside the campaign.
+      state_dir: work/harness
+      evaluation:
+        # The SkillClaw regime: every non-skip night publishes. The probe
+        # scores do not decide which changes are published; the next day's
+        # traffic judges the pool.
+        policy: none
+        # Grades the probe episodes by their exact final answer.
+        scorer: harness.plugins:ProbeScorer
+        # Three exact-answer probe tasks. Each prefix keys the expected answer
+        # in harness/skillclaw.py's answer table; each prompt pins the format the
+        # grader checks (the answer alone on the last line).
+        tasks:
+          - >-
+            [sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a
+            plain integer alone on the last line.
+          - >-
+            [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the
+            value as a plain integer alone on the last line.
+          - |-
+            [csv] Compute the median of the value column in this csv:
+            id,value
+            1,12
+            2,47
+            3,3
+            4,88
+            5,21
+            6,56
+            7,9
+            8,74
+            9,30
+            Reply with the median as a plain integer alone on the last line.
 inference:
   upstream-model: ${REEF_MODEL}
 

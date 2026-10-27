@@ -1,16 +1,18 @@
 # The recipe the AIME driver boots: run.py loads this file, fills
-# evolution.tasks with the pinned validation split, builds the implementation
-# below, and serves it from its own embedded Reef service. The Pi episodes the
-# driver runs point at that service, so the problems it solves are recorded
-# traffic and the method reflects on the served tree's own transcripts.
+# evolution.evaluation.tasks with the pinned validation split, builds the
+# implementation below, and serves it from its own embedded Reef service. The
+# Pi episodes the driver runs point at that service, so the problems it solves
+# are recorded traffic and the method reflects on the served tree's own
+# transcripts.
 #
 # ${REEF_*} values interpolate from the environment through reef's config
 # loader; run.sh exports the defaults.
 
-# The method package: GEPA's archive, Pareto parent sampling, reflective
-# proposal, and strict aggregate promotion, under the evolution contract.
+# The harness evolution recipe, with GEPA as its method: the archive, Pareto
+# parent sampling, and the reflective proposal. The evaluation below is GEPA's
+# validation pass and its strict mean improvement.
 recipe:
-  implementation: recipes.gepa.recipe:GEPARecipe
+  implementation: reef.recipe.harness:HarnessEvolutionRecipe
 
   config:
     evolution:
@@ -20,16 +22,15 @@ recipe:
       batch_size: 3
       # The harness binary the evaluation episodes run headless, from the environment.
       binary: ${REEF_PI_BINARY}
-      # The task side, in the harness/ package: evaluate is the quickstart's
-      # containment score over one episode, feedback is the wording GEPA's own
-      # default evaluator writes into the reflective records. run.py binds these
-      # hooks to a serializable answer/context snapshot before building the recipe.
-      evaluate: harness.aime:AIMEAnswerScorer
-      feedback: harness.aime:AIMEFeedback
-      # The validation set, which is what the mechanism scores every candidate on.
-      # Left empty here because it is data, not configuration: run.py fills it with
-      # the 45 validation problems from the pinned split before build_recipe.
-      tasks: []
+      # The first tree, beside this file: rules.md is the quickstart's system
+      # prompt and the only evolvable file; config/primary.json (Pi starts with
+      # no built-in tools, one model call per problem) and the extension that
+      # makes the rules Pi's whole system prompt reproduce the quickstart's
+      # request envelope and never change. run.py resolves the path.
+      seed: seed
+      # The scenario's history (every candidate, episode and decision) and its
+      # step records. A resumed run reads the history from here.
+      state_dir: ${REEF_WORK}/harness
       models:
         # GEPA's reflection model. The key stays out of this file and out of every
         # published tree; only the named environment variable carries it.
@@ -37,24 +38,37 @@ recipe:
           url: https://api.openai.com
           model: gpt-5-2025-08-07
           api_key_env: OPENAI_API_KEY
-      gepa:
-        # The archive is the method state Reef commits with each step: the
-        # candidates, their validation vectors and the metric-call count a
-        # resumed run continues from. run.py sets trainset_size to the pinned
-        # training split, so each iteration walks GEPA's own minibatch order.
-        minibatch_size: 3
-        seed: 0
-        skip_perfect_score: true
-        perfect_score: 1.0
-        max_metric_calls: 150
-        # The evolvable kinds. run.py appends "skill" under REEF_GEPA_MULTI=1.
-        components: [rules]
-      # The first tree, beside this file: rules.md is the quickstart's system
-      # prompt and the only evolvable file; config/primary.json (Pi starts with
-      # no built-in tools, one model call per problem) and the extension that
-      # makes the rules Pi's whole system prompt reproduce the quickstart's
-      # request envelope and never change. run.py resolves the path.
-      seed: seed
+      method:
+        module: recipes.gepa:GEPA
+        config:
+          # The archive is the method's state/archive.json, which Reef commits
+          # with each step: the candidates, their validation vectors and the
+          # metric-call count a resumed run continues from. run.py sets seed from
+          # --seed and trainset_size to the pinned training split, so each
+          # iteration walks GEPA's own minibatch order.
+          minibatch_size: 3
+          seed: 0
+          skip_perfect_score: true
+          perfect_score: 1.0
+          max_metric_calls: 150
+          # The evolvable kinds. run.py appends "skill" under REEF_GEPA_MULTI=1.
+          components: [rules]
+          # The wording GEPA's own default evaluator writes into the reflective
+          # records, in the harness/ package.
+          feedback: harness.aime:AIMEFeedback
+      evaluation:
+        # The validation set, which the evaluation scores every candidate on.
+        # Left empty here because it is data, not configuration: run.py fills it
+        # with the 45 validation problems from the pinned split before build_recipe.
+        tasks: []
+        # The quickstart's containment score over one episode, in the harness/
+        # package. run.py binds this scorer and the feedback hook to a
+        # serializable answer and context snapshot after it builds the recipe.
+        scorer: harness.aime:AIMEAnswerScorer
+        # GEPA's rule: publish a candidate whose validation mean is strictly above
+        # the served tree's. The served tree's scores come from the score cache.
+        policy: compare
+        statistic: mean
 
 inference:
   upstream-model: ${REEF_MODEL}

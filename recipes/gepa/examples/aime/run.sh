@@ -19,6 +19,6 @@ export REEF_WORK REEF_MODEL REEF_PI_BINARY REEF_GEPA_WORKERS REEF_GEPA_EXECUTOR
 # The driver owns the whole run: it embeds the Reef service (gepa.yaml's
 # recipe on an ephemeral port), runs the minibatch episodes against it,
 # reports every score, and seals the two test passes under ./work. The
-# repository root on PYTHONPATH exposes recipes.gepa.recipe, the method
+# repository root on PYTHONPATH exposes recipes.gepa, the method
 # gepa.yaml names.
 PYTHONPATH=../../../.. python3 run.py "$@"

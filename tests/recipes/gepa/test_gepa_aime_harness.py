@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"
 
 
-def _purge_example_modules() -> None:
+def purge_example_modules() -> None:
     # Every example names its package ``harness`` and its driver ``run``:
     # drop any cached import so this file's syspath entry wins, and drop
     # ours again afterwards so a sibling suite never inherits it.
@@ -46,9 +46,9 @@ def load(monkeypatch, tmp_path):
     """
     monkeypatch.setenv("REEF_WORK", str(tmp_path / "work"))
     monkeypatch.syspath_prepend(str(EXAMPLE_DIR))
-    _purge_example_modules()
+    purge_example_modules()
     yield importlib.import_module
-    _purge_example_modules()
+    purge_example_modules()
 
 
 def releases_of(recipe) -> ComponentReleases:
@@ -117,8 +117,8 @@ def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     assert recipe.worker_executor.backend == "mp"
-    # One --seed drives both draws, and the proposer plans over the training split.
-    assert (recipe.propose.settings.rng_seed, recipe.propose.settings.trainset_size) == (0, 45)
+    # One --seed drives both draws, and the method plans over the training split.
+    assert (recipe.method.settings.seed, recipe.method.settings.trainset_size) == (0, 45)
 
 
 def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tmp_path):
@@ -130,19 +130,20 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     assert config["execution"]["evolution"]["backend"] == "auto"
     config["execution"]["evolution"]["workers"] = 1
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    monkeypatch.setattr("reef.evaluation.harness.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
+    monkeypatch.setattr("reef.evaluation.harness.runner.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records, releases=releases_of(recipe))
         try:
-            evaluator = trainer.candidate_backend.evaluator
-            assert evaluator.worker_selection.settings.backend == "uni"
-            assert [row.score for row in evaluator.run_episodes([({}, "problem", None), ({}, "problem", None)])] == [
-                1.0,
-                1.0,
-            ]
+            backend = trainer.candidate_backend
+            evaluator = backend.evaluator
+            assert evaluator.worker_pool.selection.settings.backend == "uni"
+            backend.history.add_candidate(recipe.seed, step=1, origin="seed")
+            requests = [(recipe.seed, "problem", 0), (recipe.seed, "problem", 1)]
+            assert [record.score for record in evaluator.run(requests, step=1)] == [1.0, 1.0]
+            # A later registration does not reach the snapshot the recipe scores with.
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert evaluator.run_episodes([({}, "problem", None)])[0].score == 1.0
+            assert evaluator.run(requests[:1], step=1, fresh=True)[0].score == 1.0
         finally:
             trainer.close()
 
@@ -189,36 +190,32 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
         trainer = recipe.build("isolated", records, releases=releases_of(recipe))
         try:
-            evaluator = trainer.candidate_backend.evaluator
-            assert evaluator.worker_selection.settings.backend == ("mp" if executor == "auto" else executor)
-            rows = evaluator.run_episodes([({}, "problem", None), ({}, "problem", None)])
+            backend = trainer.candidate_backend
+            evaluator = backend.evaluator
+            assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)
+            backend.history.add_candidate(recipe.seed, step=1, origin="seed")
+            rows = evaluator.run([(recipe.seed, "problem", 0), (recipe.seed, "problem", 1)], step=1)
             assert [row.score for row in rows] == [1.0, 1.0]
             with pytest.raises(Exception, match="no AIME answer is registered"):
-                evaluator.run_episodes([({}, "unknown", None)])
+                evaluator.run([(recipe.seed, "unknown", 0)], step=1)
         finally:
             trainer.close()
 
 
-def test_driver_keeps_custom_task_hooks(load, monkeypatch):
+def test_driver_binds_the_example_hooks_to_one_snapshot_and_keeps_other_hooks(load, monkeypatch):
+    from recipes.gepa import ScoreFeedback
+    from reef.evaluation.harness import VerifierRewardScorer
+
     driver = load("run")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    assert isinstance(recipe.scorer, driver.aime.AIMEScorer) and recipe.method.feedback is recipe.scorer
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
-
-    from recipes.gepa.proposer import Feedback
-    from reef.evaluation.harness import EpisodeScorer
-
-    class HalfScorer(EpisodeScorer):
-        def score(self, task, result):
-            return 0.5
-
-    class CustomFeedback(Feedback):
-        def feedback(self, task, output, score):
-            return "custom"
-
-    config["recipe"]["config"]["evolution"].update(evaluate=HalfScorer(), feedback=CustomFeedback())
+    evolution = config["recipe"]["config"]["evolution"]
+    evolution["evaluation"]["scorer"] = "reef.evaluation.harness:VerifierRewardScorer"
+    evolution["method"]["config"]["feedback"] = "recipes.gepa:ScoreFeedback"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
-    assert recipe.score_episode.score("problem", pi_episode("anything")) == 0.5
-    assert recipe.propose.feedback.feedback("problem", "anything", 0.5) == "custom"
+    assert isinstance(recipe.scorer, VerifierRewardScorer) and isinstance(recipe.method.feedback, ScoreFeedback)
 
 
 @pytest.mark.parametrize("already_initialized", [False, True])
@@ -339,7 +336,7 @@ def test_episode_files_render_the_served_tree_with_the_transient_binding(load):
 # The driver against the embedded service ----------------------------------
 
 
-def _stub_backend():
+def stub_backend():
     from reef.runtime.interfaces import InferenceHandler
 
     class StubModel(InferenceHandler):
@@ -373,7 +370,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_handler=_stub_backend(),
+        inference_handler=stub_backend(),
     )
     service.start()
     try:
@@ -382,6 +379,12 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         # The served source tree is the seed: no rendered file, and so no provider endpoint.
         assert manifest["files"] == dict(recipe.seed.files)
         assert HarnessTree.read(tmp_path / "served") == recipe.seed
+        # The driver plans from the history where the scenario's backend writes it; before any step the archive
+        # holds the seed alone, charged GEPA's seed validation.
+        backend = service.dispatcher.get_or_create_scenario(service.scenario).trainer.candidate_backend
+        assert service.history().root == backend.history.root
+        archive = driver.committed_archive(service, problems, recipe.seed, 0)
+        assert (len(archive.candidates), archive.served, archive.metric_calls) == (1, 0, len(problems))
 
         floor = driver.max_sequence(service.records(), service.scenario)
         references = []

@@ -8,13 +8,13 @@ bucket - ``improve_skill``, ``optimize_description``, ``create_skill``, or
 ``skip``, exactly the sealed action set. The decisions land on a scratch
 pool (night.night_step, merge and registry semantics included) and the
 pool diff maps to one patch: one ``skills/<name>/SKILL.md`` file per added
-or rewritten skill, evaluated as one candidate tree. The sealed night never
+or rewritten skill, published as one candidate tree. The sealed night never
 removes a skill, so the patch removes no file. A night that applies nothing
 returns ``None`` and the served pool stands.
 
-``evaluate`` grades the probe episodes by exact final answer. With
-``selection: always`` in skillclaw.yaml those scores are recorded, but they
-do not decide the publish: SkillClaw publishes every non-skip night and the
+``evaluate`` grades the probe episodes by exact final answer. The night's
+step notes keep those scores, but they do not decide the publish:
+skillclaw.yaml's ``policy: none`` publishes every non-skip night and the
 next day's traffic judges the pool, which is the method's own regime.
 
 The day's task metadata (score, success, error, breakdown) travels through
@@ -44,7 +44,7 @@ from .sessions import annotate_score, build_aggregate_session, parse_recorded, r
 
 
 #: Expected final answers of the probe tasks, keyed by the stable prefix
-#: each task starts with (the tasks live in skillclaw.yaml's evolution section).
+#: each task starts with (the tasks live in skillclaw.yaml's evolution.evaluation section).
 ANSWERS = {
     "[sieve]": "9592",
     "[fib]": "2880067194370816120",
