@@ -38,7 +38,7 @@ from reef.recipe import (
     Recipe,
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.train import Task2Job, Trainer, TrainingPipeline
+from reef.train import Sample2Job, Trainer, TrainingPipeline
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent, TrainingJob
 from reef.train.jobs import JobPlan, JobRequest
@@ -74,9 +74,9 @@ __all__ = [
     "RequestHeaders",
     "RequestType",
     "SQLiteRecordStore",
+    "Sample2Job",
     "Scenario",
     "SelectionDecision",
-    "Task2Job",
     "Trainer",
     "TrainingComponent",
     "TrainingJob",

@@ -14,7 +14,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 from recipes.beta.reefine.proposer import EXTENSION_ADAPTER, answer_request
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.training_request import TrainingRequest
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree
@@ -116,7 +116,7 @@ def answer(
     *,
     tree: HarnessTree = TREE,
     request: TrainingRequest = REQUEST,
-    samples: tuple[TrajectoryItem, ...] = (),
+    samples: tuple[TrajectorySample, ...] = (),
 ) -> TreeProposal:
     """The text proposer's answer to ``request`` on ``adapter``, from the replies of ``models``."""
     return answer_request(tree, request, samples, models, adapter)

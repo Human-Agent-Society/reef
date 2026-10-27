@@ -80,9 +80,9 @@ phase ``committed`` with the new scenario step and starts the next search step.
 Configuration
 -------------
 
-The recipe has three pipeline stages: ``TTTDRecord2Record``, ``TTTDTasks``, and
+The recipe has three pipeline stages: ``TTTDRecord2Record``, ``TTTDSamples``, and
 ``TTTDJobData``. The deployment's ``pipeline`` section configures them. Write
-the step grid once, in the record stage. ``TTTDTasks`` and ``TTTDJobData`` read
+the step grid once, in the record stage. ``TTTDSamples`` and ``TTTDJobData`` read
 the grid from the record stage.
 
 .. code:: yaml
@@ -94,7 +94,7 @@ the grid from the record stage.
        config:
          groups_per_step: 8
          rollouts_per_group: 64
-     task2job:
+     sample2job:
        config:
          job_samples: 512       # the grid: groups_per_step x rollouts_per_group
 
@@ -103,8 +103,8 @@ the grid from the record stage.
    pipeline.record2record.config.groups_per_step | 8 | comparison groups in one step; at least one.
    pipeline.record2record.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
    pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
-   pipeline.record2task.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
-   pipeline.task2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
+   pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
 
 ``TTTDJobData`` reads only ``job_samples`` and ``buffer_size``. One job's data
 is always one complete grid. ``job_samples`` must not exceed the grid's
@@ -240,7 +240,7 @@ The grid has one source in ``serve.yaml``: ``pipeline.record2record.config``.
 The harness reads the same ``groups_per_step`` and ``rollouts_per_group``
 values, and ``steps`` and ``max_new_tokens`` from ``training.config``, when it
 starts. Slime's ``--global-batch-size`` and
-``pipeline.task2job.config.job_samples`` in that file must equal
+``pipeline.sample2job.config.job_samples`` in that file must equal
 ``groups_per_step x rollouts_per_group``.
 
 .. config::

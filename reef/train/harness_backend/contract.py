@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest
@@ -209,7 +209,7 @@ class ProposalContext:
     step: int
     tree: HarnessTree
     descriptor: AdapterDescriptor
-    samples: tuple[TrajectoryItem, ...]
+    samples: tuple[TrajectorySample, ...]
     sources: tuple[SampleSource, ...]
     request: TrainingRequest | None
     evaluation_tasks: tuple[str, ...]
@@ -292,7 +292,7 @@ class Promoter(ConfiguredPlugin, ABC):
 
     @abstractmethod
     def promote(
-        self, samples: tuple[TrajectoryItem, ...], *, manifest: FailureManifest | None = None
+        self, samples: tuple[TrajectorySample, ...], *, manifest: FailureManifest | None = None
     ) -> Sequence[str]:
         """The prompts this step should promote into the evaluation tasks."""
 

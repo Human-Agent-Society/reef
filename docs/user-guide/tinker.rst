@@ -78,7 +78,7 @@ a release names. Each job starts from the scenario's last saved checkpoint,
 which ``state-dir`` keeps across restarts.
 
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
-one optimizer step. ``pipeline.task2job.config.job_samples`` is the job size:
+one optimizer step. ``pipeline.sample2job.config.job_samples`` is the job size:
 the training pipeline submits a job when it holds this many samples. Set it
 to the batch size, so that one job is one optimizer step. Job data takes whole
 record sets, so it can hold more; the component then cuts it into optimizer

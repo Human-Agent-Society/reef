@@ -28,7 +28,7 @@ SFT = LearningRateSchedule("sft", 2e-5, warmup_steps=4, decay_style="cosine", de
 RL = LearningRateSchedule("rl", 1e-6, warmup_steps=2)
 #: The staged recipe's stages with jobs of one sample.
 ONE_SAMPLE_JOBS = PipelineConfig.from_setting(
-    {"task2job": {"config": {"job_samples": 1}}}, spec=StagedRecipe.pipeline_spec(), environ={}
+    {"sample2job": {"config": {"job_samples": 1}}}, spec=StagedRecipe.pipeline_spec(), environ={}
 )
 
 

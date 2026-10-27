@@ -100,10 +100,11 @@ The context
 | ``descriptor``       | The adapter the tree renders for: the kinds and config targets a tree  |
 |                      | may hold there.                                                        |
 +----------------------+------------------------------------------------------------------------+
-| ``samples``          | The step's trace samples (ATIF ``TrajectoryItem`` values) in the order |
-|                      | of its job data. Read the reward and feedback from ``sample.metadata`` |
-|                      | (``reward`` is absent for unscored traffic) and the original provider  |
-|                      | exchanges with ``reef.core.trajectories.recorded_payloads``.           |
+| ``samples``          | The step's trace samples (ATIF ``TrajectorySample`` values) in the     |
+|                      | order of its job data. Read the reward and feedback from               |
+|                      | ``sample.metadata`` (``reward`` is absent for unscored traffic) and    |
+|                      | the original provider exchanges with                                   |
+|                      | ``reef.core.trajectories.recorded_payloads``.                          |
 +----------------------+------------------------------------------------------------------------+
 | ``sources``          | One ``SampleSource`` per sample, in sample order. See                  |
 |                      | `Untrusted input`_.                                                    |
@@ -436,7 +437,7 @@ Two trace sources
 ~~~~~~~~~~~~~~~~~
 
 The deployment's ``pipeline`` section selects the source of each step's
-traces. ``pipeline.task2job.config.job_samples`` sets the number of traces
+traces. ``pipeline.sample2job.config.job_samples`` sets the number of traces
 in one step. Without it, ``recipe.config.evolution.batch_size`` (default 1)
 gives the number.
 
@@ -452,8 +453,8 @@ gives the number.
      pipeline:
        record2record:
          module: reef.record2record:InferenceRecord2Record
-       record2task:
-         module: reef.record2task.traces:InferenceTasks
+       record2sample:
+         module: reef.record2sample.traces:InferenceSamples
 
 Package a method
 ----------------

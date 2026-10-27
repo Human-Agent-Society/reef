@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from recipes.beta.reefine.harness_facts import harness_facts
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest
@@ -604,7 +604,7 @@ class RequestAnswers:
 def answer_request(
     tree: HarnessTree,
     request: TrainingRequest,
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     adapter: str = EXTENSION_ADAPTER,
 ) -> TreeProposal:
@@ -885,7 +885,7 @@ def client_text(request: TrainingRequest) -> str:
 def request_prompt(
     tree: HarnessTree,
     request: TrainingRequest,
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     adapter: str = EXTENSION_ADAPTER,
 ) -> str:
@@ -1140,7 +1140,7 @@ def max_tokens(default: int) -> int:
         return default
 
 
-def failures_text(samples: Sequence[TrajectoryItem]) -> str:
+def failures_text(samples: Sequence[TrajectorySample]) -> str:
     """The failing samples as the proposer reads them: one object per sample with the request as served, the
     score its report gave and the report's feedback verbatim (``null`` when the report carried none)."""
     views = [
@@ -1311,7 +1311,7 @@ def open_brackets(text: str) -> int:
 
 
 def learn_from_failures(
-    tree: HarnessTree, samples: Sequence[TrajectoryItem], models: ModelBindings
+    tree: HarnessTree, samples: Sequence[TrajectorySample], models: ModelBindings
 ) -> TreeProposal | None:
     """One improved or new skill from the step's failing reports; ``None`` when the call fails or the reply holds
     no skill, and the reason goes to the log alone."""

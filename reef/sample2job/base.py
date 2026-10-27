@@ -1,12 +1,12 @@
-"""The task-to-job contract: a buffer of samples, and the samples of the selected record set units become one job's data.
+"""The sample-to-job contract: a buffer of samples, and the samples of the selected record set units become one job's data.
 
-The tasks of a record set enter the stage as samples when the record-to-task
-stage makes them. The buffer holds the samples of the record sets that wait
-for a job, at most ``buffer_size``. When the buffer holds at least
+The record-to-sample stage makes the samples of each record set. The buffer
+holds the samples of the record sets that wait for a job, at most
+``buffer_size``. When the buffer holds at least
 ``job_samples`` samples, the trainer asks the training pipeline
 (:class:`~reef.train.pipeline.TrainingPipeline`) for the next job's data. The
 pipeline selects whole record set units from the record-to-record stage and
-gives their samples to a recipe's ``Task2Job``. A task is a ``TrainDataItem``.
+gives their samples to a recipe's ``Sample2Job``. A sample is a ``Sample``.
 """
 
 from __future__ import annotations
@@ -17,15 +17,15 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, JobOutcome, TrainDataItem
+from reef.core.job_data import JobData, JobOutcome, Sample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
-from reef.record2task import Record2Task
+from reef.record2sample import Record2Sample
 
-#: The jobs whose data the sample buffer holds when ``pipeline.task2job.config.buffer_size`` is not set.
+#: The jobs whose data the sample buffer holds when ``pipeline.sample2job.config.buffer_size`` is not set.
 DEFAULT_BUFFER_JOBS = 4
 
 
@@ -36,14 +36,14 @@ def require_optional_positive(value: object, name: str) -> None:
 
 
 @dataclass(frozen=True)
-class Task2JobSettings(PluginSettings):
-    """The config of a task-to-job stage: the size of its sample buffer and the fewest samples of one job.
+class Sample2JobSettings(PluginSettings):
+    """The config of a sample-to-job stage: the size of its sample buffer and the fewest samples of one job.
 
     Values: ``buffer_size`` and ``job_samples`` are each None or a positive
     int. The constructor refuses other values.
     Purpose: a stage's ``from_config`` parses it from
-    ``pipeline.task2job.config`` and gives both fields to
-    ``Task2Job.__init__``, where None means the default. A stage settings
+    ``pipeline.sample2job.config`` and gives both fields to
+    ``Sample2Job.__init__``, where None means the default. A stage settings
     class that has more keys extends it.
     """
 
@@ -64,8 +64,8 @@ class Task2JobSettings(PluginSettings):
         require_optional_positive(self.job_samples, "job_samples")
 
 
-class Task2Job(ABC, Plugin):
-    """The task-to-job stage: bound the sample buffer, and shape the samples of the selected record set units into one job's data.
+class Sample2Job(ABC, Plugin):
+    """The sample-to-job stage: bound the sample buffer, and shape the samples of the selected record set units into one job's data.
 
     Values: for a stage that ``trains_own_job_data_only``, ``job_samples`` and
     ``buffer_size`` are None: its jobs are its own samples, which wait in the
@@ -85,7 +85,7 @@ class Task2Job(ABC, Plugin):
     A recipe implements ``make_job_data``. It runs on the trainer thread
     without network or model calls. The class attributes declare what the
     pipeline and the trainer need to know about the recipe's job data.
-    A deployment names a stage class in ``pipeline.task2job`` and gives its
+    A deployment names a stage class in ``pipeline.sample2job`` and gives its
     config. The class parses the config into its settings dataclass and
     builds the stage in ``from_config``.
     """
@@ -159,12 +159,12 @@ class Task2Job(ABC, Plugin):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         """Build the stage of one scenario from its config.
 
-        ``record2record`` and ``record2task`` are the scenario's earlier stages, built first.
+        ``record2record`` and ``record2sample`` are the scenario's earlier stages, built first.
         ``environ`` holds the environment the deployment was read with.
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
@@ -175,17 +175,17 @@ class Task2Job(ABC, Plugin):
         return self.context.experiment_logger
 
     @abstractmethod
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        """Build one job's data from the tasks of the selected record sets, in selection order.
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        """Build one job's data from the samples of the selected record sets, in selection order.
 
         Use ``data_id`` as the ID of the returned value. The pipeline assigns
         it. Automatic job data gets ``<scenario>:data:<number>``. An
         instruction's data gets ``<scenario>:instruction:<request id>``. The
         number counts the job data of this pipeline and starts again when the
         pipeline restarts. It is not a training step.
-        The pipeline tracks consumption by record set, including the tasks
+        The pipeline tracks consumption by record set, including the samples
         that the recipe leaves out of the job data. In ``manual`` mode an
-        instruction's data has no tasks.
+        instruction's data has no samples.
         """
 
     # A stage may also make samples itself, from no record, and train them as one job of its own: the
@@ -195,7 +195,7 @@ class Task2Job(ABC, Plugin):
         """Advance the stage's own work on the trainer thread, such as starting the next rollout. The default does nothing."""
         return
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         """Return samples that the stage made itself and that train now as one job, or None.
 
         While the value is not None, the pipeline is ready and its next job data holds exactly these samples. It
@@ -237,7 +237,7 @@ class Task2Job(ABC, Plugin):
         return
 
 
-class NoJobData(Task2Job):
+class NoJobData(Sample2Job):
     """Make no job data: the no-update default. A pipeline with it never becomes ready."""
 
     @classmethod
@@ -247,7 +247,7 @@ class NoJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         NoSettings.parse(config, plugin_class=cls)
@@ -256,5 +256,5 @@ class NoJobData(Task2Job):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, None, None)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         raise RuntimeError(f"scenario {self.scenario!r} trains no weights and never produces job data")

@@ -303,11 +303,11 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
     )
-    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2job``.
+    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2job, each with module and "
+            "Pipeline stages as a JSON/YAML object: record2record, record2sample and sample2job, each with module and "
             "config.",
             path=("pipeline",),
         ),

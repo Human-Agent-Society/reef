@@ -52,11 +52,11 @@ pipeline:
     config:
       max_staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
   # The teacher's tokenizer and window.
-  record2task:
+  record2sample:
     config:
       tokenizer_path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer
       max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence is skipped and counted
-  task2job:
+  sample2job:
     config:
       # The fewest samples of one job: one optimizer step of Slime's global batch.
       job_samples: ${training.config.global_batch_size}

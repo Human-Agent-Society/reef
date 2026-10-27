@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -240,7 +240,7 @@ class MetaHarnessProposer(Proposer):
         )
 
 
-def traces(samples: Sequence[TrajectoryItem]) -> list[dict[str, Any]]:
+def traces(samples: Sequence[TrajectorySample]) -> list[dict[str, Any]]:
     return [
         {
             "source_agent_record_id": source_record_id(sample),

@@ -22,7 +22,7 @@ from reef.runtime.interfaces import InferenceStream, TrainingMethod
 from reef.service.streaming import stream_record
 from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData, TaskItem, TrajectoryItem, trajectories, trajectory_groups
+from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 
 
 def captured_trajectory(record_id="inference-1", reward=1.0):
@@ -44,7 +44,7 @@ def captured_trajectory(record_id="inference-1", reward=1.0):
 
 
 def atif_item():
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.7",
             "session_id": "episode-1",
@@ -59,9 +59,9 @@ def atif_item():
 
 
 def test_mixed_items_survive_worker_serialization():
-    batch = JobData("mixed", (captured_trajectory(), TaskItem(Path("tasks/example")), atif_item()))
+    batch = JobData("mixed", (captured_trajectory(), TaskSample(Path("tasks/example")), atif_item()))
     assert pickle.loads(pickle.dumps(batch)) == batch
-    assert isinstance(batch.items[1], TaskItem)
+    assert isinstance(batch.samples[1], TaskSample)
 
 
 #: The step schedule of a job without a ``scheduling`` parameter, as the cookbook recipes submit them.
@@ -80,7 +80,7 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     assert prepare_slime_job(
         loaded, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE
     ) == prepare_slime_job(original, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
-    assert loaded.items[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
+    assert loaded.samples[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
 
 
 def test_harness_projection_reads_external_atif_without_reef_records():
@@ -96,7 +96,7 @@ def test_original_provider_payloads_and_feedback_survive_json_roundtrip():
     first = {"messages": [{"role": "user", "content": "hi"}], "provider_specific": {"opaque": [1, 2]}}
     last = {"messages": [{"role": "user", "content": "next"}], "response": {"content": "done"}}
     item = recorded_trajectory("record", last, 0.0, {"detail": "feedback"}, (first, last))
-    loaded = TrajectoryItem(json.loads(json.dumps(item.trajectory)))
+    loaded = TrajectorySample(json.loads(json.dumps(item.trajectory)))
     assert recorded_payloads(loaded) == (first, last)
     assert recorded_payload(loaded) == last
     assert loaded.metadata["feedback"] == {"detail": "feedback"}
@@ -131,7 +131,7 @@ def test_completed_stream_messages_survive_multiturn_atif_conversion(provider: s
         messages.append({"role": "assistant", "content": answer})
 
     item = make_trajectory(records, reward=1.0)
-    loaded = TrajectoryItem(json.loads(json.dumps(item.trajectory)))
+    loaded = TrajectorySample(json.loads(json.dumps(item.trajectory)))
 
     assert [(step["source"], step["message"]) for step in loaded.trajectory["steps"]] == [
         ("user", "First question"),
@@ -162,12 +162,12 @@ def test_training_response_message_takes_precedence_over_stream_summary() -> Non
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
 def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(algorithm):
-    batch = JobData("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
+    batch = JobData("mixed", (replace(captured_trajectory(), group_id="a"), TaskSample(Path("tasks/example"))))
     state = {"steps": 3}
-    with pytest.raises(TypeError, match="unsupported item 1"):
+    with pytest.raises(TypeError, match="unsupported sample 1"):
         prepare_slime_job(batch, TrainingMethod(algorithm), state, SCHEDULING, step_size=STEP_SIZE)
     assert state == {"steps": 3}
-    assert isinstance(batch.items[1], TaskItem)
+    assert isinstance(batch.samples[1], TaskSample)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
@@ -210,8 +210,8 @@ def test_noncontiguous_groups_fail_before_misaligned_training():
 
 def test_non_atif_payloads_are_not_accepted_as_trajectories():
     with pytest.raises(TypeError, match="ATIF"):
-        TrajectoryItem(object())
-    with pytest.raises(TypeError, match="TrajectoryItem or TaskItem"):
+        TrajectorySample(object())
+    with pytest.raises(TypeError, match="TrajectorySample or TaskSample"):
         JobData("invalid", ({"tokens": [1]},))
 
 
@@ -224,22 +224,22 @@ def test_request_only_batch_preserves_manual_training_contract():
 
 def test_report_processor_reserves_and_acknowledges_mixed_data():
     from reef.pipeline_context import PipelineContext
-    from reef.record2task import ReportTasks
-    from reef.task2job import Task2Job
+    from reef.record2sample import ReportSamples
+    from reef.sample2job import Sample2Job
     from reef.train.pipeline import TrainingPipeline
 
-    class MixedTasks(ReportTasks):
+    class MixedTasks(ReportSamples):
         def make_sample(self, context):
             source = context.inferences[0]
             return (
-                TaskItem(Path(source.payload["task_path"]))
+                TaskSample(Path(source.payload["task_path"]))
                 if "task_path" in source.payload
                 else make_trajectory(context.inferences)
             )
 
-    class MixedJobData(Task2Job):
-        def make_job_data(self, tasks, data_id):
-            return JobData(data_id, tasks)
+    class MixedJobData(Sample2Job):
+        def make_job_data(self, samples, data_id):
+            return JobData(data_id, samples)
 
     from reef.record2record import ReportGrouping, ReportRecord2Record
 
@@ -247,8 +247,8 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
     processor = TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ReportGrouping(), exclusive_sources=True),
-        record2task=MixedTasks(),
-        task2job=MixedJobData(context, None, None),
+        record2sample=MixedTasks(),
+        sample2job=MixedJobData(context, None, None),
     )
     for index, payload in enumerate(
         ({"messages": [{"role": "user", "content": "hi"}]}, {"task_path": "tasks/example"})
@@ -271,8 +271,8 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
         )
     batch = processor.build_job_data(2)
     assert processor.build_job_data(2) is batch
-    assert isinstance(batch.items[0], TrajectoryItem)
-    assert isinstance(batch.items[1], TaskItem)
+    assert isinstance(batch.samples[0], TrajectorySample)
+    assert isinstance(batch.samples[1], TaskSample)
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
     assert processor.releasable_record_ids().isdisjoint(ids)
     assert processor.acknowledge(batch.data_id) == ids
@@ -323,7 +323,7 @@ def test_atif_multiturn_tools_preserve_history_observations_and_provider_fields(
     assert steps[1]["observation"]["results"][0]["source_call_id"] == "read-1"
     assert steps[2]["reasoning_content"] == "File read"
     assert "is_copied_context" not in steps[1]
-    assert recorded_payloads(TrajectoryItem(json.loads(json.dumps(item.trajectory)))) == (first, second)
+    assert recorded_payloads(TrajectorySample(json.loads(json.dumps(item.trajectory)))) == (first, second)
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "responses"])
@@ -404,7 +404,7 @@ def test_external_atif_projection_preserves_images_reasoning_and_tool_results():
         },
         {"step_id": 3, "source": "agent", "message": "Done"},
     ]
-    payload = recorded_payload(TrajectoryItem(document))
+    payload = recorded_payload(TrajectorySample(document))
     assert payload["messages"][0]["content"][1] == {
         "type": "image_url",
         "image_url": {"url": "data:image/png;base64,AAAA"},

@@ -140,9 +140,9 @@ def write_fake_sdk(root: Path, model: str) -> Path:
 
 
 def training_item(version: str, index: int):
-    from reef.core.job_data import TrajectoryItem
+    from reef.core.job_data import TrajectorySample
 
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": "test"},
@@ -227,7 +227,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "pipeline": {
             "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
-            "task2job": {"config": {"job_samples": 4}},
+            "sample2job": {"config": {"job_samples": 4}},
         },
         "inference": {
             "model-path": MODEL,

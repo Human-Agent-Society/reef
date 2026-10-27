@@ -13,11 +13,11 @@ import mimetypes
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 
 
-def source_record_id(item: TrajectoryItem) -> str:
+def source_record_id(item: TrajectorySample) -> str:
     """The primary recorded source, or the identity of an imported ATIF document."""
     return str(
         item.metadata.get("source_agent_record_id")
@@ -27,7 +27,7 @@ def source_record_id(item: TrajectoryItem) -> str:
     )
 
 
-def trajectory_reward(item: TrajectoryItem) -> float:
+def trajectory_reward(item: TrajectorySample) -> float:
     """Read the finite reward required by a policy objective."""
     reward = item.metadata.get("reward")
     if isinstance(reward, bool) or not isinstance(reward, (float, int)) or not math.isfinite(reward):
@@ -35,7 +35,7 @@ def trajectory_reward(item: TrajectoryItem) -> float:
     return float(reward)
 
 
-def recorded_payloads(item: TrajectoryItem) -> tuple[Mapping[str, Any], ...]:
+def recorded_payloads(item: TrajectorySample) -> tuple[Mapping[str, Any], ...]:
     """Read every original provider exchange, in reference order.
 
     Imported ATIF without captured records is projected into one exchange for
@@ -55,7 +55,7 @@ def recorded_payloads(item: TrajectoryItem) -> tuple[Mapping[str, Any], ...]:
     return tuple(payloads)
 
 
-def recorded_payload(item: TrajectoryItem) -> Mapping[str, Any]:
+def recorded_payload(item: TrajectorySample) -> Mapping[str, Any]:
     """The last captured exchange, retaining the original provider request body."""
     return recorded_payloads(item)[-1]
 
@@ -64,7 +64,7 @@ def make_trajectory(
     records: Sequence[AgentRecord],
     reward: float | None = None,
     feedback: str | Mapping[str, Any] | None = None,
-) -> TrajectoryItem:
+) -> TrajectorySample:
     """Encode ordered inference records as ATIF, retaining all raw provider fields."""
     if not records:
         raise ValueError("an ATIF trajectory requires at least one inference record")
@@ -89,7 +89,7 @@ def make_trajectory(
     model = records[-1].payload.get("model")
     if isinstance(model, str):
         agent["model_name"] = model
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.7",
             "session_id": records[0].agent_record_id,

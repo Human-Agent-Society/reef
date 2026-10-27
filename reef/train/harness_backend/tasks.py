@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.storage.tasks import TaskStore
@@ -23,7 +23,7 @@ from reef.train.harness_backend.manifest import FailureManifest
 from reef.train.harness_backend.state import HarnessState
 
 
-def prompt_of(sample: TrajectoryItem) -> str | None:
+def prompt_of(sample: TrajectorySample) -> str | None:
     """The trace's last user message, the prompt an evaluation would run; ``None`` for a tool-only turn."""
     messages = recorded_payload(sample).get("messages")
     if not isinstance(messages, Sequence):
@@ -43,7 +43,7 @@ def prompt_of(sample: TrajectoryItem) -> str | None:
     return None
 
 
-def source_of(sample: TrajectoryItem) -> SampleSource:
+def source_of(sample: TrajectorySample) -> SampleSource:
     """Where a sample came from: its record and its client's tag (``x-reef-tag-client``, else the session tag)."""
     metadata = recorded_payload(sample).get("metadata")
     tags = metadata.get("tags") if isinstance(metadata, Mapping) else None
@@ -111,7 +111,7 @@ class EvaluationTasks:
         return tuple(str(self.task_store.path(task.files_digest)) for task in self.task_store.tasks(split="eval"))
 
     def for_step(
-        self, samples: tuple[TrajectoryItem, ...], state: HarnessState, manifest: FailureManifest | None
+        self, samples: tuple[TrajectorySample, ...], state: HarnessState, manifest: FailureManifest | None
     ) -> StepTasks:
         """The tasks this step evaluates, after promoting this step's prompts when promotion is on."""
         seed = self.seed()

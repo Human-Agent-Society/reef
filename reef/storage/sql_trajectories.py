@@ -27,7 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import RowMapping
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 from reef.storage.trajectories import StoredTrajectory, TrajectoryConflict, TrajectoryStore
 
@@ -71,7 +71,7 @@ class SQLTrajectoryStore(TrajectoryStore):
         self.records = records
         self.table = table
 
-    def add(self, trajectories: tuple[tuple[str, TrajectoryItem], ...]) -> bool:
+    def add(self, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
         rows = []
         for trajectory_id, trajectory in trajectories:
             if not isinstance(trajectory_id, str) or not trajectory_id.strip():
@@ -138,7 +138,7 @@ class SQLTrajectoryStore(TrajectoryStore):
 def stored_trajectory(row: RowMapping) -> StoredTrajectory:
     """Return the stored trajectory of one table row."""
     content = json.loads(row["content_json"])
-    trajectory = TrajectoryItem(
+    trajectory = TrajectorySample(
         content["trajectory"],
         group_id=content["group_id"],
         source_agent_record_ids=tuple(content["source_agent_record_ids"]),
