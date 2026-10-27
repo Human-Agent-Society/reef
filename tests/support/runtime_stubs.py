@@ -29,7 +29,8 @@ class StubTrainingComponent(TrainingComponent):
     in submission order and ``imported`` the releases given to
     :meth:`import_start`. ``shares_scenarios`` is what the component reports
     for :attr:`TrainingComponent.shares_scenarios`, and ``release_format`` for
-    :attr:`TrainingComponent.release_format` (full weights by default).
+    :attr:`TrainingComponent.release_format` (full weights by default). Like
+    the Tinker component, it runs task jobs that carry a ``rollout`` object.
     """
 
     def __init__(
@@ -60,6 +61,10 @@ class StubTrainingComponent(TrainingComponent):
     @property
     def release_format(self) -> ReleaseFormat | None:
         return self.releases
+
+    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
+        if not isinstance(parameters.get("rollout"), Mapping):
+            raise ValueError("a task job needs the rollout parameter as an object")
 
     def import_start(self, release: Path) -> str | None:
         self.imported.append(release)

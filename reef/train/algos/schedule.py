@@ -15,6 +15,7 @@ import random
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any, Literal
 
 from reef.core.job_data import JobData, trajectories
@@ -29,9 +30,9 @@ class StepScheduling:
     """The passes over one job's data, the packing of its rollouts, and the handling of a partial last step.
 
     ``epochs`` is a positive int: the job trains all of its data that many
-    times, each pass its own run of optimizer steps. The reference and
-    old-policy log-probs are computed once, before the first pass, so only an
-    objective with ``supports_multiple_epochs`` accepts more than one.
+    times, each pass its own run of optimizer steps. Only an objective with
+    ``supports_multiple_epochs``, whose loss stays valid when it trains the
+    same rollouts again, accepts more than one.
     ``shuffle`` reorders the rollouts in every pass, deterministically from the
     data's rows. ``remainder`` decides what happens when a pass's rollout
     count is not a multiple of the step size: ``"partial"`` trains the tail as
@@ -104,13 +105,18 @@ class MaterializedSchedule:
     is its step-grouping id: the rollouts are numbered 0, 1, ... in emission
     order, distinct per epoch, so every epoch's copy of a rollout is scheduled
     on its own. ``step_sizes`` is the rollout count of every optimizer step in
-    order; it is not empty, and step ``k`` holds the rollouts with ids from
-    ``sum(step_sizes[:k])`` up to ``sum(step_sizes[:k + 1])``. Its sum is
-    ``epochs * rollouts_per_epoch``. ``dropped_rollouts`` is the tail that
-    ``remainder="drop"`` left out of each epoch, and ``tail_rollouts`` the
-    rollouts of each epoch's partial last step under ``remainder="partial"``
-    (0 when every step is full). ``materialize_schedule`` makes the value; a
-    component turns it into its wire rows.
+    order; it is not empty, each entry is positive, and step ``k`` holds the
+    rollouts with ids from ``sum(step_sizes[:k])`` up to
+    ``sum(step_sizes[:k + 1])``. Its sum is ``epochs * rollouts_per_epoch``,
+    with ``epochs`` and ``rollouts_per_epoch`` positive. ``row_indices`` and
+    ``rollout_ids`` have one non-negative entry per emitted row, and
+    ``rollout_ids`` starts at 0 and grows by 0 or 1 per row up to the last
+    rollout, so every rollout has a row. ``dropped_rollouts`` is the
+    non-negative tail that ``remainder="drop"`` left out of each epoch, and
+    ``tail_rollouts`` the rollouts of each epoch's partial last step under
+    ``remainder="partial"``: the last step's size, or 0 when every step is
+    full. The constructor checks these conditions. ``materialize_schedule``
+    makes the value; a component turns it into its wire rows.
     """
 
     row_indices: tuple[int, ...]
@@ -120,6 +126,27 @@ class MaterializedSchedule:
     rollouts_per_epoch: int
     dropped_rollouts: int
     tail_rollouts: int
+
+    def __post_init__(self) -> None:
+        if self.epochs <= 0 or self.rollouts_per_epoch <= 0 or self.dropped_rollouts < 0:
+            raise ValueError("a schedule has positive epochs and rollouts per epoch, and non-negative drops")
+        if not self.step_sizes or any(size <= 0 for size in self.step_sizes):
+            raise ValueError("a schedule has one or more optimizer steps, each of one or more rollouts")
+        rollouts = sum(self.step_sizes)
+        if rollouts != self.epochs * self.rollouts_per_epoch:
+            raise ValueError("a schedule's steps hold every rollout of every epoch")
+        if self.tail_rollouts not in (0, self.step_sizes[-1]):
+            raise ValueError("a schedule's tail is its last step, or 0")
+        ids = self.rollout_ids
+        if len(self.row_indices) != len(ids) or any(row < 0 for row in self.row_indices):
+            raise ValueError("a schedule has one non-negative source row per rollout id")
+        if (
+            not ids
+            or ids[0] != 0
+            or ids[-1] != rollouts - 1
+            or any(later - earlier not in (0, 1) for earlier, later in pairwise(ids))
+        ):
+            raise ValueError("a schedule numbers its rollouts 0, 1, ... in emission order, each with a row")
 
     @property
     def optimizer_steps(self) -> int:

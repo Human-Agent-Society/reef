@@ -46,6 +46,7 @@ def scenario_double(
         pipeline=pipeline,
         trains=True,
         job_running=job_running,
+        needs_polling=lambda: job_running or background_jobs_running,
         job_loop=job_loop,
         state={} if state is None else state,
         job_data_ready=lambda: job_data_ready,

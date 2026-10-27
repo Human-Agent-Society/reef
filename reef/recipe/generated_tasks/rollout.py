@@ -107,3 +107,22 @@ class HandedOutTasks:
     def __post_init__(self) -> None:
         if len(self.task_uses) != len(self.tasks) or len(set(self.task_uses)) != len(self.task_uses):
             raise ValueError("handed-out tasks have one distinct task use for each task")
+
+
+@dataclass(frozen=True)
+class SubmittedTaskJob:
+    """The tasks of one submitted task job, until the commit of its submission is durable.
+
+    Values: ``task_names`` are the distinct, non-empty names of the job's tasks, and ``consumed_ids`` the
+    non-empty IDs that the submission's commit lists for them. Purpose: ``GeneratedTaskJobData`` makes it when
+    the submission commits, and marks ``task_names`` trained once one of ``consumed_ids`` is released.
+    """
+
+    task_names: tuple[str, ...]
+    consumed_ids: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not self.task_names or len(set(self.task_names)) != len(self.task_names) or not all(self.task_names):
+            raise ValueError("a submitted task job has distinct, non-empty task names")
+        if not self.consumed_ids:
+            raise ValueError("a submitted task job's commit lists one or more IDs")

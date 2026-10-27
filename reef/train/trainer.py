@@ -22,7 +22,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
-from reef.core.job_data import JobOutcome
+from reef.core.job_data import JobOutcome, TrajectoryItem
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -249,7 +249,7 @@ class Trainer:
             values["records/oldest_unread_age_seconds"] = (
                 max(0.0, time.time() - oldest[0][1].created_at) if oldest else 0.0
             )
-            values["training/reserved_job_data"] = int(self._pending is not None)
+            values["training/reserved_job_data"] = int(self._pending is not None and self._pending.data is not None)
             values["training/auto_enabled"] = int(self._pipeline.training_mode in {"auto", "hybrid"})
             pipeline_metrics = {
                 **self._pipeline.status(),
@@ -328,6 +328,24 @@ class Trainer:
         with self._lock:
             return self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
 
+    def needs_polling(self) -> bool:
+        """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
+
+        Otherwise the worker sleeps until the next accepted record.
+        """
+        with self._lock:
+            job_running = self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
+            return job_running or self._pipeline.background_jobs_running()
+
+    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+        """The training sample of an uploaded trajectory (``TrainingPipeline.uploaded_sample``), under the lock.
+
+        Admission calls it from a request thread; the lock keeps the pipeline's stages, such as a tokenizer,
+        to one thread at a time.
+        """
+        with self._lock:
+            return self._pipeline.uploaded_sample(trajectory)
+
     @property
     def candidate_evaluator(self) -> CandidateEvaluationPlugin | None:
         """The external or built-in candidate evaluator, when training."""
@@ -363,9 +381,9 @@ class Trainer:
             return None if self._pending is None else self._pending.data
 
     def job_data_ready(self) -> bool:
-        """Whether reserved or buildable job data is waiting on the training thread."""
+        """Whether reserved or buildable job data is waiting; a pending job commit holds no job data."""
         with self._lock:
-            return self._pending is not None or self.pipeline_ready()
+            return (self._pending is not None and self._pending.data is not None) or self.pipeline_ready()
 
     def holds_untrained_records(self) -> bool:
         """Whether this trainer has records that its backend would still train on.

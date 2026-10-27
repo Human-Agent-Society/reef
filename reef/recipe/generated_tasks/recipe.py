@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 
 from reef.core.reports import ReportBase, ScoredRolloutReport
@@ -41,11 +40,13 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance((self.job_parameters or {}).get("rollout"), Mapping):
+        try:
+            self.training_component.check_task_jobs(self.job_parameters or {})
+        except ValueError as exc:
             raise RecipeConfigError(
-                "the generated-task recipe trains task jobs: set recipe.config.job_parameters.rollout "
-                "(the episodes of each task and the agent that runs them)"
-            )
+                "the generated-task recipe trains task jobs, whose recipe.config.job_parameters.rollout names the "
+                f"episodes of each task and the agent that runs them: {exc}"
+            ) from exc
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:

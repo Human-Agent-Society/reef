@@ -53,7 +53,13 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
-from reef.recipe.generated_tasks.rollout import HandedOutTasks, PooledTask, TaskPool, consumed_rollout_id
+from reef.recipe.generated_tasks.rollout import (
+    HandedOutTasks,
+    PooledTask,
+    SubmittedTaskJob,
+    TaskPool,
+    consumed_rollout_id,
+)
 from reef.record2record import (
     Record2Record,
     Record2RecordSettings,
@@ -1025,9 +1031,9 @@ class GeneratedTaskJobData(Task2Job):
                 self.task_pool.add(stored.name, task_item(store, generation, stored), group_key=generation)
         #: The tasks of the next job, from hand-out until the trainer commits the job's submission.
         self.handed_out: HandedOutTasks | None = None
-        #: The task uses of each submitted job, with the IDs that its commit lists. The tasks are marked
-        #: trained when those IDs are released, after the commit is durable.
-        self.trained_rollouts: list[tuple[str, tuple[str, ...], frozenset[str]]] = []
+        #: The submitted jobs whose submission's commit is not yet durable. Their tasks are marked trained when
+        #: one of the IDs that the commit lists is released.
+        self.trained_rollouts: list[SubmittedTaskJob] = []
         #: The tasks of the jobs submitted in this process that did not end; they leave the pool at the end.
         self.submitted_tasks: tuple[PooledTask, ...] = ()
 
@@ -1055,19 +1061,17 @@ class GeneratedTaskJobData(Task2Job):
         if handed_out is None:
             raise RuntimeError("no tasks were handed out")
         ids = frozenset(consumed_rollout_id(task_use) for task_use in handed_out.task_uses)
-        self.trained_rollouts.append((handed_out.batch, handed_out.task_uses, ids))
+        self.trained_rollouts.append(SubmittedTaskJob(tuple(task_name_of(task) for task in handed_out.tasks), ids))
         self.submitted_tasks = (*self.submitted_tasks, *handed_out.tasks)
         self.handed_out = None
         return ids
 
     def release_own_ids(self, ids: frozenset[str]) -> None:
-        durable = [entry for entry in self.trained_rollouts if entry[2] & ids]
-        for _, trained_uses, _ in durable:
+        durable = [job for job in self.trained_rollouts if job.consumed_ids & ids]
+        for job in durable:
             if self.record2task.task_store is not None:
-                self.record2task.task_store.mark_trained(
-                    task_names=tuple(task_use.rsplit("/", 1)[1] for task_use in trained_uses)
-                )
-        self.trained_rollouts = [entry for entry in self.trained_rollouts if entry not in durable]
+                self.record2task.task_store.mark_trained(task_names=job.task_names)
+        self.trained_rollouts = [job for job in self.trained_rollouts if job not in durable]
 
     def job_ended(self, outcome: JobOutcome) -> None:
         """Save a result for each trained task without one: its rewards in the job's ``rollout_rewards``, or why

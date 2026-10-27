@@ -8,6 +8,7 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 
 from reef.train.algos.schedule import (
+    MaterializedSchedule,
     StepScheduling,
     materialize_schedule,
     pack_rollouts,
@@ -214,3 +215,27 @@ def test_packing_counts_the_tokens_of_each_trajectory() -> None:
 
     # 8 tokens and 2 tokens do not fit in 9: the long trajectory is a pack alone, and the three short ones share one.
     assert schedule.step_sizes == (1, 3)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"step_sizes": ()}, "one or more optimizer steps"),
+        ({"step_sizes": (2, 2)}, "every rollout of every epoch"),
+        ({"tail_rollouts": 2}, "its last step, or 0"),
+        ({"rollout_ids": (0, 1)}, "one non-negative source row"),
+        ({"rollout_ids": (0, 2, 2)}, "numbers its rollouts"),
+    ],
+)
+def test_a_schedule_refuses_values_outside_its_definition(changes, message) -> None:
+    valid = MaterializedSchedule(
+        row_indices=(0, 1, 2),
+        rollout_ids=(0, 1, 2),
+        step_sizes=(2, 1),
+        epochs=1,
+        rollouts_per_epoch=3,
+        dropped_rollouts=0,
+        tail_rollouts=1,
+    )
+    with pytest.raises(ValueError, match=message):
+        replace(valid, **changes)

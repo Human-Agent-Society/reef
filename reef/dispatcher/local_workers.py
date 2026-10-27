@@ -113,7 +113,7 @@ class LocalTrainingWorkers:
     def wait(self, scenario: str, component: str | None, ready: Event) -> bool:
         current = self.registry.get_optional(scenario)
         trainer = None if current is None else current.trainer_for(component)
-        polling = trainer is not None and (trainer.job_running or trainer.pipeline.background_jobs_running())
+        polling = trainer is not None and trainer.needs_polling()
         ready.wait(timeout=POLL_SECONDS if polling else None)
         ready.clear()
         with self.lock:

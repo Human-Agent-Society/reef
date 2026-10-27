@@ -208,15 +208,20 @@ class TinkerTrainingComponent(LocalJobComponent):
         if tasks and len(tasks) != len(job.data.items):
             raise ValueError("a Tinker job trains either trajectories or tasks, not both")
         if tasks:
-            if self._sampler is None:
-                raise ValueError("this Tinker component has no sampler, so it cannot roll tasks out")
-            if parameters.rollout is None:
-                raise ValueError("a task job needs the rollout parameter as an object")
+            self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
                 raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
         elif parameters.rollout is not None:
             raise ValueError("the rollout parameter applies only to a job of tasks")
+
+    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
+        """A task job rolls its tasks out on this component's sampler, as the ``rollout`` parameter says."""
+        if self._sampler is None:
+            raise ValueError("this Tinker component has no sampler, so it cannot roll tasks out")
+        if parameters.get("rollout") is None:
+            raise ValueError("a task job needs the rollout parameter as an object")
+        RolloutSettings.from_parameters(parameters)
 
     def close_resources(self) -> None:
         try:

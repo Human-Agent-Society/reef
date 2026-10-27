@@ -174,8 +174,10 @@ class TrainingPipeline:
     trains.
 
     The trainer-facing methods (``push``, ``ready``, ``build_job_data``, and
-    the others) run on the trainer's thread under its lock and must not block
-    on network or model latency. Stages that call models run that work on a
+    the others) run under the trainer's lock, whichever thread calls them (the
+    trainer's worker, admission's ``uploaded_sample``, the worker's
+    ``background_jobs_running``), and must not block on network or model
+    latency. Stages that call models run that work on a
     background worker and release it in ``close``, which the owning scenario
     calls when it drops the pipeline. State that lives only in memory is
     rebuilt after a restart: the trainer replays the records that no committed

@@ -308,8 +308,9 @@ Upload trajectories
 -------------------
 
 Use this route when your data is already a complete ATIF trajectory. An
-uploaded trajectory is not a record. Reef keeps it in the scenario storage and
-gives it directly to the recipe's task-to-job stage. The scenario's recipe
+uploaded trajectory is not a record. Reef keeps it in the scenario storage.
+The recipe's record-to-task stage renders it as a training sample, and the
+task-to-job stage puts it in the next job's data. The scenario's recipe
 must accept uploaded trajectories. If it does not, Reef refuses the upload with
 400. For the recipe side, see
 `Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
