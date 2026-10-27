@@ -1253,8 +1253,9 @@ nothing trains.
 
 On Slime, set ``loss-type: custom_loss``, ``use-rollout-logprobs: true``, and
 ``disable-compute-advantages-and-returns: true`` in ``training.options``. Keep
-``kl-coef`` at 0 and leave ``use-kl-loss`` off: the loss has no KL term, and
-the Slime driver refuses one. See `Loss families
+``kl-coef`` at 0 and leave ``use-kl-loss`` and ``calculate-per-token-loss``
+off: the loss has no KL term and sums over tokens as Tinker does, and the Slime
+driver refuses either flag. See `Loss families
 <../developer-guide/loss-families.rst>`__.
 
 .. code:: yaml

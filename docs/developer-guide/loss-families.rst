@@ -48,25 +48,28 @@ Family to driver flags
 The recipe's ``loss_family`` and the driver's flags must describe the same
 objective; the driver checks it at start and refuses a mismatch.
 
-+---------------------+-----------------------------+----------------------------+
-| Loss family         | ``--loss-type``             | Rollout log-probs          |
-+=====================+=============================+============================+
-| ``sao``             | ``policy_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
-| ``sft``             | ``sft_loss``                | not required               |
-+---------------------+-----------------------------+----------------------------+
-| ``tttd``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
-| ``openclawrl``      | ``custom_loss``             | not required               |
-+---------------------+-----------------------------+----------------------------+
-| ``sdft``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
++---------------------------+-----------------------------+----------------------------+
+| Loss family               | ``--loss-type``             | Rollout log-probs          |
++===========================+=============================+============================+
+| ``sao``                   | ``policy_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+| ``sft``                   | ``sft_loss``                | not required               |
++---------------------------+-----------------------------+----------------------------+
+| ``tttd``                  | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+| ``openclawrl``            | ``custom_loss``             | not required               |
++---------------------------+-----------------------------+----------------------------+
+| ``sdft``                  | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+| ``importance_sampling``   | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
 
-The backend's own ``importance_sampling`` family
-(``reef/train/slime_backend/importance_sampling/``) is Tinker's built-in loss
-of that name. It needs ``--loss-type custom_loss`` and
-``--use-rollout-logprobs``, and refuses a nonzero ``--kl-coef`` and
-``--use-kl-loss``. TTTD's Slime loss is this loss on TTTD's own advantages.
+The ``importance_sampling`` family is the backend's own
+(``reef/train/slime_backend/importance_sampling/``): Tinker's built-in loss of
+that name. It also needs ``--disable-compute-advantages-and-returns``, and
+refuses a nonzero ``--kl-coef``, ``--use-kl-loss`` and
+``--calculate-per-token-loss``. TTTD's Slime loss is this loss on TTTD's own
+advantages.
 
 The spec
 --------

@@ -18,8 +18,8 @@ generator's method:
   their episodes, which are not records.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
-- ``objective``: group relative advantages per task group on Tinker's
-  importance sampling loss.
+- ``objective``: group relative advantages per task group on the
+  ``importance_sampling`` loss, which Tinker and Slime both have.
 - ``recipe``: the objective, the step schedule, and the report contract.
 
 The recipe runs the episodes of its tasks through the generator service (``reef.record2task.generator``).

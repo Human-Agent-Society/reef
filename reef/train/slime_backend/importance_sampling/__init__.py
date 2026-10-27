@@ -38,12 +38,20 @@ class ImportanceSamplingAlgorithm(SlimeAlgorithm):
     advantages = "required"
 
     def validate_specific_args(self, args: Namespace, source: str) -> None:
-        """Raise ``RuntimeError`` when ``args`` sets a KL term, which the loss does not have."""
+        """Raise ``RuntimeError`` when ``args`` sets a KL term, which the loss does not have, or Slime's per-token
+        reduction, which would divide each step's loss by its token count."""
         # With a KL term Slime also loads a reference model that this loss never reads.
         if args.kl_coef or args.use_kl_loss:
             raise RuntimeError(
                 f"{source} trains importance_sampling, which has no KL penalty: "
                 "set --kl-coef 0 and remove --use-kl-loss"
+            )
+        # The loss cancels Slime's division by the step's sample count; the per-token reduction divides by the
+        # step's token count instead, so the step would not match Tinker's.
+        if args.calculate_per_token_loss:
+            raise RuntimeError(
+                f"{source} trains importance_sampling, which sums over tokens as Tinker does: "
+                "omit --calculate-per-token-loss"
             )
 
     def build_rollout_data(self, payload: Mapping[str, object], samples: Sequence[object]) -> dict[str, object]:

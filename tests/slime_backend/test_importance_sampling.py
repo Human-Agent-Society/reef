@@ -46,6 +46,7 @@ def slime_args(**overrides: object) -> Namespace:
         "use_rollout_logprobs": True,
         "kl_coef": 0.0,
         "use_kl_loss": False,
+        "calculate_per_token_loss": False,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -78,6 +79,7 @@ def test_slime_has_the_importance_sampling_family_without_a_method_package() -> 
     [
         ({"kl_coef": 0.1}, "no KL penalty"),
         ({"use_kl_loss": True}, "no KL penalty"),
+        ({"calculate_per_token_loss": True}, "omit --calculate-per-token-loss"),
         ({"use_rollout_logprobs": False}, "--use-rollout-logprobs"),
         ({"loss_type": "policy_loss"}, "--loss-type custom_loss"),
     ],
@@ -195,15 +197,12 @@ def test_slime_and_tinker_give_generated_task_samples_the_same_token_advantages_
 
 
 @pytest.mark.unit
-def test_workers_resolve_the_family_loss_and_tttd_trains_on_the_same_token_loss() -> None:
+def test_workers_resolve_the_family_loss_by_its_objective_path() -> None:
     pytest.importorskip("torch")
-    from recipes.tttd.slime import objective as tttd_objective
     from reef.train.slime_backend.algorithm import resolve_objective_paths
-    from reef.train.slime_backend.importance_sampling import objective
 
     args = Namespace(loss_family="importance_sampling")
     resolve_objective_paths(args)
     assert args.custom_loss_function_path == (
         "reef.train.slime_backend.importance_sampling.objective.importance_sampling_loss"
     )
-    assert tttd_objective.importance_sampling_surrogate is objective.importance_sampling_surrogate

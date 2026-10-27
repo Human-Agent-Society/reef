@@ -9,10 +9,7 @@ from typing import Any
 import torch
 
 from reef.train.slime_backend.algorithm import objective
-from reef.train.slime_backend.importance_sampling.objective import (
-    importance_sampling_loss,
-    importance_sampling_surrogate,
-)
+from reef.train.slime_backend.importance_sampling.objective import importance_sampling_loss
 
 
 @objective("custom_loss_function_path")
@@ -105,4 +102,4 @@ def tttd_advantages(args, rollout_data) -> None:
     rollout_data["tttd_base_logp_diff"] = [average_difference.detach().expand_as(value) for value in adjusted]
 
 
-__all__ = ["importance_sampling_surrogate", "tttd_advantages", "tttd_loss"]
+__all__ = ["tttd_advantages", "tttd_loss"]

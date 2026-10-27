@@ -35,7 +35,7 @@ def importance_sampling_loss(
     logits: torch.Tensor,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Tinker's ``importance_sampling`` loss: ``-(exp(logp - logq) * advantage).sum()`` over every response token.
+    """Tinker's ``importance_sampling`` loss: ``-(exp(logp - logq) * advantage).sum()`` over the response tokens, each advantage masked.
 
     The loss reads the token advantages as the rollout data holds them; it
     reads no loss mask. A family that trains only the masked tokens puts the
