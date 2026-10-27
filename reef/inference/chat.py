@@ -15,11 +15,13 @@ native request and parses the native response into a
 from __future__ import annotations
 
 import codecs
+import copy
 import json
 import math
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -532,6 +534,38 @@ def template_kwargs_of(value: Any, label: str) -> dict[str, Any]:
     return dict(value)
 
 
+#: Episodes whose latest call the handler keeps for continuation; the oldest is forgotten first.
+EPISODE_PREFIX_LIMIT = 1024
+#: A message content no chat template rewrites, used to find where a rendered assistant turn ends.
+EPISODE_BOUNDARY_SENTINEL = "reef-episode-boundary-7f3a9c"
+
+
+@dataclass(frozen=True)
+class EpisodePrefix:
+    """The exact tokens of an episode's latest call, for the episode's next call to extend.
+
+    Values: ``tokens`` is a non-empty tuple of non-negative ints, the prompt
+    ids followed by the sampled ids of the latest call; ``request`` is that
+    call's validated chat request, a dict whose ``messages`` is a non-empty
+    list.
+    Purpose: :class:`TokenNativeChatHandler` makes one after each call of an
+    episode when ``episode_continuation`` is on, and reads it when the same
+    episode's next request extends ``request["messages"]``. The next prompt is
+    then ``tokens`` followed by the rendered new messages.
+    """
+
+    tokens: tuple[int, ...]
+    request: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.tokens or any(
+            not isinstance(token, int) or isinstance(token, bool) or token < 0 for token in self.tokens
+        ):
+            raise ValueError("an episode prefix requires non-negative integer token ids")
+        if not isinstance(self.request.get("messages"), list) or not self.request["messages"]:
+            raise ValueError("an episode prefix requires a validated chat request with messages")
+
+
 class TokenNativeChatHandler(HttpInferenceHandler):
     """Serve OpenAI or Anthropic chat with engine-native policy tensors.
 
@@ -571,6 +605,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
+        episode_continuation: bool = False,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
         super().__init__(
@@ -597,6 +632,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # Chat template arguments for a request that omits them, for example
         # {"enable_thinking": false}. A request's own chat_template_kwargs win key by key.
         self._chat_template_kwargs = template_kwargs_of(chat_template_kwargs, "chat_template_kwargs")
+        # Multi-turn episodes served from their exact sampled tokens: the
+        # client names the episode in the OpenAI ``user`` field, and each later
+        # request's prompt is the previous call's tokens plus the rendered new
+        # messages, so a template that rewrites earlier turns cannot change
+        # the trained tokens. Off, every request renders from the template.
+        self._episode_continuation = bool(episode_continuation)
+        self._episode_prefixes: OrderedDict[str, EpisodePrefix] = OrderedDict()
 
     @property
     def client(self) -> NativeGenerateClient:
@@ -649,7 +691,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             anthropic=anthropic,
             payload=payload,
             request=request,
-            prompt_ids=self._render_prompt(request),
+            prompt_ids=self._prompt_ids(request),
             sampling_params=self._client.sampling_params(request, self._sampling_defaults),
             tool_parser=self._configured_tool_parser(request),
         )
@@ -690,6 +732,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if captured.topk_indices is not None and captured.topk_log_probs is not None:
             training["topk_indices"] = captured.topk_indices
             training["topk_log_probs"] = captured.topk_log_probs
+        episode_id = self._episode_id(call.request)
+        if episode_id is not None:
+            self._remember_episode(episode_id, training["tokens"], call.request)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -1127,6 +1172,90 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if value == "length":
             return "max_tokens"
         return "end_turn"
+
+    # -- Episode continuation ---------------------------------------------------
+
+    def _episode_id(self, request: Mapping[str, Any]) -> str | None:
+        """The episode a request belongs to: its OpenAI ``user`` field, when continuation is on."""
+        if not self._episode_continuation:
+            return None
+        episode_id = request.get("user")
+        if isinstance(episode_id, str) and episode_id:
+            return episode_id
+        return None
+
+    def _prompt_ids(self, request: dict[str, Any]) -> list[int]:
+        """Render the prompt, or extend the episode's previous call when the request continues one."""
+        episode_id = self._episode_id(request)
+        prefix = None if episode_id is None else self._episode_prefixes.get(episode_id)
+        if prefix is None:
+            return self._render_prompt(request)
+        return self._continuation_prompt(request, prefix)
+
+    def _continuation_prompt(self, request: Mapping[str, Any], prefix: EpisodePrefix) -> list[int]:
+        """The previous call's exact tokens followed by the rendered new messages.
+
+        The request repeats the previous request's messages, then carries the
+        sampled assistant turn and one or more user or tool messages, with the
+        same model, tools and chat template arguments. Only the new messages
+        are rendered: a two-message boundary conversation whose assistant turn
+        holds a sentinel, then the new messages and the generation prompt; the
+        text after the sentinel is the suffix. A sampled turn that ended with
+        the template's end-of-turn token already carries it, so the suffix's
+        leading copy is dropped; a length-limited turn keeps it as context.
+        """
+        messages = request.get("messages")
+        previous = prefix.request["messages"]
+        count = len(previous)
+        if (
+            not isinstance(messages, list)
+            or messages[:count] != previous
+            or len(messages) < count + 2
+            or not isinstance(messages[count], Mapping)
+            or messages[count].get("role") != "assistant"
+        ):
+            raise ValueError(
+                "episode continuation requires the previous messages, the sampled assistant turn, "
+                "and at least one new message; name a new episode in the user field to start over"
+            )
+        new_messages = messages[count + 1 :]
+        if any(
+            not isinstance(message, Mapping) or message.get("role") not in ("user", "tool") for message in new_messages
+        ):
+            raise ValueError("episode continuation accepts only user and tool messages after the sampled turn")
+        for key in ("model", "tools", "chat_template_kwargs"):
+            if request.get(key) != prefix.request.get(key):
+                raise ValueError(f"episode continuation cannot change {key}")
+        tokenizer = self._require_tokenizer()
+        render_kwargs = {
+            **self._chat_template_kwargs,
+            **template_kwargs_of(request.get("chat_template_kwargs"), "chat_template_kwargs"),
+        }
+        boundary = [
+            {"role": "user", "content": EPISODE_BOUNDARY_SENTINEL},
+            {"role": "assistant", "content": EPISODE_BOUNDARY_SENTINEL},
+        ]
+        rendered = tokenizer.apply_chat_template(
+            [*boundary, *self._template_messages(list(new_messages))],
+            tokenize=False,
+            add_generation_prompt=True,
+            **render_kwargs,
+        )
+        if not isinstance(rendered, str) or rendered.count(EPISODE_BOUNDARY_SENTINEL) != 2:
+            raise ValueError("the chat template cannot render an episode's new messages on their own")
+        suffix = rendered[rendered.rindex(EPISODE_BOUNDARY_SENTINEL) + len(EPISODE_BOUNDARY_SENTINEL) :]
+        suffix_ids = integer_tokens(tokenizer.encode(suffix, add_special_tokens=False), "episode continuation")
+        if suffix_ids and suffix_ids[0] == prefix.tokens[-1]:
+            suffix_ids = suffix_ids[1:]
+        return [*prefix.tokens, *suffix_ids]
+
+    def _remember_episode(self, episode_id: str, tokens: list[int], request: Mapping[str, Any]) -> None:
+        """Keep the call's exact tokens as the episode's latest; forget the oldest episode past the limit."""
+        prefixes = self._episode_prefixes
+        prefixes.pop(episode_id, None)
+        prefixes[episode_id] = EpisodePrefix(tuple(tokens), copy.deepcopy(dict(request)))
+        while len(prefixes) > EPISODE_PREFIX_LIMIT:
+            prefixes.popitem(last=False)
 
     # -- Prompt rendering and tool parsing -------------------------------------
 

@@ -315,6 +315,15 @@ def test_consecutive_sao_jobs_train_and_save_consecutive_rollouts(tmp_path, sao_
 
 
 @pytest.mark.unit
+def test_ten_valid_batches_warm_up_critic_before_first_actor_update(tmp_path, sao_stacks) -> None:
+    stack = sao_stacks(tmp_path, critic_only_steps=10)
+    for step in range(11):
+        assert checkpoint_metrics(stack.run(step))["sao/actor_trained"] == int(step == 10)
+    assert len(stack.critic.train_calls) == 22
+    assert [rollout_id for rollout_id, _ in stack.actor.train_calls] == [10]
+
+
+@pytest.mark.unit
 def test_a_sao_checkpoint_carries_the_backend_and_worker_metrics(tmp_path, sao_stacks) -> None:
     # Slime is only a producer here: Reef records the checkpoint's metrics and decides who sees them.
     stack = sao_stacks(tmp_path, rank_metrics=[{"slime/lr": 1e-6}])
@@ -447,6 +456,7 @@ def critic_prep_args(**overrides):
         "critic_init": None,
         "critic_lr": None,
         "megatron_lora_rank": 0,
+        "custom_model_provider_path": None,
         "custom_megatron_init_path": None,
         "load": "/ckpt/megatron",
         "save": "/ckpt/megatron",
@@ -501,11 +511,11 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init)))
     assert critic_args.load == str(critic_save)
 
-    # An init directory without a checkpoint changes nothing.
+    # An explicitly requested initialization must not silently start cold.
     empty = tmp_path / "empty"
     empty.mkdir()
-    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
-    assert critic_args.load == "/ckpt/megatron"
+    with pytest.raises(ValueError, match=r"critic-init.*has no latest"):
+        prepare_critic_args(critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
 
 
 @pytest.mark.unit
@@ -564,17 +574,35 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
 
 
 @pytest.mark.unit
-def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
+@pytest.mark.parametrize("provider", [None, "recipes.sao.examples.servelearnbench.long_context.provide_model"])
+def test_prepare_critic_args_without_lora_preserves_the_user_provider(provider) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
-    args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
+    args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path=provider)
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.megatron_lora_rank == 0
     assert critic_args.megatron_lora_alpha is None
-    assert critic_args.custom_model_provider_path == getattr(args, "reef_chained_model_provider_path", None)
+    assert critic_args.custom_model_provider_path == provider
+    assert args.custom_model_provider_path == provider
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("provider", [None, "my.provider:build"])
+def test_prepare_critic_args_without_lora_unwraps_only_the_reef_provider(provider) -> None:
+    from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
+
+    args = critic_prep_args(
+        custom_model_provider_path=REEF_MODEL_PROVIDER_PATH,
+        reef_chained_model_provider_path=provider,
+    )
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.custom_model_provider_path == provider
+    assert args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
 
 
 @pytest.mark.unit

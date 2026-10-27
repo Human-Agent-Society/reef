@@ -178,7 +178,7 @@ def wait_for_training(expected: int) -> None:
             print(f"trained: {trained}/{expected} steps committed", flush=True)
             return
         time.sleep(15)
-    print(f"WARNING: only {trained}/{expected} steps trained within {TRAIN_DRAIN_TIMEOUT_S}s", flush=True)
+    raise TimeoutError(f"Only {trained}/{expected} steps trained within {TRAIN_DRAIN_TIMEOUT_S}s")
 
 
 def one_rollout(client: ReefClient, model: str, problem: dict, position: int) -> dict:
