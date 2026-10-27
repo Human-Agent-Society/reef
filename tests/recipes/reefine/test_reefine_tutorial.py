@@ -1,7 +1,7 @@
-"""Guarantees of the recipes/beta/reefine/examples demos, hermetic: the deployment builds in manual mode with the text proposer
-and the evaluation's floor over the one health task, the driver parses and installs a source tree locally, the demo
-requests and the measurement's fixed list pass the request screens on POST /reef/train, the bugfix fixture fails its
-one test, and the README examples have valid shell syntax and local links resolve."""
+"""Guarantees of the recipes/beta/reefine/examples demos, hermetic: the deployment builds in manual mode, answering in
+text, with the evaluation's floor over the one health task, the driver parses and installs a source tree locally, the
+demo requests and the measurement's fixed list pass the request screens on POST /reef/train, the bugfix fixture fails
+its one test, and the README examples have valid shell syntax and local links resolve."""
 
 from __future__ import annotations
 
@@ -18,13 +18,12 @@ import pytest
 from tests.support.config_helpers import load_harness_deployment as load_config
 
 from recipes.beta import reefine
-from recipes.beta.reefine import ReefineRecipe, proposer
+from recipes.beta.reefine import AnswerScorer, ReefineMethod, ReefineRecipe
+from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import grade_text
-from reef.core.plugins import PluginReference
 from reef.dispatcher.ingest import training_request_refusal
-from reef.evaluation.harness import FloorPlugin
-from reef.harness.tree import HarnessTree, TreeKind
+from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.service.deploy.service_config import service_config_from_mapping
 
@@ -59,8 +58,8 @@ def run_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
-def test_deployment_yaml_builds_the_recipe_with_the_text_proposer_and_the_floor(monkeypatch) -> None:
-    """The demos use the built-in recipe with tutorial-local state, training_mode manual (one step per
+def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monkeypatch) -> None:
+    """The demos use the built-in recipe with tutorial-local state, no agent, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
     so a change publishes when the tree still works and an extension still waits."""
     from reef.recipe.registry import build_named_recipe
@@ -74,26 +73,27 @@ def test_deployment_yaml_builds_the_recipe_with_the_text_proposer_and_the_floor(
     path = TUTORIAL / "configs" / "deployment.yaml"
     config = load_config(path)
     section = config["evolution"]
-    assert section["review_kinds"] == ["code_extension"]
-    assert section["selection"] == "floor"
+    assert section["review_kinds"] == ["code_extension"] and section["agent"] is None
+    assert section["evaluation"]["policy"] == "floor"
     assert config["data"]["training_mode"] == "manual"
     # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
-    assert section["tasks"] == [HEALTH_TASK]
-    assert load_config(TUTORIAL / "configs" / "serve.yaml")["evolution"]["tasks"] == [HEALTH_TASK]
+    assert section["evaluation"]["tasks"] == [HEALTH_TASK]
+    serve = load_config(TUTORIAL / "configs" / "serve.yaml")["evolution"]
+    assert serve["evaluation"]["tasks"] == [HEALTH_TASK]
+    # The serve config's agent works in a step's directory, and pi reads every AGENTS.md above it: not this checkout's.
+    assert not Path(serve["state_dir"]).expanduser().resolve().is_relative_to(REPO_ROOT)
     assert grade_text(HEALTH_TASK, "$ echo reef-ok\nreef-ok") == 1.0
     assert [service["name"] for service in config["services"]] == ["reef"]
-    module_name = section["propose"].partition(":")[0]
-    assert module_name == "recipes.beta.reefine.proposer"
+    module_name = section["evaluation"]["scorer"].partition(":")[0]
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
-    # The selected module belongs to the active Reef installation, including a wheel outside the checkout.
-    assert Path(spec.origin).resolve() == Path(reefine.__file__).with_name("proposer.py").resolve()
+    # The scorer belongs to the active Reef installation, including a wheel outside the checkout.
+    assert Path(spec.origin).resolve() == Path(reefine.__file__).with_name("scorer.py").resolve()
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("recipes/beta/reefine/examples/work/")
     assert config["run_dir"].startswith("recipes/beta/reefine/examples/work/")
-    assert section["step_record_dir"].startswith("recipes/beta/reefine/examples/work/")
-    # The proposal inbox defaults to .reef/proposals under the service's directory, outside the run's state.
-    assert section["proposals_dir"].startswith("recipes/beta/reefine/examples/work/")
+    # The step workspaces, the history and the proposal inbox stay with the run's state.
+    assert section["state_dir"].startswith("recipes/beta/reefine/examples/work/")
     assert config["reef"]["port"] == 8901 and config["reef"]["token"] == "reef-local"
 
     service = service_config_from_mapping(config)
@@ -102,11 +102,12 @@ def test_deployment_yaml_builds_the_recipe_with_the_text_proposer_and_the_floor(
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(TUTORIAL / "configs")},
         default_runtime=_upstream_runtime(service),
     )
-    assert isinstance(built, ReefineRecipe) and built.adapter == "pi"
-    assert built.review_kinds == (TreeKind.CODE_EXTENSION,)
-    # Manual mode needs a proposer that reads requests, which Reefine's does; the build refuses otherwise.
-    assert isinstance(built.propose, proposer.TextProposer) and built.training_mode == "manual"
-    assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
+    assert isinstance(built, ReefineRecipe) and built.evolution.adapter == "pi"
+    assert built.evolution.review_kinds == ("code_extension",)
+    # No agent: the method answers each request in text.
+    assert isinstance(built.method, ReefineMethod) and built.agent is None and built.training_mode == "manual"
+    assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
+    assert isinstance(built.scorer, AnswerScorer)
     assert built.model_binding().model == "provider/model-a"
     # No seed in the deployment: the first tree is the recipe's own, the starter skill.
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
@@ -135,7 +136,7 @@ def test_run_sh_refuses_an_unknown_mode_before_touching_anything() -> None:
 
 
 def test_the_measurement_requests_pass_the_request_screens(run_module) -> None:
-    """The fixed list becomes proposer input through POST /reef/train: none of it may trip the directive or
+    """The fixed list becomes the method's input through POST /reef/train: none of it may trip the directive or
     credential screen, and the default --n has that many to file."""
     requests = run_module.MEASURE_REQUESTS
     assert len(requests) >= 10 and len(set(requests)) == len(requests)
@@ -161,10 +162,10 @@ def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> No
     patch = {"rules.md": None, "extensions/speak.ts": "export default function (pi) {}", "notes.txt": "x"}
     pending = {"pending": True, "metrics": {"selected": True, "patch": patch}}
     rejected = {"metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
-    skipped = {"metrics": {"skipped": "no proposal"}}
+    skipped = {"metrics": {"skipped": "the method left the head tree unchanged"}}
     assert run_module.result_of(pending) == "pending"
     assert run_module.result_of(rejected) == "rejected"
-    assert run_module.result_of(skipped) == "skipped: no proposal"
+    assert run_module.result_of(skipped) == "skipped: the method left the head tree unchanged"
     assert run_module.result_of({"operation": "promote"}) == "promote"
     assert run_module.changes_of(pending["metrics"]) == [
         "write extensions/speak.ts",
@@ -184,25 +185,6 @@ def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> No
     assert run_module.evaluation_counts(met) == {"passed": 1, "failed": 0}
     assert run_module.evaluation_counts(rejected["metrics"]) == {"wins": 0, "losses": 1, "ties": 2}
     assert run_module.evaluation_counts(skipped["metrics"]) == {}
-    # selection: always records the per task scores of both sides and no counts; the counts come from those.
-    always = {
-        "selected": True,
-        "selection": {
-            "evaluation": {"metrics": {"candidate_scores": [1.0, 0.0, 1.0], "current_scores": [1.0, 1.0, 0.0]}}
-        },
-    }
-    assert run_module.tally_parts(always) == (1, 1, 1)
-    assert run_module.tally(always) == "1 / 1 / 1"
-    # A failed episode scores None and ranks below every number, as reef's own tally ranks it.
-    failed = {
-        "selection": {
-            "evaluation": {"metrics": {"candidate_scores": [1.0, None, 1.0], "current_scores": [1.0, 1.0, 0.0]}}
-        }
-    }
-    assert run_module.tally_parts(failed) == (1, 1, 1)
-    both = {"selection": {"evaluation": {"metrics": {"candidate_scores": [None], "current_scores": [None]}}}}
-    assert run_module.tally_parts(both) == (0, 0, 1)
-    assert run_module.tally_parts({"selection": {"evaluation": {"metrics": {"candidate_scores": [1.0]}}}}) is None
 
 
 def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
@@ -212,7 +194,7 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
     results = [
         {"request": "a", "filed": False, "result": "the request was not filed"},
         {"request": "b", "filed": True, "result": "no step"},
-        {"request": "c", "filed": True, "result": "skipped: no proposal"},
+        {"request": "c", "filed": True, "result": "skipped: the method left the head tree unchanged"},
         {"request": "d", "filed": True, "kinds": "rules", "result": "selected", "wins": 1, "losses": 0, "ties": 2},
         {"request": "e", "filed": True, "kinds": "skill", "result": "selected", "wins": 0, "losses": 0, "ties": 3},
         {"request": "f", "filed": True, "kinds": "rules", "result": "rejected", "wins": 0, "losses": 1, "ties": 2},
@@ -320,22 +302,22 @@ def test_the_example_is_listed_with_the_beta_recipes() -> None:
     assert os.access(TUTORIAL / "run.sh", os.X_OK)
 
 
-def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
-    """run.sh exports REEF_PROPOSER_TIMEOUT_S because the method package's defaults (60 s for a failure step,
-    120 s for a request) are short of what a local 26B model needs, and pins REEF_PROPOSER_MAX_TOKENS at the
+def test_the_model_call_budget_follows_the_environment(monkeypatch) -> None:
+    """run.sh exports REEF_REEFINE_CALL_TIMEOUT_S because the method package's defaults (60 s for a failure step,
+    120 s for a request) are short of what a local 26B model needs, and pins REEF_REEFINE_CALL_MAX_TOKENS at the
     package's request default of 16384, the budget a thinking model needs; unset, the defaults stand."""
-    monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
-    assert proposer.timeout_s(120.0) == 120.0
-    monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", "900")
-    assert proposer.timeout_s(120.0) == 900.0
-    monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", " ")
-    assert proposer.timeout_s(60.0) == 60.0
-    monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
-    assert proposer.max_tokens(16384) == 16384
-    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
-    assert proposer.max_tokens(16384) == 32768
-    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
-    assert proposer.max_tokens(16384) == 16384
+    monkeypatch.delenv("REEF_REEFINE_CALL_TIMEOUT_S", raising=False)
+    assert reefine_answer.timeout_s(120.0) == 120.0
+    monkeypatch.setenv("REEF_REEFINE_CALL_TIMEOUT_S", "900")
+    assert reefine_answer.timeout_s(120.0) == 900.0
+    monkeypatch.setenv("REEF_REEFINE_CALL_TIMEOUT_S", " ")
+    assert reefine_answer.timeout_s(60.0) == 60.0
+    monkeypatch.delenv("REEF_REEFINE_CALL_MAX_TOKENS", raising=False)
+    assert reefine_answer.max_tokens(16384) == 16384
+    monkeypatch.setenv("REEF_REEFINE_CALL_MAX_TOKENS", "32768")
+    assert reefine_answer.max_tokens(16384) == 32768
+    monkeypatch.setenv("REEF_REEFINE_CALL_MAX_TOKENS", "16k")
+    assert reefine_answer.max_tokens(16384) == 16384
     run_sh = (TUTORIAL / "run.sh").read_text(encoding="utf-8")
-    assert 'REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"' in run_sh
-    assert 'REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"' in run_sh
+    assert 'REEF_REEFINE_CALL_TIMEOUT_S="${REEF_REEFINE_CALL_TIMEOUT_S:-900}"' in run_sh
+    assert 'REEF_REEFINE_CALL_MAX_TOKENS="${REEF_REEFINE_CALL_MAX_TOKENS:-16384}"' in run_sh

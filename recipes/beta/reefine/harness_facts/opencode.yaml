@@ -1,4 +1,4 @@
-# What Reefine's proposer is told about opencode: see recipes/beta/reefine/harness_facts/__init__.py.
+# What Reefine's prompts say about opencode: see recipes/beta/reefine/harness_facts/__init__.py.
 title: opencode
 command: >-
   A person types a command file as /<name>. Its text is an opencode command file: YAML frontmatter with

@@ -1,6 +1,6 @@
-"""The text proposer off pi: each harness's own facts reach the request, its plan and its review.
+"""The text answer off pi: each harness's own facts reach the request, its plan and its review.
 
-On pi the proposer writes extensions against the API reference; on every
+On pi the answer writes extensions against the API reference; on every
 other adapter it writes rules, skills and commands, plus the primary config
 file where the harness's config can enforce a behavior. These tests pin what
 the prompts say per adapter (the rules file, how a command is typed, the
@@ -16,7 +16,7 @@ import re
 import pytest
 from tests.recipes.reefine.reefine_support import PLAN_MARKER, TREE, Model, answer, designed, extension, failure_of
 
-from recipes.beta.reefine import proposer
+from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.harness_facts import harness_facts
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -61,16 +61,16 @@ def test_the_request_prompt_names_the_harness_its_rules_file_its_command_and_its
 
 def test_a_config_file_is_offered_only_where_it_enforces_a_behavior_and_keeps_to_its_keys() -> None:
     skill_rules_commands = (TreeKind.SKILL, TreeKind.RULES, TreeKind.AGENT_COMMAND)
-    assert proposer.request_kinds("opencode") == (*skill_rules_commands, TreeKind.CONFIG)
-    assert proposer.request_kinds("hermes") == skill_rules_commands
-    assert proposer.request_kinds("pi") == (*skill_rules_commands, TreeKind.CODE_EXTENSION)
+    assert reefine_answer.request_kinds("opencode") == (*skill_rules_commands, TreeKind.CONFIG)
+    assert reefine_answer.request_kinds("hermes") == skill_rules_commands
+    assert reefine_answer.request_kinds("pi") == (*skill_rules_commands, TreeKind.CODE_EXTENSION)
     agent = {"chat": {"mode": "primary", "prompt": "Chat.", "permission": {"*": "deny", "websearch": "allow"}}}
     # A second config target is not the harness config: dropped, while the primary config and the command land.
     files = {"config/primary.json": json.dumps({"agent": agent}), "config/env.json": json.dumps({"agent": agent})}
     model = Model(designed(files, CHAT), COMPLETE)
-    proposal = answer(model, "opencode")
-    assert proposal.patch.changes == {"config/primary.json": files["config/primary.json"], **CHAT}
-    assert proposal.notes["dropped"] == [
+    outcome = answer(model, "opencode")
+    assert outcome.patch.changes == {"config/primary.json": files["config/primary.json"], **CHAT}
+    assert outcome.notes["dropped"] == [
         "config/env.json was dropped: a request may change config/primary.json only, and never remove it"
     ]
     assert "change only the top level keys agent" in model.prompt and "opencode.json" in model.prompt
@@ -113,8 +113,8 @@ def test_a_file_dropped_for_its_kind_is_named_in_the_notes_and_in_the_retry() ->
     loader = extension("chat", "export default function (pi) {}\n")
     partial = json.dumps({"result": "partial", "delivers": True, "covered": [], "uncovered": ["no /chat command"]})
     model = Model(designed(loader, RULES), partial, designed(CHAT, RULES), COMPLETE)
-    proposal = answer(model, "hermes")
-    assert proposal.patch.changes == {**CHAT, **RULES}
+    outcome = answer(model, "hermes")
+    assert outcome.patch.changes == {**CHAT, **RULES}
     dropped = "extensions/chat.ts was dropped: this harness takes skill, rules, agent_command"
     retry = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
     assert retry and f"- {dropped}" in retry[0]
@@ -139,7 +139,7 @@ def test_a_reply_the_provider_filtered_says_so_instead_of_naming_no_file() -> No
 def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_restriction_is_a_limit(
     adapter: str,
 ) -> None:
-    """On a harness whose command cannot take a tool away, the proposer says the mode is followed by the model while
+    """On a harness whose command cannot take a tool away, the prompt says the mode is followed by the model while
     every tool stays offered, keeps the mode's state in the conversation (a marker file shared every session and
     made the rules call a tool on every turn), and the review lists a hard restriction under limits."""
     model = Model(designed(CHAT, RULES), COMPLETE)
@@ -170,10 +170,10 @@ def test_claude_permissions_from_a_request_may_only_pre_approve_web_tools() -> N
 
     widened = permissions({"allow": ["Bash(*)", "mcp__server"], "defaultMode": "bypassPermissions"})
     model = Model(designed(CHAT, widened), designed(CHAT, permissions({"allow": ["WebSearch"]})), COMPLETE)
-    proposal = answer(model, "claude")
-    kept = json.loads(proposal.patch.changes["config/primary.json"])
+    outcome = answer(model, "claude")
+    kept = json.loads(outcome.patch.changes["config/primary.json"])
     assert kept == {"permissions": {"allow": ["WebSearch"]}}
-    (dropped,) = proposal.notes["dropped_attempts"]
+    (dropped,) = outcome.notes["dropped_attempts"]
     assert "a request may not set permissions.defaultMode" in dropped
     assert "not 'Bash(*)'" in dropped and "not 'mcp__server'" in dropped
     assert "WebFetch(domain:<host>)" in model.prompt
@@ -270,21 +270,21 @@ def test_an_opencode_agent_without_a_permission_map_is_written_again() -> None:
     command = {"commands/chat.md": "---\nagent: chat\n---\nChat."}
     mapped = {"*": "deny", "websearch": "allow"}
     model = Model(designed(agent_config(None), command), designed(agent_config(mapped), command), COMPLETE)
-    proposal = answer(model, "opencode")
-    assert proposal.patch.changes == {**agent_config(mapped), **command}
+    outcome = answer(model, "opencode")
+    assert outcome.patch.changes == {**agent_config(mapped), **command}
     reason = (
         "agent 'chat' has no permission map, so it is offered every tool: add agent.chat.permission, for example "
         '{"*": "deny", "websearch": "allow"}'
     )
-    assert proposal.notes["dropped_attempts"] == [f"answer 1: {reason}"]
+    assert outcome.notes["dropped_attempts"] == [f"answer 1: {reason}"]
     (retry,) = [prompt for prompt in model.prompts if "could not be used" in prompt]
     assert reason in retry
     # An agent the tree already gives a map keeps it: the file may change the prompt alone.
     held = json.dumps({"agent": {"chat": {"mode": "primary", "prompt": "Chat.", "permission": mapped}}})
     tree = HarnessTree({**TREE.files, "config/primary.json": held})
     model = Model(designed(agent_config(None)), COMPLETE)
-    proposal = answer(model, "opencode", tree=tree)
-    assert proposal.patch.changes == agent_config(None) and "dropped_attempts" not in proposal.notes
+    outcome = answer(model, "opencode", tree=tree)
+    assert outcome.patch.changes == agent_config(None) and "dropped_attempts" not in outcome.notes
 
 
 def test_a_point_the_harness_notes_put_out_of_reach_is_a_limit_that_starts_no_retry() -> None:
@@ -294,15 +294,15 @@ def test_a_point_the_harness_notes_put_out_of_reach_is_a_limit_that_starts_no_re
         {"result": "partial", "delivers": True, "covered": ["chat"], "uncovered": [], "limits": ["no tool lockout"]}
     )
     model = Model(designed(CHAT, RULES), limited)
-    proposal = answer(model, "hermes")
-    assert model.answered == 2 and "attempts" not in proposal.notes
-    assert proposal.notes["review"]["limits"] == ["no tool lockout"] and proposal.notes["review"]["uncovered"] == []
+    outcome = answer(model, "hermes")
+    assert model.answered == 2 and "attempts" not in outcome.notes
+    assert outcome.notes["review"]["limits"] == ["no tool lockout"] and outcome.notes["review"]["uncovered"] == []
     gap = json.dumps(
         {"result": "partial", "delivers": True, "covered": [], "uncovered": ["no off"], "limits": ["no tool lockout"]}
     )
     model = Model(designed(CHAT, RULES), gap)
-    proposal = answer(model, "hermes")
-    assert proposal.notes["attempts"] == 3
+    outcome = answer(model, "hermes")
+    assert outcome.notes["attempts"] == 3
     (retry, *_) = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
     assert "- no off" in retry and "no tool lockout" not in retry
 
@@ -316,7 +316,7 @@ def test_terminus_gets_its_own_facts_and_runs_in_its_task_container() -> None:
     assert f"This harness is {facts.title}" in model.prompt and facts.tools in model.prompt
     # Its runs happen in a task's Linux container: the prompt says so instead of the person's platforms.
     assert facts.machine in model.prompt and "macOS, Linux or Windows under WSL 2" not in model.prompt
-    assert proposer.request_kinds("terminus") == (TreeKind.SKILL, TreeKind.RULES, TreeKind.AGENT_COMMAND)
+    assert reefine_answer.request_kinds("terminus") == (TreeKind.SKILL, TreeKind.RULES, TreeKind.AGENT_COMMAND)
     text = review_prompt(model)
     assert "This harness is Terminus 2" in text and "pi.registerCommand" not in text
 
@@ -373,6 +373,6 @@ def test_the_step_names_the_earlier_answer_it_kept() -> None:
     first = json.dumps({"result": "partial", "delivers": True, "covered": [], "uncovered": ["no off"]})
     worse = json.dumps({"result": "partial", "delivers": True, "covered": [], "uncovered": ["no off", "no header"]})
     model = Model(designed(CHAT, RULES), first, designed(CHAT, RULES), worse, designed(CHAT), worse)
-    proposal = answer(model, "hermes")
-    assert proposal.notes["attempts"] == 3 and proposal.notes["kept_attempt"] == 1
-    assert proposal.notes["review"]["uncovered"] == ["no off"]
+    outcome = answer(model, "hermes")
+    assert outcome.notes["attempts"] == 3 and outcome.notes["kept_attempt"] == 1
+    assert outcome.notes["review"]["uncovered"] == ["no off"]

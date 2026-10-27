@@ -5,11 +5,11 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
     ask     - the request goes to ``POST /reef/train`` as a training
               instruction, and the deployment, in ``training_mode: manual``,
               runs one evolve step for it at once
-    step    - the service proposer designs the change, writes it and
-              reviews it; the evaluation runs the candidate on the recipe's
-              health task and the floor decides; the catalog row carries
-              the result, the notes and the request it answered under
-              ``metrics.training_request``
+    step    - the service's Reefine method designs the change, writes it
+              and reviews it; the evaluation runs the candidate on the
+              recipe's health task and the floor decides; the catalog row
+              carries the result, the method's summary and notes, and the
+              request it answered under ``metrics.training_request``
     promote - a release that changes an extension waits as pending; its page
               says why it exists and what it changed, and the demo promotes
               it through the route (a person reads the page first)
@@ -200,43 +200,26 @@ def kinds_of(metrics):
 
 
 def tally_parts(metrics):
-    """The evaluation's counts over the tasks: the floor's (passed, failed), else (wins, losses, ties); None when no
-    evaluation ran.
-
-    The floor records how many tasks the candidate passed and failed. Before
-    it, the score comparison selector recorded the three counts and
-    ``selection: always`` only the per task scores of both sides, so on those
-    rows the counts come from comparing the scores."""
+    """The evaluation's counts over the tasks, as the row's metrics carry them: the floor's (passed, failed), else
+    the comparison's (wins, losses, ties); None when the row carries neither (no evaluation ran, or the comparison
+    measured means)."""
     if all(isinstance(metrics.get(key), int) for key in ("passed", "failed")):
         return metrics["passed"], metrics["failed"]
     if all(isinstance(metrics.get(key), int) for key in ("wins", "losses", "ties")):
         return metrics["wins"], metrics["losses"], metrics["ties"]
-    scored = ((metrics.get("selection") or {}).get("evaluation") or {}).get("metrics") or {}
-    candidate, current = scored.get("candidate_scores"), scored.get("current_scores")
-    if not isinstance(candidate, list) or not isinstance(current, list) or len(candidate) != len(current):
-        return None
-    # An episode that failed scores None, which the score comparison ranks below every number.
-    ranked = [
-        (-float("inf") if c is None else c, -float("inf") if k is None else k)
-        for c, k in zip(candidate, current, strict=True)
-    ]
-    return (
-        sum(1 for c, k in ranked if c > k),
-        sum(1 for c, k in ranked if c < k),
-        sum(1 for c, k in ranked if c == k),
-    )
+    return None
 
 
 def tally(metrics):
-    """The evaluation's counts as one cell: ``passed / failed`` under the floor, ``wins / losses / ties`` before it,
-    ``-`` when no evaluation ran."""
+    """The evaluation's counts as one cell: ``passed / failed`` under the floor, ``wins / losses / ties`` under the
+    comparison, ``-`` when the row carries neither."""
     parts = tally_parts(metrics)
     return " / ".join(str(part) for part in parts) if parts else "-"
 
 
 def evaluation_counts(metrics):
     """The evaluation's counts by name: ``passed`` and ``failed`` under the floor, ``wins``, ``losses`` and ``ties``
-    on a row from before it; empty when no evaluation ran."""
+    under the comparison; empty when the row carries neither."""
     parts = tally_parts(metrics)
     if parts is None:
         return {}
@@ -455,17 +438,17 @@ def _won(result):
 
 def totals_of(results):
     """The measurement's counts: filed, answered (a patch came back), admitted (the evaluation ran), won (met the
-    floor; on a row from before the floor, more wins than losses), published, pending. Under ``selection:
-    always`` a publish said nothing about the evaluation, so won and published are counted apart; under the floor a
-    publish is a win, and the two agree unless a release waits as pending."""
+    floor; on a row from before the floor, more wins than losses), published, pending. Under ``policy: none`` a
+    publish says nothing about the evaluation, so won and published are counted apart; under the floor a publish is
+    a win, and the two agree unless a release waits as pending."""
     return {
         "filed": sum(1 for r in results if r.get("filed")),
         # A patch came back: a step that skipped on a refusal or on a failed step carries none.
         "answered": sum(1 for r in results if r.get("filed") and r.get("kinds") not in (None, "-")),
         "admitted": sum(1 for r in results if was_evaluated(r)),
         "won": sum(1 for r in results if _won(r)),
-        "published": sum(1 for r in results if r.get("result", r.get("verdict")) == "selected"),
-        "pending": sum(1 for r in results if r.get("result", r.get("verdict")) == "pending"),
+        "published": sum(1 for r in results if r.get("result") == "selected"),
+        "pending": sum(1 for r in results if r.get("result") == "pending"),
     }
 
 
@@ -490,7 +473,7 @@ def demo(mode):
     metrics = row.get("metrics") or {}
     selection_result = result_of(row)
     changes = changes_of(metrics)
-    say(f"result: {selection_result}; evaluation {tally(metrics)}; proposer {metrics.get('proposer_seconds', '-')} s")
+    say(f"result: {selection_result}; evaluation {tally(metrics)}; model calls {metrics.get('model_seconds', '-')} s")
     say(f"changes: {'; '.join(changes) or 'none'}")
     promoted = None
     if row.get("pending"):
@@ -504,7 +487,7 @@ def demo(mode):
         "pending": bool(row.get("pending")),
         "promoted": promoted or "-",
         "requires": _requires_of(requires),
-        "proposer_seconds": metrics.get("proposer_seconds", "-"),
+        "model_seconds": metrics.get("model_seconds", "-"),
     }
     if selection_result == "selected" or promoted:
         installed = install()
@@ -582,7 +565,7 @@ def measure(n):
             (
                 r["request"],
                 r.get("kinds", "-"),
-                r.get("result", r.get("verdict", "-")),
+                r.get("result", "-"),
                 r.get("evaluation", r.get("gate", "-")),
                 r.get("seconds", "-"),
             )

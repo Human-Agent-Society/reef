@@ -28,7 +28,8 @@ reef serve -c recipes/beta/reefine/examples/configs/serve.yaml \
 
 This example uses a local Ollama model. Change the endpoint, model, and key
 for your provider. Leave the service running throughout the example.
-It listens on `127.0.0.1:8901` and stores state under `.reef/reefine/`.
+It listens on `127.0.0.1:8901` and stores state under `~/.reef/reefine/`,
+outside the checkout.
 At startup it installs the pinned pi under `~/.local/share/reef-harness/pi`.
 
 The local service requires no token unless `REEF_TOKEN` is set.
@@ -65,7 +66,7 @@ curl -fsS -H 'x-reef-scenario: reefine-example' -H 'Content-Type: application/js
 The answer carries the request's `agent_record_id` and its `page_path`. Open
 `http://127.0.0.1:8901` followed by the `page_path` in a browser. While the
 step runs, the page names its state (queued, proposing, evaluating), lists
-what the proposer does, and reloads every five seconds. Local models can take
+what the method does, and reloads every five seconds. Local models can take
 several minutes per request. For a client without a browser,
 `GET /reef/harness/requests/<agent_record_id>/progress` gives the same state
 as JSON.
@@ -163,10 +164,11 @@ failing test before editing `adder.py`, then fix the code and run the test
 again. A published release alone does not establish that the instruction was
 followed. If the behavior is incomplete, submit a more specific request.
 
-The [scripted deployment](configs/deployment.yaml) uses the text proposer and
-stores state under `work/`. The [configuration](configs/serve.yaml) used above
-can use an agent proposer where supported. Both use manual training and a health evaluation.
-The script sets proposer limits of 900 seconds and 16,384 tokens by default.
+The [scripted deployment](configs/deployment.yaml) answers requests in text,
+with no agent, and stores state under `work/`. The
+[configuration](configs/serve.yaml) used above runs the agent where the host
+can isolate it. Both use manual training and a health evaluation. The script
+sets model call limits of 900 seconds and 16,384 tokens by default.
 
 Measurement submits up to 12 fixed skill and rule requests, one at a time.
 It reports accepted requests, proposed changes, evaluated candidates, health

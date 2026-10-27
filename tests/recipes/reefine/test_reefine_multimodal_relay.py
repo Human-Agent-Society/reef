@@ -162,21 +162,28 @@ def test_multimodal_settings_read_the_preset_address_and_key() -> None:
 
 @pytest.mark.unit
 def test_reefine_hands_its_gateway_to_the_relay_and_the_agent() -> None:
+    """The relay and the agent's trials (``ReefineRecipe.build_backend`` binds the agent to this provider) reach
+    the same gateway."""
     from recipes.beta.reefine import ReefineRecipe
-    from recipes.beta.reefine.agent import AgentProposer
 
-    settings = {"evolution": {"tasks": ["[health] reply reef-ok"], "multimodal": {"preset": "openrouter"}}}
+    settings = {
+        "evolution": {
+            "evaluation": {"tasks": ["[health] reply reef-ok"]},
+            "multimodal": {"preset": "openrouter"},
+            "agent": None,
+        }
+    }
     kwargs = ReefineRecipe._recipe_kwargs(settings, {})
     upstream = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="m")
     recipe = ReefineRecipe(**kwargs, runtime=upstream)
     relay = recipe.multimodal_relay
-    assert isinstance(relay, ProviderRelay) and relay.provider.api_key == "sk-upstream"
-    assert isinstance(recipe.propose, AgentProposer) and recipe.propose.provider == relay.provider
+    assert isinstance(relay, ProviderRelay) and relay.provider == recipe.multimodal_provider
+    assert relay.provider.api_key == "sk-upstream"
     # A scenario on its own model (BYOK) still relays on the deployment's key, which the platform bills.
     own = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-byok", model_path="m")
     scenario_recipe = recipe.with_model_config(ModelConfig(runtime=own))
     assert scenario_recipe.multimodal_relay.provider.api_key == "sk-upstream"
-    assert scenario_recipe.propose.provider.api_key == "sk-upstream"
+    assert scenario_recipe.multimodal_provider.api_key == "sk-upstream"
     elsewhere = InferenceProxyRuntime(base_url="http://127.0.0.1:11434", api_key="ollama", model_path="m")
     assert ReefineRecipe(**kwargs, runtime=elsewhere).multimodal_relay is None
     with pytest.raises(RecipeConfigError, match=r"evolution\.multimodal"):

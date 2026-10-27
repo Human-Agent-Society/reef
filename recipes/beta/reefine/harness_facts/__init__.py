@@ -1,7 +1,7 @@
-"""What Reefine's proposer is told about each harness it writes files for, beside pi.
+"""What Reefine's prompts say about each harness they write files for, beside pi.
 
-pi's surface is its extension API, which a proposer reads from the reference
-beside pi's descriptor (``pi_extension_api.md``). Every other adapter takes
+pi's surface is its extension API, which a prompt carries from the reference
+beside the method (``pi_extension_api.md``). Every other adapter takes
 rules, skills, commands and, where its config can enforce a behavior, a few
 config keys. Its ``<adapter>.yaml`` in this directory says how a person types a command there, what the
 command file holds, which tools the harness has of its own (web search among
@@ -12,7 +12,7 @@ file (pi, native, an external one) has no facts.
 A harness that keeps no mode state of its own writes ``conversation_mode``
 (its ``name``, how a typed ``skill`` reaches the message, the ``escape`` a
 person has around a mode, and ``toggle``, what turns the mode off, a command
-by default) in place of ``mode``; ``CONVERSATION_MODE`` holds the words.
+by default) in place of ``mode``; ``conversation_mode.md`` holds the words.
 """
 
 from __future__ import annotations
@@ -48,22 +48,9 @@ class HarnessFacts:
     machine: str = ""
 
 
-#: How a mode is built on a harness that keeps no mode state: guidance the model follows, filled per harness.
-CONVERSATION_MODE = (
-    "{title} keeps no mode state of its own and a command cannot take a tool away, so a mode here is guidance the "
-    "model follows while every tool stays in its list: the command that turns it on says so in its reply and "
-    "names how to leave it, the rules say how the agent behaves while it is on and that every reply shows it is "
-    "on, and the same command with the word off turns it off. The mode's state lives in the conversation, in the "
-    "command's reply and the header each reply starts with, never in a file or a marker a tool writes or reads, and "
-    "the rules make no tool call on any turn: a rule applies to every turn of every session, the mode's turns or "
-    "not. While the mode is on, the model declines a skill that the person's message loads, other than the mode's "
-    "own command ({skill}), and tries the tool the mode allows before it refuses a question that tool can answer. "
-    "A reply that declines names the mode's off command as the way out and never suggests a route around the mode, "
-    "such as a shell command the person runs themselves ({escape}). "
-    "The design, the How to use paragraph and the command's reply say the model follows the mode and never "
-    "claim the other tools are unavailable. A request for a hard restriction (no other tool or skill may run at "
-    "all) is only partly met this way, and no answer here can do more: the review lists that point under limits."
-)
+#: How a mode is built on a harness that keeps no mode state: guidance the model follows, filled per harness with
+#: ``title``, ``skill`` and ``escape``.
+CONVERSATION_MODE = Path(__file__).with_name("conversation_mode.md").read_text(encoding="utf-8").removesuffix("\n")
 
 
 def conversation_mode(name: str, skill: str, escape: str, toggle: str = "command") -> str:

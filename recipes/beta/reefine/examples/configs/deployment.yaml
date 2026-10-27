@@ -1,7 +1,7 @@
 # Run from the repository root:
 # reef serve -c recipes/beta/reefine/examples/configs/deployment.yaml
 # The Reefine recipe (beta) with its state under recipes/beta/reefine/examples/work/,
-# training_mode manual and the evaluation's selection set to floor. ./run.sh starts it,
+# training_mode manual and the evaluation's policy set to floor. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
 reef:
   host: 127.0.0.1
@@ -16,25 +16,26 @@ recipe:
   config:
     evolution:
       adapter: pi
-      # Reefine's text proposer answers a request with any kind pi renders.
-      propose: recipes.beta.reefine.proposer:TextProposer
-      evaluate: recipes.beta.reefine.scorer:AnswerScorer
+      # No agent: the recipe's method, recipes.beta.reefine:ReefineMethod, answers a request in text, with the
+      # skills, rules, commands and extensions a request may write on pi.
+      agent: null
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
-      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
-      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
-      # change does; the step page's design and review notes and the person judge the change itself.
-      selection: floor
-      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
-      step_record_dir: recipes/beta/reefine/examples/work/deployment/steps
-      # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
-      proposals_dir: recipes/beta/reefine/examples/work/deployment/proposals
+      # Each step's workspace (its tree, material, calls and output), the history of every candidate, and the
+      # proposal inbox of POST /reef/harness/proposals, one directory per scenario.
+      state_dir: recipes/beta/reefine/examples/work/deployment/harness
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi, which the demo's show session runs too.
       # Set evolution.binary to a path to use an install of your own instead.
-      tasks:
-        - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
-          as a plain word alone on the last line.'
+      evaluation:
+        # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
+        # that the tree still works (the model binding, the tools, the extensions load), not that the requested
+        # change does; the step page's design and review and the person judge the change itself.
+        policy: floor
+        scorer: recipes.beta.reefine.scorer:AnswerScorer
+        tasks:
+          - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+            as a plain word alone on the last line.'
       # No seed: the first tree is the recipe's own (recipes/beta/reefine/seed), the starter skill.
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual

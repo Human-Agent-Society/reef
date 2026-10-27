@@ -1,4 +1,4 @@
-"""The loopback gateway an agent proposer and its trial runs reach models through.
+"""The loopback gateway Reefine's agent and its trial runs reach models through.
 
 The agent and every candidate harness it tries hold one URL and nothing else: no
 provider key and no Reef token. The URL's path carries a random token, so the
@@ -6,7 +6,7 @@ candidate's own extensions reach the gateway as they would reach Reef, with no
 credential of their own. Behind it:
 
 - the model routes go to the served model with the served binding's key, one
-  call from the step's budget each, recorded in the step's ``proposer.json``;
+  call from the step's budget each, recorded in the step's ``calls.json``;
   the request's ``model`` is always the served one;
 - the multimodal routes (images, embeddings, speech, decisions) go to the
   recipe's multimodal provider, and the step record keeps their status only;
@@ -42,7 +42,7 @@ from reef.inference.provider_protocol import (
     usage_of,
 )
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
-from reef.train.harness_backend.contract import ProposerCalls
+from reef.train.harness_backend import ModelCalls
 
 logger = logging.getLogger(__name__)
 
@@ -66,68 +66,80 @@ class WorkspaceTools(ABC):
 
 
 class AgentGateway:
-    """A loopback HTTP server for one agent run; ``base_url`` is the only thing the agent is given."""
+    """A loopback HTTP server for one agent run; ``base_url`` is the only thing the agent is given.
+
+    Values: ``served`` is the served model every model route reaches;
+    ``calls`` is the step's budget, call record and activity; ``tools``
+    answers ``/check`` and ``/trial``; ``provider`` is the multimodal
+    gateway, ``None`` for none. ``address`` is the loopback address it
+    listens on and ``token`` the random path segment every route needs.
+    ``provider_calls`` holds each multimodal call in call order, and
+    ``server`` is the running server, ``None`` before ``start`` and after
+    ``stop``.
+    Purpose: Reefine's agent run starts one and stops it when the agent
+    ends; AutoEnvScaling's author extends it.
+    """
 
     def __init__(
         self,
         served: ModelBinding,
-        calls: ProposerCalls,
+        calls: ModelCalls,
         tools: WorkspaceTools,
         provider: MultimodalProvider | None,
         *,
         host: str = "127.0.0.1",
     ) -> None:
-        self._served = served
-        self._calls = calls
-        self._tools = tools
-        self._provider = provider
-        self._host = host
-        self._token = secrets.token_urlsafe(24)
-        self._lock = threading.Lock()
-        self._provider_calls: list[dict[str, Any]] = []
-        self._server: ThreadingHTTPServer | None = None
+        self.served = served
+        self.calls = calls
+        self.tools = tools
+        self.provider = provider
+        self.address = host
+        self.token = secrets.token_urlsafe(24)
+        self.lock = threading.Lock()
+        self.provider_calls: list[dict[str, Any]] = []
+        self.server: ThreadingHTTPServer | None = None
 
     @property
     def port(self) -> int:
-        if self._server is None:
+        if self.server is None:
             raise RuntimeError("the agent gateway is not running")
-        return int(self._server.server_address[1])
+        return int(self.server.server_address[1])
 
     @property
     def base_url(self) -> str:
         """The address the agent and its trials use in place of Reef's: no ``/v1`` suffix."""
-        return f"http://{self._host}:{self.port}/t/{self._token}"
+        return f"http://{self.address}:{self.port}/t/{self.token}"
 
     def provider_calls_since(self, index: int) -> list[dict[str, Any]]:
         """The provider calls made after the first ``index``: what one trial's harness asked of the provider."""
-        with self._lock:
-            return list(self._provider_calls[index:])
+        with self.lock:
+            return list(self.provider_calls[index:])
 
     def provider_call_count(self) -> int:
-        with self._lock:
-            return len(self._provider_calls)
+        with self.lock:
+            return len(self.provider_calls)
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self._host, 0), self.handler_class())
+        server = ThreadingHTTPServer((self.address, 0), self.handler_class())
         server.daemon_threads = True
         threading.Thread(target=server.serve_forever, name="reef-agent-gateway", daemon=True).start()
-        self._server = server
+        self.server = server
 
     def stop(self) -> None:
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
 
     def handler_class(self) -> type[BaseHTTPRequestHandler]:
         gateway = self
-        prefix = f"/t/{self._token}"
+        prefix = f"/t/{self.token}"
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 path = self.path.split("?", 1)[0]
                 if not secrets.compare_digest(path[: len(prefix)], prefix):
-                    self._answer(404, {"error": "not found"})
+                    self.respond(404, {"error": "not found"})
                     return
                 route = path[len(prefix) :]
                 length = int(self.headers.get("Content-Length") or 0)
@@ -135,47 +147,47 @@ class AgentGateway:
                 try:
                     payload = json.loads(raw or b"{}")
                 except json.JSONDecodeError:
-                    self._answer(400, {"error": "the body must be JSON"})
+                    self.respond(400, {"error": "the body must be JSON"})
                     return
                 if not isinstance(payload, dict):
-                    self._answer(400, {"error": "the body must be a JSON object"})
+                    self.respond(400, {"error": "the body must be a JSON object"})
                     return
                 if route in MODEL_PATHS:
                     gateway.relay_model_call(self, route, payload)
                 elif route in MULTIMODAL_ROUTES:
                     gateway.relay_provider_call(self, route, payload)
                 elif route == "/check":
-                    self._answer(200, gateway._tools.check())
+                    self.respond(200, gateway.tools.check())
                 elif route == "/trial":
                     task = payload.get("task")
                     script = payload.get("script")
                     if script is not None:
                         if task is not None:
-                            self._answer(400, {"error": "choose task or script, not both"})
+                            self.respond(400, {"error": "choose task or script, not both"})
                             return
                         try:
                             validated = trial_script(script)
                         except ValueError as error:
-                            self._answer(400, {"error": str(error)})
+                            self.respond(400, {"error": str(error)})
                             return
-                        self._answer(200, gateway._tools.trial("", validated))
+                        self.respond(200, gateway.tools.trial("", validated))
                     elif isinstance(task, str) and task.strip():
-                        self._answer(200, gateway._tools.trial(task.strip()))
+                        self.respond(200, gateway.tools.trial(task.strip()))
                     else:
-                        self._answer(400, {"error": "a trial needs a task or script"})
+                        self.respond(400, {"error": "a trial needs a task or script"})
                         return
                 else:
-                    self._answer(404, {"error": f"the gateway serves no {route}"})
+                    self.respond(404, {"error": f"the gateway serves no {route}"})
 
             def do_GET(self) -> None:
                 path, _, query = self.path.partition("?")
                 if not secrets.compare_digest(path[: len(prefix)], prefix) or path[len(prefix) :] != "/models":
-                    self._answer(404, {"error": "not found"})
+                    self.respond(404, {"error": "not found"})
                     return
                 modality = urllib.parse.parse_qs(query).get("modality", ["text"])[0]
                 gateway.relay_models(self, modality)
 
-            def _answer(self, status: int, body: Mapping[str, Any]) -> None:
+            def respond(self, status: int, body: Mapping[str, Any]) -> None:
                 data = json.dumps(body, default=str).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -190,16 +202,16 @@ class AgentGateway:
 
     def relay_model_call(self, client: BaseHTTPRequestHandler, route: str, payload: dict[str, Any]) -> None:
         try:
-            self._calls.spend()
+            self.calls.spend()
         except RuntimeError as exc:
             refuse(client, 429, str(exc))
             return
         # The served model is the only one the agent reaches: a request naming another is sent to it anyway.
-        payload = {**payload, "model": self._served.model}
+        payload = {**payload, "model": self.served.model}
         headers = {
             "Content-Type": "application/json",
             "Accept-Encoding": "identity",
-            **provider_headers(route, self._served.api_key),
+            **provider_headers(route, self.served.api_key),
         }
         if route in ANTHROPIC_PATHS:
             # The agent's own API version and beta features win over the default version.
@@ -207,13 +219,13 @@ class AgentGateway:
                 value = client.headers.get(name)
                 if value:
                     headers[name] = value
-        url = f"{self._served.base_url.rstrip('/')}{route}"
+        url = f"{self.served.base_url.rstrip('/')}{route}"
         started = time.monotonic()
-        status, body, _ = relay(client, url, headers, payload, timeout_s=self._served.timeout_s)
+        status, body, _ = relay(client, url, headers, payload, timeout_s=self.served.timeout_s)
         text = body.decode("utf-8", errors="replace")
         entry: dict[str, Any] = {
             "source": "agent",
-            "model": self._served.model,
+            "model": self.served.model,
             "path": route,
             "status": status,
             "messages": len(payload.get("messages") or payload.get("input") or []),
@@ -224,58 +236,58 @@ class AgentGateway:
         usage = sse_usage(text)
         if usage is not None:
             entry["usage"] = usage
-        self._calls.record(entry)
+        self.calls.record(entry)
         # What the agent decided this turn, for the request page: each tool it called, else what it said.
         if status >= 400:
-            self._calls.note(
+            self.calls.note(
                 "agent", f"the served model answered {status}: {entry['reply'] or text[:200]}", failed=True
             )
             return
         called = reply_tool_calls(text)
         for name, arguments in called:
-            self._calls.note("agent", tool_summary(name, arguments))
+            self.calls.note("agent", tool_summary(name, arguments))
         said = entry["reply"].strip()
         if said and not called:
-            self._calls.note("agent", said.splitlines()[0])
+            self.calls.note("agent", said.splitlines()[0])
 
     def relay_models(self, client: BaseHTTPRequestHandler, modality: str) -> None:
         """The provider's models of one output modality, so the agent picks a real one without holding the key."""
-        if self._provider is None:
+        if self.provider is None:
             refuse(client, 501, "the Reef deployment has no multimodal provider")
             return
-        relay_models_request(client, self._provider.models_url(modality), self._provider.api_key)
+        relay_models_request(client, self.provider.models_url(modality), self.provider.api_key)
 
     def relay_provider_call(self, client: BaseHTTPRequestHandler, route: str, payload: dict[str, Any]) -> None:
-        if self._provider is None:
+        if self.provider is None:
             refuse(client, 501, f"{route} needs a multimodal provider key on the Reef deployment")
             return
-        upstream_path = self._provider.upstream_path(route)
+        upstream_path = self.provider.upstream_path(route)
         if upstream_path is None:
-            refuse(client, 501, f"the deployment's {self._provider.preset.name} provider serves no {route}")
+            refuse(client, 501, f"the deployment's {self.provider.preset.name} provider serves no {route}")
             return
         try:
-            self._calls.spend()
+            self.calls.spend()
         except RuntimeError as exc:
             refuse(client, 429, str(exc))
             return
         headers = {
             "Content-Type": "application/json",
             "Accept-Encoding": "identity",
-            "Authorization": f"Bearer {self._provider.api_key}",
+            "Authorization": f"Bearer {self.provider.api_key}",
         }
-        url = f"{self._provider.base_url}{upstream_path}"
+        url = f"{self.provider.base_url}{upstream_path}"
         started = time.monotonic()
         status, body, _ = relay(client, url, headers, payload, timeout_s=300.0)
         call: dict[str, Any] = {"path": route, "model": payload.get("model"), "status": status}
         if status >= 400:
             call["error"] = body.decode("utf-8", errors="replace")[:MAX_ERROR_CHARS]
-        with self._lock:
-            self._provider_calls.append(call)
+        with self.lock:
+            self.provider_calls.append(call)
         seconds = round(time.monotonic() - started, 3)
         # The step record keeps what was asked of the provider and how it answered, never the media itself.
-        self._calls.record({"source": "agent", **call, "seconds": seconds})
+        self.calls.record({"source": "agent", **call, "seconds": seconds})
         outcome = f"{status}" if status < 400 else f"{status}: {call['error'][:160]}"
-        self._calls.note("provider", f"{route} {call['model']} → {outcome} ({seconds:g} s)", failed=status >= 400)
+        self.calls.note("provider", f"{route} {call['model']} → {outcome} ({seconds:g} s)", failed=status >= 400)
 
 
 def relay_models_request(client: BaseHTTPRequestHandler, url: str, api_key: str) -> None:

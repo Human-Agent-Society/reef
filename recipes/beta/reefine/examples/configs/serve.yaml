@@ -5,7 +5,7 @@ reef:
   port: 8901
   # Unset REEF_TOKEN leaves the loopback service without authentication; set it to require a Bearer token.
   token: ${REEF_TOKEN}
-  run-dir: .reef/reefine/stack
+  run-dir: ~/.reef/reefine/stack
 
 recipe:
   implementation: recipes.beta.reefine:ReefineRecipe
@@ -14,12 +14,12 @@ recipe:
   config:
     evolution:
       adapter: pi
-      # A coding agent (pi) answers a request: it edits the tree, runs the changed harness to prove it, and
-      # hands the files back. Jailed with bubblewrap and pasta where the host has them; without them the text
-      # proposer answers, unless proposer_agent.sandbox (or REEF_PROPOSER_SANDBOX) is a cloud sandbox (e2b with
-      # E2B_API_KEY, or modal with Modal's token), or none, which runs the agent unisolated (trusted clients only).
-      propose: recipes.beta.reefine.agent:AgentProposer
-      proposer_agent:
+      # The recipe's method, recipes.beta.reefine:ReefineMethod, answers each request. A coding agent (pi) does
+      # it: the agent edits the step's tree, runs the changed harness to prove it, and stops. Jailed with
+      # bubblewrap and pasta where the host has them; without them the served model answers in text, unless
+      # agent.sandbox (or REEF_AGENT_SANDBOX) is a cloud sandbox (e2b with E2B_API_KEY, or modal with Modal's
+      # token), or none, which runs the agent unisolated (trusted clients only).
+      agent:
         timeout_s: 1800
         trial_timeout_s: 300
       # Images, embeddings, speech and decisions: Reef relays the harness's calls to this gateway with its key,
@@ -29,24 +29,26 @@ recipe:
       multimodal:
         preset: openrouter
         api_key: ${REEF_MULTIMODAL_API_KEY}
-      evaluate: recipes.beta.reefine.scorer:AnswerScorer
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
-      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
-      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
-      # change does; the step page's design and review notes and the person judge the change itself.
-      selection: floor
-      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
-      step_record_dir: .reef/reefine/steps
-      # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
-      proposals_dir: .reef/reefine/proposals
+      # Each step's workspace (its tree, material, calls and output), the history of every candidate, and the
+      # proposal inbox of POST /reef/harness/proposals, one directory per scenario. It stays outside the
+      # checkout: with agent.sandbox none the agent works in a step's directory, and pi reads every AGENTS.md
+      # and CLAUDE.md in the directories above it.
+      state_dir: ~/.reef/reefine/harness
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi. Set evolution.binary to a path to use an install of your own instead.
-      # On an adapter whose prompt is a Harbor task directory (terminus), the recipe runs the health task as
-      # the directory recipes/beta/reefine/health instead, scored by its verifier's reward.
-      tasks:
-        - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
-          as a plain word alone on the last line.'
+      evaluation:
+        # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
+        # that the tree still works (the model binding, the tools, the extensions load), not that the requested
+        # change does; the step page's design and review and the person judge the change itself.
+        policy: floor
+        scorer: recipes.beta.reefine.scorer:AnswerScorer
+        # On an adapter whose prompt is a Harbor task directory (terminus), the recipe runs the health task as
+        # the directory recipes/beta/reefine/health instead, scored by its verifier's reward.
+        tasks:
+          - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+            as a plain word alone on the last line.'
       # No seed: the first tree is the recipe's own (recipes/beta/reefine/seed), the starter skill.
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual
@@ -56,7 +58,7 @@ inference:
   upstream-model: ${REEF_UPSTREAM_MODEL:?}
   upstream-api-key: ${REEF_UPSTREAM_API_KEY}
 storage:
-  agent-record-dir: .reef/reefine/agent-record
-  artifact-repository: .reef/reefine/artifacts.git
-  artifact-work-dir: .reef/reefine/artifact-work
-  artifact-cache-dir: .reef/reefine/artifact-cache
+  agent-record-dir: ~/.reef/reefine/agent-record
+  artifact-repository: ~/.reef/reefine/artifacts.git
+  artifact-work-dir: ~/.reef/reefine/artifact-work
+  artifact-cache-dir: ~/.reef/reefine/artifact-cache

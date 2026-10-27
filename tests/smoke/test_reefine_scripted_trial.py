@@ -118,7 +118,7 @@ export default function(pi) {
     assert not report["steps"][1]["passed"] and report["steps"][1]["model_requests"] == 0
 
 
-def test_proposer_restores_saved_progress_and_deadline_without_old_history(tmp_path: Path) -> None:
+def test_agent_restores_saved_progress_and_deadline_without_old_history(tmp_path: Path) -> None:
     files = {AGENT_TOOLS_PATH: AGENT_TOOLS.read_text()}
     plan = trial_script(
         {
@@ -143,9 +143,9 @@ def test_proposer_restores_saved_progress_and_deadline_without_old_history(tmp_p
         }
     )
     env = {
-        "REEF_PROPOSER_URL": "http://127.0.0.1:1",
-        "REEF_PROPOSER_DEADLINE_MS": str(int(time.time() * 1000) + 30000),
-        "REEF_PROPOSER_FINISH_SECONDS": "60",
+        "REEF_AGENT_URL": "http://127.0.0.1:1",
+        "REEF_AGENT_DEADLINE_MS": str(int(time.time() * 1000) + 30000),
+        "REEF_AGENT_FINISH_SECONDS": "60",
     }
     outcome, report = run_script(tmp_path, files, plan, env)
     assert report["passed"] and outcome.exit_code == 0, (report, outcome.stderr)

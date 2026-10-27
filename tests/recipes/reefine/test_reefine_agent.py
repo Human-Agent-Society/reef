@@ -1,4 +1,4 @@
-"""Reefine's agent proposer: the workspace round trip, the gateway, and a whole run with a stand-in pi."""
+"""Reefine's agent: the tree read back, the gateway, the trials, and whole runs with a stand-in pi."""
 
 from __future__ import annotations
 
@@ -9,53 +9,32 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from tests.recipes.reefine.reefine_support import TREE, Served, designed, reefine_step, step_workspace
+from tests.support.harness_steps import step_tools
 
+from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import agent as reefine_agent
-from recipes.beta.reefine import proposer
-from recipes.beta.reefine.agent import AgentProposer, AgentRun
+from recipes.beta.reefine.agent import AgentExecution, AgentRun, agent_rules, answer_with_agent
 from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
-from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.tree import HarnessTree, TreePatch, TreeWorkspace
+from reef.harness.tree import TreePatch
 from reef.sandbox.e2b import E2BSession
-from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome
+from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome, SandboxExecutor
 from reef.sandbox.remote import pack
-from reef.train.harness_backend.calls import StepCalls, budgeted_bindings
-from reef.train.harness_backend.contract import AgentHost, ProposalContext, TreeProposal
+from reef.train.harness_backend import Tools, Workspace
+from reef.train.harness_backend.calls import StepCalls
+from reef.train.types import JobData
 
 REVIEW = {"result": "complete", "covered": ["reads answers aloud"], "uncovered": [], "delivers": True}
-
-#: The head tree the agent starts from: a skill and the rules.
-TREE = HarnessTree(
-    {
-        "rules.md": "Be brief.\n",
-        "skills/answer-style/SKILL.md": "---\nname: answer-style\ndescription: x\n---\nold",
-    }
-)
-
-
-def context(models: ModelBindings, text: str | None, host: AgentHost | None) -> ProposalContext:
-    """One request step's context over ``TREE`` on pi; ``text`` is the request, ``None`` for an automatic step."""
-    request = None if text is None else TrainingRequest(text=text, session="s1", release_id="base", id="r1")
-    return ProposalContext(
-        step=1,
-        tree=TREE,
-        descriptor=get_adapter("pi") if host is None else host.descriptor,
-        samples=(),
-        sources=(),
-        request=request,
-        evaluation_tasks=(),
-        models=models,
-        agent_host=host,
-    )
+SPEAK = "export default function (pi) { if (process.env.PI_OFFLINE) return; }"
+ASK = TrainingRequest(text="Read my answers aloud with a natural voice", session="s1", release_id="base", id="r1")
 
 
 class Upstream:
@@ -126,6 +105,10 @@ def provider_of(upstream: Upstream) -> MultimodalProvider:
     return MultimodalProvider(PRESETS["openrouter"], f"{upstream.url}/api", "sk-or-test")
 
 
+def served_of(upstream: Upstream) -> ModelBindings:
+    return ModelBindings(served=ModelBinding(base_url=upstream.url, model="served-model", api_key="served-key"))
+
+
 def post(url: str, body: dict) -> tuple[int, bytes]:
     request = urllib.request.Request(
         url, data=json.dumps(body).encode(), headers={"content-type": "application/json"}, method="POST"
@@ -146,20 +129,170 @@ class NoTools(WorkspaceTools):
         return {"task": task} if script is None else {"script": script}
 
 
-def workspace_of(tmp_path: Path) -> Path:
-    """A run's workspace directory, its harness/ an editable copy of ``TREE``."""
-    workspace = tmp_path / "workspace"
-    TreeWorkspace.create(TREE, workspace / "harness")
-    return workspace
+FAKE_PI = textwrap.dedent(
+    """\
+    #!{python}
+    import json, os, pathlib, sys, time, urllib.request
+
+    def post(url, body):
+        request = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                         headers={{"content-type": "application/json"}}, method="POST")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+        try:
+            with opener.open(request, timeout=60) as response:
+                return response.status, response.read().decode(errors="replace")
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode()
+
+    sessions = pathlib.Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
+    sessions.mkdir(parents=True, exist_ok=True)
+    assert "PI_OFFLINE" not in os.environ, "an agent or a trial runs online"
+    assert pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "{tools}").exists() == (
+        "REEF_AGENT_URL" in os.environ)
+    # The episode environment is minimal, so the test sets the mode in a file beside the binary.
+    mode_file = pathlib.Path(sys.argv[0]).with_name("mode")
+    mode = mode_file.read_text() if mode_file.exists() else ""
+    if "REEF_AGENT_URL" in os.environ:
+        base = os.environ["REEF_AGENT_URL"]
+        if mode == "sleep":
+            time.sleep(30)
+        if mode != "idle":
+            # The agent's current directory is the tree; its design and requires go beside it.
+            pathlib.Path("../output/design.md").write_text("Speak each answer with a TTS model.")
+            pathlib.Path("extensions").mkdir(exist_ok=True)
+            pathlib.Path("extensions/speak.ts").write_text({speak!r})
+            pathlib.Path("notes.txt").write_text("scratch")
+            pathlib.Path("../output/requires.json").write_text(json.dumps(
+                [{{"name": "afplay", "kind": "service", "check": "command -v afplay", "prompt": "Install a player"}}]))
+            print(post(base + "/check", {{}}))
+            print(post(base + "/trial", {{"task": "Say hello out loud"}}))
+        text = "done"
+    else:
+        # The candidate harness: its extension calls the TTS route at REEF_SERVICE_URL, as in a user's session.
+        status, body = post(os.environ["REEF_SERVICE_URL"] + "/v1/audio/speech",
+                            {{"model": "not/real", "input": sys.argv[-1]}})
+        text = "spoke with status %d" % status
+    event = {{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "text", "text": text}}]}}}}
+    if mode == "stream-error":
+        event["message"].update(stopReason="error", errorMessage="Stream ended without finish_reason")
+    if mode == "budget":
+        event["message"].update(stopReason="length")
+    (sessions / "s.jsonl").write_text(json.dumps(event) + "\\n")
+    """
+)
+
+
+def fake_pi(tmp_path: Path, mode: str = "") -> Path:
+    """The stand-in pi in ``tmp_path``: the agent with ``REEF_AGENT_URL``, the candidate harness without it."""
+    binary = tmp_path / "bin" / "pi"
+    binary.parent.mkdir(exist_ok=True)
+    binary.write_text(FAKE_PI.format(python=sys.executable, tools=reefine_agent.AGENT_TOOLS_PATH, speak=SPEAK))
+    binary.chmod(0o755)
+    binary.with_name("mode").write_text(mode)
+    return binary
+
+
+def agent_of(binary: Path, provider: MultimodalProvider | None = None, *, timeout_s: float = 60.0) -> AgentExecution:
+    return AgentExecution(LocalExecutor(), str(binary), timeout_s, 30.0, provider)
+
+
+def agent_step(tmp_path: Path, models: ModelBindings) -> tuple[Workspace, Tools]:
+    """A request step's workspace over ``TREE`` and its tools, the served model ``models``."""
+    workspace = step_workspace(tmp_path, request=ASK)
+    return workspace, step_tools(workspace, models)
 
 
 @pytest.mark.unit
-def test_the_workspace_reads_back_only_the_changes_a_request_may_make(tmp_path) -> None:
-    workspace = workspace_of(tmp_path)
-    run = AgentRun(agent_host(tmp_path, []), TREE, workspace, ModelBinding(base_url="http://m", model="m"))
-    assert run.read() == (TreePatch({}), [])
+def test_the_agent_changes_the_steps_tree_tries_it_and_the_step_publishes_it_reviewed(tmp_path, upstream) -> None:
+    method = ReefineMethod(agent_of(fake_pi(tmp_path), provider_of(upstream)))
+    result, activity = reefine_step(tmp_path, method, JobData("demo:1", (), request=ASK), served_of(upstream))
+    metrics = result.metrics
+    assert metrics["selected"] is True and metrics["patch"] == {"extensions/speak.ts": SPEAK}
+    notes = metrics["method_notes"]
+    assert notes["design"] == "Speak each answer with a TTS model." and notes["review"]["result"] == "complete"
+    assert notes["agent"]["trials"] == 1 and notes["agent"]["exit_code"] == 0
+    # A file the agent left off the layout is not the candidate's: the notes say so and the record keeps it.
+    assert notes["unread"] == ["harness/notes.txt is not a path of the harness layout, so it is not read"]
+    assert metrics["method_summary"].startswith("Design:\nSpeak each answer with a TTS model.\n\nReview: complete")
+    assert [item["name"] for item in metrics["training_request"]["requires"]] == ["afplay"]
+    step_dir = Path(metrics["step_record"])
+    assert not (step_dir / "harness" / "notes.txt").exists()
+    assert (step_dir / "output" / "agent-harness" / "notes.txt").read_text() == "scratch"
+    assert (step_dir / "output" / "agent-session.jsonl").read_text().count('"done"') == 1
+    checks = [json.loads(line) for line in (step_dir / "output" / "agent-checks.jsonl").read_text().splitlines()]
+    assert [check["kind"] for check in checks] == ["check", "trial"] and checks[0]["valid"] is True
+    # The trial's speech call reached the provider, and its refusal is in the step's call record for the agent.
+    speech = [r for r in upstream.requests if r["path"] == "/api/v1/audio/speech"]
+    assert speech and speech[0]["body"]["model"] == "not/real"
+    calls = json.loads((step_dir / "calls.json").read_text())
+    assert any(entry.get("path") == "/v1/audio/speech" and entry.get("status") == 400 for entry in calls)
+    # The live activity tells the run as it went: the agent's start, its check and trial, the refused speech call,
+    # its end, and the review's model call.
+    kinds = [line["kind"] for line in activity]
+    assert kinds[0] == "agent" and "the coding agent started" in activity[0]["text"]
+    assert any(line["kind"] == "check" and line["text"].startswith("validation passed") for line in activity)
+    assert any(line["text"].startswith("trial 1 running the changed harness: Say hello out loud") for line in activity)
+    refused = [line for line in activity if line["kind"] == "provider"]
+    assert refused and refused[0]["failed"] and refused[0]["text"].startswith("/v1/audio/speech not/real → 400")
+    assert any(line["kind"] == "agent" and "exited 0" in line["text"] for line in activity)
+    assert kinds[-2:] == ["model", "model"] and activity[-1]["text"].startswith("served-model answered in")
 
-    harness = workspace / "harness"
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mode", "failure"),
+    [
+        ("idle", "the agent changed no file"),
+        ("stream-error", "the agent's model response failed: Stream ended without finish_reason"),
+        ("budget", "the agent's model response failed: the model's reply hit its token budget"),
+    ],
+)
+def test_an_agent_that_changes_nothing_or_fails_its_model_call_hands_back_no_change(
+    tmp_path, upstream, mode, failure
+) -> None:
+    """A run that writes nothing, or that pi ends on a failed model response (exiting zero all the same), is no
+    answer. A reasoning model that spends the reply budget on its reasoning ends the turn with nothing: the step
+    names the budget, so the person raises it instead of guessing."""
+    workspace, tools = agent_step(tmp_path, served_of(upstream))
+    answered = answer_with_agent(workspace, tools, TREE, ASK, agent_of(fake_pi(tmp_path, mode), provider_of(upstream)))
+    assert answered.patch.changes == {} and answered.notes["failure"].startswith(failure)
+    assert answered.notes["agent"]["exit_code"] == 0
+
+
+@pytest.mark.unit
+def test_off_pi_the_agent_stays_idle_and_the_served_model_answers(tmp_path) -> None:
+    """The agent's rules and trials are pi's: on another adapter a method that holds an agent answers in text."""
+    workspace = step_workspace(tmp_path, adapter="dsh")
+    served = Served(designed({"rules.md": "Run the tests first.\n"}), json.dumps(REVIEW))
+    method = ReefineMethod(agent_of(tmp_path / "no-such-pi"))
+    result = method.step(workspace, step_tools(workspace, ModelBindings(served=served)))
+    assert workspace.tree() == TREE.apply(TreePatch({"rules.md": "Run the tests first.\n"}))
+    assert result.notes["review"] == REVIEW and "This harness is" in served.prompts[1]
+
+
+@pytest.mark.unit
+def test_a_run_past_its_limit_keeps_its_tree_and_progress_without_publishing(tmp_path, monkeypatch) -> None:
+    def launch(*args, root, workspace, **kwargs):
+        reference = (root / "scratch" / "reference" / "pi-extension-api.md").read_text()
+        assert "pi.getActiveTools()" in reference and "**replaces**" in reference
+        (workspace / "rules.md").write_text("Unfinished candidate")
+        (root / "output" / "progress.md").write_text("API confirmed; tool isolation remains unchecked.")
+        raise EpisodeTimeout("deadline")
+
+    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
+    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
+    answered = answer_with_agent(workspace, tools, TREE, ASK, agent_of(tmp_path / "pi"))
+    assert answered.patch.changes == {} and "past its" in answered.notes["failure"]
+    assert (workspace.output / "agent-harness" / "rules.md").read_text() == "Unfinished candidate"
+    assert "remains unchecked" in (workspace.output / "progress.md").read_text()
+
+
+@pytest.mark.unit
+def test_the_tree_reads_back_only_the_changes_a_request_may_make(tmp_path) -> None:
+    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
+    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi"))
+    assert run.read() == (TREE, [])
+    harness = workspace.harness
     (harness / "skills" / "answer-style" / "SKILL.md").write_text("---\nname: answer-style\ndescription: x\n---\nnew")
     (harness / "rules.md").unlink()
     for relative, text in {
@@ -170,17 +303,160 @@ def test_the_workspace_reads_back_only_the_changes_a_request_may_make(tmp_path) 
     }.items():
         (harness / relative).parent.mkdir(parents=True, exist_ok=True)
         (harness / relative).write_text(text)
-    patch, unread = run.read()
-    assert patch.changes == {
+    candidate, unread = run.read()
+    assert TREE.diff(candidate).changes == {
         "commands/tone.md": "Say it again.",
         "extensions/speak.ts": "export default function (pi) {}",
         "rules.md": None,
         "skills/answer-style/SKILL.md": "---\nname: answer-style\ndescription: x\n---\nnew",
     }
     assert unread == [
-        "harness/notes.txt is not a path of the harness layout, so it is not read",
         "harness/config/primary.json is a file a request may not change, so it is not read",
+        "harness/notes.txt is not a path of the harness layout, so it is not read",
     ]
+    # A link could point outside the tree: a file a request may write that is a link fails the check.
+    (harness / "commands" / "linked.md").symlink_to(harness / "notes.txt")
+    checked = run.check()
+    assert checked["valid"] is False and checked["problems"] == ["harness/commands/linked.md is a symbolic link"]
+
+
+@pytest.mark.unit
+def test_a_binary_scratch_file_and_the_links_of_an_install_leave_the_change_readable(tmp_path) -> None:
+    """One stray file does not cost the request: a binary off the layout and the node_modules/ of an npm install,
+    its .bin links included, are left out and named, the directory once. A file a request may write must be text."""
+    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
+    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi"))
+    harness = workspace.harness
+    (harness / "rules.md").write_text("Reply in French.\n")
+    (harness / "out.mp3").write_bytes(b"\xff\xfb\x90\x00")
+    (harness / "node_modules" / "say").mkdir(parents=True)
+    (harness / "node_modules" / "say" / "cli.js").write_text("#!/usr/bin/env node\n")
+    (harness / "node_modules" / ".bin").mkdir()
+    (harness / "node_modules" / ".bin" / "say").symlink_to("../say/cli.js")
+    checked = run.check()
+    assert checked["valid"] is True and checked["files"] == {"rules.md": "written"}
+    assert checked["unread"] == [
+        "harness/node_modules/ holds no file of the harness layout, so nothing in it is read",
+        "harness/out.mp3 is not a path of the harness layout, so it is not read",
+    ]
+    (harness / "extensions").mkdir()
+    (harness / "extensions" / "speak.ts").write_bytes(b"\xff\xfe")
+    assert run.check()["problems"][0].startswith("harness/extensions/speak.ts is not UTF-8 text")
+
+
+@pytest.mark.unit
+def test_concurrent_tool_calls_pull_the_sandbox_tree_one_at_a_time(tmp_path) -> None:
+    """pi runs the tool calls of one turn at once, and each pull replaces the tree's directory: they take turns, and
+    every one answers from a whole copy."""
+    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
+    (workspace.harness / "skills" / "answer-style" / "SKILL.md").write_text("---\nname: x\n---\nnew")
+    archive = pack(workspace.harness)
+
+    class Sandbox:
+        """What a pull asks of the E2B sandbox, counting how many pulls are inside it at once."""
+
+        def __init__(self) -> None:
+            self.commands = self
+            self.files = self
+            self.inside = 0
+            self.most_at_once = 0
+            self.counter = threading.Lock()
+
+        def run(self, command: str, **options: object) -> None:
+            return None
+
+        def read(self, path: str, format: str = "text") -> bytes:
+            with self.counter:
+                self.inside += 1
+                self.most_at_once = max(self.most_at_once, self.inside)
+            time.sleep(0.05)  # long enough for unserialized pulls to overlap
+            with self.counter:
+                self.inside -= 1
+            return archive
+
+    sandbox = Sandbox()
+    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi"))
+    run.session = E2BSession(sandbox)
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def check() -> None:
+        try:
+            results.append(run.check())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=check) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert all(r["valid"] and r["files"] == {"skills/answer-style/SKILL.md": "written"} for r in results)
+    assert len(results) == 6 and sandbox.most_at_once == 1
+
+
+def gateway_run(tmp_path: Path, *, timeout_s: float = 60.0) -> tuple[AgentRun, AgentGateway]:
+    """An agent run on a fresh step whose gateway is up; the caller stops the gateway."""
+    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
+    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi", timeout_s=timeout_s))
+    gateway = AgentGateway(run.served, tools.calls, run, None)
+    run.gateway = gateway
+    gateway.start()
+    return run, gateway
+
+
+@pytest.mark.unit
+def test_a_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, monkeypatch) -> None:
+    timeouts = []
+
+    def launch(*args, timeout, **kwargs):
+        timeouts.append(timeout)
+        raise EpisodeTimeout("trial deadline")
+
+    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
+    run, gateway = gateway_run(tmp_path, timeout_s=100)
+    try:
+        (run.workspace.harness / "rules.md").write_text("A changed rule.\n")
+        run.deadline = time.monotonic() + 15
+        first = run.trial("hello")
+        assert first["ran"] and "timed_out" in first and 0 < timeouts[0] <= 5
+        assert first["candidate"] == run.check()["candidate"]
+        (run.workspace.harness / "rules.md").write_text("Another changed rule.\n")
+        assert first["candidate"] != run.check()["candidate"]
+        run.deadline = time.monotonic() + 9
+        refused = run.trial("another trial")
+        assert not refused["ran"] and len(timeouts) == 1
+        run.write_checks()
+        records = [json.loads(line) for line in (run.workspace.output / "agent-checks.jsonl").read_text().splitlines()]
+        assert records[0]["candidate"] == first["candidate"] and records[-1]["ran"] is False
+    finally:
+        gateway.stop()
+
+
+@pytest.mark.unit
+def test_the_agent_can_try_the_head_tree_before_it_changes_a_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(reefine_agent, "launch_pi", lambda *args, **kwargs: (ProcessOutcome(0, "", ""), []))
+    run, gateway = gateway_run(tmp_path)
+    try:
+        assert run.check()["valid"]
+        assert run.trial("hello")["ran"]
+    finally:
+        gateway.stop()
+
+
+@pytest.mark.unit
+def test_a_scripted_driver_failure_is_returned_to_the_agent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        reefine_agent, "launch_pi", lambda *args, **kwargs: (ProcessOutcome(1, "", "node could not load pi"), [])
+    )
+    run, gateway = gateway_run(tmp_path)
+    try:
+        (run.workspace.harness / "rules.md").write_text("A changed rule.\n")
+        result = run.trial("", trial_script({"steps": [{"prompt": "hello", "expect": {"model_called": True}}]}))
+        assert not result["passed"] and result["stderr_tail"] == "node could not load pi"
+    finally:
+        gateway.stop()
 
 
 @pytest.mark.unit
@@ -232,234 +508,28 @@ def test_without_a_provider_a_provider_call_is_501(upstream) -> None:
         gateway.stop()
 
 
-FAKE_PI = textwrap.dedent(
-    """\
-    #!{python}
-    import json, os, pathlib, sys, time, urllib.request
-
-    def post(url, body):
-        request = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                         headers={{"content-type": "application/json"}}, method="POST")
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
-        try:
-            with opener.open(request, timeout=60) as response:
-                return response.status, response.read().decode(errors="replace")
-        except urllib.error.HTTPError as error:
-            return error.code, error.read().decode()
-
-    sessions = pathlib.Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
-    sessions.mkdir(parents=True, exist_ok=True)
-    assert "PI_OFFLINE" not in os.environ, "an agent or a trial runs online"
-    assert pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "{tools}").exists() == (
-        "REEF_PROPOSER_URL" in os.environ)
-    # The episode environment is minimal, so the test sets the mode in a file beside the binary.
-    mode_file = pathlib.Path(sys.argv[0]).with_name("mode")
-    mode = mode_file.read_text() if mode_file.exists() else ""
-    if "REEF_PROPOSER_URL" in os.environ:
-        base = os.environ["REEF_PROPOSER_URL"]
-        if mode == "sleep":
-            time.sleep(30)
-        if mode != "idle":
-            pathlib.Path("design.md").write_text("Speak each answer with a TTS model.")
-            pathlib.Path("harness/extensions").mkdir(exist_ok=True)
-            pathlib.Path("harness/extensions/speak.ts").write_text(
-                "export default function (pi) {{ if (process.env.PI_OFFLINE) return; }}")
-            pathlib.Path("requires.json").write_text(json.dumps(
-                [{{"name": "afplay", "kind": "service", "check": "command -v afplay", "prompt": "Install a player"}}]))
-            print(post(base + "/check", {{}}))
-            print(post(base + "/trial", {{"task": "Say hello out loud"}}))
-        text = "done"
-    else:
-        # The candidate harness: its extension calls the TTS route at REEF_SERVICE_URL, as in a user's session.
-        status, body = post(os.environ["REEF_SERVICE_URL"] + "/v1/audio/speech",
-                            {{"model": "not/real", "input": sys.argv[-1]}})
-        text = "spoke with status %d" % status
-    event = {{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "text", "text": text}}]}}}}
-    if mode == "stream-error":
-        event["message"].update(stopReason="error", errorMessage="Stream ended without finish_reason")
-    if mode == "budget":
-        event["message"].update(stopReason="length")
-    (sessions / "s.jsonl").write_text(json.dumps(event) + "\\n")
-    """
-)
-
-
-def agent_host(tmp_path: Path, record: list[dict], *, timeout_s: float = 60.0) -> AgentHost:
-    binary = tmp_path / "bin" / "pi"
-    binary.parent.mkdir()
-    binary.write_text(FAKE_PI.format(python=sys.executable, tools=reefine_agent.AGENT_TOOLS_PATH))
-    binary.chmod(0o755)
-    step_dir = tmp_path / "step"
-    step_dir.mkdir()
-    return AgentHost(
-        descriptor=get_adapter("pi"),
-        binary=str(binary),
-        executor=LocalExecutor(),
-        step_dir=step_dir,
-        calls=StepCalls(0, record),
-        timeout_s=timeout_s,
-        trial_timeout_s=30.0,
-    )
-
-
-def served_models(upstream: Upstream, record: list[dict], host: AgentHost) -> ModelBindings:
-    models = ModelBindings(served=ModelBinding(base_url=upstream.url, model="served-model", api_key="served-key"))
-    return budgeted_bindings(models, host.calls)  # the step hands the proposer these
-
-
 @pytest.mark.unit
-def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_path, upstream) -> None:
-    record: list[dict] = []
-    host = agent_host(tmp_path, record)
-    models = served_models(upstream, record, host)
-    proposal = AgentProposer(provider_of(upstream)).propose(
-        context(models, "Read my answers aloud with a natural voice", host)
-    )
-    assert isinstance(proposal, TreeProposal)
-    assert proposal.patch.changes == {
-        "extensions/speak.ts": "export default function (pi) { if (process.env.PI_OFFLINE) return; }"
-    }
-    notes = proposal.notes
-    assert notes["design"] == "Speak each answer with a TTS model."
-    assert notes["review"]["result"] == "complete"
-    assert notes["agent"]["trials"] == 1 and notes["agent"]["exit_code"] == 0
-    assert [dict(item) for item in proposal.requires] == [
-        {"name": "afplay", "kind": "service", "check": "command -v afplay", "prompt": "Install a player"}
+def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) -> None:
+    calls = StepCalls(0, [])
+    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), calls, NoTools(), None)
+    gateway.start()
+    try:
+        upstream.answer = {
+            "choices": [{"message": {"tool_calls": [{"function": {"name": "edit", "arguments": '{"path": "x.md"}'}}]}}]
+        }
+        post(f"{gateway.base_url}/v1/chat/completions", {"messages": []})
+        upstream.answer = {"choices": [{"message": {"content": "Done: the extension speaks.\nMore detail."}}]}
+        post(f"{gateway.base_url}/v1/chat/completions", {"messages": []})
+    finally:
+        gateway.stop()
+    assert [(line["kind"], line["text"]) for line in calls.activity()] == [
+        ("agent", "edit x.md"),
+        ("agent", "Done: the extension speaks."),
     ]
-    # The trial's speech call reached the provider and its refusal is on record for the agent to read.
-    speech = [r for r in upstream.requests if r["path"] == "/api/v1/audio/speech"]
-    assert speech and speech[0]["body"]["model"] == "not/real"
-    assert any(entry.get("path") == "/v1/audio/speech" and entry.get("status") == 400 for entry in record)
-    assert (host.step_dir / "agent-session.jsonl").read_text().count('"done"') == 1
-    # The live activity tells the run as it went: the agent's start, its check and trial, the refused speech call,
-    # its end, and the review's model call.
-    activity = host.calls.activity()
-    kinds = [line["kind"] for line in activity]
-    assert kinds[0] == "proposer" and "the coding agent started" in activity[0]["text"]
-    assert any(line["kind"] == "check" and line["text"].startswith("validation passed") for line in activity)
-    assert any(line["text"].startswith("trial 1 running the changed harness: Say hello out loud") for line in activity)
-    speech = [line for line in activity if line["kind"] == "provider"]
-    assert speech and speech[0]["failed"] and speech[0]["text"].startswith("/v1/audio/speech not/real → 400")
-    assert any(
-        line["kind"] == "trial" and line["text"].startswith("trial 1 exited") and line["failed"] for line in activity
-    )
-    assert any(line["kind"] == "proposer" and "exited 0" in line["text"] for line in activity)
-    assert kinds[-2:] == ["model", "model"] and activity[-1]["text"].startswith("served-model answered in")
-
-
-@pytest.mark.unit
-def test_concurrent_tool_calls_pull_the_sandbox_workspace_one_at_a_time(tmp_path) -> None:
-    """pi runs the tool calls of one turn at once, and each pull replaces the workspace directory: they take turns,
-    and every one answers from a whole copy."""
-    workspace = workspace_of(tmp_path)
-    (workspace / "harness" / "skills" / "answer-style" / "SKILL.md").write_text("---\nname: x\n---\nnew")
-    archive = pack(workspace)
-
-    class Sandbox:
-        """What a pull asks of the E2B sandbox, counting how many pulls are inside it at once."""
-
-        def __init__(self) -> None:
-            self.commands = self
-            self.files = self
-            self.inside = 0
-            self.most_at_once = 0
-            self.counter = threading.Lock()
-
-        def run(self, command: str, **options: object) -> None:
-            return None
-
-        def read(self, path: str, format: str = "text") -> bytes:
-            with self.counter:
-                self.inside += 1
-                self.most_at_once = max(self.most_at_once, self.inside)
-            time.sleep(0.05)  # long enough for unserialized pulls to overlap
-            with self.counter:
-                self.inside -= 1
-            return archive
-
-    sandbox = Sandbox()
-    run = AgentRun(agent_host(tmp_path, []), TREE, workspace, ModelBinding(base_url="http://m", model="m"))
-    run.session = E2BSession(sandbox)
-    results: list[dict] = []
-    errors: list[BaseException] = []
-
-    def check() -> None:
-        try:
-            results.append(run.check())
-        except BaseException as exc:
-            errors.append(exc)
-
-    threads = [threading.Thread(target=check) for _ in range(6)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert errors == []
-    assert all(r["valid"] and r["files"] == {"skills/answer-style/SKILL.md": "written"} for r in results)
-    assert len(results) == 6 and sandbox.most_at_once == 1
-
-
-@pytest.mark.unit
-def test_an_agent_that_changes_nothing_or_runs_out_of_time_hands_back_no_mutation(tmp_path, upstream) -> None:
-    record: list[dict] = []
-    host = agent_host(tmp_path, record)
-    models = served_models(upstream, record, host)
-    mode = Path(host.binary).with_name("mode")
-    mode.write_text("idle")
-    propose = AgentProposer(provider_of(upstream))
-    idle = propose.propose(context(models, "x", host))
-    assert idle.patch.changes == {} and idle.notes["failure"] == "the agent changed no file"
-
-    mode.write_text("sleep")
-    slow = propose.propose(context(models, "x", replace(host, timeout_s=1.0, step_dir=None)))
-    assert slow.patch.changes == {} and "past its" in slow.notes["failure"]
-
-
-@pytest.mark.unit
-def test_an_agent_with_a_failed_model_response_does_not_publish_its_partial_changes(tmp_path, upstream) -> None:
-    record: list[dict] = []
-    host = agent_host(tmp_path, record)
-    Path(host.binary).with_name("mode").write_text("stream-error")
-    proposal = AgentProposer(provider_of(upstream)).propose(context(served_models(upstream, record, host), "x", host))
-    assert proposal.patch.changes == {}
-    assert proposal.notes["agent"]["exit_code"] == 0
-    assert proposal.notes["failure"] == "the agent's model response failed: Stream ended without finish_reason"
-
-
-@pytest.mark.unit
-def test_a_reply_cut_at_its_token_budget_says_so_rather_than_that_nothing_changed(tmp_path, upstream) -> None:
-    """A reasoning model spends the reply budget on its reasoning and answers with nothing, which pi reads as the
-    end of the turn and exits zero. The step names the budget, so the person raises it instead of guessing."""
-    record: list[dict] = []
-    host = agent_host(tmp_path, record)
-    Path(host.binary).with_name("mode").write_text("budget")
-    proposal = AgentProposer(provider_of(upstream)).propose(context(served_models(upstream, record, host), "x", host))
-    assert proposal.patch.changes == {} and proposal.notes["agent"]["exit_code"] == 0
-    assert "hit its token budget" in proposal.notes["failure"] and "maxTokens" in proposal.notes["failure"]
-
-
-@pytest.mark.unit
-def test_without_a_request_an_agent_host_or_pi_the_text_proposer_answers(tmp_path, monkeypatch) -> None:
-    seen = []
-
-    def text_proposer(self, step):
-        seen.append((step.request is not None, step.descriptor.name))
-        return TreeProposal(TreePatch({"rules.md": None}))
-
-    monkeypatch.setattr(proposer.TextProposer, "propose", text_proposer)
-    models = ModelBindings(served=ModelBinding(base_url="http://127.0.0.1:9", model="m"))
-    dsh = replace(agent_host(tmp_path, []), descriptor=get_adapter("dsh"))
-    propose = AgentProposer()
-    for step in (context(models, None, None), context(models, "x", None), context(models, "x", dsh)):
-        assert propose.propose(step).patch.changes == {"rules.md": None}
-    # The text proposer writes for the adapter the step renders for.
-    assert seen == [(False, "pi"), (True, "pi"), (True, "dsh")]
 
 
 @pytest.mark.unit
 def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(tmp_path) -> None:
-    from reef.sandbox.process import SandboxExecutor
-
     executor = SandboxExecutor(network="isolated", forward_ports=(4123,))
     argv = executor.bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path / "workspace", env={})
     separator = argv.index("--")
@@ -487,65 +557,12 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
 
 
 @pytest.mark.unit
-def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
-    from reef.recipe.errors import RecipeConfigError
-    from reef.recipe.harness import proposer_agent_settings
-    from reef.sandbox.e2b import E2BExecutor
-    from reef.sandbox.modal import ModalExecutor
-    from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
-    from reef.sandbox.remote import deployment_owner
-
-    assert proposer_agent_settings(None, {}) == (None, 1800.0, 300.0)
-    executor, timeout_s, trial_s = proposer_agent_settings({"sandbox": "none", "timeout_s": 60}, {})
-    assert isinstance(executor, LocalExecutor) and (timeout_s, trial_s) == (60.0, 300.0)
-    assert isinstance(proposer_agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"})[0], LocalExecutor)
-    with pytest.raises(RecipeConfigError, match="one of 'bwrap', 'e2b', 'modal', 'none'"):
-        proposer_agent_settings({"sandbox": "docker"}, {})
-    # E2B: the key from the section, else the environment; none at all is refused at startup.
-    with pytest.raises(RecipeConfigError, match=r"sandbox is e2b, but .*E2B_API_KEY"):
-        proposer_agent_settings({"sandbox": "e2b"}, {})
-    monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)  # the e2b package is an extra
-    remote, timeout_s, _ = proposer_agent_settings({"sandbox": "e2b", "timeout_s": 900}, {"E2B_API_KEY": "e2b-env"})
-    assert isinstance(remote, E2BExecutor) and remote.api_key == "e2b-env" and remote.timeout_s == 900.0
-    assert remote.template == "" and "e2b-env" not in repr(remote)
-    # The deployment's own state directory names its sandboxes, so a later start can stop the ones a stopped run
-    # left.
-    assert remote.owner == deployment_owner(Path(".reef/proposals"))
-    configured = proposer_agent_settings(
-        {"sandbox": "e2b", "e2b_api_key": "e2b-cfg", "e2b_template": "mine"}, {"E2B_API_KEY": "e2b-env"}
-    )[0]
-    assert isinstance(configured, E2BExecutor) and (configured.api_key, configured.template) == ("e2b-cfg", "mine")
-    # Modal: the provider's options from the section, the deployment that names its sandboxes, and the timeout.
-    monkeypatch.setattr(ModalExecutor, "preflight", lambda self: None)
-    modal_executor = proposer_agent_settings(
-        {"sandbox": "modal", "modal_app": "reef-proposers", "timeout_s": 90}, {}, proposals_dir=Path("/tmp/props")
-    )[0]
-    assert isinstance(modal_executor, ModalExecutor)
-    assert (modal_executor.app_name, modal_executor.timeout_s) == ("reef-proposers", 90.0)
-    assert modal_executor.owner == deployment_owner(Path("/tmp/props"))
-    monkeypatch.undo()
-    with pytest.raises(RecipeConfigError, match="positive number"):
-        proposer_agent_settings({"timeout_s": 0}, {})
-
-    def unavailable(self) -> None:
-        raise SandboxUnavailable("no bwrap here")
-
-    monkeypatch.setattr(SandboxExecutor, "preflight", unavailable)
-    # Unset on a host that cannot isolate: the agent is off and the text proposer answers.
-    assert proposer_agent_settings({}, {})[0] is None
-    with pytest.raises(RecipeConfigError, match="no bwrap here"):
-        proposer_agent_settings({"sandbox": "bwrap"}, {})
-
-
-@pytest.mark.unit
 def test_the_agent_is_told_what_its_deployments_provider_serves() -> None:
-    from recipes.beta.reefine.agent import agent_rules
-
     assert "no multimodal provider" in agent_rules(None)
     compatible = MultimodalProvider(PRESETS["openai-compatible"], "https://gateway.example", "k")
     rules = agent_rules(compatible)
     assert "openai-compatible (https://gateway.example)" in rules and "`/v1/decisions`" not in rules
-    assert "$REEF_PROPOSER_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
+    assert "$REEF_AGENT_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
     assert "(or `image`, `embeddings`)." in rules
     openrouter = MultimodalProvider(PRESETS["openrouter"], "https://openrouter.ai/api", "k")
     assert "(or `image`, `embeddings`, `decisions`)." in agent_rules(openrouter)
@@ -601,26 +618,6 @@ def test_a_replys_tool_calls_read_the_same_in_every_dialect() -> None:
 
 
 @pytest.mark.unit
-def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) -> None:
-    calls = StepCalls(0, [])
-    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), calls, NoTools(), None)
-    gateway.start()
-    try:
-        upstream.answer = {
-            "choices": [{"message": {"tool_calls": [{"function": {"name": "edit", "arguments": '{"path": "x.md"}'}}]}}]
-        }
-        post(f"{gateway.base_url}/v1/chat/completions", {"messages": []})
-        upstream.answer = {"choices": [{"message": {"content": "Done: the extension speaks.\nMore detail."}}]}
-        post(f"{gateway.base_url}/v1/chat/completions", {"messages": []})
-    finally:
-        gateway.stop()
-    assert [(line["kind"], line["text"]) for line in calls.activity()] == [
-        ("agent", "edit x.md"),
-        ("agent", "Done: the extension speaks."),
-    ]
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(
     "script",
     [
@@ -657,92 +654,5 @@ def test_gateway_validates_scripted_trials_and_preserves_online_tasks(upstream) 
         assert post(f"{gateway.base_url}/trial", {"script": script, "task": "hello"})[0] == 400
         assert post(f"{gateway.base_url}/trial", {"script": {"steps": []}})[0] == 400
         assert post(f"{gateway.base_url}/trial", {"task": "hello"}) == (200, b'{"task": "hello"}')
-    finally:
-        gateway.stop()
-
-
-@pytest.mark.unit
-def test_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, monkeypatch) -> None:
-    host = agent_host(tmp_path, [], timeout_s=100)
-    workspace = workspace_of(tmp_path)
-    run = AgentRun(host, TREE, workspace, ModelBinding(base_url="http://unused", model="m"))
-    gateway = AgentGateway(run.served, host.calls, run, None)
-    run.gateway = gateway
-    gateway.start()
-    timeouts = []
-
-    def launch(*args, timeout, **kwargs):
-        timeouts.append(timeout)
-        raise EpisodeTimeout("trial deadline")
-
-    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
-    try:
-        (workspace / "harness/rules.md").write_text("A changed rule.\n")
-        run.deadline = time.monotonic() + 15
-        first = run.trial("hello")
-        assert first["ran"] and "timed_out" in first and 0 < timeouts[0] <= 5
-        assert first["candidate"] == run.check()["candidate"]
-        (workspace / "harness/rules.md").write_text("Another changed rule.\n")
-        assert first["candidate"] != run.check()["candidate"]
-        run.deadline = time.monotonic() + 9
-        refused = run.trial("another trial")
-        assert not refused["ran"] and len(timeouts) == 1
-        records = [json.loads(line) for line in (host.step_dir / "agent-checks.jsonl").read_text().splitlines()]
-        assert records[0]["candidate"] == first["candidate"] and records[-1]["ran"] is False
-    finally:
-        gateway.stop()
-
-
-@pytest.mark.unit
-def test_the_agent_can_try_the_head_tree_before_it_changes_a_file(tmp_path, monkeypatch) -> None:
-    host = agent_host(tmp_path, [])
-    run = AgentRun(host, TREE, workspace_of(tmp_path), ModelBinding(base_url="http://unused", model="m"))
-    gateway = AgentGateway(run.served, host.calls, run, None)
-    run.gateway = gateway
-    gateway.start()
-    monkeypatch.setattr(reefine_agent, "launch_pi", lambda *args, **kwargs: (ProcessOutcome(0, "", ""), []))
-    try:
-        assert run.check()["valid"]
-        assert run.trial("hello")["ran"]
-    finally:
-        gateway.stop()
-
-
-@pytest.mark.unit
-def test_timeout_keeps_candidate_and_progress_without_publishing(tmp_path, upstream, monkeypatch) -> None:
-    host = agent_host(tmp_path, [])
-
-    def launch(*args, root, **kwargs):
-        reference = (root / "workspace/reference/pi-extension-api.md").read_text()
-        assert "pi.getActiveTools()" in reference and "**replaces**" in reference
-        (root / "workspace/harness/rules.md").write_text("Unfinished candidate")
-        (root / "workspace/progress.md").write_text("API confirmed; tool isolation remains unchecked.")
-        raise EpisodeTimeout("deadline")
-
-    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
-    proposal = AgentProposer().propose(context(served_models(upstream, [], host), "x", host))
-    assert proposal.patch.changes == {} and "past its" in proposal.notes["failure"]
-    saved = host.step_dir / "agent-workspace"
-    assert (saved / "harness/rules.md").read_text() == "Unfinished candidate"
-    assert "remains unchecked" in (saved / "progress.md").read_text()
-
-
-@pytest.mark.unit
-def test_script_driver_failure_is_returned_to_the_agent(tmp_path, monkeypatch) -> None:
-    host = agent_host(tmp_path, [])
-    workspace = workspace_of(tmp_path)
-    (workspace / "harness/rules.md").write_text("A changed rule.\n")
-    run = AgentRun(host, TREE, workspace, ModelBinding(base_url="http://unused", model="m"))
-    gateway = AgentGateway(run.served, host.calls, run, None)
-    run.gateway = gateway
-    gateway.start()
-
-    def launch(*args, **kwargs):
-        return ProcessOutcome(1, "", "node could not load pi"), []
-
-    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
-    try:
-        result = run.trial("", trial_script({"steps": [{"prompt": "hello", "expect": {"model_called": True}}]}))
-        assert not result["passed"] and result["stderr_tail"] == "node could not load pi"
     finally:
         gateway.stop()

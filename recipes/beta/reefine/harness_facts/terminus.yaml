@@ -1,4 +1,4 @@
-# What Reefine's proposer is told about Terminus 2: see recipes/beta/reefine/harness_facts/__init__.py.
+# What Reefine's prompts say about Terminus 2: see recipes/beta/reefine/harness_facts/__init__.py.
 title: Terminus 2
 command: >-
   Terminus 2 has no session a person types in: a person's words reach the model only as a Harbor task's

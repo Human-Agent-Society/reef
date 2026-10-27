@@ -1,12 +1,12 @@
-// The proposer agent's own tools: its workspace through Reef's validation, and the candidate harness run for real.
-// Both go to the gateway at REEF_PROPOSER_URL, which holds every credential; this file holds none.
+// Reefine's agent's own tools: its tree through Reef's validation, and the candidate harness run for real.
+// Both go to the gateway at REEF_AGENT_URL, which holds every credential; this file holds none.
 import { Type } from "typebox";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 async function gateway(route, body, signal) {
-  const base = process.env.REEF_PROPOSER_URL;
-  if (!base) throw new Error("REEF_PROPOSER_URL is not set: these tools run only inside a Reef proposer run");
+  const base = process.env.REEF_AGENT_URL;
+  if (!base) throw new Error("REEF_AGENT_URL is not set: these tools run only inside a Reefine agent run");
   const response = await fetch(`${base}${route}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -18,16 +18,21 @@ async function gateway(route, body, signal) {
   return { content: [{ type: "text", text }], details: JSON.parse(text) };
 }
 
+// The working notes live beside the tree, the agent's current directory, in the step's output.
+function progressFile(cwd) {
+  return join(cwd, "..", "output", "progress.md");
+}
+
 export default function (pi) {
-  if (!process.env.REEF_PROPOSER_URL) return;
+  if (!process.env.REEF_AGENT_URL) return;
   const observations = new Map();
-  const deadline = Number(process.env.REEF_PROPOSER_DEADLINE_MS);
-  const finishSeconds = Number(process.env.REEF_PROPOSER_FINISH_SECONDS ?? 60);
+  const deadline = Number(process.env.REEF_AGENT_DEADLINE_MS);
+  const finishSeconds = Number(process.env.REEF_AGENT_FINISH_SECONDS ?? 60);
 
   pi.on("context", async (event, ctx) => {
     let progress = "No progress recorded yet.";
     try {
-      progress = (await readFile(join(ctx.cwd, "progress.md"), "utf8")).slice(0, 6000);
+      progress = (await readFile(progressFile(ctx.cwd), "utf8")).slice(0, 6000);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -52,7 +57,7 @@ export default function (pi) {
       "Do not copy transcripts or credentials. Runner check results are recorded separately.",
     parameters: Type.Object({ text: Type.String({ maxLength: 6000 }) }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      await writeFile(join(ctx.cwd, "progress.md"), params.text, "utf8");
+      await writeFile(progressFile(ctx.cwd), params.text, "utf8");
       return { content: [{ type: "text", text: "Progress saved; continue from these findings after compaction." }], details: {} };
     },
   });
@@ -61,11 +66,11 @@ export default function (pi) {
     name: "harness_check",
     label: "Check the harness",
     description:
-      "Read workspace/harness back as a patch against the tree it started from and run Reef's validation on it, " +
+      "Read the tree (the current directory) back against the tree it started from and run Reef's validation on it, " +
       "exactly as the evolve step will: the files the patch changes, or every problem it has (a path off the " +
       "layout, a credential-shaped text, an extension that does not load). Takes no arguments.",
-    promptSnippet: "Check workspace/harness against Reef's validation",
-    promptGuidelines: ["Run harness_check after every change to workspace/harness and fix what it refuses."],
+    promptSnippet: "Check the tree against Reef's validation",
+    promptGuidelines: ["Run harness_check after every change to the tree and fix what it refuses."],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal) {
       const result = await gateway("/check", {}, signal);
@@ -78,7 +83,7 @@ export default function (pi) {
     name: "harness_trial",
     label: "Try the harness",
     description:
-      "Run the candidate harness in workspace/harness for real: a fresh pi session with the changed tree, online, " +
+      "Run the candidate harness in the tree for real: a fresh pi session with the changed tree, online, " +
       "given `task` as its prompt. Answers with the session's final text, the tools it called, every image, " +
       "speech, embedding or decision call it made (status and the provider's error when one failed) and the end of " +
       "its stderr. Alternatively provide script for deterministic, multi-step SDK sessions: literal slash " +

@@ -47,7 +47,7 @@ from reef.record2sample.generator.designer import (
 )
 from reef.sandbox.environment import download_directory
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
-from reef.train.harness_backend.contract import ProposerCalls
+from reef.train import harness_backend
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +222,7 @@ class TaskAuthor(ABC):
         """
 
 
-class ModelCalls(ProposerCalls):
+class ModelCalls(harness_backend.ModelCalls):
     """One agent run's model-call budget, and the receipts of the calls Reef recorded.
 
     ``is_spent`` says the budget refused a call: the agent's model error that follows is its own limit, not an outage.
@@ -307,16 +307,14 @@ class RecordingGateway(AgentGateway):
 
     Reefine's gateway relays a model call with the credential alone. Reef records a call only when it names a
     scenario, so this relay adds ``x-reef-scenario`` and the run's ``x-reef-tag-*`` labels, sends the call to
-    the upstream binding (a Reef service) with its token, and records the receipt of every call in ``calls``.
-    The request's ``model`` is always the binding's.
+    ``upstream`` (a Reef service, which the gateway keeps as ``served``) with its token, and records the
+    receipt of every call in ``calls``. The request's ``model`` is always the binding's.
     """
 
     def __init__(
         self, upstream: ModelBinding, calls: ModelCalls, tools: WorkspaceTools, *, headers: Mapping[str, str]
     ) -> None:
         super().__init__(upstream, calls, tools, None)
-        self.upstream = upstream
-        self.calls = calls
         self.reef_headers = dict(headers)
 
     def relay_model_call(self, client: BaseHTTPRequestHandler, route: str, payload: dict[str, Any]) -> None:
@@ -326,18 +324,18 @@ class RecordingGateway(AgentGateway):
             refuse(client, 429, str(exc))
             return
         headers = {"Content-Type": "application/json", "Accept-Encoding": "identity", **self.reef_headers}
-        if self.upstream.api_key:
-            headers["Authorization"] = f"Bearer {self.upstream.api_key}"
+        if self.served.api_key:
+            headers["Authorization"] = f"Bearer {self.served.api_key}"
         for name in ANTHROPIC_CLIENT_HEADERS:
             value = client.headers.get(name)
             if value:
                 headers[name] = value
         status, body, upstream_headers = relay(
             client,
-            f"{self.upstream.base_url.rstrip('/')}{route}",
+            f"{self.served.base_url.rstrip('/')}{route}",
             headers,
-            {**payload, "model": self.upstream.model},
-            timeout_s=self.upstream.timeout_s,
+            {**payload, "model": self.served.model},
+            timeout_s=self.served.timeout_s,
         )
         self.calls.record({"status": status, "receipt": call_receipt(upstream_headers, body)})
 

@@ -4,7 +4,7 @@ One gateway that serves images, embeddings, speech and decisions behind a
 single key: OpenRouter by default, or an OpenAI-compatible one (OrcaRouter,
 LiteLLM, ...). Reefine reads it from ``evolution.multimodal``, hands Reef a
 :class:`ProviderRelay` for its scenarios, and gives the same gateway to its
-agent proposer. The relay keeps the key the way the upstream runtime keeps the
+agent. The relay keeps the key the way the upstream runtime keeps the
 chat key: request bodies pass through unchanged, in the gateway's own format,
 and the preset only decides where each of Reef's routes lands and how an agent
 lists the models.
@@ -123,11 +123,18 @@ class MultimodalSettings:
 
 
 class ProviderRelay(MultimodalRelay):
-    """Relay multimodal calls to one provider at its own path for each route, with its key and nothing of Reef's."""
+    """Relay multimodal calls to one provider at its own path for each route, with its key and nothing of Reef's.
+
+    Values: ``provider`` is the gateway the calls go to; ``timeout_s`` > 0 bounds one call.
+    Purpose: ``ReefineRecipe.multimodal_relay`` makes one; the service relays a scenario's multimodal calls
+    through it.
+    """
 
     def __init__(self, provider: MultimodalProvider, *, timeout_s: float = 300.0) -> None:
+        if timeout_s <= 0:
+            raise ValueError("ProviderRelay.timeout_s must be positive")
         self.provider = provider
-        self._timeout_s = timeout_s
+        self.timeout_s = timeout_s
 
     async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
         from aiohttp import ClientSession, ClientTimeout
@@ -137,7 +144,7 @@ class ProviderRelay(MultimodalRelay):
             raise NotImplementedError(f"the {self.provider.preset.name} provider serves no {path}")
         headers = {"Authorization": f"Bearer {self.provider.api_key}", "Accept-Encoding": "identity"}
         # The session outlives this call: the stream owns it until closed.
-        session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
+        session = ClientSession(timeout=ClientTimeout(total=self.timeout_s), auto_decompress=False)
         try:
             response = await session.post(f"{self.provider.base_url}{upstream_path}", json=payload, headers=headers)
         except Exception:

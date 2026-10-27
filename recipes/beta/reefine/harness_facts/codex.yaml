@@ -1,4 +1,4 @@
-# What Reefine's proposer is told about Codex CLI: see recipes/beta/reefine/harness_facts/__init__.py.
+# What Reefine's prompts say about Codex CLI: see recipes/beta/reefine/harness_facts/__init__.py.
 title: Codex CLI
 command: >-
   Codex has no custom slash commands: a typed /<word> that is not one of its own commands is refused before the
