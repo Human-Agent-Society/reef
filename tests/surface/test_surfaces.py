@@ -7,7 +7,6 @@ from reef.recipe.base import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
     AdapterWeightRuntime,
-    ArtifactActivator,
     ArtifactLoader,
     ComponentSurface,
     InferenceHooks,
@@ -68,8 +67,6 @@ def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations(
     loader = WeightLoader()
     hooks = WeightInferenceHooks()
     assert isinstance(loader, ArtifactLoader)
-    # Weight surfaces activate: a runtime serving remote snapshots binds the published head there.
-    assert isinstance(loader, ArtifactActivator)
     assert isinstance(hooks, InferenceHooks)
     assert not isinstance(hooks, LeasingInferenceHooks)
     assert isinstance(_InjectingModule(), RequestSkillLayer)
@@ -183,36 +180,6 @@ def _weight_loader(surface: Surface | None = None):
     loader = (surface or create_weight_surface()).loader
     assert loader is not None
     return loader
-
-
-def test_weight_surface_addresses_every_request_to_the_served_adapter(tmp_path) -> None:
-    # The engine applies an adapter only when the request names it, so a
-    # LoRA deployment must name it on every request — including the
-    # checkpoint and streaming paths that skip version echoing.
-    surface = create_weight_surface(adapter_name="reef_lora")
-    payload = {"model": "m", "messages": []}
-    checkpoint = _weight_hooks(surface).prepare_request(
-        _checkpoint_artifact(tmp_path), "/v1/chat/completions", payload
-    )
-    assert checkpoint == {**payload, "lora_path": "reef_lora"}
-    streaming = _weight_hooks(surface).prepare_request(
-        _checkpoint_artifact(tmp_path), "/v1/chat/completions", {**payload, "stream": True}
-    )
-    assert streaming == {**payload, "stream": True, "lora_path": "reef_lora"}
-    assert "lora_path" not in payload
-
-
-def test_weight_surface_refuses_a_request_naming_another_adapter() -> None:
-    surface = create_weight_surface(adapter_name="reef_lora")
-    with pytest.raises(ReefError, match="serves adapter 'reef_lora'"):
-        _weight_hooks(surface).prepare_request(
-            _release_without_files(), "/v1/chat/completions", {"lora_path": "other"}
-        )
-    # Naming the served adapter explicitly is redundant, not wrong.
-    out = _weight_hooks(surface).prepare_request(
-        _release_without_files(), "/v1/chat/completions", {"lora_path": "reef_lora"}
-    )
-    assert out["lora_path"] == "reef_lora"
 
 
 def test_weight_surface_without_an_adapter_leaves_requests_alone(tmp_path) -> None:
@@ -354,14 +321,8 @@ class _StubTrainingRuntime(WeightRuntime):
     def base_url(self) -> str:
         return "http://engine.invalid"
 
-    def serving_runtime_load_id(self) -> str | None:
-        return self._served
-
     def current_runtime_load_id(self) -> str | None:
         return self._published
-
-    def restore_checkpoint(self, artifact, *, scenario=None) -> str:
-        raise AssertionError("recover must not restore a checkpoint")
 
     def activate_checkpoint(self, artifact, *, scenario=None) -> str:
         return artifact.ref.release_id
@@ -437,8 +398,6 @@ def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> N
         hooks.prepare_request(checkpoint, "/v1/chat/completions", {"lora_path": "anything"})
 
 
-def test_weight_hooks_refuse_both_a_shared_and_a_scenario_adapter() -> None:
-    with pytest.raises(ValueError, match="either one shared adapter or per-scenario"):
-        WeightInferenceHooks("shared", scenario="math", runtime=_StubAdapterRuntime(None, {}))
+def test_weight_hooks_need_the_scenario_and_its_runtime_together() -> None:
     with pytest.raises(ValueError, match="both the scenario and the runtime"):
         WeightInferenceHooks(scenario="math")

@@ -86,8 +86,6 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._releases: dict[str, tuple[str | None, str]] = {}
         self._active, self._version = self._remember(None)
         self._closed = False
-        # The base model the runtime opens with is the published head until an artifact is bound.
-        self.mark_published()
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -97,7 +95,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def model_path(self) -> str:
         return self._model
 
-    def serving_runtime_load_id(self) -> str:
+    def current_runtime_load_id(self) -> str:
+        """The version of the active sampler: the base model's until a release is activated."""
         with self._lock:
             return self._version
 
@@ -131,12 +130,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
             self._releases[artifact.ref.release_id] = selected
             return selected
 
-    # -- Weight updates
-
-    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        # Rollback validates the target first; activate_checkpoint binds the
-        # republished artifact. No mutable remote serving slot needs restoring.
-        return self.snapshot(artifact)[1]
+    # -- Serving releases
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the release's sampler; a sampler other than the served one is a new serving update."""
@@ -146,11 +140,10 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 # Even a sampler served earlier in this incarnation, as after a rollback, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
             self._releases[artifact.ref.release_id] = (self._active, self._version)
-            self.mark_published()
             return self._version
 
     def shutdown(self) -> None:
-        self.pause_admission()
+        self.close_admission()
         with self._lock:
             if self._closed:
                 return

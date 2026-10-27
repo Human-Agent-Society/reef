@@ -122,8 +122,9 @@ is rolled back. No trainer holds a serving engine.
 - ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
   base model. Requests name the adapter per scenario. At most
   ``adapter_capacity`` adapters are resident.
-  ``reef.runtime.residency.AdapterResidencyManager`` evicts the least
-  recently used one.
+  ``reef.runtime.residency.AdapterResidencyManager`` evicts a leaked
+  adapter first, then the oldest-activated adapter that is no scenario's
+  current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
   weights. After it serves a release, it cannot return to the base model,
   because the engines do not keep the base model's files. Roll back to a

@@ -471,7 +471,7 @@ class WeightTrainingRecipe(Recipe):
         if self.runtime.per_scenario_adapters:
             # Every scenario owns an adapter on the shared base: route by scenario.
             return create_weight_surface(scenario=scenario, runtime=self.runtime)
-        return create_weight_surface(adapter_name=self.runtime.serving_adapter_name())
+        return create_weight_surface()
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """The engine's adapter residency on a runtime that serves per-scenario adapters."""

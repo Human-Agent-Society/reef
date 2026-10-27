@@ -17,13 +17,11 @@ backend contracts.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from numbers import Integral, Real
 from pathlib import Path
@@ -31,7 +29,8 @@ from threading import Lock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import ReefError
+from reef.core.errors import InferenceUnavailable, ReefError
+from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
 # -- Identities and errors ----------------------------------------------------
@@ -94,11 +93,6 @@ class UpstreamStatusError(ReefError):
 
 
 # -- Training values ----------------------------------------------------------
-
-
-def _require_non_empty(value: object, name: str) -> None:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{name} must be a non-empty string")
 
 
 LearningRateDecayStyle = Literal["constant", "linear", "cosine"]
@@ -316,58 +310,29 @@ class InferenceAdmissionHandle(InferenceLease):
 class InferenceAdmissionController:
     """Thread-safe inference admission: it counts the admitted requests, and once closed it admits none.
 
-    Admission starts open. The runtime closes it when it shuts down, and it
-    does not open again: a later request waits on one event-loop-local event
-    without occupying a worker thread. ``status`` reports ``open`` and the
-    count of ``active`` admitted requests that are not yet released.
+    Values: ``open`` is True until ``close``, and never True again; ``active``
+    is the non-negative count of admitted requests not yet released.
+    ``status`` reports both. The runtime's ``acquire_inference`` makes the
+    handles, and the runtime closes admission when it shuts down.
     """
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._open = True
         self._active = 0
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._open_event: asyncio.Event | None = None
 
     async def acquire(self) -> InferenceAdmissionHandle:
-        """Wait until admission is open, then count one active request."""
-        loop = asyncio.get_running_loop()
-        while True:
-            with self._lock:
-                event = self._bind_loop(loop)
-                if self._open:
-                    self._active += 1
-                    return InferenceAdmissionHandle(self)
-            await event.wait()
-            # ``close`` clears the asyncio event on its owning loop. If this
-            # task raced the thread-safe callback, a still-set event would
-            # otherwise make this loop spin without yielding and prevent the
-            # clear callback from ever running.
-            await asyncio.sleep(0)
-
-    def _bind_loop(self, loop: asyncio.AbstractEventLoop) -> asyncio.Event:
-        """Return the open event for ``loop``, creating it on first use. Caller holds the lock."""
-        if self._loop is None or self._loop.is_closed():
-            self._loop = loop
-            self._open_event = asyncio.Event()
-            if self._open:
-                self._open_event.set()
-        elif self._loop is not loop:
-            raise RuntimeError("inference admission cannot span concurrent event loops")
-        if self._open_event is None:
-            raise RuntimeError("closed inference admission has no loop event")
-        return self._open_event
+        """Count one active request; ``InferenceUnavailable`` once admission is closed."""
+        with self._lock:
+            if not self._open:
+                raise InferenceUnavailable("the inference runtime is shutting down")
+            self._active += 1
+            return InferenceAdmissionHandle(self)
 
     def close(self) -> None:
-        """Admit no new request from now on; admitted requests continue, and later ones wait."""
+        """Admit no new request from now on; admitted requests continue."""
         with self._lock:
             self._open = False
-            loop, event = self._loop, self._open_event
-            if loop is None or event is None or loop.is_closed():
-                return
-            # The loop can close between is_closed() and scheduling.
-            with suppress(RuntimeError):
-                loop.call_soon_threadsafe(event.clear)
 
     @property
     def status(self) -> Mapping[str, Any]:
@@ -524,7 +489,6 @@ class InferenceRuntime(AdapterWeightRuntime):
         self._base_url = base_url.rstrip("/")
         self._inference_timeout_s = inference_timeout_s
         self._inference_admission = InferenceAdmissionController()
-        self._current_runtime_load_id: str | None = None
 
     # -- Requests
 
@@ -564,34 +528,9 @@ class InferenceRuntime(AdapterWeightRuntime):
     def inference_admission_status(self) -> Mapping[str, Any]:
         return self._inference_admission.status
 
-    def pause_admission(self) -> None:
-        """Hold new requests before shutdown; admitted requests continue."""
+    def close_admission(self) -> None:
+        """Admit no new request, before shutdown; admitted requests continue."""
         self._inference_admission.close()
-
-    # -- Serving version
-
-    def serving_runtime_load_id(self) -> str | None:
-        """The runtime load ID the serving engine currently reports, if knowable.
-
-        A read-only probe used at recovery to detect an engine that disagrees
-        with the recovered head. ``None`` means the runtime cannot tell;
-        callers must treat that as "unverified", never as "matching".
-
-        The returned value is an opaque engine-side token, not a durable
-        artifact identity. Backends must namespace monotonic counters by a
-        fresh serving incarnation so a restart cannot reuse an old token for
-        different weights. Equality identifies the same published engine
-        update; it does not make that update's bytes durable.
-        """
-        return None
-
-    def current_runtime_load_id(self) -> str | None:
-        """Return the version acknowledged as published by Reef."""
-        return self._current_runtime_load_id
-
-    def mark_published(self) -> None:
-        """Record the loaded version after the durable publication handshake."""
-        self._current_runtime_load_id = self.serving_runtime_load_id()
 
     # -- Scenarios
 
@@ -612,18 +551,6 @@ class InferenceRuntime(AdapterWeightRuntime):
 
     # -- Adapters
 
-    def serving_adapter_name(self) -> str | None:
-        """Name of the one adapter the serving engine applies, if it serves one.
-
-        A LoRA deployment trains an adapter over frozen base weights, and the
-        engine applies it only when a request names it. Reporting the name
-        here is what lets the weight surface address every request to it, so
-        no harness can silently sample the frozen base. ``None`` means the
-        runtime publishes full weights and requests need no adapter name, or
-        that adapters are per scenario.
-        """
-        return None
-
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         """The serving runtime load ID of ``scenario``'s resident adapter.
 
@@ -634,18 +561,6 @@ class InferenceRuntime(AdapterWeightRuntime):
 
     def adapter_residency_status(self) -> Mapping[str, Any] | None:
         return None
-
-    # -- Weight updates
-
-    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Restore served weights from a durable artifact.
-
-        Runtimes that support weight rollback override this and return the new
-        serving-engine version token. The default fails explicitly: silently
-        moving Reef's artifact head while the engine keeps newer weights would
-        corrupt serving-version records.
-        """
-        raise ReefError(f"{type(self).__name__} does not support checkpoint restore")
 
 
 @dataclass(frozen=True)
@@ -660,12 +575,12 @@ class WeightFiles:
     """
 
     path: Path
-    layout: Literal["full", "adapter"]
+    layout: WeightLayout
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, Path):
             raise TypeError("weight files path must be a Path")
-        if self.layout not in ("full", "adapter"):
+        if self.layout not in WEIGHT_LAYOUTS:
             raise ValueError(f"weight files layout must be full or adapter, got {self.layout!r}")
 
 
@@ -719,7 +634,7 @@ class InferenceBackend(ABC):
 
     @abstractmethod
     def abort(self) -> None:
-        """Retire the owned engines after an update whose result is unknown; borrowed engines stay."""
+        """Retire the owned engines, which ``recover`` then replaces, such as to restart them all; borrowed engines stay."""
 
     @abstractmethod
     def unload_adapter(self, name: str) -> None:
@@ -731,12 +646,12 @@ class AdapterEngine(ABC):
 
     ``load_adapter`` must return only once the engine can serve requests that
     name ``name``; raising means the adapter never became resident.
-    ``payload`` is the caller's opaque description of the bytes to load.
+    ``files`` is the adapter's PEFT directory.
     ``unload_adapter`` raising means the slot may still be occupied.
     """
 
     @abstractmethod
-    def load_adapter(self, name: str, payload: Any) -> None: ...
+    def load_adapter(self, name: str, files: WeightFiles) -> None: ...
 
     @abstractmethod
     def unload_adapter(self, name: str) -> None: ...

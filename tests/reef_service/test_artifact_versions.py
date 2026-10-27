@@ -69,6 +69,8 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
     assert before[-1]["release_id"] == created
     target_version = restorable(before)[-2]["release_id"]
     last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    runtime.restore_order.clear()
+    served_before = len(runtime.activated)
 
     published = value.rollback("math", target_version)
 
@@ -77,8 +79,8 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
         value.get_or_create_scenario("math").repository.resolve(published).local_path.joinpath("model.txt").read_text()
         == "w1"
     )
-    assert runtime.restored == ["w1"]
-    # The next job starts from the restored release, and the engine serves it.
+    assert runtime.activated[served_before:] == ["w1"]
+    # The next job starts from the restored release, and the engine serves it once it is published.
     assert runtime.restore_order == ["training", "inference"]
     assert runtime.inference.inference_admission_status["open"]
     record = value.get_or_create_scenario("math").store.history()[-1]
@@ -288,7 +290,7 @@ def test_rollback_restore_failure_keeps_the_head_and_the_next_start_unchanged(tm
     if component == "training":
         monkeypatch.setattr(training, "import_start", fail_restore)
     else:
-        monkeypatch.setattr(training.inference, "restore_checkpoint", fail_restore)
+        monkeypatch.setattr(training.inference, "activate_checkpoint", fail_restore)
     try:
         with pytest.raises(RuntimeError, match="restore failed"):
             value.rollback("math", created)

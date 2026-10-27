@@ -571,7 +571,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.release_id != pre_head.release_id
         assert inference.activated[1:] == ["w1"]
-        assert inference.serving_runtime_load_id() == "w1"
+        assert inference.current_runtime_load_id() == "w1"
     finally:
         dispatcher.close()
 

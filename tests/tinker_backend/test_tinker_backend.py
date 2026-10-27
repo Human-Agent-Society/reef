@@ -574,7 +574,7 @@ def test_exact_chat_tokens_and_buffered_sse(inference, client, tmp_path):
     response = asyncio.run(handler.inference(artifact, "/v1/chat/completions", request))
     assert response["training"]["tokens"] == [101, 102, 201, 202]
     assert response["training"]["rollout_log_probs"] == [-0.2, -0.3]
-    assert response["training"]["runtime_load_id"] == inference.serving_runtime_load_id()
+    assert response["training"]["runtime_load_id"] == inference.current_runtime_load_id()
     assert response["usage"]["total_tokens"] == 4
     assert client.rendered[1] == {"enable_thinking": False}
 
@@ -620,7 +620,7 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     (checkpoint,) = train(component, batch(), objective.name).checkpoints
     published = Artifact.local(Path(checkpoint.release_path))
     selected = inference.activate_checkpoint(published)
-    assert inference.serving_runtime_load_id() == selected != first
+    assert inference.current_runtime_load_id() == selected != first
     # An in-flight request on the older release keeps its sampler and load.
     assert inference.snapshot(base) == (None, first)
     assert inference.snapshot(published) == ("tinker://update-1/sampler", selected)
@@ -633,7 +633,7 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     assert inference.activate_checkpoint(rollback) == latest
     # A release another component minted with the same weights is never activated; it serves the active load.
     carried = Artifact.local(base.local_path)
-    assert inference.snapshot(carried)[1] == latest == inference.serving_runtime_load_id()
+    assert inference.snapshot(carried)[1] == latest == inference.current_runtime_load_id()
 
 
 # -- Deployment
@@ -827,7 +827,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         assert published.release_id != base
         artifact = scenario.release_queries.artifact_for_version(published.release_id)
         assert inference.snapshot(artifact)[0] == "tinker://update-1/sampler"
-        assert inference.serving_runtime_load_id() == inference.snapshot(artifact)[1]
+        assert inference.current_runtime_load_id() == inference.snapshot(artifact)[1]
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
         step = scenario.scenario_step
     finally:
@@ -841,7 +841,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         assert scenario.scenario_step == step
         assert loop_state(scenario) == state
         artifact = scenario.release_queries.artifact_for_version(published.release_id)
-        assert inference.snapshot(artifact)[1] == inference.serving_runtime_load_id()
+        assert inference.snapshot(artifact)[1] == inference.current_runtime_load_id()
         scenario.rollback(base)
         assert scenario.scenario_step == step + 1
         current = scenario.release_queries.artifact_for_version(scenario.current_artifact_ref().release_id)

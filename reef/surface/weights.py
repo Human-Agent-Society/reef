@@ -11,7 +11,7 @@ from reef.surface.adapter import adapter_name
 from reef.surface.base import (
     AcceptAnyArtifact,
     AdapterWeightRuntime,
-    ArtifactActivator,
+    ArtifactLoader,
     ComponentSurface,
     InferenceHooks,
     ServingRuntime,
@@ -33,8 +33,8 @@ class RuntimeLoadMismatch(ReefError):
     """
 
 
-class WeightLoader(ArtifactActivator):
-    """Restore weight checkpoints and recover the serving head.
+class WeightLoader(ArtifactLoader):
+    """Serve published weight releases on a ``WeightRuntime``, and recover the serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
     separate adapter per scenario: a durable release of that scenario serves
@@ -46,7 +46,7 @@ class WeightLoader(ArtifactActivator):
         self._scenario = scenario
 
     def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
-        """Let the runtime bind the final release before traffic reaches it, including at startup."""
+        """Serve the final release on the runtime before traffic reaches it; without a weight runtime, its release ID."""
         if isinstance(runtime, WeightRuntime):
             return runtime.activate_checkpoint(artifact, scenario=self._scenario)
         return artifact.ref.release_id
@@ -80,16 +80,6 @@ class WeightLoader(ArtifactActivator):
             return None
         return runtime.current_runtime_load_id()
 
-    def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str:
-        if not isinstance(runtime, WeightRuntime):
-            raise ReefError("weight rollback requires an inference runtime")
-        if artifact.local_path is None:
-            raise ReefError("weight rollback requires a materialized checkpoint")
-        runtime_load_id = runtime.restore_checkpoint(artifact, scenario=self._scenario)
-        if not isinstance(runtime_load_id, str) or not runtime_load_id:
-            raise TypeError("restore_checkpoint must return a non-empty runtime load ID")
-        return runtime_load_id
-
 
 def scenario_adapter_version(scenario: str, runtime: ServingRuntime | None) -> str | None:
     """The version of the adapter that ``runtime`` serves for ``scenario``, or None when it serves none.
@@ -102,32 +92,20 @@ def scenario_adapter_version(scenario: str, runtime: ServingRuntime | None) -> s
 
 
 class WeightInferenceHooks(InferenceHooks):
-    """Address weight-backed requests and verify the serving runtime load ID.
+    """Address weight-backed requests to the adapter that serves them.
 
-    ``adapter_name`` names the one adapter a shared-slot LoRA runtime serves.
-    ``scenario`` instead derives the name per request on ``runtime``, which
-    serves one adapter per scenario: ``adapter_name(scenario,
-    runtime_load_id)``. A release names the version ``runtime`` serves for the
-    scenario. A release with no runtime load ID (nothing published yet)
-    samples the frozen base, which is exactly what a fresh zero-initialised
-    adapter computes. The request service checks the version a durable
-    training response reports, so these hooks verify no response themselves.
+    Without ``scenario``, requests name no adapter: the runtime serves full
+    weights. With ``scenario``, ``runtime`` serves one adapter per scenario,
+    and each request names ``adapter_name(scenario, runtime_load_id)`` for the
+    version ``runtime`` serves the scenario. A scenario the runtime serves no
+    adapter for samples the base model. The request service checks the version
+    a durable training response reports, so these hooks verify no response
+    themselves.
     """
 
-    def __init__(
-        self,
-        adapter_name: str | None = None,
-        *,
-        scenario: str | None = None,
-        runtime: AdapterWeightRuntime | None = None,
-    ) -> None:
-        if adapter_name is not None and not adapter_name:
-            raise ValueError("adapter_name must be a non-empty name or None")
-        if adapter_name is not None and scenario is not None:
-            raise ValueError("a weight surface serves either one shared adapter or per-scenario adapters")
+    def __init__(self, *, scenario: str | None = None, runtime: AdapterWeightRuntime | None = None) -> None:
         if (scenario is None) != (runtime is None):
             raise ValueError("per-scenario adapters need both the scenario and the runtime that serves them")
-        self._adapter_name = adapter_name
         self._scenario = scenario
         self._runtime = runtime
 
@@ -136,7 +114,7 @@ class WeightInferenceHooks(InferenceHooks):
 
     def _served_adapter(self, artifact: Artifact) -> str | None:
         if self._scenario is None:
-            return self._adapter_name
+            return None
         version = scenario_adapter_version(self._scenario, self._runtime)
         # A scenario served no adapter samples the base model, as a release without weights does.
         return None if version is None else adapter_name(self._scenario, version)
@@ -166,7 +144,6 @@ WEIGHTS_COMPONENT = "weights"
 
 
 def create_weight_surface(
-    adapter_name: str | None = None,
     *,
     scenario: str | None = None,
     runtime: AdapterWeightRuntime | None = None,
@@ -183,7 +160,7 @@ def create_weight_surface(
             WEIGHTS_COMPONENT: ComponentSurface(
                 validator=AcceptAnyArtifact() if validator is None else validator,
                 loader=WeightLoader(scenario),
-                inference=WeightInferenceHooks(adapter_name, scenario=scenario, runtime=runtime),
+                inference=WeightInferenceHooks(scenario=scenario, runtime=runtime),
             )
         }
     )

@@ -197,8 +197,8 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. Does not implement training
-    lifecycle methods.
+    and exposes it via inference_handler. It loads no weights: a release
+    serves under its release ID, and no load names what serves.
     """
 
     def __init__(
@@ -263,6 +263,12 @@ class InferenceProxyRuntime(InferenceRuntime):
     @property
     def inference_handler(self) -> InferenceHandler:
         return self._inference_handler
+
+    def current_runtime_load_id(self) -> str | None:
+        return None
+
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        return artifact.ref.release_id
 
 
 def _clean_text(value: object) -> bool:

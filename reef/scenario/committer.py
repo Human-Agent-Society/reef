@@ -353,7 +353,8 @@ class ScenarioCommitter:
                 staged = source
             try:
                 self.admit_restored(source, release_id, promoted)
-                # The runtime-loaded component is restored only when the engine serves other content.
+                # The runtime-loaded component changes only when the engine serves other content. The runtime
+                # serves the target once it is published, so a failed publication leaves serving as it was.
                 loaded_component = surface.loader_component
                 served = Artifact(current_ref, artifacts.repository)
                 restore_weights = loaded_component is not None and surface.component_changed(
@@ -362,8 +363,6 @@ class ScenarioCommitter:
                 # A rollback also moves where training continues; a promote serves a release training passed already.
                 restoring = weight_trainer if restore_weights and operation == "rollback" else None
                 restored_start = None if restoring is None else self.imported_start(restoring.trainer, source)
-                if restore_weights:
-                    surface.load(source, self._binding.runtime)
                 if staged is None:
                     staged = artifacts.stage(next_step, source, parent=checkpoint)
                 published_ref = artifacts.publish(

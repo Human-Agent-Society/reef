@@ -17,8 +17,7 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.inference.remote.runtime import INFERENCE_RESERVED_OPTIONS
-from reef.runtime.executor.arguments import native_arguments, normalize_native_options
+from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings
 from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import ReleaseFormat
@@ -31,6 +30,16 @@ ENGINES = "engines"
 TRAINER = "trainer"
 #: Nothing serves; the deployment trains on uploaded or imported data.
 NONE = "none"
+
+#: Native options that Reef sets itself for a serving engine, in SGLang's names: the managed engine's,
+#: and the adapter table that the release format and inference.max-loaded-adapters set.
+INFERENCE_RESERVED_OPTIONS = MANAGED_ENGINE_OPTIONS | {
+    "enable-lora",
+    "max-lora-rank",
+    "max-loaded-loras",
+    "max-loras-per-batch",
+    "lora-target-modules",
+}
 
 #: The settings that configure Reef's engines, with their public names.
 ENGINE_SETTINGS = (
@@ -138,7 +147,7 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> N
             "inference.backend: vllm serves one engine; set inference.num-gpus equal to inference.tensor-parallel-size"
         )
     config["reef"].update(
-        inference_backend=settings.inference_backend or "sglang",
+        inference_backend=engine,
         inference_num_gpus=num_gpus,
         tensor_parallel_size=parallel_size,
         inference_options=options,
@@ -178,14 +187,20 @@ def serving_runtime_config(
             "the training backend's releases hold no weight files that engines load; configure it to export them "
             "(for Tinker, training.options.export-adapter: true) or set inference.serving: trainer"
         )
-    if settings.inference_num_gpus is None or settings.tensor_parallel_size is None:
-        raise DeployConfigError("engine serving needs the resolved inference.num-gpus and tensor-parallel-size")
+    if (
+        settings.inference_backend is None
+        or settings.inference_num_gpus is None
+        or settings.tensor_parallel_size is None
+    ):
+        raise DeployConfigError(
+            "engine serving needs the resolved inference.backend, inference.num-gpus and tensor-parallel-size"
+        )
     rollout = role_executor_settings(settings.execution_config, "rollout")
     config: dict[str, Any] = {
         "type": "remote_serving",
         "remote": dict(settings.inference_remote),
         "release_format": release_format.to_dict(),
-        "engine": settings.inference_backend or "sglang",
+        "engine": settings.inference_backend,
         "num_gpus": settings.inference_num_gpus,
         "tensor_parallel_size": settings.tensor_parallel_size,
         "options": dict(settings.inference_options),

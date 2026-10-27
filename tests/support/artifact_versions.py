@@ -27,16 +27,16 @@ class RollbackInference(StubInferenceRuntime):
     def serve(self, artifact):
         return super().serve(artifact.materialize())
 
-    def restore_checkpoint(self, artifact, *, scenario=None):
+    def activate_checkpoint(self, artifact, *, scenario=None):
         self.restore_order.append("inference")
-        return super().restore_checkpoint(artifact, scenario=scenario)
+        return super().activate_checkpoint(artifact, scenario=scenario)
 
 
 class RollbackComponent(StubTrainingComponent):
     """A component whose ``n``-th job saves ``w<n>``; a rollback imports the release as the next job's start.
 
-    ``inference`` is the runtime that serves its checkpoints. ``restored`` lists the versions that rollbacks
-    served, and ``trained`` counts the submitted jobs.
+    ``inference`` is the runtime that serves its checkpoints. ``activated`` lists the versions that it served, and
+    ``trained`` counts the submitted jobs.
     """
 
     def __init__(self, checkpoint_dir) -> None:
@@ -45,8 +45,8 @@ class RollbackComponent(StubTrainingComponent):
         self.inference = RollbackInference(self.restore_order)
 
     @property
-    def restored(self) -> list[str]:
-        return self.inference.restored
+    def activated(self) -> list[str]:
+        return self.inference.activated
 
     @property
     def trained(self) -> int:

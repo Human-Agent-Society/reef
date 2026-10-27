@@ -9,6 +9,7 @@ import pytest
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import Artifact, ArtifactRef
+from reef.core.errors import InferenceUnavailable
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceAdmissionController, InferenceHandler, InferenceStream
 from reef.service.app import RequestService
@@ -16,17 +17,13 @@ from reef.service.streaming import stream_record
 from reef.surface import RuntimeLoadMismatch, create_weight_surface
 
 
-def test_inference_admission_controller_blocks_cancellation_without_leaking_a_handle() -> None:
+def test_closed_admission_refuses_new_requests_and_lets_admitted_ones_finish() -> None:
     async def run() -> None:
         controller = InferenceAdmissionController()
         admitted = await controller.acquire()
         controller.close()
-        queued = asyncio.create_task(controller.acquire())
-        await asyncio.sleep(0)
-        assert not queued.done()
-        queued.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await queued
+        with pytest.raises(InferenceUnavailable, match="shutting down"):
+            await controller.acquire()
         assert controller.status == {"open": False, "active": 1}
         admitted.release()
         assert controller.status == {"open": False, "active": 0}

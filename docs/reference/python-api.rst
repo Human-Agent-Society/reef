@@ -1572,18 +1572,18 @@ set the capabilities on each ``ComponentSurface``.
 | ``validator`` | ``ArtifactValidator``       | admit the component before publication and   |
 |               |                             | rollback; the default accepts any artifact   |
 +---------------+-----------------------------+----------------------------------------------+
-| ``loader``    | ``ArtifactLoader | None``   | recover the serving head, load rollback      |
-|               |                             | checkpoints                                  |
+| ``loader``    | ``ArtifactLoader | None``   | recover the serving head, make published     |
+|               |                             | releases servable                            |
 +---------------+-----------------------------+----------------------------------------------+
 | ``inference`` | ``InferenceHooks | None``   | prepare provider requests, verify responses  |
 +---------------+-----------------------------+----------------------------------------------+
 | ``files``     | ``FileTree | None``         | back client pulls                            |
 +---------------+-----------------------------+----------------------------------------------+
 
-Two optional protocols extend those structurally, and the scenario checks for
-them with ``isinstance``. ``ArtifactActivator`` adds ``loader.activate(artifact,
-runtime, source=...)``, making a version servable once it is final.
-``LeasingInferenceHooks`` adds ``inference.begin_request(artifact, path)``,
+``loader.activate(artifact, runtime, source=...)`` makes a version servable
+once it is published, and returns the runtime load ID that serves it. One
+optional interface extends the hooks, and the scenario checks for it with
+``isinstance``: ``LeasingInferenceHooks`` adds ``inference.begin_request(artifact, path)``,
 returning a lease the service releases when the attempt ends, so serving state
 such as a resident adapter stays protected for its duration.
 
@@ -1612,9 +1612,12 @@ Neither inherits from the other, and no trainer holds a serving engine.
   that serves each scenario its own adapter.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
-* ``ScenarioCommitter`` orders both around each commit. It loads a selected
-  checkpoint into serving before it publishes and commits the release. For a
-  rollback it first imports the release into the training component.
+* ``ScenarioCommitter`` orders both around each commit. It publishes a
+  selected checkpoint, has the runtime serve it
+  (``WeightRuntime.activate_checkpoint``), and then writes the commit record.
+  A failed publication therefore leaves serving unchanged. For a rollback it
+  first imports the release into the training component, then publishes and
+  serves the target the same way.
 
 ``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:
@@ -1622,8 +1625,9 @@ Neither inherits from the other, and no trainer holds a serving engine.
 * ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
   base model. A release holds the adapter in ``adapter/``. At most
   ``adapter_capacity`` adapters stay resident.
-  ``reef.runtime.residency.AdapterResidencyManager`` evicts the least recently
-  used one.
+  ``reef.runtime.residency.AdapterResidencyManager`` evicts a leaked
+  adapter first, then the oldest-activated adapter that is no scenario's
+  current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
   weights. After it serves a release, it cannot return to the base model,
   because the engines do not keep the base model's files. Roll back to a

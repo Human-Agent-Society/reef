@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.core.job_data import JobData
+from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 
 JobState = Literal["running", "finished", "failed"]
 
@@ -160,12 +161,12 @@ class ReleaseFormat:
     serving runtime that cannot load the releases.
     """
 
-    layout: Literal["full", "adapter"]
+    layout: WeightLayout
     adapter_rank: int | None = None
     adapter_target_modules: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.layout not in ("full", "adapter"):
+        if self.layout not in WEIGHT_LAYOUTS:
             raise ValueError(f"ReleaseFormat.layout must be 'full' or 'adapter', got {self.layout!r}")
         if self.layout == "full":
             if self.adapter_rank is not None or self.adapter_target_modules:
@@ -193,14 +194,16 @@ class ReleaseFormat:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ReleaseFormat:
         """Read a ``to_dict`` value; raise ``ValueError`` for another shape."""
-        if not isinstance(value, Mapping) or set(value) - {"layout", "adapter_rank", "adapter_target_modules"}:
+        if (
+            not isinstance(value, Mapping)
+            or "layout" not in value
+            or set(value) - {"layout", "adapter_rank", "adapter_target_modules"}
+        ):
             raise ValueError("a release format is an object of layout, adapter_rank and adapter_target_modules")
-        layout, modules = value.get("layout"), value.get("adapter_target_modules", ())
-        if layout not in ("full", "adapter"):
-            raise ValueError(f"ReleaseFormat.layout must be 'full' or 'adapter', got {layout!r}")
+        modules = value.get("adapter_target_modules", ())
         if not isinstance(modules, (list, tuple)):
             raise ValueError("a release format's adapter_target_modules is a list of module names")
-        return cls(layout, value.get("adapter_rank"), tuple(modules))
+        return cls(value["layout"], value.get("adapter_rank"), tuple(modules))
 
 
 class TrainingComponent(ABC):

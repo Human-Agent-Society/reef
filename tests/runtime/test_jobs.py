@@ -126,7 +126,8 @@ def test_a_release_format_reads_back_what_it_writes(value):
     [
         ({"layout": "full", "dtype": "bf16"}, "an object of layout"),
         ({"layout": "adapter", "adapter_rank": 8, "adapter_target_modules": "all"}, "a list of module names"),
-        ({"adapter_rank": 8}, "layout must be 'full' or 'adapter'"),
+        ({"adapter_rank": 8}, "an object of layout"),
+        ({"layout": "lora"}, "layout must be 'full' or 'adapter'"),
     ],
 )
 def test_a_release_format_refuses_another_shape(value, message):

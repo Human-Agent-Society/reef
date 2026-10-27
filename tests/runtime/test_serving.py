@@ -14,7 +14,7 @@ from reef.runtime.deployment import InferenceService
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, RuntimeContractError
 from reef.runtime.residency import AdapterCapacityExhausted, AdapterResidencyError
 from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime, FullWeightServingRuntime
-from reef.surface.adapter import adapter_name
+from reef.surface.adapter import adapter_name, parse_adapter_name
 
 
 class Engines(InferenceBackend):
@@ -132,8 +132,7 @@ def serving(engines):
 def test_the_engines_start_serving_the_base_model_under_a_fresh_version(serving, engines):
     [(_, version), resumed] = engines.events
     assert (engines.events[0][0], resumed) == ("initialize", "resume")
-    assert serving.serving_runtime_load_id() == version
-    assert serving.current_runtime_load_id() == version
+    assert serving.current_runtime_load_id() == version == serving.base_version
     assert serving.serving_adapter_runtime_load_id("math") is None
     assert serving.base_url == "http://component.example"
     assert serving.per_scenario_adapters and serving.shared_by_training_scenarios
@@ -152,7 +151,6 @@ def test_each_release_loads_under_a_new_version_and_the_same_content_loads_nothi
     # The committer activates the staged release, then the published one with the same content.
     calls = len(engines.events)
     assert serving.activate_checkpoint(release(checkpoint, "c1"), scenario="math") == version
-    assert serving.restore_checkpoint(release(checkpoint, "c1"), scenario="math") == version
     assert len(engines.events) == calls
     newer = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-2"), "c2"), scenario="math")
     assert newer != version and serving.serving_adapter_runtime_load_id("math") == newer
@@ -175,9 +173,9 @@ def test_scenarios_serve_their_own_adapters_and_a_restart_loads_each_release_aga
 
 def test_a_rollback_loads_another_release_and_a_release_without_weights_serves_the_base(serving, tmp_path):
     first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
-    older = serving.restore_checkpoint(release(saved_adapter(tmp_path / "older"), "o"), scenario="math")
+    older = serving.activate_checkpoint(release(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    serving.restore_checkpoint(release(base_release(tmp_path / "empty"), "base"), scenario="math")
+    serving.activate_checkpoint(release(base_release(tmp_path / "empty"), "base"), scenario="math")
     assert serving.serving_adapter_runtime_load_id("math") is None
 
 
@@ -188,7 +186,9 @@ def test_a_base_model_release_unloads_the_scenario_adapter_and_serves_the_base_v
     math = serving.activate_checkpoint(release(saved_adapter(tmp_path / "math"), "m"), scenario="math")
     assert serving.current_runtime_load_id() == math != base
     assert serving.activate_checkpoint(release(base_release(tmp_path / "empty"), "base"), scenario="math") == base
-    assert engines.events[-1] == ("unload", adapter_name("math", math))
+    # Generation pauses while the adapter unloads.
+    assert engines.events[-3:] == ["pause", ("unload", adapter_name("math", math)), "resume"]
+    assert serving.current_runtime_load_id() == base
     assert serving.serving_adapter_runtime_load_id("math") is None
     assert serving.adapter_residency_status()["resident"] == 0
     # The freed slot takes another scenario's adapter without an eviction.
@@ -233,6 +233,21 @@ def test_engines_that_report_another_version_after_an_adapter_load_fail_the_acti
     assert serving.adapter_residency_status()["resident"] == 0
 
 
+def test_a_failed_load_that_took_the_scenarios_own_slot_leaves_it_serving_no_adapter(engines, tmp_path):
+    serving = AdapterServingRuntime(engines, Handler(), adapter_capacity=1)
+    first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    engines.misreport = "stale:1"
+    with pytest.raises(AdapterResidencyError, match="could not load"):
+        serving.activate_checkpoint(release(saved_adapter(tmp_path / "m2"), "m2"), scenario="math")
+    # The new adapter evicted the first one, so requests sample the base model rather than name a gone adapter.
+    assert ("unload", adapter_name("math", first)) in engines.events
+    assert serving.serving_adapter_runtime_load_id("math") is None
+    # The first release is not served any more, so activating it again loads it under a new version.
+    engines.misreport = None
+    again = serving.activate_checkpoint(release(tmp_path / "m1", "m1"), scenario="math")
+    assert again != first and serving.serving_adapter_runtime_load_id("math") == again
+
+
 def test_shutdown_closes_admission_and_the_service_that_owns_the_engines(engines):
     service = Service()
     serving = AdapterServingRuntime(engines, Handler(), adapter_capacity=1, service=service)
@@ -251,11 +266,11 @@ def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothin
     version = serving.activate_checkpoint(release(weights, "w1"))
     assert version != initial
     assert engines.events[-4:] == ["pause", ("recover", 0), ("load", "full", None, version, weights), "resume"]
-    assert serving.current_runtime_load_id() == version == serving.serving_runtime_load_id()
+    assert serving.current_runtime_load_id() == version
     calls = len(engines.events)
-    assert serving.restore_checkpoint(release(weights, "w1")) == version
+    assert serving.activate_checkpoint(release(weights, "w1")) == version
     assert len(engines.events) == calls
-    rolled_back = serving.restore_checkpoint(release(saved_full_weights(tmp_path / "step-0"), "w0"))
+    rolled_back = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-0"), "w0"))
     assert rolled_back not in (initial, version)
 
 
@@ -264,7 +279,7 @@ def test_full_weights_cannot_return_to_the_base_model(engines, tmp_path):
     version = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-1"), "w1"))
     calls = len(engines.events)
     with pytest.raises(ReefError, match="cannot return to the base model"):
-        serving.restore_checkpoint(release(base_release(tmp_path / "base"), "base"))
+        serving.activate_checkpoint(release(base_release(tmp_path / "base"), "base"))
     assert len(engines.events) == calls
     assert serving.current_runtime_load_id() == version
 
@@ -307,6 +322,23 @@ def test_a_replaced_engine_restarts_every_engine_and_reloads_each_scenarios_adap
     assert "abort" in engines.events
     assert serving.adapter_residency_status()["resident"] == 2
     assert serving.serving_adapter_runtime_load_id("math") == math
+
+
+def test_a_restart_that_cannot_load_one_scenarios_adapter_still_loads_the_others(engines, tmp_path):
+    class FailingMath(Engines):
+        def load_weight_files(self, files, *, adapter_name, runtime_load_id):
+            if parse_adapter_name(adapter_name)[0] == "math" and "abort" in self.events:
+                raise RuntimeError("the engine refused the adapter")
+            super().load_weight_files(files, adapter_name=adapter_name, runtime_load_id=runtime_load_id)
+
+    engines = FailingMath()
+    serving = AdapterServingRuntime(engines, Handler(), adapter_capacity=3)
+    serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    code = serving.activate_checkpoint(release(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
+    with pytest.raises(AdapterResidencyError, match=r"scenarios \['math'\]"):
+        serving.restart_engines()
+    assert serving.serving_adapter_runtime_load_id("math") is None
+    assert serving.serving_adapter_runtime_load_id("code") == code
 
 
 def test_a_load_without_dead_engines_restarts_nothing(serving, engines, tmp_path):

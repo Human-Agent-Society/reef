@@ -130,8 +130,8 @@ def test_the_retry_of_a_promote_over_the_creation_leaves_held_admission_closed(t
         dispatcher.recipe.backends[HARNESS].hold_next = True
         _step(scenario, HARNESS, 1)
         held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
-        runtime.pause_admission()
-        runtime._current_runtime_load_id = "before"
+        runtime.close_admission()
+        runtime.served = "before"
         _fail_next_install(scenario)
         with pytest.raises(RuntimeError, match="artifact backend away"):
             scenario.rollback(held, operation="promote")
@@ -152,8 +152,8 @@ def test_a_harness_only_rollback_leaves_held_admission_closed(tmp_path: Path) ->
         first = _step(scenario, HARNESS, 1)
         _step(scenario, HARNESS, 2)
         # Another publication holds admission: published, not yet committed.
-        runtime.pause_admission()
-        runtime._current_runtime_load_id = "before"
+        runtime.close_admission()
+        runtime.served = "before"
         scenario.rollback(first)
         assert not runtime.inference_admission_status["open"]
         assert runtime.current_runtime_load_id() == "before"
@@ -170,8 +170,8 @@ def test_the_recorded_retry_of_a_harness_only_rollback_leaves_held_admission_clo
         scenario = _scenario(dispatcher, runtime)
         first = _step(scenario, HARNESS, 1)
         _step(scenario, HARNESS, 2)
-        runtime.pause_admission()
-        runtime._current_runtime_load_id = "before"
+        runtime.close_admission()
+        runtime.served = "before"
         _fail_next_install(scenario)
         with pytest.raises(RuntimeError, match="artifact backend away"):
             scenario.rollback(first)
@@ -199,7 +199,7 @@ def test_a_rejected_step_before_the_rollback_does_not_make_its_retry_look_like_a
         dispatcher.recipe.backends[HARNESS].reject_next = True
         _step(scenario, HARNESS, 3)
         assert scenario.store.history()[-1].components is None
-        runtime.pause_admission()
+        runtime.close_admission()
         _fail_next_install(scenario)
         with pytest.raises(RuntimeError, match="artifact backend away"):
             scenario.rollback(first)
@@ -227,7 +227,7 @@ def test_a_composite_without_loaded_weights_never_resumes_admission_on_a_recorde
         scenario = _scenario(dispatcher, runtime)
         first = _step(scenario, WEIGHTS, 1)
         _step(scenario, WEIGHTS, 2)
-        runtime.pause_admission()
+        runtime.close_admission()
         _fail_next_install(scenario)
         with pytest.raises(RuntimeError, match="artifact backend away"):
             scenario.rollback(first)
@@ -247,9 +247,10 @@ def test_the_recorded_retry_of_a_weights_rollback_installs_the_restored_head(tmp
         base = scenario.current_artifact_ref().release_id
         _step(scenario, WEIGHTS, 1)
         _fail_next_install(scenario)
+        served_before = len(runtime.activated)
         with pytest.raises(RuntimeError, match="artifact backend away"):
             scenario.rollback(base)
-        assert len(runtime.restored) == 1
+        assert len(runtime.activated) == served_before + 1
         assert scenario.rollback(base) == scenario.store.history()[-1].artifact_ref
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
         assert runtime.inference_admission_status["open"]

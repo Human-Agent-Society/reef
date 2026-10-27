@@ -73,6 +73,7 @@ def test_a_mode_that_the_settings_contradict_is_refused(settings, backend, messa
 
 def test_engine_serving_runs_the_settings_engines_for_the_components_release_format():
     settings = slime(
+        inference_backend="sglang",
         inference_num_gpus=4,
         tensor_parallel_size=2,
         inference_options={"context-length": 4096},
@@ -104,11 +105,13 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
 
 
 def test_engines_cannot_serve_releases_without_weight_files_or_unresolved_engine_sizes():
-    resolved = tinker(inference_num_gpus=1, tensor_parallel_size=1)
+    resolved = tinker(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
     with pytest.raises(DeployConfigError, match=r"training\.options\.export-adapter: true"):
         serving_runtime_config(resolved, TinkerDeployment(), None)
-    with pytest.raises(DeployConfigError, match=r"resolved inference\.num-gpus"):
+    with pytest.raises(DeployConfigError, match=r"resolved inference\.backend, inference\.num-gpus"):
         serving_runtime_config(tinker(inference_backend="sglang"), TinkerDeployment(), ADAPTER)
+    with pytest.raises(DeployConfigError, match=r"resolved inference\.backend"):
+        serving_runtime_config(tinker(inference_num_gpus=1, tensor_parallel_size=1), TinkerDeployment(), ADAPTER)
 
 
 def test_trainer_and_none_serving_build_the_backends_own_and_the_null_runtime():

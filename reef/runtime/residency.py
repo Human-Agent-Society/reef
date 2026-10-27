@@ -14,7 +14,7 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.core.errors import ReefError
-from reef.runtime.interfaces import AdapterEngine
+from reef.runtime.interfaces import AdapterEngine, WeightFiles
 from reef.surface.adapter import adapter_name
 
 logger = logging.getLogger(__name__)
@@ -53,15 +53,18 @@ class ResidentAdapter:
     """One adapter name the engine holds, and the manager's bookkeeping for it.
 
     ``name`` is ``adapter_name(scenario, runtime_load_id)``; ``scenario`` and
-    ``runtime_load_id`` are non-empty. ``order`` is the activation order, a
-    non-negative int unique within one manager, which eviction follows.
-    ``state`` is ``active``, or ``leaked`` after the engine refused to unload
-    it. ``AdapterResidencyManager`` makes and reads the values.
+    ``runtime_load_id`` are non-empty. ``files`` is the adapter directory the
+    engine loaded it from. ``order`` is the activation order, a non-negative
+    int unique within one manager, which eviction follows. ``state`` is
+    ``active``, or ``leaked`` after the engine refused to unload it.
+    ``AdapterResidencyManager`` makes the values; it and the serving runtime
+    read them.
     """
 
     name: str
     scenario: str
     runtime_load_id: str
+    files: WeightFiles
     order: int
     state: ResidentState = "active"
 
@@ -77,8 +80,10 @@ class AdapterResidencyManager:
     - a scenario's current revision is never evicted, except that a caller
       which has paused serving may supersede its own current revision when
       nothing else fits (``supersede=True``);
-    - eviction is deterministic: the oldest unprotected activation goes
-      first, regardless of which scenario owns it;
+    - eviction is deterministic: a leaked adapter goes first, then the
+      oldest-activated adapter that is no scenario's current revision,
+      regardless of which scenario owns it; activating a resident adapter
+      again does not change its order;
     - a failed load never occupies a slot; a failed unload keeps occupying
       one as ``leaked`` until a later unload succeeds, so capacity
       degradation is visible rather than hidden.
@@ -114,17 +119,17 @@ class AdapterResidencyManager:
         runtime_load_id: str,
         engine: AdapterEngine,
         *,
-        payload: Any = None,
+        files: WeightFiles,
         supersede: bool = False,
     ) -> str:
         """Make ``runtime_load_id`` the revision ``scenario`` serves; return its engine name.
 
-        Loads the adapter first and advances the scenario's current pointer
-        only after the engine confirms the load, so a failure leaves the
-        incumbent revision active and touches no other scenario. ``payload``
-        is handed to the engine untouched. ``supersede`` lets the scenario's
-        own current revision be evicted to make room, which is only safe while
-        no request can reach it (generation paused).
+        Loads the adapter from ``files`` first and advances the scenario's
+        current pointer only after the engine confirms the load. A failure
+        touches no other scenario. It leaves the incumbent revision current,
+        unless ``supersede`` evicted it to make room: the scenario then serves
+        no adapter. ``supersede`` is only safe while no request can reach the
+        incumbent (generation paused).
         """
         require_name(scenario, "scenario")
         require_name(runtime_load_id, "runtime_load_id")
@@ -141,10 +146,10 @@ class AdapterResidencyManager:
                     f"succeeds: {unload_error}"
                 ) from unload_error
             self.make_room(scenario, engine, supersede=supersede)
-            self.adapters[name] = ResidentAdapter(name, scenario, runtime_load_id, self.next_order)
+            self.adapters[name] = ResidentAdapter(name, scenario, runtime_load_id, files, self.next_order)
             self.next_order += 1
             try:
-                engine.load_adapter(name, payload)
+                engine.load_adapter(name, files)
             except Exception as exc:
                 # Never leave a phantom slot: it would evict a live peer later for an adapter the engine never held.
                 self.adapters.pop(name, None)
@@ -157,6 +162,19 @@ class AdapterResidencyManager:
             self.counters["loads"] += 1
             self.current[scenario] = name
             return name
+
+    def current_adapter(self, scenario: str) -> ResidentAdapter | None:
+        """The resident adapter ``scenario`` serves, or None when it serves none."""
+        with self.lock:
+            name = self.current.get(scenario)
+            return None if name is None else self.adapters[name]
+
+    def current_adapters(self) -> tuple[ResidentAdapter, ...]:
+        """Every scenario's current adapter, in activation order."""
+        with self.lock:
+            return tuple(
+                sorted((self.adapters[name] for name in self.current.values()), key=lambda adapter: adapter.order)
+            )
 
     def release(self, scenario: str, engine: AdapterEngine) -> None:
         """Unload the revision ``scenario`` serves, after which the scenario serves no adapter.

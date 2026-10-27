@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from reef.core.weight_layout import WEIGHT_LAYOUTS
 from reef.inference.deployment import inference_service_for
 from reef.inference.http import HOP_BY_HOP_HEADERS
 from reef.inference.remote.config import CONTROL_PATH
@@ -261,7 +262,7 @@ class RemoteInferenceServer:
         layout = request.query.get("layout")
         adapter_name = request.query.get("adapter_name")
         runtime_load_id = request.query.get("runtime_load_id")
-        if layout not in ("full", "adapter") or (adapter_name is None) != (layout == "full"):
+        if layout not in WEIGHT_LAYOUTS or (adapter_name is None) != (layout == "full"):
             raise web.HTTPBadRequest(text="weights need layout full, or layout adapter with an adapter_name")
         directory = self.work_dir / uuid4().hex
         archive = directory.with_suffix(".tar")

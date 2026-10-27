@@ -101,18 +101,16 @@ class StubInferenceRuntime(InferenceProxyRuntime):
 
     A release serves under the version its ``model.txt`` names, or under its
     release ID when it holds no such file. ``activated`` lists the versions
-    of committed releases and ``restored`` those of rolled-back releases, in
-    order; ``served`` is the version the engines report, ``None`` before the
-    first one.
+    of the releases it served, at commits, rollbacks and starts, in order;
+    ``served`` is the last one, ``None`` before the first one.
     """
 
     def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
-        self.restored: list[str] = []
         self.served: str | None = None
 
-    def serving_runtime_load_id(self) -> str | None:
+    def current_runtime_load_id(self) -> str | None:
         return self.served
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
@@ -120,17 +118,11 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         self.activated.append(version)
         return version
 
-    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        version = self.serve(artifact)
-        self.restored.append(version)
-        return version
-
     def serve(self, artifact: Artifact) -> str:
         path = artifact.local_path
         marker = None if path is None else Path(path) / VERSION_FILE
         version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.release_id
         self.served = version
-        self.mark_published()
         return version
 
 

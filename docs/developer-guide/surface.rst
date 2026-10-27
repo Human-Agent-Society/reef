@@ -60,8 +60,8 @@ Capabilities and call sites
 ``ComponentSurface`` is a frozen composition of optional capabilities;
 ``None`` means the component does not support one. Callers inspect fields,
 never types, and a recipe never subclasses ``Surface``. The scenario reaches
-the loader through ``Surface.validate``, ``recover``, ``load``, and
-``activate``, which route to the loaded component; the service reads
+the loader through ``Surface.validate``, ``recover`` and ``activate``, which
+route to the loaded component; the service reads
 ``Surface.inference`` and ``Surface.files``, which route to their
 components. Every call site for each capability is listed here;
 ``activate`` alone is invoked from more than one module, once per lifecycle
@@ -76,10 +76,6 @@ event that makes a version servable:
 | ``loader.recover(current, checkpoint, runtime)``  | ``scenario/factory.py``             | Choose the head the runtime can still serve after startup. Without   |
 |                                                   |                                     | a loader, recovery uses the durable checkpoint.                      |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``loader.load(artifact, runtime)``                | ``scenario/committer.py``           | Load a durable rollback target before the rollback commit becomes    |
-|                                                   |                                     | authoritative. Without a loader, moving the head is sufficient. A    |
-|                                                   |                                     | composed release loads only when its loaded component changed.       |
-+---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``inference.prepare_request(...)``                | ``service/request_service.py``      | Address or inject the frozen artifact before forwarding. The         |
 |                                                   |                                     | returned request is both forwarded and recorded.                     |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
@@ -89,10 +85,11 @@ event that makes a version servable:
 | ``files.read_files(artifact)``                    | ``service/request_service.py``      | Read the file manifest for the frozen snapshot. Without ``files``,   |
 |                                                   |                                     | harness file routes reject the scenario before materialization.      |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``loader.activate(artifact, runtime, source=...)``| ``scenario/factory.py``,            | Optional ``ArtifactActivator``. Make a final version servable: after |
-|                                                   | ``scenario/committer.py``           | recovery, and after a publication or rollback minted its version but |
-|                                                   |                                     | before the commit record makes it the head. A composed release       |
-|                                                   |                                     | activates only when its loaded component changed.                    |
+| ``loader.activate(artifact, runtime, source=...)``| ``scenario/factory.py``,            | Make a final version servable: after recovery, and after a commit,   |
+|                                                   | ``scenario/committer.py``           | rollback or promote published its version but before the commit      |
+|                                                   |                                     | record makes it the head. Without a loader, moving the head is       |
+|                                                   |                                     | sufficient. A composed release activates only when its loaded        |
+|                                                   |                                     | component changed.                                                   |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``inference.begin_request(artifact, path)``       | ``service/request_service.py``      | Optional ``LeasingInferenceHooks``. Hold serving state for one       |
 |                                                   |                                     | attempt; the lease is released when the attempt ends.                |
@@ -124,10 +121,11 @@ Built-in surfaces
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 
 **Weights.** ``WeightLoader`` makes the inference runtime serve a release.
-``activate`` calls the runtime's ``activate_checkpoint`` at startup recovery
-and after Reef publishes a selected checkpoint; ``load`` calls
-``restore_checkpoint`` for a rollback. Each returns the runtime load ID that
-serves the release. The runtime loads only published weights; no trainer
+``activate`` calls the runtime's ``activate_checkpoint`` at startup recovery,
+after Reef publishes a selected checkpoint, and after a rollback or promote
+publishes its target. It returns the runtime load ID that serves the release:
+a new load ID for a runtime that loads weights, or the release ID for one that
+loads nothing, such as a proxy. The runtime loads only published weights; no trainer
 changes what the engines serve. For a training scenario, Reef records the
 serving runtime load ID that the engine reports for each exchange, and
 rejects a response that reports none (see `HTTP API
@@ -144,7 +142,8 @@ naming contract (``adapter_name(scenario, runtime_load_id)`` and its inverse), s
 recorded ``lora_path`` names exactly one (scenario, revision). Residency is
 engine-global, not per surface: the serving runtime owns one
 ``AdapterResidencyManager``, which keeps at most ``adapter_capacity`` adapters
-loaded and evicts the least recently used. The surface never touches it.
+loaded. It evicts a leaked adapter first, then the oldest-activated adapter
+that is no scenario's current one. The surface never touches it.
 
 **Harness file trees.** ``create_harness_surface()`` exposes the artifact's
 UTF-8 text files through ``TextFileTree``, excluding repository bookkeeping

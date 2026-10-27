@@ -196,7 +196,7 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   select it in ``storage.artifact_backend``, the factory also inherits
   ``ConfigurableRepositoryBackendFactory``.
 - Put request preparation and response verification in ``InferenceHooks``,
-  restore/recovery behavior in ``ArtifactLoader``, and client-pull delivery in
+  activation and recovery behavior in ``ArtifactLoader``, and client-pull delivery in
   ``FileTree`` under ``reef/surface/``.
 - Build the surface from the owning recipe; do not make the surface choose a
   method or evaluate a candidate.

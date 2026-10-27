@@ -162,16 +162,10 @@ def test_vllm_input_keeps_vllm_option_names_and_the_pause_mode():
     assert engine_input("vllm", options={"trust-remote-code": False})["options"]["trust_remote_code"] is False
 
 
-@pytest.mark.parametrize(
-    ("values", "match"),
-    [
-        ({"release_format": ADAPTER}, "vllm serves full weights only"),
-        ({"num_gpus": 2, "tensor_parallel_size": 1}, "vllm serves one engine"),
-    ],
-)
-def test_vllm_refuses_adapter_releases_and_more_than_one_engine(values, match):
-    with pytest.raises(ValueError, match=match):
-        engine_input("vllm", **values)
+def test_vllm_refuses_adapter_releases():
+    # The serving assembly refuses more than one vLLM engine (tests/reef_service/test_training_startup.py).
+    with pytest.raises(ValueError, match="vllm serves full weights only"):
+        engine_input("vllm", release_format=ADAPTER)
 
 
 def test_the_engine_input_imports_no_engine_implementation_or_training_framework():

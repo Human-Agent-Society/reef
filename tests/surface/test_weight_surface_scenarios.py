@@ -20,14 +20,14 @@ def checkpoint(tmp_path: Path) -> Artifact:
 
 
 class AdapterRuntime(StubInferenceRuntime):
-    """Serves one adapter version per scenario, from ``adapters``, and ``engine`` as the engine version."""
+    """Serves one adapter version per scenario, from ``adapters``, and ``engine`` as the last load's version."""
 
     def __init__(self, adapters: dict[str, str], engine: str = "inc:9") -> None:
         super().__init__()
         self.adapters = adapters
         self.engine = engine
 
-    def serving_runtime_load_id(self):
+    def current_runtime_load_id(self):
         return self.engine
 
     def serving_adapter_runtime_load_id(self, scenario):
@@ -58,13 +58,6 @@ def test_a_scenario_that_serves_no_adapter_samples_the_base(tmp_path: Path) -> N
         hooks.prepare_request(checkpoint(tmp_path), "/v1/chat/completions", {"lora_path": "x"})
 
 
-def test_shared_and_per_scenario_modes_are_exclusive() -> None:
-    with pytest.raises(ValueError, match="either"):
-        WeightInferenceHooks("reef_lora", scenario="math", runtime=AdapterRuntime({}))
-    with pytest.raises(ValueError, match="both the scenario and the runtime"):
-        WeightInferenceHooks(scenario="math")
-
-
 def test_a_restart_serves_the_checkpoint_under_the_version_it_was_loaded_again(tmp_path: Path) -> None:
     # The restart loaded math's checkpoint again as new:1.
     runtime = AdapterRuntime({"math": "new:1"})
@@ -82,38 +75,22 @@ def test_a_restart_serves_the_checkpoint_under_the_version_it_was_loaded_again(t
 
 
 class RecordingRuntime(StubInferenceRuntime):
-    """Records the scenario each activation and restore names; ``restored_version`` is what a restore returns."""
+    """Records the scenario each activation names."""
 
-    def __init__(self, restored_version: str = "inc:4") -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.restored_version = restored_version
-        self.scenarios: list[tuple[str, str | None]] = []
+        self.scenarios: list[str | None] = []
 
     def activate_checkpoint(self, artifact, *, scenario=None):
-        self.scenarios.append(("activate", scenario))
+        self.scenarios.append(scenario)
         return "inc:3"
 
-    def restore_checkpoint(self, artifact, *, scenario=None):
-        self.scenarios.append(("restore", scenario))
-        return self.restored_version
 
-
-def test_the_loader_activates_and_restores_releases_through_the_runtime_for_its_scenario(tmp_path: Path) -> None:
+def test_the_loader_activates_releases_through_the_runtime_for_its_scenario(tmp_path: Path) -> None:
     runtime = RecordingRuntime()
     saved = checkpoint(tmp_path)
     assert WeightLoader("math").activate(saved, runtime) == "inc:3"
-    assert WeightLoader("math").load(saved, runtime) == "inc:4"
-    assert WeightLoader().load(saved, runtime) == "inc:4"
-    assert runtime.scenarios == [("activate", "math"), ("restore", "math"), ("restore", None)]
+    assert WeightLoader().activate(saved, runtime) == "inc:3"
+    assert runtime.scenarios == ["math", None]
     # A runtime that serves no weights binds nothing: the release names what serves.
     assert WeightLoader("math").activate(saved, None) == saved.ref.release_id
-
-
-def test_a_rollback_needs_a_weight_runtime_a_materialized_release_and_a_version(tmp_path: Path) -> None:
-    saved = checkpoint(tmp_path)
-    with pytest.raises(ReefError, match="requires an inference runtime"):
-        WeightLoader().load(saved, None)
-    with pytest.raises(ReefError, match="requires a materialized checkpoint"):
-        WeightLoader().load(Artifact(saved.ref, None), RecordingRuntime())
-    with pytest.raises(TypeError, match="non-empty runtime load ID"):
-        WeightLoader().load(saved, RecordingRuntime(restored_version=""))

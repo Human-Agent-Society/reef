@@ -111,10 +111,6 @@ def test_status_keeps_the_published_version_until_inference_reopens() -> None:
         def inference_admission_status(self):
             return {"open": self.open, "active": 0}
 
-        @staticmethod
-        def serving_runtime_load_id():
-            return "engine:new"
-
         def current_runtime_load_id(self):
             return self.current
 

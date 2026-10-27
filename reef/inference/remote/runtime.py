@@ -23,7 +23,6 @@ from reef.inference.remote.service import RemoteInferenceService
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.inference.vllm.chat import VLLMInferenceHandler
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory
-from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import ReleaseFormat
 from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime, SavedWeightServingRuntime
@@ -32,16 +31,6 @@ from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
 ENGINE_HANDLERS: dict[str, type[InferenceHandler]] = {
     "sglang": SGLangInferenceHandler,
     "vllm": VLLMInferenceHandler,
-}
-
-#: Native options that Reef sets itself for a serving engine, in SGLang's names: the managed engine's,
-#: and the adapter table that the release format and inference.max-loaded-adapters set.
-INFERENCE_RESERVED_OPTIONS = MANAGED_ENGINE_OPTIONS | {
-    "enable-lora",
-    "max-lora-rank",
-    "max-loaded-loras",
-    "max-loras-per-batch",
-    "lora-target-modules",
 }
 
 
@@ -85,14 +74,9 @@ def serving_engine_config(
         "executor_options": dict(executor_options),
     }
     if engine == "vllm":
+        # The serving assembly already refused more than one vLLM engine (``prepare_engine_serving``).
         if release_format.layout != "full":
             raise ValueError("inference.backend: vllm serves full weights only, not PEFT adapter releases")
-        if num_gpus != tensor_parallel_size:
-            # vLLM ships no router, so one engine serves.
-            raise ValueError(
-                "inference.backend: vllm serves one engine; set inference.num-gpus equal to "
-                "inference.tensor-parallel-size"
-            )
         values.setdefault("trust_remote_code", True)
         return {**placement, "options": values, "env_vars": {}}
     # Router options keep their native names after the router- prefix; the first router binds router-port.

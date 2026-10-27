@@ -1,7 +1,7 @@
 """Inference components, resource ownership, and runtime selection.
 
 - Component contracts: what an inference service and the resources it borrows
-  each own, and how their health is observed.
+  each own, and how their health is checked.
 - Runtime factories: the ``type`` table that turns a config section into
   runtimes, with bundled kinds resolved lazily so importing contracts loads
   no integration.
@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import importlib
-import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
@@ -22,8 +21,6 @@ from reef.core.errors import ReefError
 from reef.runtime.executor import Executor
 from reef.runtime.interfaces import InferenceBackend, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
-
-_logger = logging.getLogger(__name__)
 
 # -- Component contracts ------------------------------------------------------
 
@@ -49,14 +46,6 @@ class InferenceResources(DeploymentResources):
         """Return the borrowed placement handle understood by the selected backend."""
 
 
-class DeploymentHealth(ABC):
-    """Nonblocking observation of an already started deployment."""
-
-    @abstractmethod
-    def poll(self) -> None:
-        """Raise on failure; an outstanding probe is not a failed component."""
-
-
 @dataclass(frozen=True)
 class InferenceConnection:
     """What a started ``InferenceService`` returns: its control protocol and, when it has one, its control executor.
@@ -71,7 +60,7 @@ class InferenceConnection:
     control: Executor | None
 
 
-class InferenceService(DeploymentHealth):
+class InferenceService(ABC):
     """An inference component that owns its engines but borrows reservations."""
 
     @property
@@ -93,14 +82,14 @@ class InferenceService(DeploymentHealth):
 
     @abstractmethod
     def poll(self) -> None:
-        """Observe component failures without blocking behind active work."""
+        """Raise when the engines failed, without blocking behind active work: a busy engine has not failed.
+
+        The inference component's health route calls it.
+        """
 
     @abstractmethod
     def close(self) -> None:
         """Release owned engines, including partial starts, idempotently."""
-
-
-# -- Deployment lifecycle -----------------------------------------------------
 
 
 # -- Runtime factories --------------------------------------------------------
@@ -289,7 +278,7 @@ def close_runtimes(
     stop the next one. ``None`` stands for an absent component or runtime.
     """
     if runtime is not None:
-        runtime.pause_admission()
+        runtime.close_admission()
     errors: list[BaseException] = []
     if training_component is not None:
         try:
