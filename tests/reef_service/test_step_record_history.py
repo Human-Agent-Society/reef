@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.harness.tree import TreePatch
 from reef.service.app import create_app
+from reef.train.harness_backend import StepResult
 from reef.train.harness_backend.records import MAX_RECORD_BYTES, read_step_records
 
 SCENARIO = "agents"
@@ -21,27 +23,24 @@ def train_request(text: str) -> dict:
     return {"text": text, "session": "3f1c2a9d0b7e", "release_id": "rel-0"}
 
 
-def manual_dispatcher(tmp_path: Path, propose):
-    """A manual pi scenario that keeps every step's record under ``tmp_path / "steps"``."""
-    recipe = harness_recipe(
-        tmp_path, propose, reads_requests=True, training_mode="manual", step_record_dir=str(tmp_path / "steps")
-    )
-    return harness_dispatcher(tmp_path, recipe)
+def manual_dispatcher(tmp_path: Path, method):
+    """A manual pi scenario; every step keeps its record under the recipe's state directory."""
+    return harness_dispatcher(tmp_path, replace(harness_recipe(tmp_path, method), training_mode="manual"))
 
 
 def test_record_scope_and_limits(tmp_path: Path) -> None:
     root = tmp_path / "a"
     step = root / "1-2"
     step.mkdir(parents=True)
-    (step / "proposer.json").write_text('[{"reply":"hello"}]')
+    (step / "calls.json").write_text('[{"reply":"hello"}]')
     other = tmp_path / "b" / "1"
     other.mkdir(parents=True)
     (other / "secret.json").write_text('"private"')
     (step / "link.json").symlink_to(other / "secret.json")
     (step / "agents").symlink_to(other, target_is_directory=True)
-    assert read_step_records(root, str(step), None)["files"] == [{"path": "proposer.json", "bytes": 19}]
-    assert json.loads(read_step_records(root, str(step), "proposer.json")["text"])[0]["reply"] == "hello"
-    for relative in ("../1/proposer.json", str(other / "secret.json"), "link.json", "agents/secret.json"):
+    assert read_step_records(root, str(step), None)["files"] == [{"path": "calls.json", "bytes": 19}]
+    assert json.loads(read_step_records(root, str(step), "calls.json")["text"])[0]["reply"] == "hello"
+    for relative in ("../1/calls.json", str(other / "secret.json"), "link.json", "agents/secret.json"):
         with pytest.raises(ValueError):
             read_step_records(root, str(step), relative)
     with pytest.raises(ValueError, match="outside"):
@@ -51,12 +50,15 @@ def test_record_scope_and_limits(tmp_path: Path) -> None:
     (step / "large.json").write_bytes(b"x" * (MAX_RECORD_BYTES + 1))
     with pytest.raises(ValueError, match="4 MiB"):
         read_step_records(root, str(step), "large.json")
-    assert read_step_records(None, str(step), None)["status"] == "disabled"
     assert read_step_records(root, str(root / "missing"), None)["status"] == "missing"
 
 
 def test_step_record_http_contract(tmp_path: Path) -> None:
-    dispatcher = manual_dispatcher(tmp_path, lambda context: TreePatch(changed_rules("marker rules\n")))
+    def method(workspace, tools):
+        workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
+        return StepResult("added a rule")
+
+    dispatcher = manual_dispatcher(tmp_path, method)
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
     assert scenario is not None
 
@@ -74,10 +76,11 @@ def test_step_record_http_contract(tmp_path: Path) -> None:
             assert response.status == 200 and response.headers["Cache-Control"] == "no-store"
             inventory = await response.json()
             assert inventory["status"] == "retained"
-            assert {"patch.json", "proposer.json"} <= {entry["path"] for entry in inventory["files"]}
-            response = await client.get(url, params={"path": "patch.json"}, headers=headers)
+            listed = {entry["path"] for entry in inventory["files"]}
+            assert {"calls.json", "result.json", "material/request.json", "material/evaluation.json"} <= listed
+            response = await client.get(url, params={"path": "result.json"}, headers=headers)
             assert response.status == 200
-            assert json.loads((await response.json())["text"]) == changed_rules("marker rules\n")
+            assert json.loads((await response.json())["text"])["summary"] == "added a rule"
             assert (await client.get(url, params={"path": "../secret.json"}, headers=headers)).status == 400
             assert (await client.get(url, params={"path": "absent.json"}, headers=headers)).status == 404
             assert (await client.get("/reef/harness/releases/99/records", headers=headers)).status == 404
@@ -92,7 +95,7 @@ def test_step_record_http_contract(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_failed_proposer_records_remain_linked_after_reload_and_retry(tmp_path: Path, monkeypatch) -> None:
+def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Path, monkeypatch) -> None:
     replies = iter([None, "done"])
 
     def urlopen(request, timeout=None):
@@ -115,10 +118,10 @@ def test_failed_proposer_records_remain_linked_after_reload_and_retry(tmp_path: 
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
-    def propose(context):
-        context.models.served.chat([{"role": "user", "content": context.request.text}])
+    def method(workspace, tools):
+        tools.models.served.chat([{"role": "user", "content": workspace.request().text}])
 
-    dispatcher = manual_dispatcher(tmp_path, propose)
+    dispatcher = manual_dispatcher(tmp_path, method)
     dispatcher.get_or_create_scenario(SCENARIO)
 
     async def run() -> None:
@@ -148,7 +151,7 @@ def test_failed_proposer_records_remain_linked_after_reload_and_retry(tmp_path: 
                 url = f"/reef/harness/releases/{step}/records"
                 response = await client.get(url, headers=headers)
                 assert (await response.json())["status"] == "retained"
-                response = await client.get(url, params={"path": "proposer.json"}, headers=headers)
+                response = await client.get(url, params={"path": "calls.json"}, headers=headers)
                 recorded = json.loads((await response.json())["text"])[0]
                 expected = "failed call thinking" if step == 1 else "retry thinking"
                 assert recorded["response"]["choices"][0]["message"]["reasoning"] == expected

@@ -1,4 +1,4 @@
-"""A real HTTP provider, proposer, judge and subprocess episode share a scenario model setting."""
+"""A real HTTP provider, method, judge and subprocess episode share a scenario model setting."""
 
 from __future__ import annotations
 
@@ -11,18 +11,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_episode_scorer, resolve_method
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import harness_repository
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.evaluation.harness import ScoreComparisonPlugin
+from reef.evaluation.harness import ComparePolicy, EvaluationSettings
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
-from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -111,21 +111,21 @@ def make_recipe(platform, tmp_path):
     binary.write_text(FAKE_AGENT)
     binary.chmod(0o755)
 
-    def propose(context):
-        assert context.models["teacher"].chat([{"role": "user", "content": "proposer"}]) == "OK"
+    def method(workspace, tools):
+        assert tools.models["teacher"].chat([{"role": "user", "content": "method"}]) == "OK"
         return TreePatch({"rules.md": "marker\n"})
 
     managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key="platform-key", model="platform-model")
     return HarnessEvolutionRecipe(
-        resolve_proposer(propose),
-        resolve_episode_scorer(judge),
-        ("test task",),
+        method=resolve_method(method),
+        evolution=EvolutionSettings(
+            binary=str(binary), client_models=("managed-alternative",), state_dir=str(tmp_path / "harness")
+        ),
+        evaluation=EvaluationSettings(tasks=("test task",)),
+        scorer=resolve_episode_scorer(judge),
         runtime=InferenceProxyRuntime(base_url=managed.base_url, api_key=managed.api_key, model_path=managed.model),
         models={"teacher": managed, "judge": managed},
-        binary=str(binary),
-        client_models=("managed-alternative",),
         seed=HarnessTree({"skills/notes/SKILL.md": "notes\n"}),
-        proposals_dir=str(tmp_path / "proposals"),
     )
 
 
@@ -158,16 +158,14 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
             0,
         )
         assert prepared.candidate is not None
-        # Updates between proposal and evaluation must not mix providers within the step.
+        # Updates between the method and the evaluation must not mix providers within the step.
         dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api, "2"))
-        plugin = ScoreComparisonPlugin(backend)
-        evaluation = plugin.evaluate(prepared.candidate)
-        result = backend.settle_step(prepared, plugin.decide(prepared.candidate, evaluation))
+        policy = ComparePolicy(backend)
+        evaluation = policy.evaluate(prepared.candidate)
+        result = backend.settle_step(prepared, policy.decide(prepared.candidate, evaluation))
         assert result.metrics["selected"] is True
         calls = platform["calls"]
-        assert len(calls) == (
-            7 if api == "anthropic" else 6
-        )  # inference, proposer, two episodes, two judges (+ count)
+        assert len(calls) == (7 if api == "anthropic" else 6)  # inference, method, two episodes, two judges (+ count)
         for path, raw_headers, body in calls:
             headers = {k.lower(): v for k, v in raw_headers.items()}
             assert path.startswith("/alpha/1/")
@@ -256,7 +254,7 @@ def test_model_auth_failure_never_falls_back(platform, tmp_path):
     bindings = recipe.model_bindings()
     platform["fail_models"] = True
     with pytest.raises(Exception, match="401"):
-        bindings["teacher"].chat([{"role": "user", "content": "proposer"}])
+        bindings["teacher"].chat([{"role": "user", "content": "method"}])
     assert len(platform["calls"]) == 1
     assert platform["calls"][0][0].startswith("/alpha/")
 

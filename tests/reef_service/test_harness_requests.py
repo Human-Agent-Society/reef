@@ -21,7 +21,7 @@ from reef.harness.tree import TreePatch
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
-from reef.train.harness_backend.contract import TreeProposal
+from reef.train.harness_backend import StepResult, Workspace
 from reef.train.types import JobData
 
 TEXT = "add a skill that texts me when the run is blocked"
@@ -44,28 +44,30 @@ async def post_request(client: TestClient, body: object, scenario: str = "agents
     return await client.post("/reef/train", headers={"x-reef-scenario": scenario}, json=body)
 
 
-def manual_recipe(tmp_path: Path, propose, **fields):
-    return harness_recipe(tmp_path, propose, reads_requests=True, training_mode="manual", **fields)
+def manual_recipe(tmp_path: Path, method, **fields):
+    return dataclasses.replace(harness_recipe(tmp_path, method, **fields), training_mode="manual")
 
 
-def growing_recipe(tmp_path: Path, propose, **fields):
+def growing_recipe(tmp_path: Path, method, **fields):
     """A manual recipe whose scorer prefers the longer rules text, so every step that lengthens the rules publishes."""
 
     def longer(task: str, result) -> float:
         return float(len(result.trajectory[-1]["rules"]))
 
-    return manual_recipe(tmp_path, propose, score=longer, **fields)
+    return manual_recipe(tmp_path, method, score=longer, **fields)
 
 
-def rules_proposer():
-    """A proposer whose every request step adds one more rule, which the growing recipe publishes."""
+def adding_rules(workspace: Workspace, tools) -> TreePatch | None:
+    """A method whose every request step adds one more rule, which the growing recipe publishes."""
+    if workspace.request() is None:
+        return None
+    return TreePatch(changed_rules(workspace.tree().files["rules.md"] + f"rule {workspace.step}\n"))
 
-    def propose(context):
-        if context.request is None:
-            return None
-        return TreePatch(changed_rules(context.tree.files["rules.md"] + f"rule {context.step}\n"))
 
-    return propose
+def answered(workspace: Workspace, patch: TreePatch, **result) -> StepResult:
+    """Write ``patch`` over the head tree, so the tree it makes is the candidate, and return the step's result."""
+    workspace.write_tree(workspace.tree().apply(patch))
+    return StepResult(**result)
 
 
 def request_rows(scenario) -> list[dict]:
@@ -87,12 +89,12 @@ async def committed(scenario, count: int, seconds: float = 30.0) -> list[dict]:
 def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_route(tmp_path: Path) -> None:
     seen: list[tuple] = []
 
-    def propose(context):
-        seen.append((context.samples, context.request))
+    def method(workspace, tools):
+        seen.append((workspace.traces(), workspace.request()))
         return MARKER
 
     # A large auto batch must not keep an explicit manual request waiting.
-    recipe = harness_recipe(tmp_path, propose, reads_requests=True, batch_size=100)
+    recipe = harness_recipe(tmp_path, method, batch_size=100)
     dispatcher = harness_dispatcher(tmp_path, recipe)
     scenario = dispatcher.get_or_create_scenario("agents")
 
@@ -112,8 +114,8 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
             assert request["session"] == "3f1c2a9d0b7e"
             # A request carries its requires list everywhere it goes, empty when the person named nothing.
             assert request["requires"] == []
-            [(samples, asked)] = seen
-            assert samples == () and asked.id == request["id"] and asked.text == "run tests first"
+            [(traces, asked)] = seen
+            assert traces == () and asked.id == request["id"] and asked.text == "run tests first"
             assert row["metrics"]["selected"] is True
             response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "auto"})
             assert response.status == 200
@@ -198,12 +200,12 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
     never the literal; a malformed list is a caller error; a refusal stores nothing."""
     entered, release = Event(), Event()
 
-    def propose(context):
+    def method(workspace, tools):
         # Holds its step open so the accepted records stay stored while the route is probed.
         entered.set()
         release.wait(10)
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -290,30 +292,31 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
         dispatcher.close()
 
 
-def test_the_commit_carries_requires_and_merges_what_the_proposer_added_by_name(tmp_path: Path) -> None:
-    """The person's items stand first; the proposer's items follow, and a name already there is not repeated;
-    a step with no proposal still commits the request's own list."""
+def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tmp_path: Path) -> None:
+    """The person's items stand first; the method's items follow, and a name already there is not repeated;
+    a step whose method changed nothing still commits the request's own list."""
     answers = iter(
         (
-            TreeProposal(
+            (
                 MARKER,
-                requires=(
+                (
                     {"name": "notify", "kind": "service", "check": "same name, dropped"},
                     {"name": "SMTP_HOST", "kind": "env"},
                 ),
             ),
-            TreeProposal(PLAIN),
-            TreeProposal(PLAIN, requires=({"name": "ok", "kind": "env"},)),
-            None,
+            (PLAIN, ()),
+            (PLAIN, ({"name": "ok", "kind": "env"},)),
+            (None, ()),
         )
     )
     handed: list[list[dict]] = []
 
-    def propose(context):
-        handed.append([dict(item) for item in context.request.requires])
-        return next(answers)
+    def method(workspace, tools):
+        handed.append([dict(item) for item in workspace.request().requires])
+        patch, requires = next(answers)
+        return StepResult() if patch is None else answered(workspace, patch, requires=requires)
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -342,7 +345,7 @@ def test_the_commit_carries_requires_and_merges_what_the_proposer_added_by_name(
             # Every step got the person's items and nothing else.
             assert handed == [REQUIRES] * 4
             assert rows[0]["selected"] is True and rows[2]["selected"] is False
-            assert rows[3]["skipped"] == "no proposal"
+            assert rows[3]["skipped"] == "the method left the head tree unchanged"
             # The releases the route serves carry the same lists.
             catalog = await (await client.get("/reef/harness/releases", headers={"x-reef-scenario": "agents"})).json()
             served = [
@@ -358,12 +361,12 @@ def test_the_commit_carries_requires_and_merges_what_the_proposer_added_by_name(
         dispatcher.close()
 
 
-def test_the_merge_keeps_the_persons_items_and_adds_the_proposers_new_names() -> None:
+def test_the_merge_keeps_the_persons_items_and_adds_the_methods_new_names() -> None:
     base = ({"name": "A", "kind": "env"},)
     item = {"name": "B", "kind": "env"}
     assert merge_requires(base, [item]) == [*base, item]
     assert merge_requires(base, [item, *base, item]) == [*base, item]
-    # The person's item edited by the proposer stays the person's.
+    # The person's item edited by the method stays the person's.
     assert merge_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == [*base]
     assert merge_requires(base, []) == [*base]
 
@@ -380,16 +383,16 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
     person = [{"name": f"P{index}", "kind": "env"} for index in range(6)]
     added = [{"name": f"A{index}", "kind": "env"} for index in range(added_count)]
 
-    def extending(context):
+    def extending(workspace, tools):
         # A name the person already gave does not take one of the remaining places.
-        return TreeProposal(MARKER, requires=(*person[:2], *added))
+        return answered(workspace, MARKER, requires=(*person[:2], *added))
 
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
-    backend, _ = harness_backend(tmp_path, extending, reads_requests=True)
+    backend, _ = harness_backend(tmp_path, extending)
     initial = backend.initial_state()
     result = backend_step(backend, JobData("demo:instruction:ask-1", (), request=request), initial)
     if added_count > 2:
-        assert result.metrics["skipped"] == "proposal requires 9 items; at most 8"
+        assert result.metrics["skipped"] == "the step requires 9 items; at most 8"
         assert "selected" not in result.metrics and result.artifact is None
     else:
         assert result.metrics["training_request"]["requires"] == [*person, *added]
@@ -398,10 +401,12 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
 
 
 def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
-    def propose(context):
-        return TreeProposal(MARKER, requires=tuple({"name": f"ENV_{index}", "kind": "env"} for index in range(8)))
+    def method(workspace, tools):
+        return answered(
+            workspace, MARKER, requires=tuple({"name": f"ENV_{index}", "kind": "env"} for index in range(8))
+        )
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -413,7 +418,7 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
             answer = await (await post_request(client, body)).json()
             await committed(scenario, 1)
             metrics = request_rows(scenario)[0]["metrics"]
-            reason = "proposal requires 9 items; at most 8"
+            reason = "the step requires 9 items; at most 8"
             assert metrics["skipped"] == reason and "selected" not in metrics
             response = await client.get(
                 f"/reef/harness/requests/{answer['agent_record_id']}/page",
@@ -433,15 +438,20 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
 def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_that_never_reached_it(
     tmp_path: Path,
 ) -> None:
-    """The backend's dict wins, since it carries what the proposer added; a step the backend skipped before it
+    """The backend's dict wins, since it carries what the method added; a step the backend skipped before it
     merged the list gets the request as accepted, requires included."""
     payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
-    for answer, expected in (
-        (TreeProposal(MARKER, requires=({"name": "SMTP_HOST", "kind": "env"},)), merged),
-        (None, REQUIRES),
-    ):
-        recipe = manual_recipe(tmp_path, lambda context, answer=answer: answer)
+
+    def adding(workspace, tools):
+        return answered(workspace, MARKER, requires=({"name": "SMTP_HOST", "kind": "env"},))
+
+    def keeping(workspace, tools):
+        return StepResult()
+
+    for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
+        (tmp_path / str(index)).mkdir()
+        recipe = manual_recipe(tmp_path / str(index), method)
         records = SQLiteRecordStore()
         trainer = recipe.build("agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
         try:
@@ -464,10 +474,10 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
     """The seed's base release requires nothing; the release a request with two items published carries them;
     the manifest of each carries that release's own list."""
 
-    def propose(context):
-        return MARKER if context.request is not None else None
+    def method(workspace, tools):
+        return MARKER if workspace.request() is not None else None
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -499,7 +509,7 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
 def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
     """A request's items are per release: a release still needs what an earlier one named, so its manifest lists
     the union over its chain, while each releases row keeps its own step's list."""
-    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, rules_proposer()))
+    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
     first, second = REQUIRES
@@ -543,7 +553,7 @@ def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
 def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp_path: Path) -> None:
     """The cap of eight is per request: three published requests of three items each make a union of nine, which
     the manifest carries; the cap never refuses a release for what its chain named."""
-    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, rules_proposer()))
+    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -577,12 +587,12 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
     tree."""
     themed = json.dumps({"defaultThinkingLevel": "off", "theme": "light"}) + "\n"
 
-    def propose(context):
-        if context.request is None:
+    def method(workspace, tools):
+        if workspace.request() is None:
             return None
         return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": themed})
 
-    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, propose, publish="review"))
+    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, method, publish="review"))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 

@@ -53,7 +53,7 @@ def test_scheme_is_case_insensitive() -> None:
 
 
 def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
-    """An evaluation episode or proposer bound through the Anthropic dialect sends x-api-key, not Bearer."""
+    """An evaluation episode or a method bound through the Anthropic dialect sends x-api-key, not Bearer."""
 
     async def run() -> None:
         client = _make_client("secret")

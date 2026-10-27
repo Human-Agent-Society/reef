@@ -1,8 +1,8 @@
-"""Guarantees of the tutorials/evolve-your-harness example, hermetic: the model binding is stubbed, episodes
-never run, and the boot tests read the serve files the way run.sh and ``reef serve`` do.
+"""Guarantees of the tutorials/evolve-your-harness example, hermetic: the served model is stubbed, episodes run a
+fake pi binary, and the boot tests read the serve files the way run.sh and ``reef serve`` do.
 
-The pi variant proposes with the Reefine text proposer (``recipes/beta/reefine``), whose tests live with the
-method; this file covers what the tutorial owns: its grader, the native variant's proposer, the serve files and the replay page.
+This file covers what the tutorial owns: its grader, its two methods (``RulesMethod`` on pi, ``NativeMethod`` on the
+native loop), the serve files and the replay page.
 """
 
 from __future__ import annotations
@@ -21,12 +21,16 @@ import pytest
 import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
-from tests.support.harness_steps import COMPONENT, TreeReleases
+from tests.support.harness_service import backend_step
+from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 
+from reef.core.training_request import TrainingRequest
+from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import final_assistant_text
-from reef.harness.tree import HarnessTree, TreeKind, validate_patch
+from reef.harness.tree import HarnessTree, validate_patch
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
@@ -35,12 +39,23 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
 from reef.train.trainer import Trainer
+from reef.train.types import JobData
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
 REPO_ROOT = EXAMPLE_DIR.parents[1]
 PI_SEED = HarnessTree.read(EXAMPLE_DIR / "seeds" / "pi")
 NATIVE_SEED = HarnessTree.read(EXAMPLE_DIR / "seeds" / "native")
-SAMPLES = (recorded_trajectory("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
+#: A failing trace with its reply and its report's feedback, and a passing one.
+FAILING = recorded_trajectory(
+    "a1",
+    {
+        "messages": [{"role": "user", "content": "[fib] compute fib(90)"}],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "about 2.88e18"}}]},
+    },
+    0.0,
+    "not exact",
+)
+PASSING = recorded_trajectory("a2", {"messages": [{"role": "user", "content": "[csv] compute the median"}]}, 1.0)
 
 
 def _method(monkeypatch: pytest.MonkeyPatch, module: str) -> ModuleType:
@@ -62,17 +77,31 @@ def native_evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return _method(monkeypatch, "native_evolution")
 
 
-class Canned:
-    """A ModelBindings stand-in whose served model answers every call with ``reply``."""
+@pytest.fixture
+def plugins(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    return _method(monkeypatch, "plugins")
+
+
+class Served(ModelBinding):
+    """The served model: it answers ``reply``, or raises it, and keeps every prompt it was asked."""
 
     def __init__(self, reply: str | Exception) -> None:
-        self.reply = reply
-        self.served = self
+        super().__init__(base_url="http://127.0.0.1:9", model="served", api_key="dummy")
+        object.__setattr__(self, "reply", reply)
+        object.__setattr__(self, "prompts", [])
 
     def chat(self, messages, **params) -> str:
+        self.prompts.append(messages[-1]["content"])
         if isinstance(self.reply, Exception):
             raise self.reply
         return self.reply
+
+
+def method_backend(tmp_path: Path, method, served: Served, **fields):
+    """A backend that runs ``method`` with ``served`` as its served model; ``fields`` set the recipe."""
+    backend, _ = harness_backend(tmp_path, method, **fields)
+    backend.models = ModelBindings(served=served)
+    return backend
 
 
 def episode(trajectory: tuple[dict, ...]) -> EpisodeResult:
@@ -115,11 +144,38 @@ def test_the_tutorial_grader_keeps_its_own_answers(evolution) -> None:
     assert final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 
-def test_the_proposer_reads_each_failure_with_its_report_score_and_feedback(evolution) -> None:
-    sample = recorded_trajectory("a1", {"messages": [{"role": "user", "content": "[csv] median"}]}, 0.0, "wrong row")
-    [view] = json.loads(evolution.failures_text((sample,)))
-    assert view["request"]["messages"][0]["content"] == "[csv] median"
-    assert (view["score"], view["feedback"]) == (0.0, "wrong row")
+# -- the pi variant's method: one call rewrites rules.md -------------------------------------------
+
+
+def test_the_rules_method_rewrites_rules_md_from_the_failing_traces(tmp_path, plugins) -> None:
+    """The model sees each failing trace with its reply and feedback, and the current rules; the passing trace
+    stays out. Its fenced answer becomes rules.md, which wins the evaluation (the scorer prefers the marker)."""
+    served = Served("The new rules:\n```markdown\nEnd every reply with the answer alone. marker\n```\n")
+    backend = method_backend(tmp_path, plugins.RulesMethod(), served, seed=PI_SEED)
+    result = backend_step(backend, JobData("demo:1", (FAILING, PASSING)), backend.initial_state())
+    [prompt] = served.prompts
+    assert "[fib] compute fib(90)" in prompt and "about 2.88e18" in prompt and "not exact" in prompt
+    assert "[csv] compute the median" not in prompt and PI_SEED.files["rules.md"] in prompt
+    assert result.metrics["patch"] == {"rules.md": "End every reply with the answer alone. marker\n"}
+    assert result.metrics["method_summary"] == "rewrote rules.md from 1 failing trace(s)"
+    assert result.metrics["method_notes"] == {"failing_traces": 1} and result.metrics["selected"] is True
+
+
+def test_the_rules_method_answers_a_request_and_skips_when_it_has_nothing_to_learn(tmp_path, plugins) -> None:
+    served = Served("```\nAnswer in English.\n```")
+    backend = method_backend(tmp_path, plugins.RulesMethod(), served, seed=PI_SEED)
+    request = TrainingRequest("Always answer in English.", "s", "base", "ask-1")
+    answered = backend_step(backend, JobData("demo:1", (), request=request), backend.initial_state())
+    assert "Always answer in English." in served.prompts[-1]
+    assert answered.metrics["method_summary"] == "rewrote rules.md from 0 failing trace(s) and the request"
+    # A passing trace alone teaches nothing: no model call, and the step skips with the method's reason.
+    passing = backend_step(backend, JobData("demo:2", (PASSING,)), answered.state)
+    assert len(served.prompts) == 1 and passing.metrics["skipped"] == "the method left the head tree unchanged"
+    assert passing.metrics["method_summary"] == "no failing trace and no request to learn from"
+    backend.models = ModelBindings(served=Served(ModelBindingError("model endpoint unreachable: refused")))
+    failed = backend_step(backend, JobData("demo:3", (FAILING,)), passing.state)
+    assert failed.metrics["method_summary"] == "the model call failed: model endpoint unreachable: refused"
+    assert failed.metrics["skipped"] == "the method left the head tree unchanged"
 
 
 # -- the serve files boot the recipe --------------------------------------------------------------
@@ -144,7 +200,8 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert settings["execution"] == config["execution"]
     assert settings["executors"] == config["executors"]
     assert "reef" not in settings and "services" not in settings
-    assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["recipe"]["config"]["evolution"]["tasks"]
+    tasks = config["recipe"]["config"]["evolution"]["evaluation"]["tasks"]
+    assert json.loads((tmp_path / "work/tasks.json").read_text()) == tasks
     # Boot the real recipe; a retained selector without its profile would fail here.
     monkeypatch.chdir(serve_file_base(filename))
     recipe = HarnessEvolutionRecipe.from_environment(
@@ -185,13 +242,17 @@ def write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
 
 
 def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> HarnessEvolutionRecipe:
-    """The recipe a serve file boots, through reef's config loader and the service's upstream runtime."""
+    """The recipe a serve file boots, through reef's config loader and the service's upstream runtime.
+
+    Its state goes under ``tmp_path``; ``evolution`` sets further ``evolution`` keys.
+    """
     from reef.service.assembly import _upstream_runtime
 
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / filename)
     materialized = tmp_path / "harness_evolve.yaml"
-    write_recipe_file(materialized, config, {**config["evolution"], **evolution})
+    state = {"state_dir": str(tmp_path / "harness")}
+    write_recipe_file(materialized, config, {**config["evolution"], **state, **evolution})
     monkeypatch.chdir(serve_file_base(filename))
     service = service_config_from_mapping(config)
     return HarnessEvolutionRecipe.from_environment(
@@ -213,13 +274,14 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
     )
     # serve.yaml names no binary; this run has no pi on PATH.
     built = boot_serve_file(tmp_path, monkeypatch, "serve.yaml", binary=str(tmp_path / "fake-pi"))
-    assert built.adapter == "pi" and built.binary == str(tmp_path / "fake-pi")
-    assert len(built.tasks) == 3
-    assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.training_mode) == (1, "auto")
-    assert type(built.propose).__name__ == "TextProposer" and type(built.score_episode).__name__ == "AnswerScorer"
-    # The seed is the starter skill and carries no provider; the binding comes from the runtime.
-    assert built.seed == PI_SEED and set(PI_SEED.files) == {"skills/answer-style/SKILL.md"}
+    assert built.evolution.adapter == "pi" and built.evolution.binary == str(tmp_path / "fake-pi")
+    tasks = built.configured_tasks()
+    assert len(tasks) == 3
+    assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in tasks)
+    assert (built.batch_size, built.training_mode, built.evaluation.policy) == (1, "auto", "compare")
+    assert type(built.method).__name__ == "RulesMethod" and type(built.scorer).__name__ == "AnswerScorer"
+    # The seed is the starter rules and carries no provider; the binding comes from the runtime.
+    assert built.seed == PI_SEED and set(PI_SEED.files) == {"rules.md"}
     assert not any("upstream" in text or "8000" in text for text in PI_SEED.files.values())
     binding = built.model_binding()
     assert (binding.base_url, binding.model, binding.api_key, binding.api) == (
@@ -238,9 +300,11 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
     """The run.sh native contract, hermetic: the native serve file materializes like serve.yaml and boots with
     the loop's own tools, hook and graph as the seed directory holds them."""
     built = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml")
-    assert built.adapter == "native" and built.binary is None
+    assert built.evolution.adapter == "native" and built.evolution.binary is None
+    assert type(built.method).__name__ == "NativeMethod" and type(built.scorer).__name__ == "NativeAnswerScorer"
     # The same three tasks as the pi variant, so the two runs are comparable.
-    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
+    pi_tasks = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["evaluation"]["tasks"]
+    assert built.configured_tasks() == tuple(pi_tasks)
     assert (built.batch_size, built.training_mode) == (1, "auto")
     assert built.seed == NATIVE_SEED
     assert {
@@ -278,8 +342,8 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     monkeypatch.chdir(REPO_ROOT)
     path = EXAMPLE_DIR / "configs" / "deployment.yaml"
     config = load_config(path)
-    for setting in ("propose", "evaluate"):
-        module, _, name = config["evolution"][setting].partition(":")
+    for setting in (config["evolution"]["method"], config["evolution"]["evaluation"]["scorer"]):
+        module, _, name = setting.partition(":")
         assert callable(getattr(importlib.import_module(module), name))
     assert (REPO_ROOT / config["evolution"]["seed"]).is_dir()
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
@@ -292,14 +356,15 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
         default_runtime=_upstream_runtime(service),
     )
-    assert isinstance(built, HarnessEvolutionRecipe) and built.adapter == "pi"
+    assert isinstance(built, HarnessEvolutionRecipe) and built.evolution.adapter == "pi"
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
-    # The person asks while it keeps learning from failures, so the proposer must take requests.
-    assert built.training_mode == "hybrid" and built.propose.reads_requests
+    # The person asks while it keeps learning from failures; the method reads the request beside the traces.
+    assert built.training_mode == "hybrid" and type(built.method).__name__ == "RulesMethod"
     records = SQLiteRecordStore()
-    trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records, releases=releases_for(built))
+    local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
+    trainer = replace(built, evolution=local).build("demo", records, releases=releases_for(built))
     assert trainer.pipeline.training_mode == "hybrid"
     # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
     assert trainer.job_samples == 1
@@ -330,7 +395,7 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
         default_runtime=_upstream_runtime(service_config_from_mapping(config)),
     )
-    assert built.review_kinds == (TreeKind.CODE_EXTENSION,)
+    assert built.evolution.review_kinds == ("code_extension",)
     # The seed is the starter tree alone: Reef adds no entries of its own to it.
     assert built.seed == PI_SEED
 
@@ -358,33 +423,51 @@ def native_message(text: str) -> dict:
     }
 
 
-def test_native_propose_writes_skills_tools_and_hooks_as_files_the_native_adapter_takes(native_evolution) -> None:
+def test_the_native_method_writes_one_change_of_the_loop(tmp_path, plugins) -> None:
+    """One failing trace, one model call, one native file; a reply that holds no change leaves the tree."""
+    served = Served(native_proposal("native_tool", "run_python", **TOOL))
+    backend = method_backend(
+        tmp_path, plugins.NativeMethod(), served, seed=NATIVE_SEED, adapter="native", evaluation={"policy": "none"}
+    )
+    result = backend_step(
+        backend, JobData("demo:1", (FAILING, PASSING)), backend.initial_state(), NoEvaluationPolicy()
+    )
+    [prompt] = served.prompts
+    assert "about 2.88e18" in prompt and "[csv] compute the median" not in prompt
+    assert '"native/graphs/main.json"' in prompt
+    assert list(result.metrics["patch"]) == ["native/tools/run_python.py"] and result.metrics["selected"] is True
+    assert result.metrics["method_summary"] == "wrote native/tools/run_python.py from 1 failing trace(s)"
+    backend.models = ModelBindings(served=Served("no json here"))
+    unusable = backend_step(backend, JobData("demo:2", (FAILING,)), result.state, NoEvaluationPolicy())
+    assert unusable.metrics["method_summary"] == "the reply held no usable change"
+    assert unusable.metrics["skipped"] == "the method left the head tree unchanged"
+
+
+def test_native_changes_are_files_the_native_adapter_takes(native_evolution) -> None:
     native = get_adapter("native")
-    tool = native_evolution.propose(NATIVE_SEED, SAMPLES, Canned(native_proposal("native_tool", "run_python", **TOOL)))
+    tool = native_evolution.patch_of(NATIVE_SEED, native_proposal("native_tool", "run_python", **TOOL))
     assert list(tool.changes) == ["native/tools/run_python.py"]
     module = tool.changes["native/tools/run_python.py"]
     assert module.startswith(TOOL["code"].rstrip()) and "NAME = 'run_python'" in module
     assert "DESCRIPTION = 'Run python.'" in module
-    hook = native_evolution.propose(
-        NATIVE_SEED, SAMPLES, Canned(native_proposal("native_hook", "answer_last", **HOOK))
-    )
+    hook = native_evolution.patch_of(NATIVE_SEED, native_proposal("native_hook", "answer_last", **HOOK))
     assert list(hook.changes) == ["native/hooks/answer_last.py"]
     assert "EVENT = 'pre_step'" in hook.changes["native/hooks/answer_last.py"]
     # A name a file of the same kind holds rewrites that file: the shipped seed tools are addressable by name.
-    same = native_evolution.propose(NATIVE_SEED, SAMPLES, Canned(native_proposal("native_tool", "read_file", **TOOL)))
+    same = native_evolution.patch_of(NATIVE_SEED, native_proposal("native_tool", "read_file", **TOOL))
     assert list(same.changes) == ["native/tools/read_file.py"] and "native/tools/read_file.py" in NATIVE_SEED.files
-    skill = native_evolution.propose(
-        NATIVE_SEED, SAMPLES, Canned(native_proposal("skill", "answer-style", text="# answer-style\n\nBe exact.\n"))
+    skill = native_evolution.patch_of(
+        NATIVE_SEED, native_proposal("skill", "answer-style", text="# answer-style\n\nBe exact.\n")
     )
     assert skill.changes == {"skills/answer-style/SKILL.md": "# answer-style\n\nBe exact.\n"}
     # qwen2.5:7b was measured swapping the kind and the id; the config name settles it.
     swapped = json.dumps({"id": "native_tool", "name": "median", "config": {"name": "median", **TOOL}})
-    assert list(native_evolution.propose(NATIVE_SEED, SAMPLES, Canned(swapped)).changes) == ["native/tools/median.py"]
+    assert list(native_evolution.patch_of(NATIVE_SEED, swapped).changes) == ["native/tools/median.py"]
     for patch in (tool, hook, same, skill):
         assert validate_patch(NATIVE_SEED, patch, native).passed, validate_patch(NATIVE_SEED, patch, native).problems
 
 
-def test_native_propose_refuses_malformed_shapes_and_a_failed_call(native_evolution) -> None:
+def test_native_replies_of_a_malformed_shape_hold_no_change(native_evolution) -> None:
     for reply in (
         native_proposal("rules", "answer-style", text="x"),
         native_proposal("native_hook", "h", event="on_exit", code="x = 1"),
@@ -393,28 +476,25 @@ def test_native_propose_refuses_malformed_shapes_and_a_failed_call(native_evolut
         native_proposal("native_tool", "t", description="", parameters={}, code="x = 1"),
         json.dumps({"id": "t", "name": "native_tool", "config": {"name": "other", **TOOL}}),
         "no json here",
-        RuntimeError("endpoint down"),
     ):
-        assert native_evolution.propose(NATIVE_SEED, SAMPLES, Canned(reply)) is None
-    # Without failures the proposer asks the model nothing.
-    assert native_evolution.propose(NATIVE_SEED, (), Canned(RuntimeError("must not be asked"))) is None
+        assert native_evolution.patch_of(NATIVE_SEED, reply) is None
 
 
-def test_native_propose_accepts_every_event_the_shape_offers(native_evolution) -> None:
+def test_native_hooks_take_every_event_the_shape_offers(native_evolution) -> None:
     for event in native_evolution.EVENTS:
         reply = native_proposal(
             "native_hook", "guard", event=event, code="def listen(payload, next):\n    return next()\n"
         )
-        patch = native_evolution.propose(NATIVE_SEED, SAMPLES, Canned(reply))
+        patch = native_evolution.patch_of(NATIVE_SEED, reply)
         assert f"EVENT = {event!r}" in patch.changes["native/hooks/guard.py"]
 
 
-def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_evolution) -> None:
+def test_a_native_agent_change_routes_the_main_graph_through_the_agent(native_evolution) -> None:
     """An agent alone can never win: only a subagent stage runs one, and its text comes back as a user message the
-    grader never reads. The proposal carries the graph edit: ask the agent, then a model stage answers."""
+    grader never reads. The change carries the graph edit: ask the agent, then a model stage answers."""
     native = get_adapter("native")
     reply = native_proposal("native_agent", "helper", prompt="Solve the task alone.", tools=["read_file"])
-    patch = native_evolution.propose(NATIVE_SEED, SAMPLES, Canned(reply))
+    patch = native_evolution.patch_of(NATIVE_SEED, reply)
     assert sorted(patch.changes) == ["native/agents/helper.json", "native/graphs/main.json"]
     assert json.loads(patch.changes["native/agents/helper.json"])["prompt"] == "Solve the task alone."
     graph = json.loads(patch.changes["native/graphs/main.json"])
@@ -429,11 +509,11 @@ def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_ev
     assert validate_patch(NATIVE_SEED, patch, native).passed, validate_patch(NATIVE_SEED, patch, native).problems
     # The agent stands alone when the graph already runs it, and when the stage names it would add are taken.
     routed = NATIVE_SEED.apply(patch)
-    assert list(native_evolution.propose(routed, SAMPLES, Canned(reply)).changes) == ["native/agents/helper.json"]
+    assert list(native_evolution.patch_of(routed, reply).changes) == ["native/agents/helper.json"]
     taken = {**graph, "stages": {**json.loads(NATIVE_SEED.files["native/graphs/main.json"])["stages"]}}
     taken["stages"]["ask-helper"] = {"kind": "message", "text": "hi"}
     occupied = HarnessTree({**NATIVE_SEED.files, "native/graphs/main.json": json.dumps(taken)})
-    assert list(native_evolution.propose(occupied, SAMPLES, Canned(reply)).changes) == ["native/agents/helper.json"]
+    assert list(native_evolution.patch_of(occupied, reply).changes) == ["native/agents/helper.json"]
 
 
 def test_native_evaluate_reads_the_last_assistant_message_with_content(native_evolution) -> None:
@@ -532,6 +612,8 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
             "patch": {"rules.md": "one line\n"},
             "proposal": {"id": "p1", "session": "s1", "reason": "because"},
             "selection": {"reason": "candidate won 2 task pairings and lost 0"},
+            "method_summary": "rewrote rules.md from 1 failing trace(s)",
+            "model_seconds": 1.5,
         },
     }
     write_commits(work / "agent-record", commit)
@@ -555,7 +637,9 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     assert published["files"] == {**NATIVE_SEED.files, "rules.md": "one line\n"}
     assert published["diff"] == {"added": ["rules.md"], "updated": [], "removed": []}
     assert published["proposal"] == {"id": "p1", "session": "s1", "reason": "because"}
+    assert published["summary"] == "rewrote rules.md from 1 failing trace(s)"
     assert published["result"]["wins"] == 2 and published["result"]["reason"].startswith("candidate won")
+    assert published["result"]["model_seconds"] == 1.5
     assert [(s["session"], s["release_id"], len(s["events"])) for s in data["sessions"]] == [
         ("s1", "r1", 6),
         ("s2", "r2", 5),

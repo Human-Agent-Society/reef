@@ -1,9 +1,8 @@
-"""Guarantees of the evolve step record, hermetic: the proposer's model calls,
-the proposed patch, and every evaluation episode's trajectory land where a
-reader can rebuild the decision, and nothing lands when the record is off. A
-fake native binary writes a session tree shaped like the native loop's, so
-the stage path metric is checked against a kept file; the served model is a
-stub endpoint behind ``urllib.request.urlopen``."""
+"""Guarantees of the evolve step record and the episode records, hermetic: the method's model calls, its result
+and its candidate land in the step's record directory, and every evaluation episode's trajectory lands in the
+scenario's history, where a reader can rebuild the decision. A fake native binary writes a session tree shaped
+like the native loop's, so the stage path metric is checked against a kept file; the served model is a stub
+endpoint behind ``urllib.request.urlopen``."""
 
 from __future__ import annotations
 
@@ -15,30 +14,31 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_episode_scorer
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import (
     COMPONENT,
     MODEL,
+    PI_SEED,
+    UNCHANGED,
     TreeReleases,
     changed_rules,
     harness_backend,
     harness_recipe,
     make_pi_binary,
-    runtime,
 )
 
 from reef.evaluation.harness import EpisodeEvaluationWorker
+from reef.evaluation.harness.runner import EpisodeRun
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import RECORD_TEXT_CAP
-from reef.recipe import RecipeConfigError
-from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import LocalExecutor
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
+from reef.train.harness_backend import StepResult
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
 from reef.train.types import JobData, TrainStepResult
@@ -99,16 +99,31 @@ def native_score(task: str, result) -> float:
 
 
 def native_backend(
-    tmp_path: Path, propose=lambda context: MARKER, *, binary: str | None = None, **fields
+    tmp_path: Path,
+    method=lambda workspace, tools: MARKER,
+    *,
+    binary: str | None = None,
+    workers: int = 1,
+    **fields,
 ) -> tuple[HarnessBackend, TreeReleases]:
     """The native backend over the fake native binary, and its in-memory history whose base is the native seed."""
-    recipe = replace(
-        harness_recipe(tmp_path, propose, seed=NATIVE_SEED, score=native_score, **fields),
+    recipe = harness_recipe(
+        tmp_path,
+        method,
+        seed=NATIVE_SEED,
+        score=native_score,
         adapter="native",
         binary=binary or str(make_native_binary(tmp_path)),
+        **fields,
     )
+    recipe = replace(recipe, worker_executor=ExecutorSettings(workers=workers))
     releases = TreeReleases(recipe.seed)
     return recipe.build_backend("demo", ComponentReleases(releases, COMPONENT), None), releases
+
+
+def steps_dir(tmp_path: Path) -> Path:
+    """Where ``harness_recipe`` keeps the step records of the ``demo`` scenario."""
+    return (tmp_path / "harness" / "demo" / COMPONENT / "steps").resolve()
 
 
 def step(backend: HarnessBackend, state=None) -> TrainStepResult:
@@ -155,37 +170,36 @@ def test_remote_worker_returns_records_without_touching_driver_path(tmp_path):
         False,
         transfer_records=True,
     )
-    scored = worker.run({}, "one", blocker / "episode")
+    scored = worker.run(EpisodeRun({}, "one", blocker / "episode"), ModelBindings(served=MODEL))
     assert scored.record_archive is not None
     assert blocker.read_text() == "this path cannot be a directory on the worker"
     with tarfile.open(fileobj=BytesIO(scored.record_archive), mode="r:gz") as archive:
         assert {"./session.jsonl", "./agents/002-checker.jsonl", "./episode.json"} <= set(archive.getnames())
 
 
-# -- the proposer's calls ---------------------------------------------------
+# -- the method's calls -----------------------------------------------------
 
 
-def test_record_records_every_proposer_call_through_the_binding_seam(tmp_path: Path, served_model) -> None:
-    """Without a call budget the proposer still sees a recording binding, and
-    every chat lands with its model, request, reply and time, long text cut
-    at the cap with a marker naming what was dropped."""
+def test_the_record_keeps_every_model_call_through_the_binding_seam(tmp_path: Path, served_model) -> None:
+    """Without a call budget the method still sees a recording binding, and every chat lands with its model,
+    request, reply and time, long text cut at the cap with a marker naming what was dropped."""
     long_prompt = "x" * (RECORD_TEXT_CAP + 5)
 
-    def propose(context):
-        context.models.served.chat([{"role": "user", "content": "first"}], timeout_s=5.0, max_tokens=8)
-        context.models.served.chat([{"role": "system", "content": long_prompt}, {"role": "user", "content": "second"}])
+    def method(workspace, tools):
+        tools.models.served.chat([{"role": "user", "content": "first"}], timeout_s=5.0, max_tokens=8)
+        tools.models.served.chat([{"role": "system", "content": long_prompt}, {"role": "user", "content": "second"}])
         return MARKER
 
-    backend, _ = harness_backend(tmp_path, propose, step_record_dir=str(tmp_path / "record"))
+    backend, _ = harness_backend(tmp_path, method)
     result = step(backend)
 
-    assert result.metrics["proposer_calls"] == 2
-    assert result.metrics["proposer_seconds"] >= 0.0
+    assert result.metrics["model_calls"] == 2
+    assert result.metrics["model_seconds"] >= 0.0
     # An answer that reports no usage counts zero tokens rather than none.
-    assert result.metrics["proposer_input_tokens"] == 0 and result.metrics["proposer_output_tokens"] == 0
-    record = (tmp_path / "record" / "demo" / "1").resolve()
+    assert result.metrics["model_input_tokens"] == 0 and result.metrics["model_output_tokens"] == 0
+    record = steps_dir(tmp_path) / "1"
     assert result.metrics["step_record"] == str(record)
-    calls = read_json(record / "proposer.json")
+    calls = read_json(record / "calls.json")
     assert [call["model"] for call in calls] == [MODEL.model, MODEL.model]
     assert calls[0]["messages"] == [{"role": "user", "content": "first"}]
     assert calls[0]["params"] == {"max_tokens": 8, "timeout_s": 5.0}
@@ -193,112 +207,104 @@ def test_record_records_every_proposer_call_through_the_binding_seam(tmp_path: P
     assert calls[1]["params"] == {} and calls[1]["messages"][1] == {"role": "user", "content": "second"}
     clipped = calls[1]["messages"][0]["content"]
     assert clipped.startswith("x" * RECORD_TEXT_CAP) and clipped.endswith("... [clipped 5 chars]")
-    assert read_json(record / "patch.json") == MARKER.to_json()
+    # The record keeps the candidate the method left and the result it returned.
+    assert HarnessTree.read(record / "harness") == PI_SEED.apply(MARKER)
+    assert read_json(record / "result.json") == {"summary": "", "notes": {}, "requires": []}
 
-    def wordy(context):
-        context.models.served.chat([{"role": "user", "content": "go"}], stop=["z" * (RECORD_TEXT_CAP + 2)])
+    def wordy(workspace, tools):
+        tools.models.served.chat([{"role": "user", "content": "go"}], stop=["z" * (RECORD_TEXT_CAP + 2)])
         return MARKER
 
     (tmp_path / "params").mkdir()
-    backend, _ = harness_backend(tmp_path / "params", wordy, step_record_dir=str(tmp_path / "params" / "record"))
+    backend, _ = harness_backend(tmp_path / "params", wordy)
     step(backend)
-    stop = read_json(tmp_path / "params" / "record" / "demo" / "1" / "proposer.json")[0]["params"]["stop"][0]
+    stop = read_json(steps_dir(tmp_path / "params") / "1" / "calls.json")[0]["params"]["stop"][0]
     assert stop.startswith("z" * RECORD_TEXT_CAP) and stop.endswith("... [clipped 2 chars]")
 
 
-def test_record_keeps_a_failed_call_and_the_calls_before_a_budget_stop(tmp_path: Path, served_model) -> None:
+def test_the_record_keeps_a_failed_call_and_the_calls_before_a_budget_stop(tmp_path: Path, served_model) -> None:
     served_model["replies"] = [RuntimeError("endpoint down")]
 
-    def propose(context):
+    def method(workspace, tools):
         try:
-            context.models.served.chat([{"role": "user", "content": "hi"}])
+            tools.models.served.chat([{"role": "user", "content": "hi"}])
         except RuntimeError:
             return
 
-    backend, _ = harness_backend(tmp_path, propose, step_record_dir=str(tmp_path / "broken"))
+    backend, _ = harness_backend(tmp_path, method)
     result = step(backend)
-    assert result.metrics["skipped"] == "no proposal" and result.metrics["proposer_calls"] == 1
-    record = tmp_path / "broken" / "demo" / "1"
-    calls = read_json(record / "proposer.json")
+    assert result.metrics["skipped"] == UNCHANGED and result.metrics["model_calls"] == 1
+    calls = read_json(steps_dir(tmp_path) / "1" / "calls.json")
     assert calls[0]["error"] == "RuntimeError: endpoint down" and "reply" not in calls[0]
     assert calls[0]["seconds"] >= 0.0
-    # No proposal, no patch on file.
-    assert not (record / "patch.json").exists()
 
     served_model["replies"] = ["ok"]
 
-    def greedy(context):
+    def greedy(workspace, tools):
         while True:
-            context.models.served.chat([{"role": "user", "content": "more"}])
+            tools.models.served.chat([{"role": "user", "content": "more"}])
 
     (tmp_path / "greedy").mkdir()
-    backend, _ = harness_backend(
-        tmp_path / "greedy", greedy, max_model_calls_per_step=2, step_record_dir=str(tmp_path / "budget")
-    )
+    backend, _ = harness_backend(tmp_path / "greedy", greedy, max_model_calls_per_step=2)
     with pytest.raises(RuntimeError, match="model call budget of 2"):
         step(backend)
-    # The stop raised out of propose, and the two calls before it are on file.
-    assert len(read_json(tmp_path / "budget" / "demo" / "1" / "proposer.json")) == 2
-    assert not (tmp_path / "budget" / "demo" / "1" / "patch.json").exists()
+    # The stop raised out of the method, and the two calls before it are on file.
+    record = steps_dir(tmp_path / "greedy") / "1"
+    assert len(read_json(record / "calls.json")) == 2 and not (record / "result.json").exists()
 
 
-def test_a_rejected_removal_keeps_its_null_in_the_record_the_metrics_and_the_state(tmp_path: Path) -> None:
+def test_a_rejected_removal_keeps_its_null_in_the_metrics(tmp_path: Path) -> None:
     removal = TreePatch({"rules.md": None})
-    backend, _ = harness_backend(tmp_path, lambda context: removal, step_record_dir=str(tmp_path / "record"))
+    backend, _ = harness_backend(tmp_path, lambda workspace, tools: removal)
     result = step(backend)
     assert result.metrics["selected"] is False
     assert result.metrics["patch"] == {"rules.md": None}
-    assert result.state["rejected_proposals"][0]["patch"] == {"rules.md": None}
-    assert read_json(tmp_path / "record" / "demo" / "1" / "patch.json") == {"rules.md": None}
+    assert "rules.md" not in HarnessTree.read(steps_dir(tmp_path) / "1" / "harness").files
 
 
-# -- the step's files and the stage path -----------------------------------
+# -- the episode records and the stage path ---------------------------------
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_step_record_writes_the_patch_and_every_episode_and_the_path_matches_the_kept_trajectory(
+def test_the_history_keeps_every_episode_and_the_path_matches_the_kept_trajectory(
     tmp_path: Path,
     workers: int,
 ) -> None:
-    backend, _ = native_backend(
-        tmp_path,
-        step_record_dir=str(tmp_path / "record"),
-        episode_repeats=2,
-        worker_executor=ExecutorSettings(workers=workers),
-    )
+    backend, _ = native_backend(tmp_path, workers=workers, evaluation={"repeats": 2})
     result = step(backend)
     backend.close()
     assert result.metrics["selected"] is True
+    assert read_json(steps_dir(tmp_path) / "1" / "calls.json") == []
 
-    record = tmp_path / "record" / "demo" / "1"
-    assert read_json(record / "proposer.json") == []
-    assert read_json(record / "patch.json") == MARKER.to_json()
-    episodes = record / "episodes"
-    names = ["candidate-0", "candidate-0-1", "current-0", "current-0-1"]
-    assert sorted(path.name for path in episodes.iterdir()) == names
-    for name in names:
-        assert (episodes / name / "session.jsonl").is_file()
-        assert (episodes / name / "agents" / "002-checker.jsonl").is_file()
+    history = backend.history
+    candidate = NATIVE_SEED.apply(MARKER).checksum()
+    assert sorted((record.tree == candidate, record.repeat) for record in history.episodes) == [
+        (False, 0),
+        (False, 1),
+        (True, 0),
+        (True, 1),
+    ]
+    for record in history.episodes:
+        kept = history.episode_dir(record.episode)
+        assert (kept / "session.jsonl").is_file() and (kept / "agents" / "002-checker.jsonl").is_file()
 
     # The path metric is what the kept file says: the root's stage/exit names and how its turn ended.
-    kept = [json.loads(line) for line in (episodes / "candidate-0" / "session.jsonl").read_text().splitlines()]
+    first = history.episode_dir(next(record.episode for record in history.episodes if record.tree == candidate))
+    kept = [json.loads(line) for line in (first / "session.jsonl").read_text().splitlines()]
     stages = [event["data"]["stage"] for event in kept if event["type"] == "stage/exit"]
     reasons = [event["data"]["reason"]["kind"] for event in kept if event["type"] == "turn/end"]
     assert stages == STAGE_PATH["stages"] and reasons == ["completed"]
     assert result.metrics["candidate_paths"] == (STAGE_PATH, STAGE_PATH)
     assert result.metrics["current_paths"] == (STAGE_PATH, STAGE_PATH)
     # The checker's own verify stage and gave_up reason stay out of the root's path.
-    checker = [
-        json.loads(line)
-        for line in (episodes / "candidate-0" / "agents" / "002-checker.jsonl").read_text().splitlines()
-    ]
+    checker = [json.loads(line) for line in (first / "agents" / "002-checker.jsonl").read_text().splitlines()]
     assert [event["data"]["stage"] for event in checker if event["type"] == "stage/exit"] == ["verify"]
 
 
 def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replaced(tmp_path: Path) -> None:
-    backend, _ = native_backend(tmp_path, step_record_dir=str(tmp_path / "record"))
+    backend, _ = native_backend(tmp_path)
     step(backend)
-    root = (tmp_path / "record" / "demo").resolve()
+    root = steps_dir(tmp_path)
     first = root / "1"
     before = {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")}
 
@@ -312,32 +318,33 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     assert sorted(path.name for path in root.iterdir()) == ["1", "1-2", "1-3"]
 
     with pytest.raises(FileExistsError):
-        StepRecord.write(first, "proposer.json", [])
-    assert read_json(first / "proposer.json") == []
+        StepRecord.write(first, "calls.json", [])
+    assert read_json(first / "calls.json") == []
 
 
-def test_a_recheck_step_writes_episodes_only_and_asks_the_proposer_nothing(tmp_path: Path) -> None:
-    backend, releases = native_backend(tmp_path, step_record_dir=str(tmp_path / "record"), recheck_every=1)
+def test_a_recheck_step_asks_the_method_nothing_and_runs_fresh_episodes(tmp_path: Path) -> None:
+    backend, releases = native_backend(tmp_path, evaluation={"recheck_every": 1})
     first = step(backend)
     assert first.metrics["selected"] is True
     releases.publish("r1", HarnessTree.read(first.artifact.local_path))
     second = step(backend, first.state)
-    assert second.metrics["recheck"] is True and second.metrics["proposer_calls"] == 0
-    record = (tmp_path / "record" / "demo" / "2").resolve()
-    assert second.metrics["step_record"] == str(record)
-    assert sorted(path.name for path in record.iterdir()) == ["episodes"]
-    assert sorted(path.name for path in (record / "episodes").iterdir()) == ["candidate-0", "current-0"]
+    assert second.metrics["recheck"] is True and "model_calls" not in second.metrics
+    # The step claimed its record directory and wrote nothing into it: no method ran.
+    record = steps_dir(tmp_path) / "2"
+    assert second.metrics["step_record"] == str(record) and list(record.iterdir()) == []
+    # Both trees ran again, though the history held scores of each.
+    rerun = [record.tree for record in backend.history.episodes if record.step == 2]
+    assert sorted(rerun) == sorted((NATIVE_SEED.checksum(), NATIVE_SEED.apply(MARKER).checksum()))
 
 
-def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
-    backend, _ = native_backend(tmp_path, step_record_dir=str(tmp_path / "record"))
+def test_an_episode_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
+    backend, _ = native_backend(tmp_path)
     prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
-    candidate = prepared.candidate
-    assert candidate is not None and candidate.record_dir == (tmp_path / "record" / "demo" / "1").resolve()
-    # A file where the episodes directory goes stands in for a full or unwritable record volume.
-    (candidate.record_dir / "episodes").write_text("in the way")
+    assert prepared.candidate is not None
+    # A file where the episode records go stands in for a full or unwritable history volume.
+    (backend.history.root / "episodes").write_text("in the way")
     with pytest.raises(TrajectoryKeepError, match="cannot keep episode trajectory"):
-        backend.evaluate(candidate)
+        backend.evaluate(prepared.candidate)
     backend.abort_step(prepared)
     assert backend.failed_step_metrics()["failed_stage"] == "evaluating"
 
@@ -364,17 +371,6 @@ def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path
     assert len(removed) == 1 and not removed[0].exists()
 
 
-def test_nothing_is_written_when_the_step_record_is_off(tmp_path: Path) -> None:
-    backend, _ = native_backend(tmp_path)
-    before = set(tmp_path.rglob("*"))
-    result = step(backend)
-    assert set(tmp_path.rglob("*")) == before
-    assert "step_record" not in result.metrics
-    # The counts and the path ride the commit record either way.
-    assert result.metrics["proposer_calls"] == 0
-    assert result.metrics["candidate_paths"] == (STAGE_PATH,)
-
-
 def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stages(tmp_path: Path) -> None:
     missing, _ = native_backend(tmp_path, binary=str(tmp_path / "no-such-binary"))
     result = step(missing)
@@ -382,7 +378,7 @@ def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stage
     assert result.metrics["candidate_paths"] == (None,) and result.metrics["current_paths"] == (None,)
 
     (tmp_path / "pi").mkdir()
-    pi, _ = harness_backend(tmp_path / "pi", lambda context: MARKER)
+    pi, _ = harness_backend(tmp_path / "pi", lambda workspace, tools: MARKER)
     result = step(pi)
     assert result.metrics["candidate_paths"] == ({"stages": [], "reason": None},)
 
@@ -425,129 +421,81 @@ def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: P
     assert (taken / "session.jsonl").read_text() == "earlier record\n"
 
 
-# -- the setting ------------------------------------------------------------
+# -- what the checks never saw, the raw request seam, and the episode record ------------------------
 
 
-def recipe_config(**evolution) -> dict:
-    return {
-        "evolution": {
-            "propose": resolve_proposer(lambda context: None),
-            "evaluate": resolve_episode_scorer(native_score),
-            "tasks": ["one"],
-            **evolution,
-        }
-    }
-
-
-def test_recipe_parses_step_record_dir_and_the_backend_refuses_an_unwritable_one(tmp_path: Path) -> None:
-    binary = str(make_pi_binary(tmp_path))
-    on = HarnessEvolutionRecipe.from_environment(
-        {}, config=recipe_config(step_record_dir=str(tmp_path / "record"), binary=binary), runtime=runtime()
-    )
-    assert on.step_record_dir == str(tmp_path / "record")
-    assert HarnessEvolutionRecipe.from_environment({}, config=recipe_config()).step_record_dir is None
-    for bad in (42, "", "  "):
-        with pytest.raises(RecipeConfigError, match="step_record_dir must be a non-empty path"):
-            HarnessEvolutionRecipe.from_environment({}, config=recipe_config(step_record_dir=bad))
-
-    # One recipe serves many scenarios; each scenario's steps record under their own directory.
-    records = SQLiteRecordStore()
-    for scenario in ("demo", "other"):
-        releases = ComponentReleases(TreeReleases(on.seed), COMPONENT)
-        trainer = on.build(scenario, records, releases=releases)
-        assert trainer.candidate_backend.records.root == (tmp_path / "record" / scenario).resolve()
-        trainer.close()
-    records.close()
-    assert sorted(path.name for path in (tmp_path / "record").iterdir()) == ["demo", "other"]
-
-    blocker = tmp_path / "blocker"
-    blocker.write_text("not a directory")
-    with pytest.raises(ValueError, match=r"step_record_dir .* cannot be created"):
-        native_backend(tmp_path, step_record_dir=str(blocker / "record"))
-    with pytest.raises(ValueError, match="step_record_dir must be a non-empty path"):
-        native_backend(tmp_path, step_record_dir="")
-
-
-def test_a_relative_record_dir_is_made_absolute_at_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    config = recipe_config(step_record_dir="rel", binary=str(make_pi_binary(tmp_path)))
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
-    backend = recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
-    assert backend.records.root == (tmp_path / "rel" / "demo").resolve() and backend.records.root.is_absolute()
-
-
-# -- what the boundary never saw, the raw request seam, and the episode record ---------------------
-
-
-def test_record_redacts_credential_shaped_text_from_the_proposer_and_the_refused_patch(
-    tmp_path: Path, served_model
-) -> None:
+def test_the_record_redacts_credential_shaped_text_from_the_model_calls(tmp_path: Path, served_model) -> None:
     key = "sk-" + "a" * 24
     served_model["replies"] = [f"use {key} for auth"]
 
-    def propose(context):
-        context.models.served.chat([{"role": "user", "content": f"the key is {key}"}])
-        return TreePatch(changed_rules(f"always send {key}\n"))
+    def method(workspace, tools):
+        tools.models.served.chat([{"role": "user", "content": f"the key is {key}"}])
+        # An agent's gateway records the calls it relays itself.
+        tools.calls.record({"source": "agent", "reply": f"the agent used {key}"})
+        return StepResult(f"wrote {key} into the rules")
 
-    backend, _ = harness_backend(tmp_path, propose, step_record_dir=str(tmp_path / "record"))
+    backend, _ = harness_backend(tmp_path, method)
     result = step(backend)
-    assert "inline credential" in str(result.metrics.get("skipped"))  # the tree validation refused it
-    record = tmp_path / "record" / "demo" / "1"
-    written = (record / "proposer.json").read_text() + (record / "patch.json").read_text()
-    # Two proposals (the first and its retry), each with the request, the reply and the response on file.
-    assert key not in written and written.count("[redacted credential]") == 7
+    assert result.metrics["skipped"] == UNCHANGED
+    record = steps_dir(tmp_path) / "1"
+    written = (record / "calls.json").read_text() + (record / "result.json").read_text()
+    # The request, the reply, the provider's response, the gateway's entry and the method's summary, each on file
+    # without the key.
+    assert key not in written and written.count("[redacted credential]") == 5
 
 
 def test_a_methods_complete_call_shares_the_budget_and_the_record(tmp_path: Path, served_model) -> None:
     served_model["replies"] = ["echo"]
     served_model["usage"] = {"prompt_tokens": 40, "completion_tokens": 6}
 
-    def propose(context):
-        context.models.served.complete({"messages": [{"role": "user", "content": "one"}]}, timeout_s=3.0)
+    def method(workspace, tools):
+        tools.models.served.complete({"messages": [{"role": "user", "content": "one"}]}, timeout_s=3.0)
         with pytest.raises(RuntimeError, match="budget"):
-            context.models.served.complete({"messages": [{"role": "user", "content": "two"}]})
+            tools.models.served.complete({"messages": [{"role": "user", "content": "two"}]})
         return MARKER
 
-    backend, _ = harness_backend(
-        tmp_path, propose, step_record_dir=str(tmp_path / "record"), max_model_calls_per_step=1
-    )
+    backend, _ = harness_backend(tmp_path, method, max_model_calls_per_step=1)
     result = step(backend)
-    assert result.metrics["proposer_calls"] == 1
-    calls = read_json(tmp_path / "record" / "demo" / "1" / "proposer.json")
+    assert result.metrics["model_calls"] == 1
+    calls = read_json(steps_dir(tmp_path) / "1" / "calls.json")
     assert calls[0]["body"] == {"messages": [{"role": "user", "content": "one"}]}
     assert calls[0]["params"] == {"timeout_s": 3.0} and "reply" not in calls[0]
     assert calls[0]["response"]["choices"][0]["message"]["content"] == "raw one"
     # The tokens the call reported land in the record and, summed, in the step's metrics: recorded, never charged.
     assert calls[0]["usage"] == {"input_tokens": 40, "output_tokens": 6}
-    assert result.metrics["proposer_input_tokens"] == 40 and result.metrics["proposer_output_tokens"] == 6
+    assert result.metrics["model_input_tokens"] == 40 and result.metrics["model_output_tokens"] == 6
 
 
 def test_a_long_reply_is_clipped_with_the_marker(tmp_path: Path, served_model) -> None:
     served_model["replies"] = ["y" * (RECORD_TEXT_CAP + 3)]
 
-    def propose(context):
-        context.models.served.chat([{"role": "user", "content": "go"}])
+    def method(workspace, tools):
+        tools.models.served.chat([{"role": "user", "content": "go"}])
         return MARKER
 
-    backend, _ = harness_backend(tmp_path, propose, step_record_dir=str(tmp_path / "record"))
+    backend, _ = harness_backend(tmp_path, method)
     step(backend)
-    reply = read_json(tmp_path / "record" / "demo" / "1" / "proposer.json")[0]["reply"]
+    reply = read_json(steps_dir(tmp_path) / "1" / "calls.json")[0]["reply"]
     assert reply.startswith("y" * RECORD_TEXT_CAP) and reply.endswith("... [clipped 3 chars]")
 
 
 def test_every_episode_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path: Path) -> None:
-    backend, _ = native_backend(tmp_path, step_record_dir=str(tmp_path / "record"))
+    backend, _ = native_backend(tmp_path)
     result = step(backend)
-    record = read_json(tmp_path / "record" / "demo" / "1" / "episodes" / "candidate-0" / "episode.json")
+    candidate = NATIVE_SEED.apply(MARKER).checksum()
+    first = next(record for record in backend.history.episodes if record.tree == candidate)
+    record = read_json(backend.history.episode_dir(first.episode) / "episode.json")
     assert record["task"] == "task one" and record["exit_code"] == 0 and record["failure"] is None
     assert record["score"] == 1.0 and result.metrics["selected"] is True
     assert record["path"] == result.metrics["candidate_paths"][0]
     assert record["residue"] == [] and isinstance(record["stdout"], str) and isinstance(record["stderr"], str)
 
     # An episode that could not run still leaves its record: the failure, and no output to show.
-    broken, _ = native_backend(tmp_path, binary=str(tmp_path / "missing"), step_record_dir=str(tmp_path / "broken"))
+    (tmp_path / "broken").mkdir()
+    broken, _ = native_backend(tmp_path / "broken", binary=str(tmp_path / "missing"))
     step(broken)
-    record = read_json(tmp_path / "broken" / "demo" / "1" / "episodes" / "candidate-0" / "episode.json")
+    first = next(record for record in broken.history.episodes if record.tree == candidate)
+    record = read_json(broken.history.episode_dir(first.episode) / "episode.json")
     assert record["score"] is None and record["failure"]["stage"] == "launch"
     assert record["exit_code"] is None and record["stdout"] is None and record["residue"] is None
 

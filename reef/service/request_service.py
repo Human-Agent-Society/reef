@@ -968,7 +968,7 @@ class RequestService:
             "started_at": None if mine is None else mine.started_at,
             "episodes_total": None if mine is None else mine.episodes_total,
             "step_record": None if mine is None else mine.step_record,
-            # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
+            # What the method has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }
 

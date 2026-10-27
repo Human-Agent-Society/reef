@@ -65,8 +65,8 @@ padding:6px 12px;font-size:12px;background:var(--card);white-space:nowrap}
 .tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-creation,.tone-promote,
 .tone-rollback,.tone-recovery,.tone-unknown{--status:var(--accent);--status-bg:var(--soft)}
 .status{color:var(--status);background:var(--status-bg);border-color:transparent}
-.selected,.promoted,.complete{color:var(--good)}
-.pending,.skipped,.partial,.queued,.proposing,.evaluating,.running{color:var(--warn)}
+.selected,.promoted{color:var(--good)}
+.pending,.skipped,.queued,.proposing,.evaluating,.running{color:var(--warn)}
 .rejected,.failed{color:var(--bad)}.creation,.promote,.rollback,.recovery,.unknown{color:var(--accent)}
 /* A status word inside a pill takes the pill's tone, which the hero and the summary set. */
 .status span{color:inherit}
@@ -106,8 +106,6 @@ STATUS_LABELS = {
     "rejected": "Not selected",
     "skipped": "No changes",
     "failed": "Failed",
-    "complete": "Complete",
-    "partial": "Partial",
     "creation": "Starting point",
     "promote": "Promoted by a person",
     "rollback": "Rolled back by a person",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import EchoInference, harness_dispatcher, run_step
 from tests.support.harness_steps import harness_recipe
 
+from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.delivery import create_harness_surface
 from reef.recipe import Recipe
@@ -19,6 +21,15 @@ from reef.surface import Surface
 from reef.train.harness_backend.inbox import ProposalInbox
 
 MARKER_RULES = {"rules.md": "marker rules\n"}
+
+
+def unchanged(workspace, tools) -> None:
+    """A method that leaves the head tree as it is, so a step without a proposal publishes nothing."""
+
+
+def inbox_of(dispatcher: Dispatcher, scenario: str = "agents") -> Path:
+    """The proposal inbox of ``scenario``'s backend."""
+    return dispatcher.get_or_create_scenario(scenario).trainer.candidate_backend.proposals.directory
 
 
 def proposal(patch: dict, *, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0", reason: str = "because"):
@@ -57,7 +68,7 @@ class FilesOnly(Recipe):
 
 
 def test_the_route_validates_the_patch_against_the_head_and_stores_it(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, unchanged))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
     head = scenario.repository.require_current_artifact().release_id
@@ -78,7 +89,7 @@ def test_the_route_validates_the_patch_against_the_head_and_stores_it(tmp_path: 
         (status, admitted), *refusals = results
         assert status == 200
         assert admitted["admitted"] is True and admitted["reason"] is None and admitted["release_id"] == head
-        inbox = tmp_path / "proposals" / "agents"
+        inbox = inbox_of(dispatcher)
         stored = json.loads((inbox / f"{admitted['proposal_id']}.json").read_text(encoding="utf-8"))
         assert stored["patch"] == MARKER_RULES and stored["reason"] == "because"
         assert stored["session"] == "3f1c2a9d0b7e" and stored["release_id"] == "rel-0"
@@ -93,33 +104,33 @@ def test_the_route_validates_the_patch_against_the_head_and_stores_it(tmp_path: 
 
 
 def test_the_inbox_holds_max_pending_proposals_and_refuses_the_rest(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None, max_pending_proposals=1))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, unchanged, max_pending_proposals=1))
     dispatcher.get_or_create_scenario("agents")
     try:
         (_, first), (_, second) = answers(dispatcher, proposal(MARKER_RULES), proposal(MARKER_RULES))
         assert first["admitted"] is True
         assert second == {**second, "admitted": False, "reason": "inbox full"}
         assert second["proposal_id"] != first["proposal_id"]
-        assert [path.stem for path in (tmp_path / "proposals" / "agents").glob("*.json")] == [first["proposal_id"]]
+        assert [path.stem for path in inbox_of(dispatcher).glob("*.json")] == [first["proposal_id"]]
     finally:
         dispatcher.close()
 
 
 def test_a_manual_scenario_takes_instructions_only(tmp_path: Path) -> None:
-    recipe = harness_recipe(tmp_path, lambda context: None, reads_requests=True, training_mode="manual")
+    recipe = replace(harness_recipe(tmp_path, unchanged), training_mode="manual")
     dispatcher = harness_dispatcher(tmp_path, recipe)
     dispatcher.get_or_create_scenario("agents")
     try:
         [(status, answer)] = answers(dispatcher, proposal(MARKER_RULES))
         assert status == 200
         assert answer["admitted"] is False and answer["reason"] == "manual mode takes instructions only"
-        assert not (tmp_path / "proposals" / "agents").exists()
+        assert not inbox_of(dispatcher).exists()
     finally:
         dispatcher.close()
 
 
 def test_a_malformed_body_is_400_and_a_scenario_that_takes_no_proposals_is_404(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, unchanged))
     dispatcher.get_or_create_scenario("agents")
     plain = harness_dispatcher(tmp_path / "plain", Recipe())
     files_only = harness_dispatcher(tmp_path / "files", FilesOnly())
@@ -145,7 +156,7 @@ def test_a_malformed_body_is_400_and_a_scenario_that_takes_no_proposals_is_404(t
                 await client.close()
 
         assert asyncio.run(unknown_scenario()) == 404
-        assert list((tmp_path / "proposals").rglob("*.json")) == []
+        assert list(inbox_of(dispatcher).rglob("*.json")) == []
         for other, message in ((plain, "carries no harness surface"), (files_only, "takes no proposals")):
             other.get_or_create_scenario("agents")
             [(status, text)] = answers(other, proposal(MARKER_RULES))
@@ -185,10 +196,12 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it
     """Two proposals validated against one head: the first wins and publishes; the second meets the moved head at
     the step's own validation and is refused; the method is asked only once the inbox is empty."""
     asked: list[int] = []
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: asked.append(context.step)))
+    dispatcher = harness_dispatcher(
+        tmp_path, harness_recipe(tmp_path, lambda workspace, tools: asked.append(workspace.step))
+    )
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
-    inbox = tmp_path / "proposals" / "agents"
+    inbox = inbox_of(dispatcher)
     try:
         (_, first), (_, second) = answers(
             dispatcher, proposal(MARKER_RULES, session="s1"), proposal(MARKER_RULES, session="s2")
@@ -221,7 +234,8 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it
         assert asked == []
 
         result = run_step(scenario, "3")
-        assert asked == [3] and result.metrics["skipped"] == "no proposal" and "proposal" not in result.metrics
+        assert asked == [3] and "proposal" not in result.metrics
+        assert result.metrics["skipped"] == "the method left the head tree unchanged"
         assert sorted(path.name for path in inbox.iterdir()) == ["claimed", "refused", "settled"]
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
 
@@ -278,7 +292,7 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
 
 
 def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, monkeypatch) -> None:
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, unchanged))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -290,7 +304,7 @@ def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, m
         monkeypatch.setattr(type(scenario.trainer.candidate_backend), "settle_step", die)
         with pytest.raises(RuntimeError, match="evaluator died"):
             run_step(scenario, "1")
-        inbox = tmp_path / "proposals" / "agents"
+        inbox = inbox_of(dispatcher)
         refused = json.loads((inbox / "refused" / f"{admitted['proposal_id']}.json").read_text(encoding="utf-8"))
         assert refused["refused"] == "step aborted before a result" and refused["session"] == "3f1c2a9d0b7e"
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []

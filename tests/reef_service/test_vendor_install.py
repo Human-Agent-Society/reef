@@ -217,12 +217,16 @@ def _backend(
     worker_executor: ExecutorSettings | None = None,
 ) -> HarnessBackend:
     """The pi backend a recipe builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
-    fields: dict = {"binary": binary}
+    fields: dict = {}
     if executor is not None:
         fields["executor"] = executor
     if worker_executor is not None:
         fields["worker_executor"] = worker_executor
-    recipe = replace(harness_recipe(tmp_path, lambda context: TreePatch(changed_rules("marker rules\n"))), **fields)
+
+    def method(workspace, tools):
+        return TreePatch(changed_rules("marker rules\n"))
+
+    recipe = replace(harness_recipe(tmp_path, method, binary=binary), **fields)
     return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
 
 

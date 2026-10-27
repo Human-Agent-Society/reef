@@ -12,7 +12,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.harness_service import harness_dispatcher
-from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_recipe
+from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 from tests.train.test_reef_trainer_contracts import ExampleBackend, ExampleJobData
@@ -25,7 +25,7 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.harness.tree import TreePatch
 from reef.pipeline_context import PipelineContext
-from reef.recipe import RecipeConfigError
+from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2record import InferenceRecord2Record
@@ -34,7 +34,7 @@ from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentReleases, PreparedStep
-from reef.train.harness_backend.contract import TreeProposal
+from reef.train.harness_backend import StepResult
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.pipeline import TrainingPipeline
@@ -110,9 +110,9 @@ def _release_texts(dispatcher, scenario="s"):
     return [row.get("metrics", {}).get("training_request", {}).get("text") for row in rows]
 
 
-def _asking(tmp_path, propose, **fields):
-    """A pi harness recipe whose proposer answers instructions."""
-    return harness_recipe(tmp_path, propose, reads_requests=True, **fields)
+def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
+    """A pi harness recipe over ``method`` in training mode ``mode``; ``fields`` go to ``harness_recipe``."""
+    return replace(harness_recipe(tmp_path, method, **fields), training_mode=mode)
 
 
 def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
@@ -207,11 +207,11 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path)
     called = Event()
     seen = []
 
-    def propose(context):
-        seen.append((context.request, context.samples))
+    def method(workspace, tools):
+        seen.append((workspace.request(), workspace.traces()))
         called.set()
 
-    recipe = _asking(tmp_path, propose, training_mode="manual", pipeline_stages=harness_stages())
+    recipe = replace(recipe_in("manual", tmp_path, method), pipeline_stages=harness_stages())
     dispatcher = harness_dispatcher(tmp_path, recipe)
     dispatcher.get_or_create_scenario("s")
 
@@ -259,7 +259,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path)
 
 
 def test_auto_rejects_manual_requests(tmp_path):
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda workspace, tools: None))
     try:
         dispatcher.get_or_create_scenario("s")
         with pytest.raises(ValueError, match="training_mode='manual'"):
@@ -297,9 +297,7 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
 
 def test_pipeline_context_keeps_mode_when_recipe_takes_instructions():
     context = PipelineContext("s", training_mode="manual")
-    configured = replace(context, manual_enabled=True)
-    assert configured.training_mode == "manual"
-    processor = reports_pipeline(configured)
+    processor = reports_pipeline(context)
     assert processor.training_mode == "manual"
     assert RequestType.TRAIN in processor.required_request_types
     processor.close()
@@ -457,15 +455,15 @@ def test_factory_cannot_silently_change_the_processor_mode():
 def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_path):
     seen = []
 
-    def propose(context):
-        seen.append(context.request)
+    def method(workspace, tools):
+        seen.append(workspace.request())
 
-    recipe = _asking(tmp_path, propose, training_mode="manual", recheck_every=1)
+    recipe = recipe_in("manual", tmp_path, method, evaluation={"recheck_every": 1})
     records = SQLiteRecordStore()
     trainer = _trainer(recipe, records)
     backend = trainer.candidate_backend
     # A recheck is due on every automatic step: the latest publish replaced the base.
-    state = HarnessState(rollback_release_id="base", rollback_context=backend.evaluation_context()).to_json()
+    state = HarnessState(rollback_release_id="base", rollback_context=backend.context_key()).to_json()
     backend.proposals.submit(
         "pending-proposal",
         {"patch": changed_rules("marker\n"), "session": "unrelated", "release_id": "r", "reason": "unrelated"},
@@ -478,18 +476,9 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     prepared = backend.prepare_step(batch, state, 0)
     assert prepared.outcome == "skip"
     assert seen[0].id == "request-id"
-    assert (recipe.proposals_path("s") / "pending-proposal.json").is_file()
+    assert (backend.proposals.directory / "pending-proposal.json").is_file()
     assert "recheck" not in prepared.metrics
     trainer.close()
-    records.close()
-
-
-@pytest.mark.parametrize("mode", ["manual", "hybrid"])
-def test_harness_instruction_modes_require_a_proposer_that_reads_requests(tmp_path, mode):
-    recipe = harness_recipe(tmp_path, lambda context: None, training_mode=mode)
-    records = SQLiteRecordStore()
-    with pytest.raises(RecipeConfigError, match="reads_requests is true"):
-        _trainer(recipe, records)
     records.close()
 
 
@@ -548,9 +537,10 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions()
         records.close()
 
 
-@pytest.mark.parametrize("reads_requests", [False, True])
-def test_http_training_mode_updates_only_existing_supported_processors(tmp_path, reads_requests):
-    recipe = harness_recipe(tmp_path, lambda context: None, reads_requests=reads_requests)
+@pytest.mark.parametrize("instructions", [False, True], ids=["record-only", "harness"])
+def test_http_training_mode_updates_only_existing_supported_processors(tmp_path, instructions):
+    # A record-only recipe makes no job data, so it trains in auto alone; a harness recipe takes instructions.
+    recipe = harness_recipe(tmp_path, lambda workspace, tools: None) if instructions else Recipe()
     dispatcher = harness_dispatcher(tmp_path, recipe)
     scenario = dispatcher.get_or_create_scenario("s")
     processor = scenario.trainer.pipeline
@@ -562,13 +552,14 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
             url = "/reef/scenarios/s/update"
             for mode in ("manual", "hybrid"):
                 response = await client.post(url, json={"training_mode": mode})
-                assert response.status == (200 if reads_requests else 501)
-                if reads_requests:
-                    assert await response.json() == {"scenario": "s", "training_mode": mode}
-                assert scenario.trainer.pipeline.training_mode == (mode if reads_requests else "auto")
+                assert response.status == (200 if instructions else 501)
+                assert scenario.trainer.pipeline.training_mode == (mode if instructions else "auto")
                 assert scenario.trainer.pipeline is processor
-                status = await (await client.get("/reef/status")).json()
-                assert status["scenarios"]["s"]["training_mode"] == scenario.trainer.pipeline.training_mode
+                if instructions:
+                    # The status lists the scenarios that train; a record-only one does not.
+                    assert await response.json() == {"scenario": "s", "training_mode": mode}
+                    status = await (await client.get("/reef/status")).json()
+                    assert status["scenarios"]["s"]["training_mode"] == mode
             for invalid in (
                 {},
                 {"training_mode": "bad"},
@@ -595,14 +586,14 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
         dispatcher.close()
 
 
-def test_http_mode_change_does_not_wait_for_running_proposer(tmp_path):
+def test_http_mode_change_does_not_wait_for_running_method(tmp_path):
     entered, release = Event(), Event()
 
-    def propose(context):
+    def method(workspace, tools):
         entered.set()
         assert release.wait(5)
 
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose, training_mode="manual"))
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, method))
     dispatcher.get_or_create_scenario("s")
 
     async def run():
@@ -634,10 +625,10 @@ def test_http_mode_change_does_not_wait_for_running_proposer(tmp_path):
 
 
 def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, caplog):
-    def propose(context):
+    def method(workspace, tools):
         return None
 
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, method))
     try:
         scenario = dispatcher.get_or_create_scenario("s")
         assert dispatcher.set_training_mode("s", "manual") == {"scenario": "s", "training_mode": "manual"}
@@ -648,19 +639,19 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, caplog):
         assert dispatcher.registry.reload("s").trainer.pipeline.training_mode == "auto"
         dispatcher.set_training_mode("s", "manual")
         dispatcher.accept_record(instruction("one"))
-        assert _wait(lambda: _committed_skip(dispatcher, "one") == "no proposal")
+        assert _wait(lambda: _committed_skip(dispatcher, "one") == UNCHANGED)
         assert dispatcher.get_or_create_scenario("s").scenario_step == 1
     finally:
         dispatcher.close()
     # A new process loads the committed state and the stored mode.
-    restarted = harness_dispatcher(tmp_path, _asking(tmp_path, propose))
+    restarted = harness_dispatcher(tmp_path, harness_recipe(tmp_path, method))
     try:
         loaded = restarted.get_or_create_scenario("s")
         assert loaded.scenario_step == 1 and loaded.trainer.pipeline.training_mode == "manual"
     finally:
         restarted.close()
-    # A recipe that no longer takes instructions keeps its default, so a person can still select a mode.
-    without_requests = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    # A recipe that takes no instructions keeps its default, so a person can still select a mode.
+    without_requests = harness_dispatcher(tmp_path, Recipe())
     try:
         with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
             assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
@@ -691,12 +682,13 @@ def _automatic_traces(dispatcher):
     ]
 
 
-def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
-    """A proposer that raises on the poison instruction and holds its first attempt open until released."""
+def raising_method(calls, *, poison="poison", error="poison method"):
+    """A method that raises on the poison instruction and holds its first attempt open until released."""
     entered, release = Event(), Event()
 
-    def propose(context):
-        text = context.request.text if context.request else None
+    def method(workspace, tools):
+        request = workspace.request()
+        text = request.text if request else None
         calls.append(text)
         if text == poison or poison is None:
             if len(calls) == 1:
@@ -704,22 +696,22 @@ def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
                 release.wait(10)
             raise RuntimeError(error)
 
-    return propose, entered, release
+    return method, entered, release
 
 
-def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_failed(tmp_path):
+def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_failed(tmp_path):
     """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
-    evaluation, and keeps the proposed change and the method's notes, so the pages show what was tried."""
+    evaluation, and keeps the candidate's change and the method's notes, so the pages show what was tried."""
     from reef.service.release_page import failed_words
 
-    def propose(context):
-        return TreeProposal(TreePatch(changed_rules("marker rules\n")), notes={"design": "one rules entry"})
+    def method(workspace, tools):
+        workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
+        return StepResult("one rules entry", {"entries": 1})
 
     def score(task, result):
         raise ValueError("the scorer could not read the episode")
 
-    recipe = _asking(tmp_path, propose, score=score, training_mode="manual")
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, method, score=score))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("broken scorer"))
@@ -727,7 +719,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
         row = _committed_row(dispatcher, "broken scorer")
         assert row["failed_stage"] == "evaluating"
         assert row["error"] == "ValueError: the scorer could not read the episode"
-        assert row["proposal_notes"]["design"] == "one rules entry"
+        assert row["method_notes"] == {"entries": 1}
         assert row["patch"] == changed_rules("marker rules\n")
         assert failed_words(row).startswith("The step failed during its evaluation")
     finally:
@@ -736,8 +728,8 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
 
 def test_a_failed_step_keeps_the_selected_mode_and_the_next_instruction_runs(tmp_path):
     calls = []
-    propose, entered, release = _raising_proposer(calls, poison=None, error="poison proposer")
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose))
+    method, entered, release = raising_method(calls, poison=None)
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, method))
     try:
         scenario = dispatcher.get_or_create_scenario("s")
         assert scenario.store.durable
@@ -750,7 +742,7 @@ def test_a_failed_step_keeps_the_selected_mode_and_the_next_instruction_runs(tmp
         assert _wait(lambda: _committed_skip(dispatcher, "two") == "instruction failed")
         # A failed instruction is not run again; the reload after each failure kept the selected mode.
         assert calls == ["one", "two"]
-        assert _committed_row(dispatcher, "one")["error"] == "RuntimeError: poison proposer"
+        assert _committed_row(dispatcher, "one")["error"] == "RuntimeError: poison method"
         current = dispatcher.get_or_create_scenario("s")
         assert current is not scenario and current.trainer.pipeline.training_mode == "manual"
         assert current.trainer.pending_instructions() == 0
@@ -761,8 +753,8 @@ def test_a_failed_step_keeps_the_selected_mode_and_the_next_instruction_runs(tmp
 
 def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(tmp_path):
     calls = []
-    propose, entered, release = _raising_proposer(calls)
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose, training_mode="manual"))
+    method, entered, release = raising_method(calls)
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, method))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("poison"))
@@ -770,12 +762,12 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
         dispatcher.accept_record(instruction("fine"))
         dispatcher.accept_record(instruction("fine again"))
         release.set()
-        assert _wait(lambda: _committed_skip(dispatcher, "fine again") == "no proposal")
-        # The skip row consumed the failed instruction without another proposer call; the fresh ones ran after it.
+        assert _wait(lambda: _committed_skip(dispatcher, "fine again") == UNCHANGED)
+        # The skip row consumed the failed instruction without another method call; the fresh ones ran after it.
         assert calls == ["poison", "fine", "fine again"]
         assert _committed_skip(dispatcher, "poison") == "instruction failed"
-        assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison proposer"
-        assert _committed_skip(dispatcher, "fine") == "no proposal"
+        assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison method"
+        assert _committed_skip(dispatcher, "fine") == UNCHANGED
         assert "error" not in _committed_row(dispatcher, "fine")
         current = dispatcher.get_or_create_scenario("s")
         assert current.trainer.pending_instructions() == 0
@@ -788,31 +780,36 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
         dispatcher.close()
 
 
+def asked(workspace):
+    """The instruction a step answers, ``None`` for an automatic step, and the records of the step's traces."""
+    request = workspace.request()
+    return (None if request is None else request.text, tuple(trace.record for trace in workspace.traces()))
+
+
 def test_hybrid_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_path(tmp_path):
     calls = []
     entered, release = Event(), Event()
 
-    def propose(context):
-        text = context.request.text if context.request else None
-        calls.append((text, tuple(source_record_id(sample) for sample in context.samples)))
-        if text == "poison":
+    def method(workspace, tools):
+        calls.append(asked(workspace))
+        if calls[-1][0] == "poison":
             if len(calls) == 1:
                 entered.set()
                 release.wait(10)
-            raise RuntimeError("poison proposer")
+            raise RuntimeError("poison method")
 
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose, training_mode="hybrid"))
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("hybrid", tmp_path, method))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("poison"))
         assert entered.wait(5)
         dispatcher.accept_record(instruction("fine"))
         release.set()
-        assert _wait(lambda: _committed_skip(dispatcher, "fine") == "no proposal")
+        assert _wait(lambda: _committed_skip(dispatcher, "fine") == UNCHANGED)
         # The wake after the failure consumed the failed instruction with its skip row, no second call, then ran the fresh one.
         assert calls == [("poison", ()), ("fine", ())]
         assert _committed_skip(dispatcher, "poison") == "instruction failed"
-        assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison proposer"
+        assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison method"
         current = dispatcher.get_or_create_scenario("s")
         assert current.trainer.pending_instructions() == 0
         assert current.trainer.pipeline.training_mode == "hybrid"
@@ -824,7 +821,7 @@ def test_hybrid_skips_a_failed_instruction_before_the_next_and_keeps_the_failure
         assert calls[-1] == (None, ("a",))
         # The next instruction runs as an instruction step again, with nothing held beside it.
         dispatcher.accept_record(instruction("after"))
-        assert _wait(lambda: _committed_skip(dispatcher, "after") == "no proposal")
+        assert _wait(lambda: _committed_skip(dispatcher, "after") == UNCHANGED)
         assert calls[2:] == [(None, ("a",)), ("after", ())]
         assert dispatcher.get_or_create_scenario("s").trainer.pipeline.training_mode == "hybrid"
     finally:
@@ -836,20 +833,19 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
     calls = []
     entered, release, automatic, outage = Event(), Event(), Event(), Event()
 
-    def propose(context):
-        text = context.request.text if context.request else None
-        calls.append((text, tuple(source_record_id(sample) for sample in context.samples)))
-        if text == "poison":
+    def method(workspace, tools):
+        calls.append(asked(workspace))
+        if calls[-1][0] == "poison":
             if len(calls) == 1:
                 entered.set()
                 release.wait(10)
-            raise RuntimeError("poison proposer")
+            raise RuntimeError("poison method")
         # The automatic step holds so the skip row can be read, then fails so the unit stays stored for the restart.
         automatic.set()
         outage.wait(10)
-        raise RuntimeError("proposer outage")
+        raise RuntimeError("method outage")
 
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose, training_mode="hybrid"))
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("hybrid", tmp_path, method))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("poison"))
@@ -859,7 +855,7 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
         dispatcher.accept_record(report("a"))
         release.set()
         assert automatic.wait(5)
-        # The skip row took no proposer call; the automatic step that followed read the unit the skip row gave back.
+        # The skip row took no method call; the automatic step that followed read the unit the skip row gave back.
         assert calls == [("poison", ()), (None, ("a",))]
         assert _committed_skip(dispatcher, "poison") == "instruction failed"
         current = dispatcher.get_or_create_scenario("s")
@@ -883,15 +879,10 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
 
     seen = []
 
-    def propose_again(context):
-        seen.append(
-            (
-                context.request.text if context.request else None,
-                tuple(source_record_id(sample) for sample in context.samples),
-            )
-        )
+    def method_again(workspace, tools):
+        seen.append(asked(workspace))
 
-    restarted = harness_dispatcher(tmp_path, _asking(tmp_path, propose_again, training_mode="hybrid"))
+    restarted = harness_dispatcher(tmp_path, recipe_in("hybrid", tmp_path, method_again))
     try:
         loaded = restarted.get_or_create_scenario("s")
         assert loaded.scenario_step == 1
@@ -910,9 +901,8 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
 
 def test_a_queue_of_failing_instructions_drains_without_another_record(tmp_path):
     calls = []
-    propose, entered, release = _raising_proposer(calls, poison=None, error="proposer outage")
-    recipe = _asking(tmp_path, propose, training_mode="manual")
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    method, entered, release = raising_method(calls, poison=None, error="method outage")
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, method))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("p1"))
@@ -923,7 +913,7 @@ def test_a_queue_of_failing_instructions_drains_without_another_record(tmp_path)
         assert _wait(lambda: _committed_skip(dispatcher, "p1") == "instruction failed")
         assert _wait(lambda: _committed_skip(dispatcher, "p2") == "instruction failed")
         assert calls == ["p1", "p2"]
-        assert _committed_row(dispatcher, "p2")["error"] == "RuntimeError: proposer outage"
+        assert _committed_row(dispatcher, "p2")["error"] == "RuntimeError: method outage"
         current = dispatcher.get_or_create_scenario("s")
         assert current.trainer.pending_instructions() == 0
         assert dispatcher.accept_record(instruction("p3")).agent_record_id == "p3"
@@ -937,11 +927,11 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
     calls = []
     entered, release = Event(), Event()
 
-    def propose(context):
-        text = context.request.text
+    def method(workspace, tools):
+        text = workspace.request().text
         calls.append(text)
         if text == "poison":
-            raise RuntimeError("poison proposer")
+            raise RuntimeError("poison method")
         # The step after the skip row holds, so the skip row is observable as the last commit.
         entered.set()
         release.wait(10)
@@ -950,7 +940,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
     initial.mkdir(parents=True, exist_ok=True)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     dispatcher = Dispatcher(
-        _asking(tmp_path, propose, training_mode="manual"),
+        recipe_in("manual", tmp_path, method),
         factory,
         scenario_storage=SQLiteScenarioStorage(),
     )
@@ -965,11 +955,11 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         skipped = _last_committed(scenario)
         assert skipped["skipped"] == "instruction failed"
         assert skipped["training_request"]["id"] == "poison"
-        assert skipped["error"] == "RuntimeError: poison proposer"
+        assert skipped["error"] == "RuntimeError: poison method"
         assert calls == ["poison", "fine"]
         release.set()
         assert _wait(lambda: scenario.scenario_step == 2)
-        assert _last_committed(scenario).get("skipped") == "no proposal"
+        assert _last_committed(scenario).get("skipped") == UNCHANGED
         assert scenario.trainer.pending_instructions() == 0
         assert scenario.trainer.pipeline_status()["buffered_requests"] == 0
         assert scenario.trainer.instruction_failures() == {}
@@ -1076,10 +1066,10 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
 def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_path):
     seen = []
 
-    def propose(context):
-        seen.append(context.request.text if context.request else None)
+    def method(workspace, tools):
+        seen.append(asked(workspace)[0])
 
-    recipe = _asking(tmp_path, propose, training_mode="manual", max_steps=1)
+    recipe = recipe_in("manual", tmp_path, method, max_steps=1)
     records = SQLiteRecordStore()
     trainer = _trainer(recipe, records)
     try:
@@ -1094,7 +1084,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
             rows.append(prepared.metrics)
         assert seen == ["one", "two"]
         assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
-        assert [row["skipped"] for row in rows] == ["no proposal", "no proposal"]
+        assert [row["skipped"] for row in rows] == [UNCHANGED, UNCHANGED]
         assert [row["steps"] for row in rows] == [1, 2]
         assert trainer.run_once(2) is None
 
@@ -1107,7 +1097,8 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         trainer.close()
         records.close()
 
-    streak = _asking(tmp_path, propose, training_mode="manual", max_failure_streak=1)
+    (tmp_path / "streak").mkdir()
+    streak = recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1)
     records = SQLiteRecordStore()
     trainer = _trainer(streak, records)
     try:
@@ -1116,8 +1107,8 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         automatic = backend.prepare_step(JobData("auto", ()), state, 0)
         assert automatic.metrics["skipped"] == "failure streak of 1 rejections"
         request = TrainingRequest("Follow the request", "session", "r", "request-id")
-        asked = backend.prepare_step(JobData("request-id", (), request=request), state, 0)
-        assert asked.metrics["skipped"] == "no proposal" and seen[-1] == "Follow the request"
+        answered = backend.prepare_step(JobData("request-id", (), request=request), state, 0)
+        assert answered.metrics["skipped"] == UNCHANGED and seen[-1] == "Follow the request"
     finally:
         trainer.close()
         records.close()
@@ -1155,7 +1146,7 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(processor):
 
 
 def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp_path):
-    recipe = _asking(tmp_path, lambda context: None, training_mode="hybrid")
+    recipe = recipe_in("hybrid", tmp_path, lambda workspace, tools: None)
     records = SQLiteRecordStore()
     try:
         trainer = _trainer(recipe, records)
@@ -1324,15 +1315,10 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
 def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_path):
     seen = []
 
-    def propose(context):
-        seen.append(
-            (
-                () if context.request is None else (context.request.text,),
-                tuple(source_record_id(sample) for sample in context.samples),
-            )
-        )
+    def method(workspace, tools):
+        seen.append(asked(workspace))
 
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, propose, training_mode="hybrid"))
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("hybrid", tmp_path, method))
 
     async def run():
         client = TestClient(TestServer(create_app(dispatcher)))
@@ -1348,12 +1334,12 @@ def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_pa
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
             assert await asyncio.to_thread(_wait, lambda: "Prefer tests first" in _release_texts(dispatcher))
-            assert seen == [(("Prefer tests first",), ())]
+            assert seen == [("Prefer tests first", ())]
             # The failure path stays on: a failing exchange batches by itself with no instruction queued.
             dispatcher.accept_record(inference("a"))
             dispatcher.accept_record(report("a"))
             assert await asyncio.to_thread(_wait, lambda: len(seen) == 2)
-            assert seen[1] == ((), ("a",))
+            assert seen[1] == (None, ("a",))
             assert dispatcher.get_or_create_scenario("s").trainer.pipeline.training_mode == "hybrid"
         finally:
             await client.close()
@@ -1366,14 +1352,14 @@ def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_pa
 
 @pytest.mark.parametrize("target", ["auto", "hybrid"])
 def test_the_proposal_route_refuses_in_manual_mode_and_admits_again_in_a_batching_mode(tmp_path, target):
-    dispatcher = harness_dispatcher(tmp_path, _asking(tmp_path, lambda context: None, training_mode="manual"))
+    dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, lambda workspace, tools: None))
     proposal = {
         "patch": changed_rules("marker rules\n"),
         "reason": "because",
         "session": "3f1c2a9d0b7e",
         "release_id": "rel-0",
     }
-    inbox = tmp_path / "proposals" / "s"
+    inbox = dispatcher.get_or_create_scenario("s").trainer.candidate_backend.proposals.directory
 
     async def run():
         assert dispatcher.get_or_create_scenario("s").trainer.pipeline.training_mode == "manual"
@@ -1450,15 +1436,10 @@ def test_every_mode_releases_the_oldest_held_units_beyond_the_buffer(caplog, mod
 def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
     calls = []
 
-    def propose(context):
-        calls.append(
-            (
-                () if context.request is None else (context.request.text,),
-                tuple(source_record_id(sample) for sample in context.samples),
-            )
-        )
+    def method(workspace, tools):
+        calls.append(asked(workspace))
 
-    recipe = _asking(tmp_path, propose, training_mode="hybrid", promote_failures=True, batch_size=2)
+    recipe = recipe_in("hybrid", tmp_path, method, batch_size=2, evaluation={"promote_failures": True})
     dispatcher = harness_dispatcher(tmp_path, recipe)
 
     def evaluation_rows():
@@ -1482,7 +1463,7 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
             assert await asyncio.to_thread(_wait, lambda: len(evaluation_rows()) == 1)
-            assert calls == [(("do it",), ("fails-1",))]
+            assert calls == [("do it", ("fails-1",))]
             assert evaluation_rows() == [(1, 2, True)]
             # The automatic step after grows the evaluation on top of the promoted one.
             for receipt in ("fails-2", "fails-3"):
@@ -1491,7 +1472,7 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
             assert await asyncio.to_thread(_wait, lambda: len(evaluation_rows()) == 2)
             # Newest first: the automatic step's row, then the instruction step's.
             assert evaluation_rows() == [(2, 4, False), (1, 2, True)]
-            assert calls[1] == ((), ("fails-2", "fails-3"))
+            assert calls[1] == (None, ("fails-2", "fails-3"))
         finally:
             await client.close()
 

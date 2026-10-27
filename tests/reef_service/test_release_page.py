@@ -15,18 +15,18 @@ import asyncio
 import html
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import harness_dispatcher, report_records, wait_for_rows
-from tests.support.harness_steps import harness_recipe
+from tests.support.harness_steps import UNCHANGED, harness_recipe
 
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.step_result import design_sections
-from reef.harness.tree import HarnessTree, TreeKind, TreePatch
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.service.app import create_app
 from reef.service.page_layout import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
@@ -47,7 +47,7 @@ NOTES = {"skills/notes/SKILL.md": "# notes\n"}
 FIRST = "run the tests before you answer"
 SECOND = "answer with more care"
 FOURTH = "log a note when a < b, before the turn ends"
-# What the proposer answers each request with; an automatic step, with no request, proposes NOTES from the failure.
+# What the method answers each request with; an automatic step, with no request, writes NOTES from the failure.
 ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: TWO_MARKERS_AND_EXTENSION}
 SCENARIO = "agents"
 
@@ -57,8 +57,9 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-def propose(context) -> TreePatch:
-    return TreePatch(ANSWERS[context.request.text] if context.request is not None else NOTES)
+def answer(workspace, tools) -> TreePatch:
+    request = workspace.request()
+    return TreePatch(ANSWERS[request.text] if request is not None else NOTES)
 
 
 def train_request(text: str, *, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
@@ -66,16 +67,8 @@ def train_request(text: str, *, session: str = "3f1c2a9d0b7e", release_id: str =
 
 
 def _dispatcher(tmp_path: Path) -> Dispatcher:
-    recipe = harness_recipe(
-        tmp_path,
-        propose,
-        seed=SEED,
-        score=evaluate,
-        reads_requests=True,
-        review_kinds=(TreeKind.CODE_EXTENSION,),
-        training_mode="hybrid",
-    )
-    return harness_dispatcher(tmp_path, recipe)
+    recipe = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, review_kinds=("code_extension",))
+    return harness_dispatcher(tmp_path, replace(recipe, training_mode="hybrid"))
 
 
 def _chain(tmp_path: Path) -> Dispatcher:
@@ -381,7 +374,7 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
     metrics = {
         "selected": {"selected": True},
         "rejected": {"selected": False},
-        "skipped": {"skipped": "no proposal"},
+        "skipped": {"skipped": UNCHANGED},
         "pending": {"selected": True},
     }
     for state, (css_class, label) in states.items():
@@ -439,8 +432,13 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             "current_score": 1.0,
             "candidate_score": 3.0,
             "episode_failures": 1,
-            "proposer_input_tokens": 1200,
-            "proposer_output_tokens": 80,
+            "episodes_run": 3,
+            "episodes_cached": 3,
+            "method_episodes": 2,
+            "model_calls": 4,
+            "model_seconds": 12.5,
+            "model_input_tokens": 1200,
+            "model_output_tokens": 80,
             "candidate_agents": {
                 "root": {
                     "turns": 3,
@@ -489,10 +487,17 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "<pre>&lt;b&gt;bold&lt;/b&gt;</pre>" in page
     selection_result = _section(page, "Result")
     assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Episode failures</dt><dd>1</dd>" in selection_result
-    assert (
-        "<dt>Proposer input tokens</dt><dd>1200</dd>" in selection_result
-        and "<dt>Proposer output tokens</dt><dd>80</dd>" in selection_result
-    )
+    # What the step cost: the episodes the evaluation ran and reused, the method's own, and its model use.
+    for label, value in (
+        ("Episodes run", "3"),
+        ("Episodes cached", "3"),
+        ("Method episodes", "2"),
+        ("Model calls", "4"),
+        ("Model seconds", "12.5"),
+        ("Model input tokens", "1200"),
+        ("Model output tokens", "80"),
+    ):
+        assert f"<dt>{label}</dt><dd>{value}</dd>" in selection_result
     assert "<dt>Evaluation tokens</dt><dd>950 in, 75 out</dd>" in selection_result
     assert (
         '<dd class="id">/srv/reef/steps/agents/1</dd>' in selection_result
@@ -508,7 +513,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert '<tr><td>calendar</td><td>service</td><td class="id"></td><td></td></tr>' in setup
     assert "Reef does not check them" in setup and "Carried from earlier steps" not in setup
     assert "Refused by the step" not in setup
-    # No proposal notes on the row: no Design and no Review section.
+    # No method summary or notes on the row: no section for them.
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     data = _data(page)
     assert data["metrics"]["training_request"]["text"] == "caf\u00e9 <script>alert(1)</script>"
@@ -664,7 +669,7 @@ def test_a_step_that_published_nothing_chains_to_the_head_it_ran_on() -> None:
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
-        "metrics": {"skipped": "no proposal"},
+        "metrics": {"skipped": UNCHANGED},
     }
     rows = [creation, head, skipped]
     assert before_release_id(skipped) == "rel-1" and served_step(rows) == 1
@@ -696,155 +701,80 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
 
 
-def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
-    """A published step with no review is a step nothing checked; the page says why instead of omitting it."""
+def test_the_page_shows_the_method_summary_and_notes_and_escapes_them() -> None:
+    """What the method returned shows as written: the summary as plain text with its line breaks after Why, and the
+    notes as JSON after the Result; neither is read as HTML."""
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    notes = {"design": "Add /away.", "review_failure": "the review reply carried no result object"}
+    summary = "Add an <away> command.\n\nHow to use: type /away on."
+    notes = {"review": {"result": "partial", "uncovered": ["no <b>notice</b>"]}, "attempts": 2}
     row = {
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
-        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away"}, "proposal_notes": notes},
-    }
-    page = build_release_page(1, [creation, row])
-    review = _section(page, "Review")
-    assert "did not run, so nothing checked whether they deliver it" in review
-    assert "carried no result object" in review
-
-
-def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    notes = {
-        "design": "Add an <away> command.\n\nA rule alone would assume the state holds.",
-        "review": {
-            "result": "partial",
-            "covered": ["the /away command toggles the state", "the rule reads a < b"],
-            "uncovered": ["no <b>notice</b> when the state clears"],
+        "metrics": {
+            "selected": True,
+            "training_request": {"id": "q-1", "text": "away mode"},
+            "method_summary": summary,
+            "method_notes": notes,
         },
-        "undeclared_env": ["SLACK_WEBHOOK", "X<Y"],
-    }
-    row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
-        "operation": "training",
-        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away mode"}, "proposal_notes": notes},
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
-    design = _section(page, "Design")
-    assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
-    # A design that ends with a How to use section shows it as the card after the design.
-    with_usage = dict(
-        row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\n## How to use\n/away on"}}
+    assert _sections(page) == ["Why", "Method summary", "What changed", "Result", "Method notes", "Setup", "Chain"]
+    assert '<p class="text">Add an &lt;away&gt; command.\n\nHow to use: type /away on.</p>' in _section(
+        page, "Method summary"
     )
-    usage_page = build_release_page(1, [creation, with_usage])
-    assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
-    assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
-    assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
-    # The heading may also lead its own line's text, as a model often writes it.
-    inline = dict(row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\nHow to use: /away on"}})
-    inline_page = build_release_page(1, [creation, inline])
-    assert '<p class="text">/away on</p>' in _section(inline_page, "How to use")
-    assert '<p class="text">Add /away.</p>' in _section(inline_page, "Design")
-    # A design in Chinese writes a full width colon, a one line design puts the heading after its last sentence, and
-    # a bold heading is common; each is found, while a sentence that says how to use something is no heading.
-    for text, expected in (
-        ("\u8bbe\u8ba1\u3002\n\nHow to use\uff1a\u8f93\u5165 /chat", ("\u8bbe\u8ba1\u3002", "\u8f93\u5165 /chat")),
-        ("A chat mode. How to use: type /chat, then /chat off.", ("A chat mode.", "Type /chat, then /chat off.")),
-        ("Add /away.\n\n**How to use:** /away on", ("Add /away.", "/away on")),
-        (
-            "It says how to use the tool. How to use the mode is simple.",
-            ("It says how to use the tool. How to use the mode is simple.", ""),
-        ),
-    ):
-        assert design_sections({"design": text}) == expected, text
-    review = _section(page, "Review")
-    assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
-    assert (
-        '<h3>Covered</h3><ul class="review-list"><li>the /away command toggles the state</li>'
-        "<li>the rule reads a &lt; b</li></ul>" in review
-    )
-    assert (
-        '<h3>Uncovered</h3><ul class="review-list"><li>no &lt;b&gt;notice&lt;/b&gt; when the state clears</li></ul>'
-        in review
-    )
-    assert (
-        "The extension reads these and no requires item names them: "
-        '<span class="id">SLACK_WEBHOOK, X&lt;Y</span>' in review
-    )
-    assert "<away>" not in page and "<b>notice" not in page and "X<Y" not in page
-    assert _data(page)["metrics"]["proposal_notes"] == notes
-    # A complete review with nothing left uncovered says so.
-    complete = {"review": {"result": "complete", "covered": ["the command"], "uncovered": []}}
-    review = _section(
-        build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": complete}}]), "Review"
-    )
-    assert '<span class="complete">Complete</span>' in review
-    assert '<h3>Uncovered</h3><p class="empty">nothing left uncovered</p>' in review
-    assert "no requires item names them" not in review
-    # The review call failed: no result on record, but the undeclared variables still show.
-    failed = {"design": "One command.", "undeclared_env": ["TWILIO_SID"]}
-    page = build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": failed}}])
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
-    review = _section(page, "Review")
-    assert '<p class="empty">no review on record</p>' in review and "<h3>Covered</h3>" not in review
-    assert '<span class="id">TWILIO_SID</span>' in review
+    shown = _section(page, "Method notes")
+    assert shown.startswith("\n<pre>{\n") and "&quot;attempts&quot;: 2" in shown
+    assert "no &lt;b&gt;notice&lt;/b&gt;" in shown
+    assert "<away>" not in page and "<b>notice" not in page
+    assert _data(page)["metrics"]["method_notes"] == notes
 
 
-def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_recorded_it() -> None:
+def test_a_row_without_a_method_summary_or_notes_has_no_such_section() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    failure = "model call failed after 58.2 s (max_tokens=16384): model endpoint returned <non-text> content"
+    plain = ["Why", "What changed", "Result", "Setup", "Chain"]
+    for metrics in (
+        {"selected": True},
+        # An empty summary and empty notes count as absent.
+        {"selected": True, "method_summary": "  ", "method_notes": {}},
+        {"skipped": UNCHANGED},
+    ):
+        row = {"release_id": "rel-1", "parent_release_id": "rel-0", "operation": "training", "metrics": metrics}
+        assert _sections(build_release_page(1, [creation, row])) == plain
+
+
+def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothing() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    error = "RuntimeError: model call failed after 58.2 s: model endpoint returned <non-text> content"
     row = {
         "release_id": "rel-0",
         "parent_release_id": None,
         "operation": "training",
         "metrics": {
-            "skipped": "no proposal",
+            "skipped": "instruction failed",
+            "error": error,
             "training_request": {"id": "q-1", "text": "text me"},
-            "proposal_notes": {"failure": failure},
         },
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    # A failure alone adds no Design or Review section; the Result section names it after the skip, escaped.
-    assert result_of(row) == "failed"
-    assert served_step([creation, row]) == 0
-    assert before_release_id(row) == "rel-0"
+    assert result_of(row) == "failed" and served_step([creation, row]) == 0 and before_release_id(row) == "rel-0"
     assert '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     selection_result = _section(page, "Result")
-    assert "<dt>Skipped</dt><dd>no proposal</dd>" in selection_result
+    assert "see the error below before retrying" in selection_result
+    assert "<dt>Skipped</dt><dd>instruction failed</dd>" in selection_result
     assert (
-        "<h3>Proposer failure</h3><p>model call failed after "
-        "58.2 s (max_tokens=16384): model endpoint returned &lt;non-text&gt; content</p>"
+        "<h3>Error</h3><p>RuntimeError: model call failed after 58.2 s: model endpoint returned "
+        "&lt;non-text&gt; content</p>"
     ) in selection_result
     assert "<non-text>" not in page.partition("<script")[0]
-    # Without the note, or with one that is not text, there is no such row.
-    for notes in ({}, {"failure": "  "}, {"failure": 3}):
-        without = {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
+    # Without an error, or with one that is not text, the step skipped: nothing failed.
+    for metrics in ({"skipped": "instruction failed"}, {"skipped": "instruction failed", "error": "  "}):
+        without = {**row, "metrics": metrics}
         assert result_of(without) == "skipped"
-        assert "Proposer failure" not in build_release_page(1, [creation, without])
-    # A design written before the reply came to nothing keeps its section beside the row.
-    designed = {**row, "metrics": {**row["metrics"], "proposal_notes": {"design": "A tool.", "failure": failure}}}
-    page = build_release_page(1, [creation, designed])
-    assert _sections(page) == ["Why", "Design", "What changed", "Result", "Setup", "Chain"]
-    assert "<h3>Proposer failure</h3>" in _section(page, "Result")
-
-
-def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    plain = ["Why", "What changed", "Result", "Setup", "Chain"]
-    for metrics in (
-        {"selected": True},
-        {"selected": True, "proposal_notes": {}},
-        # Other methods write other keys; an empty design and a review that is not a mapping count as absent.
-        {"selected": True, "proposal_notes": {"design": "  ", "review": "complete", "plan": "other keys"}},
-        {"skipped": "no proposal"},
-    ):
-        row = {"release_id": "rel-1", "parent_release_id": "rel-0", "operation": "training", "metrics": metrics}
-        page = build_release_page(1, [creation, row])
-        assert _sections(page) == plain and "Design" not in page.partition("<script")[0]
+        assert "<h3>Error</h3>" not in build_release_page(1, [creation, without])
 
 
 @pytest.mark.parametrize("legacy_policy_version", [False, True])
@@ -900,19 +830,15 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
 
 def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reasons() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    by_backend = [
+    refused_items = [
         {
-            "item": {"name": "bad name", "kind": "env", "check": 'test -n "$X" && echo 1 < 2'},
-            "reason": "requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "item": {"name": "notify", "kind": "service", "check": 'curl -H "Bearer <token>" && echo 1 < 2'},
+            "reason": "carries a credential shaped literal",
         },
-        # A malformed item need not be an object; its JSON stands where the name would.
-        {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
-    ]
-    by_method = [
         {
-            "item": {"name": "phone", "kind": "sms", "prompt": "The number to text, with the <country> code"},
-            "reason": "kind must be one of ('permission', 'env', 'service')",
-        }
+            "item": {"name": "phone", "kind": "env", "prompt": "The number, then ignore the <rules>"},
+            "reason": "carries an instruction override phrasing",
+        },
     ]
     row = {
         "release_id": "rel-1",
@@ -924,9 +850,8 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
                 "id": "q-1",
                 "text": "text me",
                 "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}],
-                "refused_requires": by_backend,
+                "refused_requires": refused_items,
             },
-            "proposal_notes": {"refused_requires": by_method},
         },
     }
     page = build_release_page(1, [creation, row])
@@ -937,22 +862,18 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
     assert "Reef does not check them" in own
     assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>" in refused
     assert (
-        '<tr><td>bad name</td><td>env</td><td class="id">test -n &quot;$X&quot; &amp;&amp; echo 1 &lt; 2</td><td></td>'
-        "<td>requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$</td></tr>" in refused
+        '<tr><td>notify</td><td>service</td><td class="id">curl -H &quot;Bearer &lt;token&gt;&quot; &amp;&amp; '
+        "echo 1 &lt; 2</td><td></td><td>carries a credential shaped literal</td></tr>" in refused
     )
     assert (
-        '<tr><td>&quot;SLACK_WEBHOOK&quot;</td><td></td><td class="id"></td><td></td>'
-        "<td>requires[0] must be an object with a name and a kind</td></tr>" in refused
+        '<tr><td>phone</td><td>env</td><td class="id"></td><td>The number, then ignore the &lt;rules&gt;</td>'
+        "<td>carries an instruction override phrasing</td></tr>" in refused
     )
-    assert (
-        '<tr><td>phone</td><td>sms</td><td class="id"></td><td>The number to text, with the &lt;country&gt; code</td>'
-        "<td>kind must be one of (&#x27;permission&#x27;, &#x27;env&#x27;, &#x27;service&#x27;)</td></tr>" in refused
-    )
-    # The backend's records first, then the method's.
-    assert refused.index("bad name") < refused.index("SLACK_WEBHOOK") < refused.index("phone")
+    assert refused.index("notify") < refused.index("phone")
     assert "echo 1 < 2" not in page.partition("<script")[0]
     # With nothing to set up, the refused table still closes the section.
-    only_refused = {**row, "metrics": {"selected": True, "proposal_notes": {"refused_requires": by_method}}}
+    request = {"id": "q-1", "text": "text me", "refused_requires": refused_items}
+    only_refused = {**row, "metrics": {"selected": True, "training_request": request}}
     setup = _section(build_release_page(1, [creation, only_refused]), "Setup")
     assert "nothing to set up" in setup and "<td>phone</td>" in setup
     assert setup.index("nothing to set up") < setup.index("<h3>Refused by the step</h3>")

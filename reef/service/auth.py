@@ -98,7 +98,7 @@ def create_authentication_middleware(
 
     ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
     only, on POST. The service hands one to the recipe for its evaluation
-    episodes and proposer, which run candidate code: that code can sample the
+    episodes and method, which run candidate code: that code can sample the
     served release, and nothing else of the service. With no ``tokens``,
     authentication is off and these tokens change nothing.
     """
@@ -121,7 +121,7 @@ def create_authentication_middleware(
         api_key = request.headers.get("x-api-key")
         if isinstance(api_key, str) and api_key:
             # A client speaking the Anthropic dialect (an evaluation episode, a
-            # proposer bound to this service) presents its key in this header.
+            # method's model call bound to this service) presents its key in this header.
             return api_key
         return None
 

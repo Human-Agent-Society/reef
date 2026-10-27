@@ -6,6 +6,7 @@ binary through the real adapter path, and the reads go through the real HTTP app
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
@@ -50,9 +51,9 @@ def channel_dispatcher(
     inference_stages: bool = False,
     batch_size: int = 1,
 ) -> Dispatcher:
-    """A ``delivery`` scenario whose proposer answers ``patches`` in order, then nothing; its base release is
+    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its base release is
     ``seed``."""
-    proposals = iter(patches)
+    candidates = iter(patches)
     stages = (
         {
             "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
@@ -61,12 +62,10 @@ def channel_dispatcher(
         if inference_stages
         else {}
     )
-    recipe = harness_recipe(
-        tmp_path,
-        lambda context: next(proposals, None),
-        seed=seed,
-        score=evaluate,
-        batch_size=batch_size,
+    recipe = replace(
+        harness_recipe(
+            tmp_path, lambda workspace, tools: next(candidates, None), seed=seed, score=evaluate, batch_size=batch_size
+        ),
         pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
     dispatcher = harness_dispatcher(tmp_path, recipe)
@@ -134,7 +133,7 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
             committed = scenario["last_committed_step"]
             assert scenario["scenario_step"] == committed["step"] == 1
             assert isinstance(committed["recorded_at"], float)
-            assert committed["metrics"]["skipped"] == "no proposal"
+            assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
             # The empty seed serves nothing until a step publishes a tree.
             response = await client.get("/reef/harness", headers=HEADERS)
             assert response.status == 404 and "holds no harness tree" in await response.text()

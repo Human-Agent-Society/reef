@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
@@ -24,24 +25,24 @@ async def _post(client: TestClient, body: object, scenario: str = "agents"):
     return await client.post("/reef/train", headers={"x-reef-scenario": scenario}, json=body)
 
 
-def _manual(tmp_path: Path, propose, **overrides):
-    return harness_recipe(tmp_path, propose, reads_requests=True, training_mode="manual", **overrides)
+def manual_recipe(tmp_path: Path, method, **overrides):
+    return replace(harness_recipe(tmp_path, method, **overrides), training_mode="manual")
 
 
-def _blocking_proposer():
-    """A proposer that holds its step open until released, so accepted instructions stay stored."""
+def blocking_method():
+    """A method that holds its step open until released, so accepted instructions stay stored."""
     entered, release = Event(), Event()
 
-    def propose(context):
+    def method(workspace, tools):
         entered.set()
         release.wait(10)
 
-    return propose, entered, release
+    return method, entered, release
 
 
 def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: Path) -> None:
-    propose, entered, release = _blocking_proposer()
-    dispatcher = harness_dispatcher(tmp_path, _manual(tmp_path, propose))
+    method, entered, release = blocking_method()
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -86,7 +87,7 @@ def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: P
 
 
 def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, _manual(tmp_path, lambda context: None))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, lambda workspace, tools: None))
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher)))
@@ -111,8 +112,8 @@ def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
 
 
 def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(tmp_path: Path) -> None:
-    propose, entered, release = _blocking_proposer()
-    dispatcher = harness_dispatcher(tmp_path, _manual(tmp_path, propose, batch_size=3))
+    method, entered, release = blocking_method()
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method, batch_size=3))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
