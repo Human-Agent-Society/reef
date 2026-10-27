@@ -78,7 +78,7 @@ pipeline:
       # tempered scale.)
       prm_timeout_s: 3600
       prm_max_hint_candidates: 3
-  task2job:
+  sample2job:
     config:
       # The fewest samples of one job: one optimizer step of Slime's global batch.
       job_samples: ${training.config.global_batch_size}

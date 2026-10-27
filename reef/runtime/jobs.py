@@ -245,7 +245,7 @@ class TrainingComponent(ABC):
         return False
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
-        """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskItem`` values, with ``parameters``.
+        """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
         A recipe whose jobs train tasks calls it when it is built, so a deployment that cannot run them fails before
         any job. ``parameters`` are the recipe's job parameters without the method. The default refuses: the

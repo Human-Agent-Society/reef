@@ -38,7 +38,7 @@ INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 def training_config():
     return {
         "recipe": {"implementation": RECIPE},
-        "pipeline": {"task2job": {"config": {"buffer_size": 4}}},
+        "pipeline": {"sample2job": {"config": {"buffer_size": 4}}},
         "inference": {"model-path": "/models/demo"},
         "training": {"options": {"lr": 0.000001, "use-critic": True, "global-batch-size": 4}},
     }
@@ -71,7 +71,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     overrides = {
         "recipe.implementation": RECIPE,
         "inference.model-path": "/models/demo",
-        "pipeline.task2job.config.buffer_size": "8",
+        "pipeline.sample2job.config.buffer_size": "8",
         "training.options.lr": "0.000002",
         "training.options.use-critic": "true",
         "training.options.global-batch-size": "4",
@@ -82,7 +82,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         reef = config["reef"]
-        assert config["pipeline"] == {"task2job": {"config": {"buffer_size": 8}}}
+        assert config["pipeline"] == {"sample2job": {"config": {"buffer_size": 8}}}
         assert reef["training_backend_options"] == {
             "lr": "0.000002",
             "use-critic": True,
@@ -248,7 +248,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
                 RECIPE,
                 "--inference.model-path",
                 "org/model",
-                "--pipeline.task2job.config.buffer_size",
+                "--pipeline.sample2job.config.buffer_size",
                 "8",
                 "--training.options.use-critic",
                 "true",
@@ -260,7 +260,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
     assert downloads == ["org/model"]
     reef = configs[0]["reef"]
     assert reef["model_path"] == "/downloaded/snapshot"
-    assert configs[0]["pipeline"] == {"task2job": {"config": {"buffer_size": 8}}}
+    assert configs[0]["pipeline"] == {"sample2job": {"config": {"buffer_size": 8}}}
     assert interpolate_config(configs[0], reef["training_backend_options"]["hf-checkpoint"]) == reef["model_path"]
     assert not paths[0].exists()
     assert not (tmp_path / "reef.yaml").exists()

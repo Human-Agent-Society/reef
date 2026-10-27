@@ -45,7 +45,7 @@ from reef.storage.tasks import TaskStorage
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.trainer import Trainer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 from .backend import POPULATION_STATE_KEY, MetaHarnessBackend
 from .method import SEARCH_MODES, MetaHarnessPlugin, MetaHarnessProposer
@@ -58,7 +58,7 @@ class _UnboundProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: Any,
         *,
         manifest: FailureManifest | None = None,

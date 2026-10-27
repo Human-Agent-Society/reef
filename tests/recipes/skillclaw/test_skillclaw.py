@@ -436,7 +436,7 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
     processor.push(_report("rep-3", 1.0, "inf-3"))
     assert processor.ready(3)
     batch = processor.build_job_data(3)
-    assert sorted(sample.metadata.get("reward") for sample in batch.items) == [0.0, 1.0, 1.0]
+    assert sorted(sample.metadata.get("reward") for sample in batch.samples) == [0.0, 1.0, 1.0]
 
 
 # -- the campaign driver, dry: embedded service, faked docker day -----------

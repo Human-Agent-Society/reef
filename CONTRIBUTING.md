@@ -269,7 +269,7 @@ does with it.
 - State the one purpose of the type: which operation makes its values, which
   operation reads them, and what a value means to that reader.
 - Define each operation on the type by its inputs, its outputs, and the
-  relation between them. For example: for each item `i` that `make_tasks(X)`
+  relation between them. For example: for each item `i` that `make_samples(X)`
   returns, `sources(i) ⊆ records(X)`.
 - Make the definition complete. Each enum member, each status, and each case
   of an operation has a defined meaning and a defined result. No value can

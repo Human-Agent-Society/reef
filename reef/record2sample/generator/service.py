@@ -48,7 +48,7 @@ from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Faile
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskEpisode, TaskEpisodeError, TaskEpisodeRunner, checked_labels
-from reef.record2task.generator.designer import (
+from reef.record2sample.generator.designer import (
     Designer,
     DesignerError,
     DesignerReplyError,
@@ -56,7 +56,7 @@ from reef.record2task.generator.designer import (
     designer_messages,
     parse_harbor_reply,
 )
-from reef.record2task.generator.harbor import (
+from reef.record2sample.generator.harbor import (
     GeneratedHarborTask,
     HarborRuns,
     OracleResult,
@@ -64,8 +64,8 @@ from reef.record2task.generator.harbor import (
     harbor_task,
     oracle_check,
 )
-from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.wire import (
+from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator.wire import (
     WireError,
     checked_object,
     checked_string,

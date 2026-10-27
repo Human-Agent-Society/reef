@@ -15,13 +15,13 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.record2task import NoTasks
+from reef.record2sample import NoSamples
+from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2job import Task2Job
 from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 TOKEN = "upload-test-token"
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
@@ -55,7 +55,7 @@ class CountingBackend(CandidateBackend):
 
     def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
         self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.items)})
+        return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.samples)})
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         raise NotImplementedError
@@ -67,18 +67,18 @@ class CountingBackend(CandidateBackend):
         pass
 
 
-class UploadJobData(Task2Job):
+class UploadJobData(Sample2Job):
     accepts_trajectories = True
 
-    def make_job_data(self, tasks, data_id):
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples, data_id):
+        return JobData(data_id, samples)
 
 
 class RecordOnlyJobData(UploadJobData):
     accepts_trajectories = False
 
 
-class RenderingTasks(NoTasks):
+class RenderingSamples(NoSamples):
     """Renders an uploaded trajectory by marking it, and refuses one whose session is ``bad``."""
 
     def uploaded_sample(self, trajectory):
@@ -89,8 +89,8 @@ class RenderingTasks(NoTasks):
 
 @dataclass(frozen=True, kw_only=True)
 class UploadRecipe(Recipe):
-    batch_stage: type[Task2Job] = UploadJobData
-    task_stage: type[NoTasks] = NoTasks
+    batch_stage: type[Sample2Job] = UploadJobData
+    task_stage: type[NoSamples] = NoSamples
     batches: list[JobData] = field(default_factory=list)
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
@@ -98,7 +98,7 @@ class UploadRecipe(Recipe):
             scenario,
             records,
             pipeline_factory=lambda context: TrainingPipeline(
-                context, record2task=self.task_stage(), task2job=self.batch_stage(context, None, None)
+                context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, None)
             ),
             candidate_backend=CountingBackend(self.batches),
             algorithm_state=algorithm_state,
@@ -163,8 +163,8 @@ def test_uploaded_trajectories_train_once_also_after_a_restart(tmp_path):
         dispatcher.close()
 
     first, second = recipe.batches
-    assert first.items == (TrajectoryItem(atif("t1")), TrajectoryItem(atif("t2")))
-    assert second.items == (TrajectoryItem(atif("t3")), TrajectoryItem(atif("t4")))
+    assert first.samples == (TrajectorySample(atif("t1")), TrajectorySample(atif("t2")))
+    assert second.samples == (TrajectorySample(atif("t3")), TrajectorySample(atif("t4")))
 
 
 def test_an_upload_needs_a_recipe_that_accepts_uploaded_trajectories(tmp_path):
@@ -232,7 +232,7 @@ def test_the_record_import_does_not_take_a_trajectory(tmp_path, route):
 
 
 def test_admission_refuses_an_upload_that_cannot_train_and_jobs_get_the_rendered_samples(tmp_path):
-    recipe = UploadRecipe(task_stage=RenderingTasks)
+    recipe = UploadRecipe(task_stage=RenderingSamples)
     dispatcher = dispatcher_for(tmp_path, recipe)
 
     async def run():
@@ -250,6 +250,6 @@ def test_admission_refuses_an_upload_that_cannot_train_and_jobs_get_the_rendered
     finally:
         dispatcher.close()
     (batch,) = recipe.batches
-    assert [item.training for item in batch.items] == [
+    assert [item.training for item in batch.samples] == [
         {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": []}
     ] * 2

@@ -1,4 +1,4 @@
-"""The OpenClaw-RL record-to-task and task-to-job stages: one judged turn, one sample.
+"""The OpenClaw-RL record-to-sample and sample-to-job stages: one judged turn, one sample.
 
 A computed-feedback recipe. The correlation and the judge are
 :class:`~recipes.openclawrl.judging.OpenClawRLJudging`, which runs in the
@@ -26,15 +26,15 @@ from reef.core.records_types import AgentRecord
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
-from reef.record2task import JudgedTasks, Record2Task
-from reef.record2task.samples import make_policy_trajectory
-from reef.task2job import Task2Job, Task2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, policy_row_violation
+from reef.record2sample import JudgedSamples, Record2Sample
+from reef.record2sample.samples import make_policy_trajectory
+from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.train.types import JobData, Sample, TrajectorySample, policy_row_violation
 
 logger = logging.getLogger(__name__)
 
 
-class OpenClawRLTasks(JudgedTasks):
+class OpenClawRLSamples(JudgedSamples):
     """One judged turn as one sample; a turn whose tensors the top-K select loss cannot train on retires.
 
     The capture must cover every response token, and every trained sample
@@ -53,7 +53,7 @@ class OpenClawRLTasks(JudgedTasks):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectorySample | None:
         # 1. A declined judgment never trains. (Narrow on the score itself:
         #    it is what step 2 needs, and a property would not narrow it.)
         if judgment.score is None:
@@ -88,7 +88,7 @@ class OpenClawRLTasks(JudgedTasks):
 
 
 @dataclass(frozen=True)
-class OpenClawRLJobSettings(Task2JobSettings):
+class OpenClawRLJobSettings(Sample2JobSettings):
     """The config of ``OpenClawRLJobData``: the buffer, the job size, and the PRM record file."""
 
     # Upstream's OPENCLAW_PRM_RECORD_FILE.
@@ -97,7 +97,7 @@ class OpenClawRLJobSettings(Task2JobSettings):
     )
 
 
-class OpenClawRLJobData(Task2Job):
+class OpenClawRLJobData(Sample2Job):
     """Judged turns into job data, and the PRM record file.
 
     Config: :class:`OpenClawRLJobSettings`. The PRM record file reports
@@ -124,7 +124,7 @@ class OpenClawRLJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         settings = OpenClawRLJobSettings.parse(config, plugin_class=cls)
@@ -134,17 +134,17 @@ class OpenClawRLJobData(Task2Job):
             )
         return cls(context, settings, record2record)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        samples = tuple(task for task in tasks if isinstance(task, TrajectoryItem))
-        if len(samples) != len(tasks):
-            raise TypeError("OpenClaw-RL tasks must be trajectories")
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        samples = tuple(task for task in samples if isinstance(task, TrajectorySample))
+        if len(samples) != len(samples):
+            raise TypeError("OpenClaw-RL samples must be trajectories")
         self.write_record_line(samples, data_id)
         return JobData(
             data_id,
             tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
         )
 
-    def write_record_line(self, samples: tuple[TrajectoryItem, ...], data_id: str) -> None:
+    def write_record_line(self, samples: tuple[TrajectorySample, ...], data_id: str) -> None:
         """Append this job's judged population to the PRM record file.
 
         One line per job: what the judges returned since the previous one,

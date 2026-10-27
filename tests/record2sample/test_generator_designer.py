@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from tests.harness.test_task_episode_runner import StandInReef
 
-from reef.record2task.generator import (
+from reef.record2sample.generator import (
     DesignerError,
     DesignerReplyError,
     DesignerRequest,
@@ -19,8 +19,8 @@ from reef.record2task.generator import (
     designer_prompt,
     parse_harbor_reply,
 )
-from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.wire import designer_request_document
+from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator.wire import designer_request_document
 
 pytestmark = pytest.mark.unit
 

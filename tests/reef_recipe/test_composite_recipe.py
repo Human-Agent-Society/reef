@@ -102,7 +102,7 @@ class HybridThresholdJobData(ThresholdJobData):
 
 def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
     """The threshold pipeline, one report per batch, taking instructions too."""
-    return threshold_pipeline(context, task2job=HybridThresholdJobData(context, 1, None))
+    return threshold_pipeline(context, sample2job=HybridThresholdJobData(context, 1, None))
 
 
 @dataclass(frozen=True)
@@ -1277,7 +1277,7 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "hybrid"
-        assert contract["processor"] == type(harness.pipeline.task2job).__name__
+        assert contract["processor"] == type(harness.pipeline.sample2job).__name__
     finally:
         dispatcher.close()
 

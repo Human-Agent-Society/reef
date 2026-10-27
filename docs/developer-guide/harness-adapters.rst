@@ -325,7 +325,7 @@ the candidate and the current tree every step in order to compare them; at most
 one of the two becomes a release.
 
 Restrictions that depend on how an episode runs, rather than on what a tree
-contains, are checked at launch instead. Terminus's requirement for remote E2B
+contains, are checked at launch instead. Terminus's requirement for remote
 tasks is one: a tree carrying a ``code_extension`` renders, then fails to
 launch under the wrong executor.
 
@@ -427,8 +427,8 @@ Run a published tree
 Before running a declarative Terminus tree locally, prepare:
 
 - A running Reef service and the scenario whose published tree you want to use.
-- A Harbor task directory, and either a working Docker installation or an
-  E2B API key.
+- A Harbor task directory, and either a working Docker installation or the
+  credentials of a remote task environment: an E2B API key, or a Modal token.
 - For Docker, a trial directory shared with Docker. With colima on macOS, use
   a path under your home directory; ``$TMPDIR`` is not shared by default.
 - A local tree root containing the ``files`` returned by ``GET /reef/harness``
@@ -464,8 +464,10 @@ Set the paths to your saved tree and task, then run one task:
      REEF_TERMINUS_TRIALS_DIR="$TRIALS_DIR" \
      reef-terminus --task "$TASK_DIR"
 
-To run the task on E2B instead of local Docker, add
-``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY=<key>`` to the command.
+To run the task remotely instead of in local Docker, add
+``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY=<key>`` to the command, or
+``REEF_TERMINUS_ENVIRONMENT=modal`` with ``MODAL_TOKEN_ID`` and
+``MODAL_TOKEN_SECRET``.
 
 The JSON trial record under ``$TREE_ROOT/terminus/sessions`` contains the
 verifier rewards and ATIF trajectory. The bundled Reefine health task succeeds
@@ -488,12 +490,14 @@ keeps the service's ``DOCKER_HOST``, ``DOCKER_CONTEXT``, and
 reads its current context (colima, Docker Desktop) and the compose plugin
 from that directory.
 
-Docker or E2B
-^^^^^^^^^^^^^
+Docker or a remote environment
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Evaluation episodes run the Harbor task in local Docker unless the
-deployment runs them on E2B. For E2B, use the sandbox executor and pass the
-switch and the key into it:
+deployment runs them in a remote Harbor environment: ``e2b`` with
+``E2B_API_KEY``, or ``modal`` with ``MODAL_TOKEN_ID`` and
+``MODAL_TOKEN_SECRET``. For a remote environment, use the sandbox executor and
+pass the switch and the credentials into it. For E2B:
 
 .. code:: yaml
 
@@ -504,12 +508,16 @@ switch and the key into it:
        env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
 
 Start the service with ``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY``
-set. The runtime needs Linux, bubblewrap, Python 3.12+, and ``harbor[e2b]``.
+set. For Modal, list ``REEF_TERMINUS_ENVIRONMENT``, ``MODAL_TOKEN_ID`` and
+``MODAL_TOKEN_SECRET`` in ``env_from``, allow ``api.modal.com``, and start the
+service with ``REEF_TERMINUS_ENVIRONMENT=modal``. The runtime needs Linux,
+bubblewrap, Python 3.12+, and Harbor with the environment's extra
+(``harbor[e2b]``, or the ``modal`` package).
 The interpreter and local task directories must be visible inside the
 sandbox, for example under ``/opt``. ``egress_hosts`` currently does not
 enforce a hostname firewall. The episode root under ``~/.reef/episodes`` and
-the ``DOCKER_*`` variables above apply only to local Docker; an episode on
-E2B gets neither.
+the ``DOCKER_*`` variables above apply only to local Docker; an episode in a
+remote environment gets neither.
 
 A Python extension (``code_extension``) runs only this way. Reef rejects
 Docker inside bubblewrap and an extension in an unisolated runner before

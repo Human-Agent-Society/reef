@@ -219,7 +219,7 @@ def build_policy_rollout_data(
         "loss_masks": loss_masks,
         "rewards": rewards,
         "response_lengths": [len(loss_mask) for loss_mask in loss_masks],
-        # Reef's ``TrajectoryItem`` carries no truncation flag (the processor
+        # Reef's ``TrajectorySample`` carries no truncation flag (the processor
         # never captures the engine's finish reason), so every row ships as
         # non-truncated. If a truncation bit is ever added to the sample and
         # its wire row, thread it through here instead of this constant.

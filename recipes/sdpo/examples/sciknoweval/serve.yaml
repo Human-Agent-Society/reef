@@ -51,14 +51,14 @@ pipeline:
       groups_per_step: 32            # MUST equal the stage's SDPO_GROUPS_PER_STEP
       rollouts_per_group: 8          # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
   # The teacher's tokenizer and windows.
-  record2task:
+  record2sample:
     config:
       tokenizer_path: ${SDPO_MODEL_PATH}
       max_teacher_prompt_tokens: 10240  # the reference's max_reprompt_len
       max_teacher_tokens: 18944         # the trainer's seq-length; a longer teacher sequence fails the step
       enable_thinking: false
   # What the teacher reads: a correct sibling's response, and the feedback when enabled.
-  task2job:
+  sample2job:
     config:
       # The fewest samples of one job: the whole grid, which is one optimizer step of Slime's global batch.
       job_samples: ${training.config.global_batch_size}

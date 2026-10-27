@@ -154,7 +154,7 @@ class _TwoTrainerRecipe(Recipe):
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
         if component in self.hybrid_components:
-            return threshold_pipeline(context, task2job=HybridThresholdJobData(context, None, None))
+            return threshold_pipeline(context, sample2job=HybridThresholdJobData(context, None, None))
         return threshold_pipeline(context)
 
     def build_trainers(

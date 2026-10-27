@@ -10,20 +10,20 @@ from reef.core.plugins import NoSettings
 from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, ReportContext, SingleRecordSet
-from reef.record2task import ImmediateRecord2Task, ReportTasks, TaskResult
-from reef.record2task.assembly import reported_task
-from reef.task2job import DistillJobData
-from reef.train.types import TrajectoryItem
+from reef.record2sample import ImmediateRecord2Sample, ReportSamples, SampleResult
+from reef.record2sample.assembly import reported_task
+from reef.sample2job import DistillJobData
+from reef.train.types import TrajectorySample
 
 
-class TraceTasks(ReportTasks):
-    """One report's referenced requests, as served, as one trace task with the reported score.
+class TraceSamples(ReportSamples):
+    """One report's referenced requests, as served, as one trace sample with the reported score.
 
     Several references become one trajectory sample. Requests are recorded
     post-transform, so a trace shows exactly what the backend served. Harness
     evolution pairs it with ``ReportRecord2Record``: every valid report trains
     by itself. A deployment without outcome reports names
-    ``InferenceRecord2Record`` and ``InferenceTasks`` instead, to evolve on
+    ``InferenceRecord2Record`` and ``InferenceSamples`` instead, to evolve on
     recorded traffic alone; a measured result beats model self judgment, so a
     deployment with reports keeps the report stages.
     """
@@ -40,14 +40,14 @@ class TraceTasks(ReportTasks):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         sample = make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
         task = reported_task(context.report.payload.get("metadata"))
         return sample if task is None else sample.with_metadata(task=task)
 
 
-class InferenceTasks(ImmediateRecord2Task):
-    """One recorded inference as one unscored trace task, with ``InferenceRecord2Record``.
+class InferenceSamples(ImmediateRecord2Sample):
+    """One recorded inference as one unscored trace sample, with ``InferenceRecord2Record``.
 
     The proposer contract requires handling unscored samples.
     """
@@ -64,12 +64,12 @@ class InferenceTasks(ImmediateRecord2Task):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
         if not isinstance(record_set, SingleRecordSet):
             raise TypeError(
                 f"{type(self).__name__} makes tasks from single-record sets, not {type(record_set).__name__}"
             )
-        return TaskResult.ready((make_trajectory((record_set.record,)),))
+        return SampleResult.ready((make_trajectory((record_set.record,)),))
 
 
 class TraceJobData(DistillJobData):

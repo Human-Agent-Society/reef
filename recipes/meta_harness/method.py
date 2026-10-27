@@ -31,7 +31,7 @@ from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 from .population import Population, PopulationStore, normalize_entries
 
@@ -167,7 +167,7 @@ class MetaHarnessProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -277,7 +277,7 @@ class MetaHarnessProposer(Proposer):
         render_composition(_entry_nodes(entries), self._descriptor)
         return entries
 
-    def _prompt(self, population: Population, samples: Sequence[TrajectoryItem]) -> str:
+    def _prompt(self, population: Population, samples: Sequence[TrajectorySample]) -> str:
         records = population.candidates if self._mode == "full_history" else [population.served]
         history = [
             {

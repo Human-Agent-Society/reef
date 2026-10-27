@@ -73,9 +73,9 @@ tests/recipes/skillclaw/test_skillclaw.py
 tests/recipes/skillclaw/test_skillclaw_catalog.py
 tests/recipes/tttd/test_tttd.py
 tests/record2record/test_record_set_unit_pool.py
-tests/record2task/test_generator_designer.py
-tests/record2task/test_generator_harbor.py
-tests/record2task/test_generator_service.py
+tests/record2sample/test_generator_designer.py
+tests/record2sample/test_generator_harbor.py
+tests/record2sample/test_generator_service.py
 tests/reef_recipe/test_composite_recipe.py
 tests/reef_recipe/test_generated_tasks.py
 tests/reef_recipe/test_recipe_config_fields.py
@@ -203,5 +203,5 @@ tests/train/test_reported_feedback_processor.py
 tests/train/test_sample_task_metadata.py
 tests/train/test_step_schedule.py
 tests/train/test_trainer.py
-tests/train/test_training_data_items.py
+tests/train/test_training_data_samples.py
 tests/sandbox/test_environment.py

@@ -1,4 +1,4 @@
-"""SAO's record-to-task and task-to-job stages: one scored rollout, one training unit."""
+"""SAO's record-to-sample and sample-to-job stages: one scored rollout, one training unit."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from typing import Any, Self
 from reef.core.records_types import AgentRecord
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
-from reef.record2task import Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.samples import make_policy_trajectory, recorded_training
-from reef.task2job import Task2Job, Task2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem
+from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.samples import make_policy_trajectory, recorded_training
+from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.train.types import JobData, Sample, TrajectorySample
 
 
 class SAOSampleAssembly(SampleAssembly):
@@ -27,7 +27,7 @@ class SAOSampleAssembly(SampleAssembly):
     ``rollout_created_at``, for the backend's queue-age metric.
     """
 
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:
         base = make_policy_trajectory(record, score)
         action_mask = recorded_training(record.payload).get("action_mask", record.payload.get("action_mask", ()))
         return base.with_training(
@@ -35,8 +35,8 @@ class SAOSampleAssembly(SampleAssembly):
         )
 
 
-class SAOTasks(ReportTasks):
-    """One scored rollout as one SAO task, with ``action_mask`` and ``rollout_created_at``.
+class SAOSamples(ReportSamples):
+    """One scored rollout as one SAO sample, with ``action_mask`` and ``rollout_created_at``.
 
     Config: the sample-assembly keys of ``SampleAssemblySettings``.
     """
@@ -56,14 +56,14 @@ class SAOTasks(ReportTasks):
     ) -> Self:
         return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         sample = self.assembly.build(context, context.require_score())
         if not sample.training.get("action_mask", []):
             sample = sample.with_training(action_mask=sample.training.get("loss_mask", []))
         return sample
 
 
-class SAOJobData(Task2Job):
+class SAOJobData(Sample2Job):
     """Put scored rollouts into job data as independently scheduled SAO samples.
 
     Single-Rollout Asynchronous Optimization ships each completed rollout on
@@ -73,11 +73,11 @@ class SAOJobData(Task2Job):
     the job is one optimizer step; the paper uses 128 (arXiv:2607.07508,
     §4.1), and 1 trains once per accepted rollout for smoke runs.
 
-    SAO reuses ``TrajectoryItem`` / ``JobData`` and fills ``action_mask``
+    SAO reuses ``TrajectorySample`` / ``JobData`` and fills ``action_mask``
     and ``rollout_created_at``. The training backend validates required
     tensors; malformed training input fails explicitly.
 
-    Config: ``buffer_size`` and ``job_samples`` (``Task2JobSettings``).
+    Config: ``buffer_size`` and ``job_samples`` (``Sample2JobSettings``).
     """
 
     @classmethod
@@ -87,11 +87,11 @@ class SAOJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, items)

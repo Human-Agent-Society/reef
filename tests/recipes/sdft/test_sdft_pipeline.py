@@ -18,7 +18,7 @@ import pytest
 from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.sdft import SdftObjective, SDFTRecipe
-from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSettings, SDFTTasks
+from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
 from recipes.sdft.slime import SdftSettings
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -28,7 +28,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.runtime.interfaces import TrainingMethod
-from reef.task2job import DistillJobData
+from reef.sample2job import DistillJobData
 from reef.train import PipelineContext
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
@@ -117,8 +117,8 @@ def _processor(**config: Any) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=SDFTTasks(SDFTSettings(tokenizer_path=TOKENIZER_PATH, **config)),
-        task2job=DistillJobData(context, 1, None),
+        record2sample=SDFTSamples(SDFTSettings(tokenizer_path=TOKENIZER_PATH, **config)),
+        sample2job=DistillJobData(context, 1, None),
     )
 
 
@@ -133,7 +133,7 @@ def test_the_demonstration_block_is_added_to_the_final_user_message(tokenizer: C
     ]
     tools = [{"type": "function", "function": {"name": "lookup"}}]
 
-    messages, teacher_tools = _processor().record2task.teacher_request(request, tools, "", "The answer.")
+    messages, teacher_tools = _processor().record2sample.teacher_request(request, tools, "", "The answer.")
 
     assert messages == [
         {"role": "system", "content": "Be brief."},
@@ -153,7 +153,7 @@ def test_the_block_becomes_a_user_message_after_a_tool_result(tokenizer: Countin
     ]
     processor = _processor(context_template="Demonstration: {context}")
 
-    messages, teacher_tools = processor.record2task.teacher_request(request, None, "", "call bash with cat a.txt")
+    messages, teacher_tools = processor.record2sample.teacher_request(request, None, "", "call bash with cat a.txt")
 
     assert messages[-1] == {"role": "user", "content": "Demonstration: call bash with cat a.txt"}
     assert messages[:3] == [
@@ -180,7 +180,7 @@ def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: Countin
 
     assert isinstance(batch, JobData)
     assert batch.data_id == "science:data:1"
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert source_record_id(sample) == "i1"
     prompt_ids = tokenizer.count_ids(tokenizer.calls[0][0])
     # The teacher sequence is the rendered teacher prompt plus the response ids verbatim.
@@ -198,7 +198,7 @@ def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: Countin
 
 
 #: The deployment's ``pipeline`` section with only the required key.
-PIPELINE = {"record2task": {"config": {"tokenizer_path": TOKENIZER_PATH}}}
+PIPELINE = {"record2sample": {"config": {"tokenizer_path": TOKENIZER_PATH}}}
 
 
 def sdft_recipe(config: Mapping[str, Any]) -> SDFTRecipe:
@@ -222,11 +222,11 @@ def test_sdft_recipe_resolves_by_dotted_reference(tokenizer: CountingTokenizer) 
     assert SdftObjective.rollout_unit == "sample"
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
-    assert isinstance(pipeline.record2task, SDFTTasks)
-    assert isinstance(pipeline.task2job, DistillJobData)
-    assert pipeline.task2job.buffer_size is None, "without a trainer default the buffer holds every sample"
-    assert pipeline.record2task.max_teacher_tokens == 0
-    assert pipeline.record2task.template == DEFAULT_CONTEXT_TEMPLATE
+    assert isinstance(pipeline.record2sample, SDFTSamples)
+    assert isinstance(pipeline.sample2job, DistillJobData)
+    assert pipeline.sample2job.buffer_size is None, "without a trainer default the buffer holds every sample"
+    assert pipeline.record2sample.max_teacher_tokens == 0
+    assert pipeline.record2sample.template == DEFAULT_CONTEXT_TEMPLATE
 
 
 @pytest.mark.unit
@@ -234,29 +234,29 @@ def test_sdft_recipe_hands_each_stage_its_pipeline_config(tokenizer: CountingTok
     recipe = sdft_recipe(
         {
             "pipeline": {
-                "record2task": {
+                "record2sample": {
                     "config": {
                         "tokenizer_path": TOKENIZER_PATH,
                         "max_teacher_tokens": 24000,
                         "context_template": "Example: {context}",
                     }
                 },
-                "task2job": {"config": {"job_samples": 4, "buffer_size": 16}},
+                "sample2job": {"config": {"job_samples": 4, "buffer_size": 16}},
             },
         }
     )
 
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
-    assert isinstance(pipeline.record2task, SDFTTasks)
-    assert (pipeline.task2job.job_samples, pipeline.task2job.buffer_size) == (4, 16)
-    assert pipeline.record2task.max_teacher_tokens == 24000
-    assert pipeline.record2task.template == "Example: {context}"
+    assert isinstance(pipeline.record2sample, SDFTSamples)
+    assert (pipeline.sample2job.job_samples, pipeline.sample2job.buffer_size) == (4, 16)
+    assert pipeline.record2sample.max_teacher_tokens == 24000
+    assert pipeline.record2sample.template == "Example: {context}"
 
 
 @pytest.mark.unit
 def test_sdft_recipe_validates_the_demonstration_template_when_the_pipeline_builds() -> None:
     recipe = sdft_recipe(
-        {"pipeline": {"record2task": {"config": {"tokenizer_path": TOKENIZER_PATH, "context_template": "bare"}}}}
+        {"pipeline": {"record2sample": {"config": {"tokenizer_path": TOKENIZER_PATH, "context_template": "bare"}}}}
     )
     with pytest.raises(RecipeConfigError, match=r"context_template must contain \{context\}"):
         recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
@@ -279,7 +279,7 @@ def test_sdft_recipe_refuses_stage_settings_in_the_recipe_config() -> None:
         SDFTRecipe.service_config({"context-template": "Example: {context}"}, model_path=TOKENIZER_PATH)
     # A key in the wrong stage fails when the pipeline builds.
     recipe = sdft_recipe(
-        {"pipeline": {"record2task": {"config": {"tokenizer_path": TOKENIZER_PATH, "batch_size": 4}}}}
+        {"pipeline": {"record2sample": {"config": {"tokenizer_path": TOKENIZER_PATH, "batch_size": 4}}}}
     )
     with pytest.raises(RecipeConfigError, match="batch_size"):
         recipe.build_pipeline(PipelineContext("science", TeacherContextReport))

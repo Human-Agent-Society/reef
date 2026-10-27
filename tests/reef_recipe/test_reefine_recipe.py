@@ -50,7 +50,7 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
         {},
         config={
             "data": {"training_mode": "hybrid"},
-            "pipeline": {"task2job": {"config": {"batch_size": 3}}},
+            "pipeline": {"sample2job": {"config": {"batch_size": 3}}},
             "evolution": {
                 "tasks": ["[fib] Compute fib(90)."],
                 "selection": "score_comparison",
@@ -62,7 +62,7 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
         },
     )
     assert isinstance(built, ReefineRecipe)
-    assert built.training_mode == "hybrid" and built.stages().task2job.config == {"batch_size": 3}
+    assert built.training_mode == "hybrid" and built.stages().sample2job.config == {"batch_size": 3}
     assert built.seed == () and built.review_kinds == ()
     assert built.selection == PluginReference(ScoreComparisonPlugin)
 

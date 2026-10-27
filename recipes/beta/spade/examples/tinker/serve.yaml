@@ -57,7 +57,7 @@ pipeline:
     config:
       jobs_per_round: 2
   # The rounds: one generation of tasks each, run through the generator service.
-  record2task:
+  record2sample:
     config:
       generator_url: ${endpoints.generator}
       rounds: 20
@@ -72,7 +72,7 @@ pipeline:
           skills: [inspection, repair]
           state_dir: ${REEF_SPADE_STATE_DIR}/generations
   # One task job holds tasks_per_step saved tasks; Tinker rolls them out and trains on their task groups.
-  task2job:
+  sample2job:
     config:
       tasks_per_step: 2
 training:

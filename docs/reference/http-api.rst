@@ -313,8 +313,8 @@ Upload trajectories
 
 Use this route when your data is already a complete ATIF trajectory. An
 uploaded trajectory is not a record. Reef keeps it in the scenario storage.
-The recipe's record-to-task stage renders it as a training sample, and the
-task-to-job stage puts it in the next job's data. The scenario's recipe
+The recipe's record-to-sample stage renders it as a training sample, and the
+sample-to-job stage puts it in the next job's data. The scenario's recipe
 must accept uploaded trajectories. If it does not, Reef refuses the upload with
 400. For the recipe side, see
 `Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
@@ -678,7 +678,7 @@ backend that the engine aborts also carries no receipt, because Reef cannot
 restart a stream after it sent frames. In both cases a harness that reports by
 receipt does not reference the record. Reef stores it as an incomplete delivery
 record and preserves the captured response, including any training tensors.
-The record-to-record stage excludes aborted records from task creation and
+The record-to-record stage excludes aborted records from sample creation and
 training, including when a report references their IDs directly or retained
 records are replayed after a restart.
 
@@ -1263,7 +1263,7 @@ failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 ``job_data_ready`` says whether the processor has a job's data waiting.
 ``processor`` includes ``ready_samples``, the samples of the held record sets
 and uploaded trajectories; ``job_samples``, the samples that automatic job
-data needs (``pipeline.task2job.config.job_samples``); and ``buffer_size``,
+data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
 the most samples the held record sets keep.
 
 A scenario that trains weights also reports its training job.

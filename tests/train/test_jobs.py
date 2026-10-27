@@ -11,7 +11,7 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import CheckpointCandidate, EvaluationResult, SelectionDecision
-from reef.core.job_data import JobOutcome, TaskItem
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
@@ -180,7 +180,7 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
     assert JobLoopState.from_dict(result.state).job == RunningJob(job.job_id)
     # The same rows are the same job, whatever the batch's number; another scenario's are another job.
-    assert loop.submit(JobLoopState(), JobData("renumbered", batch().items)).result.training_job_id == job.job_id
+    assert loop.submit(JobLoopState(), JobData("renumbered", batch().samples)).result.training_job_id == job.job_id
     other_scenario = loop_with(component, scenario="code").submit(JobLoopState(), batch())
     assert other_scenario.result.training_job_id != job.job_id
     # The next job of the same trainer is another job, even with the same data from the same start.
@@ -488,7 +488,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         stages.append(EndedJobs(context))
-        return threshold_pipeline(context, task2job=stages[-1])
+        return threshold_pipeline(context, sample2job=stages[-1])
 
     trainer = Trainer.build(
         "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
@@ -529,7 +529,7 @@ class EvalTasks(ArtifactEvaluation):
     """Evaluates each artifact on one task, or on none when ``empty``."""
 
     def __init__(self, tmp_path: Path, *, empty: bool = False) -> None:
-        self.task = TaskItem(tmp_path, metadata={"task": {"name": "held-out", "split": "eval"}})
+        self.task = TaskSample(tmp_path, metadata={"task": {"name": "held-out", "split": "eval"}})
         self.empty = empty
 
     def evaluation_job(self, candidate):

@@ -26,7 +26,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from reef.record2task.samples import flatten_content
+from reef.record2sample.samples import flatten_content
 
 logger = logging.getLogger(__name__)
 

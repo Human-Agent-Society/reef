@@ -17,7 +17,7 @@ import yaml
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
 from reef.cli import main
-from reef.core.job_data import JobData, TrajectoryItem
+from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
 from reef.recipe.sft import SftObjective
 from reef.runtime.deployment import RuntimeConfigError
@@ -112,7 +112,7 @@ class SampleObjective(TrainingObjective):
         return TrainingSignal(
             self.action,
             {"steps": state.get("steps", 0) + 1},
-            advantages=tuple(float(i + 1) for i in range(len(batch.items))),
+            advantages=tuple(float(i + 1) for i in range(len(batch.samples))),
         )
 
 
@@ -171,7 +171,7 @@ def inference(client):
 
 
 def item(version="v", group="g", token=20):
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": "test"},
@@ -210,7 +210,7 @@ def submit(component, data, objective_name, *, start=None, schedule=None, **para
         "method": TrainingMethod(objective_name, schedule).to_dict(),
         **parameters,
     }
-    job_id = job_id_for(component.name, start, data.to_dict()["items"], parameters)
+    job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, data, parameters))
     return job_id
 
@@ -747,7 +747,7 @@ def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_
 def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, objective):
     from dataclasses import dataclass
 
-    from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
+    from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
     from tests.support.runtime_stubs import job_sized_stages
 
     from reef.artifact import InMemoryRepositoryBackend
@@ -767,7 +767,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         @classmethod
         def pipeline_spec(cls):
             return PipelineSpec(
-                record2record=ReportRecord2Record, record2task=ThresholdTasks, task2job=ThresholdJobData
+                record2record=ReportRecord2Record, record2sample=ThresholdSamples, sample2job=ThresholdJobData
             )
 
     initial = tmp_path / "initial"
@@ -875,7 +875,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     step_grid = PipelineConfig.from_setting(
         {
             "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
-            "task2job": {"config": {"job_samples": 4}},
+            "sample2job": {"config": {"job_samples": 4}},
         },
         spec=TTTDRecipe.pipeline_spec(),
         environ={},
@@ -909,9 +909,9 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         inference.shutdown()
 
 
-def sft_item(name: str) -> TrajectoryItem:
+def sft_item(name: str) -> TrajectorySample:
     """A supervised sample: three prompt tokens, two target tokens and no rollout log probabilities."""
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": name},

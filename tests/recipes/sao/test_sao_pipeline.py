@@ -19,7 +19,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOJobData, SAOTasks
+from recipes.sao.processor import SAOJobData, SAOSamples
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -30,7 +30,7 @@ from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.deploy.config_utils import interpolate_config_values
@@ -51,8 +51,8 @@ def sao_processor(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=SAOTasks(SampleAssemblySettings()),
-        task2job=SAOJobData(context, None, None),
+        record2sample=SAOSamples(SampleAssemblySettings()),
+        sample2job=SAOJobData(context, None, None),
     )
 
 
@@ -122,9 +122,9 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only its stages.
     stages = recipe.stages()
-    assert (stages.record2record.plugin_class, stages.record2task.plugin_class, stages.task2job.plugin_class) == (
+    assert (stages.record2record.plugin_class, stages.record2sample.plugin_class, stages.sample2job.plugin_class) == (
         ExclusiveReportRecord2Record,
-        SAOTasks,
+        SAOSamples,
         SAOJobData,
     )
     # Without a configured buffer_size the buffer holds the data of four jobs.
@@ -136,13 +136,13 @@ def test_sao_recipe_reads_reef_side_config() -> None:
     recipe = SAORecipe.from_environment(
         {},
         config={
-            "pipeline": {"task2job": {"config": {"job_samples": 2, "buffer_size": 16}}},
+            "pipeline": {"sample2job": {"config": {"job_samples": 2, "buffer_size": 16}}},
         },
         **runtime_bindings(),
     )
 
-    task2job = recipe.build_pipeline(PipelineContext("math")).task2job
-    assert (task2job.job_samples, task2job.buffer_size) == (2, 16)
+    sample2job = recipe.build_pipeline(PipelineContext("math")).sample2job
+    assert (sample2job.job_samples, sample2job.buffer_size) == (2, 16)
 
 
 @pytest.mark.unit
@@ -154,14 +154,14 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     # One job is one optimizer step: job_samples names Slime's global batch size.
     global_batch_size = deployment["training"]["config"]["global_batch_size"]
     assert deployment["training"]["options"]["global-batch-size"] == "${training.config.global_batch_size}"
-    assert deployment["pipeline"]["task2job"]["config"]["job_samples"] == "${training.config.global_batch_size}"
+    assert deployment["pipeline"]["sample2job"]["config"]["job_samples"] == "${training.config.global_batch_size}"
 
     pipeline = recipe.build_pipeline(PipelineContext("math"))
-    assert pipeline.task2job.job_samples == global_batch_size
+    assert pipeline.sample2job.job_samples == global_batch_size
 
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
-    assert isinstance(pipeline.record2task, SAOTasks)
-    assert isinstance(pipeline.task2job, SAOJobData)
+    assert isinstance(pipeline.record2sample, SAOSamples)
+    assert isinstance(pipeline.sample2job, SAOJobData)
     assert pipeline.buffer_size is not None and pipeline.buffer_size >= global_batch_size
 
 
@@ -176,9 +176,9 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
-        ({"task2job": {"config": {"batch_size": 8}}}, "SAOJobData: unknown config fields: batch_size"),
-        ({"task2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
-        ({"task2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
+        ({"sample2job": {"config": {"batch_size": 8}}}, "SAOJobData: unknown config fields: batch_size"),
+        ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
+        ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         (
             {"record2record": {"config": {"batch_size": 2}}},
             "ExclusiveReportRecord2Record: unknown config fields: batch_size",
@@ -218,8 +218,8 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     batch = processor.build_job_data(1)
 
     assert isinstance(batch, JobData)
-    assert len(batch.items) == 1
-    sample = batch.items[0]
+    assert len(batch.samples) == 1
+    sample = batch.samples[0]
     assert source_record_id(sample) == "i1"
     assert trajectory_reward(sample) == pytest.approx(0.75)
     # No explicit action mask -> the whole response is one action.
@@ -253,7 +253,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_of_a_record_without_a_
 
     batch = processor.build_job_data(1)
 
-    assert batch.items[0].training.get("runtime_load_id", None) == "slime-v7"
+    assert batch.samples[0].training.get("runtime_load_id", None) == "slime-v7"
 
 
 @pytest.mark.unit
@@ -274,8 +274,8 @@ def test_processor_preserves_explicit_observation_boundaries() -> None:
 
     batch = processor.build_job_data(1)
 
-    assert tuple(batch.items[0].training.get("action_mask", [])) == (1, 0, 1)
-    assert tuple(batch.items[0].training.get("loss_mask", [])) == (1, 0, 1)
+    assert tuple(batch.samples[0].training.get("action_mask", [])) == (1, 0, 1)
+    assert tuple(batch.samples[0].training.get("loss_mask", [])) == (1, 0, 1)
 
 
 @pytest.mark.unit
@@ -360,7 +360,7 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
         processor.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_job_data(1)
-    assert [source_record_id(sample) for sample in batch.items] == ["i1"]
+    assert [source_record_id(sample) for sample in batch.samples] == ["i1"]
     processor.acknowledge(batch.data_id)
     assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
 
@@ -497,12 +497,12 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
 
         [job] = component.submitted
-        assert [source_record_id(item) for item in job.data.items] == ["i1"]
+        assert [source_record_id(item) for item in job.data.samples] == ["i1"]
         [payload] = component.payloads
         assert payload["loss"] == "sao"
         # SAO defers advantages to the critic in the backend; reef ships none.
         assert "advantages" not in payload
-        assert trajectory_reward(job.data.items[0]) == pytest.approx(0.9)
+        assert trajectory_reward(job.data.samples[0]) == pytest.approx(0.9)
     finally:
         dispatcher.close()
 
@@ -514,7 +514,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config={
-            "pipeline": {"task2job": {"config": {"job_samples": 1}}},
+            "pipeline": {"sample2job": {"config": {"job_samples": 1}}},
             "evaluation": {
                 "module": "tests.support._candidate_evaluation_plugin:CheckpointEvaluator",
                 "config": {
@@ -619,7 +619,7 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
         _rollout(second, 2, 0.5)
         _wait_for_finished_jobs(second, 2)
         assert [job.start for job in component.submitted] == [None, str(tmp_path / "checkpoints" / "1")]
-        assert source_record_id(component.submitted[-1].data.items[0]) == "i2"
+        assert source_record_id(component.submitted[-1].data.samples[0]) == "i2"
     finally:
         second.close()
 
@@ -672,7 +672,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert JobLoopState.from_dict(second.state).finished_jobs == 1
         assert second.run_once() is not None
-        assert [source_record_id(job.data.items[0]) for job in component.submitted] == ["i1", "i2"]
+        assert [source_record_id(job.data.samples[0]) for job in component.submitted] == ["i1", "i2"]
 
 
 if __name__ == "__main__":

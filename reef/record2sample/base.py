@@ -1,8 +1,8 @@
-"""The record-to-task contract: each record set from the record-to-record stage becomes tasks.
+"""The record-to-sample contract: each record set from the record-to-record stage becomes samples.
 
-A task is a ``TrainDataItem``: a ``TrajectoryItem`` that trains directly, or a
-``TaskItem`` that the algorithm rolls out. The training pipeline pushes each
-record set that the record stage forms (``push``) and pulls the task results
+A sample is a ``Sample``: a ``TrajectorySample`` that trains directly, or a
+``TaskSample`` that the algorithm rolls out. The training pipeline pushes each
+record set that the record stage forms (``push``) and pulls the sample results
 (``pull``). It gives each result back to the record stage.
 """
 
@@ -14,57 +14,57 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.job_data import TrainDataItem, TrajectoryItem
+from reef.core.job_data import Sample, TrajectorySample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, RecordSet, TaskStatus
+from reef.record2record import Record2Record, RecordSet, SampleStatus
 
 
 @dataclass(frozen=True)
-class TaskResult:
-    """The tasks made from one record set, and what the record stage does with the set.
+class SampleResult:
+    """The samples made from one record set, and what the record stage does with the set.
 
-    Values: a ``READY`` result holds one or more tasks. A ``SKIPPED`` result holds no task.
+    Values: a ``READY`` result holds one or more samples. A ``SKIPPED`` result holds no sample.
     """
 
-    status: TaskStatus
-    tasks: tuple[TrainDataItem, ...] = ()
+    status: SampleStatus
+    samples: tuple[Sample, ...] = ()
 
     def __post_init__(self) -> None:
-        if (self.status is TaskStatus.READY) != bool(self.tasks):
-            raise ValueError("a READY result holds one or more tasks, and a SKIPPED result holds no task")
+        if (self.status is SampleStatus.READY) != bool(self.samples):
+            raise ValueError("a READY result holds one or more samples, and a SKIPPED result holds no sample")
 
     @classmethod
-    def ready(cls, tasks: tuple[TrainDataItem, ...]) -> TaskResult:
-        """The set trains as ``tasks``."""
-        return cls(TaskStatus.READY, tasks)
+    def ready(cls, samples: tuple[Sample, ...]) -> SampleResult:
+        """The set trains as ``samples``."""
+        return cls(SampleStatus.READY, samples)
 
     @classmethod
-    def skipped(cls) -> TaskResult:
+    def skipped(cls) -> SampleResult:
         """The set cannot train. The record stage ends its records."""
-        return cls(TaskStatus.SKIPPED)
+        return cls(SampleStatus.SKIPPED)
 
 
-class Record2Task(ABC, Plugin):
-    """The record-to-task stage: record sets in, task results out.
+class Record2Sample(ABC, Plugin):
+    """The record-to-sample stage: record sets in, sample results out.
 
     The pipeline pushes each record set one time. ``pull`` returns each pushed
     set's result exactly one time, by set ID, as soon as it is ready. Both run
     on the trainer thread and must not block on network or model calls. A
     stage with slow work runs it on a worker that it owns, and ``close`` stops
     the worker. Raise on a broken training contract. Most stages make the
-    tasks of a set at once: they inherit ``ImmediateRecord2Task``. A
-    deployment names a stage class in ``pipeline.record2task`` and gives its
+    samples of a set at once: they inherit ``ImmediateRecord2Sample``. A
+    deployment names a stage class in ``pipeline.record2sample`` and gives its
     config. The class parses the config into its settings dataclass and builds
     the stage in ``from_config``.
     """
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded ATIF trajectory; the default is the trajectory as it was uploaded.
 
         The default fits a backend that reads ATIF trajectories as they are. A stage whose backend trains
-        token-level data, and whose task-to-job stage accepts uploaded trajectories, overrides it to render the
-        trajectory as its backend trains it, such as ``SFTTasks``. The pipeline calls it at upload, from a request thread, to refuse a
+        token-level data, and whose sample-to-job stage accepts uploaded trajectories, overrides it to render the
+        trajectory as its backend trains it, such as ``SFTSamples``. The pipeline calls it at upload, from a request thread, to refuse a
         trajectory that cannot train, and again when it reads the upload. It must be pure: the same trajectory
         gives the same sample, and the stage's state does not change. A trajectory that cannot become a sample
         raises ``ValueError`` with the reason.
@@ -94,10 +94,10 @@ class Record2Task(ABC, Plugin):
 
     @abstractmethod
     def push(self, record_set: RecordSet) -> None:
-        """Take one record set to make its tasks."""
+        """Take one record set to make its samples."""
 
     @abstractmethod
-    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+    def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
         """Return the results that are ready since the last call, by set ID."""
 
     def status(self) -> Mapping[str, Any]:
@@ -113,30 +113,30 @@ class Record2Task(ABC, Plugin):
         return
 
 
-class ImmediateRecord2Task(Record2Task):
-    """A record-to-task stage that makes the tasks of a set when the pipeline pushes it.
+class ImmediateRecord2Sample(Record2Sample):
+    """A record-to-sample stage that makes the samples of a set when the pipeline pushes it.
 
-    A subclass implements ``make_tasks``. A subclass with its own ``__init__``
+    A subclass implements ``make_samples``. A subclass with its own ``__init__``
     calls ``super().__init__()``.
     """
 
     def __init__(self) -> None:
-        self.results: list[tuple[Hashable, TaskResult]] = []
+        self.results: list[tuple[Hashable, SampleResult]] = []
 
     @abstractmethod
-    def make_tasks(self, record_set: RecordSet) -> TaskResult:
-        """Return the tasks of ``record_set``, or a skip."""
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
+        """Return the samples of ``record_set``, or a skip."""
 
     def push(self, record_set: RecordSet) -> None:
-        self.results.append((record_set.set_id, self.make_tasks(record_set)))
+        self.results.append((record_set.set_id, self.make_samples(record_set)))
 
-    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+    def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
         results, self.results = tuple(self.results), []
         return results
 
 
-class NoTasks(Record2Task):
-    """The record-to-task stage of a pipeline that trains nothing. Its record stage, ``NoRecordSets``, forms no set."""
+class NoSamples(Record2Sample):
+    """The record-to-sample stage of a pipeline that trains nothing. Its record stage, ``NoRecordSets``, forms no set."""
 
     @classmethod
     def from_config(
@@ -151,7 +151,7 @@ class NoTasks(Record2Task):
         return cls()
 
     def push(self, record_set: RecordSet) -> None:
-        raise TypeError(f"{type(self).__name__} makes no tasks: pair it with NoRecordSets")
+        raise TypeError(f"{type(self).__name__} makes no samples: pair it with NoRecordSets")
 
-    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+    def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
         return ()

@@ -15,7 +15,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskTasks
+from reef.recipe.generated_tasks import GeneratedTaskSamples
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -30,8 +30,8 @@ from reef.recipe.generated_tasks.processor import (
     TaskGroupSettings,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult
-from reef.record2task.generator import GeneratorError, TaskNameConflict
-from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator import GeneratorError, TaskNameConflict
+from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
@@ -285,7 +285,7 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
     context = PipelineContext("spade", task_storage=SQLiteScenarioStorage(tmp_path / "records").open("spade").tasks)
-    generation = GeneratedTaskTasks(
+    generation = GeneratedTaskSamples(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
         GeneratedTaskRecord2Record(context, TaskGroupSettings()),
