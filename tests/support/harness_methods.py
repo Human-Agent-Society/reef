@@ -1,27 +1,30 @@
-"""Shared pieces of the Meta-Harness tests: a canned proposer model and one scored setup.
+"""Shared pieces of the harness method tests: a canned model, a scorer, and the Meta-Harness deployment.
 
-``QueueChat`` is the proposer model, ``proposal_reply`` one reply it writes,
-and ``meta_harness_sections`` the recipe section over the fake pi binary of
-``tests.support.harness_steps``, scored by ``score_marker``. ``report_once``
-records one scored trace, enough to wake one step.
+``QueueChat`` is a model that answers canned replies: the Meta-Harness, ACE
+and ReasoningBank tests give it to their method. ``proposal_reply`` is one
+reply of the Meta-Harness proposer. ``MarkerScorer`` scores an episode of the
+fake pi binary of ``tests.support.harness_steps`` by the marker in the rules
+it rendered. ``meta_harness_sections`` is a deployment's recipe section over
+that binary, and ``meta_harness_recipe`` the recipe built from it with a
+``QueueChat``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
 
-from tests.support._strategies import resolve_episode_scorer
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_steps import make_pi_binary
 
-from reef.core import AgentRecord, RequestType
-from reef.core.trajectories import recorded_payload
+from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
-from reef.scenario.scenario import Scenario
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.registry import build_recipe
 
 #: What the scorer looks for in the rules an episode ran with.
 MARKER = "META-HARNESS-WINNER"
@@ -30,20 +33,10 @@ SEED = HarnessTree({"rules.md": "Answer carefully.\n"})
 IMPROVED = HarnessTree({"rules.md": f"Answer carefully. {MARKER}\n"})
 ALTERNATE = HarnessTree({"rules.md": f"Answer carefully. {MARKER} Check twice.\n"})
 TASK = "Solve the supplied task."
-#: One failing trace of the task, with its report's feedback.
-SAMPLE = recorded_trajectory(
-    "trace-1",
-    {
-        "messages": [{"role": "user", "content": TASK}],
-        "response": {"choices": [{"message": {"role": "assistant", "content": "attempt"}}]},
-    },
-    0.0,
-    feedback="the attempt failed",
-)
 
 
 class QueueChat(ModelBinding):
-    """The proposer model: it answers the canned replies in order and keeps every prompt it was asked."""
+    """A method's model: it answers the canned replies in order and keeps every prompt it was asked."""
 
     def __init__(self, *replies: str) -> None:
         super().__init__(base_url="http://127.0.0.1:9", model="proposer", api_key="dummy")
@@ -67,69 +60,66 @@ def proposal_reply(parent: HarnessTree, tree: HarnessTree, *, hypothesis: str = 
     )
 
 
-def score_marker(task: str, result: EpisodeResult) -> float:
-    """1.0 when the episode's rendered rules carry ``MARKER``."""
-    last = result.trajectory[-1] if result.trajectory else {}
-    return 1.0 if MARKER in str(last.get("rules", "")) else 0.0
+class MarkerScorer(EpisodeScorer):
+    """1.0 when the episode's rendered rules carry ``MARKER``, else 0.0."""
+
+    def score(self, task: str, result: EpisodeResult) -> float:
+        last = result.trajectory[-1] if result.trajectory else {}
+        return 1.0 if MARKER in str(last.get("rules", "")) else 0.0
 
 
 def served_runtime(api: str = "openai") -> InferenceProxyRuntime:
     return InferenceProxyRuntime(model_path="served-model", base_url="http://127.0.0.1:9", api_key="dummy", api=api)
 
 
-def meta_harness_sections(
-    tmp_path: Path, *, scorer: Any = score_marker, adapter: str = "pi", **method: Any
-) -> dict[str, Any]:
-    """A Meta-Harness recipe section over the fake pi binary in ``tmp_path``, the seed written beside it."""
+def meta_harness_sections(tmp_path: Path, *, adapter: str = "pi", **method: Any) -> dict[str, Any]:
+    """A Meta-Harness deployment's recipe section over the fake pi binary in ``tmp_path``, the seed written beside it.
+
+    ``method`` is the method's config. The evaluation compares means, as Meta-Harness selects.
+    """
     seed = tmp_path / "seed"
     if not seed.exists():
         SEED.write(seed)
     return {
-        "implementation": "recipes.meta_harness.recipe:MetaHarnessRecipe",
+        "implementation": "reef.recipe.harness:HarnessEvolutionRecipe",
         "model": {"path": "served-model"},
         "evolution": {
             "adapter": adapter,
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_episode_scorer(scorer),
-            "tasks": [TASK],
             "seed": str(seed),
-            "meta_harness": dict(method),
+            "state_dir": str(tmp_path / "harness"),
+            "method": {"module": "recipes.meta_harness:MetaHarness", "config": dict(method)},
             "batch_size": 1,
+            "evaluation": {
+                "tasks": [TASK],
+                "scorer": "tests.support.harness_methods:MarkerScorer",
+                "policy": "compare",
+                "statistic": "mean",
+            },
         },
     }
 
 
-def report_once(scenario: Scenario, name: str, suffix: str) -> None:
-    """One recorded trace and its report: enough to wake one step."""
-    scenario.records.append_result(
-        AgentRecord.create(
-            scenario=name,
-            request_type=RequestType.INFERENCE,
-            payload=recorded_payload(SAMPLE),
-            agent_record_id=f"i{suffix}",
-        )
-    )
-    scenario.records.append_result(
-        AgentRecord.create(
-            scenario=name,
-            request_type=RequestType.REPORT,
-            payload={"score": 0.0, "feedback": SAMPLE.metadata.get("feedback"), "references": [f"i{suffix}"]},
-            agent_record_id=f"r{suffix}",
-        )
-    )
+def meta_harness_recipe(tmp_path: Path, chat: QueueChat, **method: Any) -> HarnessEvolutionRecipe:
+    """The recipe ``meta_harness_sections`` names, built over the fake pi binary, with ``chat`` as its proposer."""
+    make_pi_binary(tmp_path)
+    config = meta_harness_sections(tmp_path, **method)
+    recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
+    if not isinstance(recipe, HarnessEvolutionRecipe):
+        raise TypeError(f"the section built a {type(recipe).__name__}")
+    return dataclasses.replace(recipe, models={"proposer": chat})
 
 
 __all__ = [
     "ALTERNATE",
     "IMPROVED",
     "MARKER",
-    "SAMPLE",
     "SEED",
     "TASK",
+    "MarkerScorer",
     "QueueChat",
+    "meta_harness_recipe",
     "meta_harness_sections",
     "proposal_reply",
-    "report_once",
-    "score_marker",
     "served_runtime",
 ]

@@ -484,35 +484,3 @@ def test_opd_recipe_uses_configured_runtime() -> None:
     assert recipe.training_component is component
     sample2job = recipe.build_pipeline(PipelineContext("math")).sample2job
     assert (sample2job.job_samples, sample2job.buffer_size) == (4, 16)
-
-
-def test_harness_evolution_recipe_reads_the_evolution_batch_size(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from reef.recipe.harness import HarnessEvolutionRecipe
-
-    (tmp_path / "batch_size_strategies.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.harness_backend.contract import Proposer\n\n"
-        "class Propose(Proposer):\n"
-        "    def propose(self, context):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
-        "    def score(self, task, result):\n        return 0.0\n"
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    def evolution(**settings: object) -> dict[str, object]:
-        return {
-            "evolution": {
-                "propose": "batch_size_strategies:Propose",
-                "evaluate": "batch_size_strategies:Evaluate",
-                "tasks": ["task one"],
-                **settings,
-            }
-        }
-
-    assert HarnessEvolutionRecipe.from_environment({}, config=evolution()).batch_size == 1
-    assert HarnessEvolutionRecipe.from_environment({}, config=evolution(batch_size=3)).batch_size == 3
-    for invalid in (0, -2, 2.5, "3", True):
-        with pytest.raises(RecipeConfigError, match=r"evolution\.batch_size must be an integer of at least 1"):
-            HarnessEvolutionRecipe.from_environment({}, config=evolution(batch_size=invalid))

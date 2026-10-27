@@ -16,8 +16,9 @@ from typing import Any
 
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.dispatcher import Dispatcher
-from reef.evaluation.harness import ScoreComparisonPlugin
+from reef.evaluation.harness import ComparePolicy
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario.scenario import Scenario
@@ -86,12 +87,17 @@ def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
     return result
 
 
-def backend_step(backend: HarnessBackend, data: JobData, state: Mapping[str, Any]) -> TrainStepResult:
-    """One step of ``backend`` as the trainer runs it, selected by score comparison; a failure aborts the step."""
+def backend_step(
+    backend: HarnessBackend, data: JobData, state: Mapping[str, Any], policy: CandidateEvaluationPlugin | None = None
+) -> TrainStepResult:
+    """One step of ``backend`` as the trainer runs it, decided by ``policy`` (a win-count comparison by default).
+
+    A failure aborts the step.
+    """
     prepared = backend.prepare_step(data, state, 0)
     if prepared.candidate is None:
         return TrainStepResult(prepared.state, prepared.metrics)
-    selection = ScoreComparisonPlugin(backend)
+    selection = ComparePolicy(backend) if policy is None else policy
     try:
         decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
         return backend.settle_step(prepared, decision)

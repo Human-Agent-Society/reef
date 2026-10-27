@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from reef.evaluation.harness import EpisodeEvaluationWorker, EpisodeScorer
+from reef.evaluation.harness.runner import EpisodeRun
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import run_episode
@@ -164,7 +165,8 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
 
 
 def test_the_evaluation_worker_scores_a_real_remote_episode(model_endpoint, tmp_path):
-    """The harness backend's evaluation episodes and a method's trial episodes run through this same worker."""
+    """The harness backend's evaluation episodes and the episodes a method scores with ``tools.evaluate`` run
+    through this same worker."""
     descriptor = get_adapter("pi")
     configured = build_executor({"executor": "e2b", "sandbox": {"forward_ports": [model_endpoint]}})
     executor, _ = configured.for_program(AdapterProgram(descriptor))
@@ -177,6 +179,8 @@ def test_the_evaluation_worker_scores_a_real_remote_episode(model_endpoint, tmp_
     scorer = MarkerScorer()
     task = "Reply exactly REEF_E2B_OK. Do not use tools."
     worker = EpisodeEvaluationWorker(descriptor, scorer, None, 180, executor, True)
-    scored = worker.run(bound_files(binding, "pi"), task, models=ModelBindings(binding))
+    record_dir = tmp_path / "episode"
+    scored = worker.run(EpisodeRun(bound_files(binding, "pi"), task, record_dir), ModelBindings(binding))
     assert scored.score == 1.0 and scored.failure is None
     assert scored.reply is not None and "REEF_E2B_OK" in scored.reply
+    assert (record_dir / "episode.json").is_file()

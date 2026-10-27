@@ -1,19 +1,9 @@
 """The source tree layout: which paths a harness tree may hold, and what each one is.
 
-Every file of a source tree has one kind. The kind decides where an adapter
-renders the file (the descriptor's ``files:`` section names one path template
-per kind) and which checks its text must pass::
-
-    rules.md                      rules            the rules every session reads
-    config/<target>.json          config           a JSON object merged into one config target
-    skills/<name>/SKILL.md        skill            an Agent Skill
-    commands/<name>.md            agent_command    a prompt template a person types as a command
-    extensions/<name>.<ext>       code_extension   code the harness loads in process; ext follows the adapter
-    native/tools/<name>.py        native_tool      a tool of the native loop
-    native/hooks/<name>.py        native_hook      a listener at one event of the native loop
-    native/graphs/<name>.json     native_graph     the native loop's control flow
-    native/agents/<name>.json     native_agent     one agent the native loop delegates to
-    native/loops/<name>.py        native_loop      the native loop itself as code
+Every file of a source tree has one kind (``TreeKind``). The kind decides
+where an adapter renders the file (the descriptor's ``files:`` section names
+one path template per kind) and which checks its text must pass.
+``KIND_GUIDE`` gives each kind's path pattern and what its file holds.
 
 Model endpoints and credentials are never in a tree: the model binding writes
 them when a tree is rendered for an episode.
@@ -48,6 +38,21 @@ class TreeKind(StrEnum):
     NATIVE_AGENT = "native_agent"
     NATIVE_LOOP = "native_loop"
 
+
+#: What each kind's file holds, with its path pattern. Methods read it (in a step's ``material/host.json``) because
+#: the kind names alone do not describe the shape.
+KIND_GUIDE = {
+    TreeKind.RULES: "rules.md: the text every session reads, appended to the agent's rules file",
+    TreeKind.CONFIG: "config/<target>.json: a JSON object merged into one of the adapter's config targets",
+    TreeKind.SKILL: "skills/<name>/SKILL.md: an Agent Skill",
+    TreeKind.AGENT_COMMAND: "commands/<name>.md: a prompt template a person types as a command",
+    TreeKind.CODE_EXTENSION: "extensions/<name>.<ext>: code the harness loads in its process, which must compile",
+    TreeKind.NATIVE_TOOL: "native/tools/<name>.py: a native loop tool: run(args, workdir), then NAME and DESCRIPTION",
+    TreeKind.NATIVE_HOOK: "native/hooks/<name>.py: a native loop hook: listen(payload, next), then NAME and EVENT",
+    TreeKind.NATIVE_GRAPH: "native/graphs/<name>.json: the native loop's control flow",
+    TreeKind.NATIVE_AGENT: "native/agents/<name>.json: one agent the native loop delegates to",
+    TreeKind.NATIVE_LOOP: "native/loops/<name>.py: the native loop itself as code",
+}
 
 #: The names a skill, command, extension, config target or native file may take: they become path segments.
 NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
@@ -142,6 +147,7 @@ def extension_suffix(template: str) -> str:
 __all__ = [
     "ALWAYS_REVIEWED_KINDS",
     "EXTENSION_SUFFIXES",
+    "KIND_GUIDE",
     "LAYOUT",
     "NAME_PATTERN",
     "TreeKind",

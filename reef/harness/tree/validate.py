@@ -1,9 +1,8 @@
 """Validate a harness tree for one adapter, reporting every problem at once.
 
 ``validate_tree`` is the one check a tree meets before it is evaluated or
-published. It finds every problem in one pass, so a proposer can fix them all
-in one retry: the backend hands the problems back to the proposer, and an
-agent proposer's ``harness_check`` tool shows them during its session.
+published. It finds every problem in one pass, so a method that calls
+``tools.check`` can fix them all before its step ends.
 ``validate_patch`` checks the tree a patch makes, and refuses an empty patch.
 """
 
@@ -40,8 +39,8 @@ class ValidationResult:
     about when it is about one path. The tree passed every check if and only
     if ``problems`` is empty.
     Purpose: ``validate_tree`` and ``validate_patch`` make it; the backend
-    skips a step on problems after one retry, the proposal route refuses a
-    patch with them, and a proposer reads them to fix its patch.
+    skips a step whose candidate has problems, the proposal route refuses a
+    patch with them, and a method reads them through ``tools.check``.
     """
 
     problems: tuple[str, ...] = ()

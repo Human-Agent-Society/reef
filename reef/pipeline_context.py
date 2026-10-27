@@ -38,8 +38,6 @@ class PipelineContext:
     #: ``evolution.batch_size`` for harness evolution. None otherwise: a weight trainer's stage sets its own
     #: ``job_samples``, and a trainer that trains nothing keeps every sample.
     default_job_samples: int | None = None
-    #: Whether the pipeline takes training instructions; a recipe whose proposer reads none turns it off.
-    manual_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):

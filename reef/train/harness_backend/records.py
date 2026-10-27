@@ -1,13 +1,18 @@
-"""The step record: the raw material behind each harness step, for debugging and audit.
+"""The step records: each harness step's workspace, kept after the step for debugging and audit.
 
-With ``evolution.step_record_dir`` set, each step claims a fresh directory
-``<scenario>/<step>`` (a retried step ``<step>-<attempt>``) and writes
-``proposer.json`` (every model call the proposer made), ``patch.json`` (the
-proposed patch, written before validation) and ``episodes/`` (each evaluation
-episode's trajectory files). Every text in a record is redacted of
-credential-shaped literals and clipped, since the record holds traffic the
-tree's checks have not seen. ``StepRecord.read`` serves bounded raw reads of
-a committed step's files to the release pages.
+Each step claims a fresh directory ``<steps>/<step>`` (a retried step
+``<step>-<attempt>``) under the scenario's state directory. The directory is
+the step's workspace (``reef.train.harness_backend.workspace``) without its
+``scratch/``, plus ``calls.json`` (every model call of the step) and
+``result.json`` (what the method returned). Every text the backend writes
+into these two files is redacted of credential-shaped literals and clipped,
+since they hold model calls that the tree's checks have not seen.
+``material/`` keeps the traces as the clients sent them, as the record store
+does, and ``harness/`` the tree as the method left it. ``read_step_records``
+redacts every text it serves, so the release pages show no credential of
+either.
+``StepRecord.read`` serves bounded raw reads of a step's files to the
+release pages.
 """
 
 from __future__ import annotations
@@ -18,10 +23,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.harness.tree.checks import clip_record_text
+from reef.harness.tree.checks import clip_record_text, redact_secret_shaped
 
-PROPOSER_FILE = "proposer.json"
-PATCH_FILE = "patch.json"
+CALLS_FILE = "calls.json"
+RESULT_FILE = "result.json"
 
 
 def bounded(value: Any) -> Any:
@@ -38,25 +43,23 @@ def bounded(value: Any) -> Any:
 
 
 class StepRecord:
-    """The record directory of one scenario's steps.
+    """The directory that holds one scenario's step records.
 
-    ``root`` is the scenario's directory under ``evolution.step_record_dir``,
-    created at construction so an unwritable path refuses to boot; ``None``
-    turns the record off, and then every write does nothing.
+    Values: ``root`` is the directory, created at construction so an
+    unwritable path refuses to start.
+    Purpose: the backend claims one directory per step here, and the release
+    pages read the records through ``read``.
     """
 
-    def __init__(self, root: Path | None) -> None:
-        self.root = root
-        if root is not None:
-            try:
-                root.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ValueError(f"step_record_dir {root} cannot be created: {exc}") from exc
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(f"the step record directory {root} cannot be created: {exc}") from exc
 
-    def claim(self, step: int) -> Path | None:
+    def claim(self, step: int) -> Path:
         """A fresh directory for ``step``; a retried step gets ``<step>-<attempt>``, so no record is overwritten."""
-        if self.root is None:
-            return None
         attempt = 1
         step_dir = self.root / str(step)
         while True:
@@ -69,15 +72,13 @@ class StepRecord:
             return step_dir
 
     @staticmethod
-    def write(step_dir: Path | None, name: str, payload: Any) -> None:
+    def write(step_dir: Path, name: str, payload: Any) -> None:
         """One record file of a step as JSON, created exclusively: a record file is never replaced."""
-        if step_dir is None:
-            return
         with open(step_dir / name, "x", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
     def read(self, directory: str, relative: str | None) -> dict[str, Any]:
-        """The listing of a committed step's retained files, or one file's text, within the inspection limits."""
+        """The listing of a step's retained JSON files, or one file's text, within the inspection limits."""
         return read_step_records(self.root, directory, relative)
 
 
@@ -85,10 +86,8 @@ MAX_RECORD_BYTES = 4 * 1024 * 1024
 MAX_RECORD_FILES = 1000
 
 
-def read_step_records(root: Path | None, directory: str, relative: str | None) -> dict[str, Any]:
+def read_step_records(root: Path, directory: str, relative: str | None) -> dict[str, Any]:
     """Bounded raw reads of one step's record directory under ``root``, never interpreting trajectories."""
-    if root is None:
-        return {"status": "disabled", "files": []}
     base = root.resolve()
     step = Path(directory)
     # A recorded step is one immediate child of this backend's scenario directory.
@@ -112,7 +111,9 @@ def read_step_records(root: Path | None, directory: str, relative: str | None) -
             content = handle.read(MAX_RECORD_BYTES + 1)
         if len(content) > MAX_RECORD_BYTES:
             raise ValueError("record exceeds the 4 MiB inspection limit")
-        return {"status": "retained", "path": relative, "text": content.decode("utf-8", errors="replace")}
+        # A step record holds what the method wrote and what clients sent; the route serves no credential of either.
+        text = redact_secret_shaped(content.decode("utf-8", errors="replace"))
+        return {"status": "retained", "path": relative, "text": text}
     files = []
     visited = 0
     for current, dirs, names in os.walk(step, followlinks=False):

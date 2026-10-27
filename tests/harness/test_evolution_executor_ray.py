@@ -11,7 +11,6 @@ import tests
 from tests.support.harness_steps import PI_SEED, harness_backend
 
 from reef.evaluation.harness import EpisodeScorer, HarnessCandidate
-from reef.harness.tree import TreePatch
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.executor.requirements import ExecutionRequirements
@@ -51,31 +50,34 @@ def test_evolution_explicit_ray_places_scorer_on_declared_ray_gpu(tmp_path):
     try:
         backend, _ = harness_backend(
             tmp_path,
-            lambda context: None,
+            lambda workspace, tools: None,
             score=GPUScorer(),
             tasks=("one",),
             worker_executor=executor_settings(
                 {}, {"backend": "ray", "workers": 1, "resources": {"cpus_per_worker": 2}}
             ),
         )
+        backend.history.add_candidate(PI_SEED, step=1, origin="seed")
         candidate = HarnessCandidate(
             candidate_id="test",
             candidate_tree=PI_SEED,
             current_tree=PI_SEED,
-            patch=TreePatch({}),
             evaluation_tasks=("one",),
-            record_dir=tmp_path / "first-record",
+            step=1,
         )
-        assert backend.evaluator.worker_selection.settings.backend == "ray"
+        assert backend.evaluator.worker_pool.selection.settings.backend == "ray"
         result = backend.evaluate(candidate)
         assert result.metrics["candidate_scores"] == (1.0,)
         assert result.metrics["current_scores"] == (1.0,)
-        assert (tmp_path / "first-record/episodes/candidate-0/session.jsonl").is_file()
-        assert (tmp_path / "first-record/episodes/current-0/episode.json").is_file()
-        assert backend.evaluate(replace(candidate, record_dir=tmp_path / "second-record")).metrics[
-            "candidate_scores"
-        ] == (1.0,)
-        assert (tmp_path / "second-record/episodes/candidate-0/session.jsonl").is_file()
+        # A second evaluation on another task runs on the same workers.
+        second = backend.evaluate(replace(candidate, evaluation_tasks=("two",)))
+        assert second.metrics["candidate_scores"] == (1.0,) and second.metrics["episodes_run"] == 2
+        # Each episode's record comes back from its Ray worker into the history.
+        history = backend.history
+        assert all((history.episode_dir(record.episode) / "episode.json").is_file() for record in history.episodes)
+        for evaluation in (result, second):
+            (episode,) = evaluation.metrics["candidate_episodes"]
+            assert (history.episode_dir(episode["episode"]) / "session.jsonl").is_file()
         backend.close()
         # Shutdown is asynchronous in Ray: a following actor must be able to
         # acquire the same GPU, proving that backend.close released its workers.

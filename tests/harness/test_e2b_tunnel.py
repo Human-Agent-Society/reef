@@ -340,7 +340,7 @@ def test_a_relay_that_answers_after_a_refused_poll_starts_the_pump() -> None:
 
 @pytest.mark.unit
 def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path: Path) -> None:
-    root = tmp_path / "reef-proposer-abc"
+    root = tmp_path / "reef-agent-abc"
     (root / "workspace" / "harness" / "skills").mkdir(parents=True)
     (root / "workspace" / "harness" / "skills" / "a.md").write_text("A")
     (root / "pi-agent").mkdir()
@@ -379,11 +379,11 @@ def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path
         {"HOME": str(root), "PI_CODING_AGENT_DIR": f"{root}/pi-agent", "PATH": "/host/bin", "REEF_TOKEN": "t"},
         root,
     )
-    assert remote_root(root) == "/home/user/reef/reef-proposer-abc"
+    assert remote_root(root) == "/home/user/reef/reef-agent-abc"
     assert command == "/opt/agents/pi --mode json -p 'it'\"'\"'s here'"
     assert env == {
-        "HOME": "/home/user/reef/reef-proposer-abc",
-        "PI_CODING_AGENT_DIR": "/home/user/reef/reef-proposer-abc/pi-agent",
+        "HOME": "/home/user/reef/reef-agent-abc",
+        "PI_CODING_AGENT_DIR": "/home/user/reef/reef-agent-abc/pi-agent",
         "REEF_TOKEN": "t",
     }
     assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2-episodes-v1"

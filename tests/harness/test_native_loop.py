@@ -27,15 +27,15 @@ from tests.harness.test_native_serve import (
     _typed,
     _wait,
 )
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_episode_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import NATIVE_SEED_FILES, NATIVE_SEED_TOOLS, native_loop, native_tool, write_rendered
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeReleases, runtime
+from tests.support.harness_steps import MODEL, harness_backend
 
 from reef.evaluation.harness import EpisodeEvaluationWorker
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import stage_path
 from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
@@ -47,9 +47,7 @@ from reef.harness.runners.native.selftools import SelfTools, ServeState
 from reef.harness.tree import HarnessTree, RenderError, TreeKind, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
 from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
-from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.sandbox.process import LocalExecutor
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.types import JobData
 
@@ -367,24 +365,24 @@ def _score(task: str, result) -> float:
     return 1.0 if header.get("loop") or "marker" in header.get("skills", []) else 0.0
 
 
-def _backend(
-    tmp_path: Path, propose, score=_score, seed: dict[str, str] = NATIVE_SEED_FILES, **fields
+def loop_backend(
+    tmp_path: Path, scenario: str, method, score=_score, seed: dict[str, str] = NATIVE_SEED_FILES, **evolution
 ) -> HarnessBackend:
+    """A native backend over the fake binary; each ``scenario`` has its own history, so no score carries over."""
     binary = tmp_path / "fake-native"
     binary.write_text(NATIVE_FAKE)
     binary.chmod(0o755)
-    recipe = HarnessEvolutionRecipe(
-        resolve_proposer(propose),
-        resolve_episode_scorer(score),
-        ("task one",),
+    backend, _ = harness_backend(
+        tmp_path,
+        method,
+        scenario=scenario,
+        seed=HarnessTree(seed),
+        score=score,
         adapter="native",
         binary=str(binary),
-        seed=HarnessTree(seed),
-        runtime=runtime(),
-        proposals_dir=str(tmp_path / "proposals"),
-        **fields,
+        **evolution,
     )
-    return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    return backend
 
 
 def batch() -> JobData:
@@ -394,21 +392,22 @@ def batch() -> JobData:
 def test_a_win_that_touches_a_loop_is_pending_whatever_review_kinds_lists(tmp_path: Path) -> None:
     loop = TreePatch(LOOP_FILE)
     skill = TreePatch({"skills/marker/SKILL.md": "# marker"})
-    held = _backend(tmp_path, lambda context: loop)
+    held = loop_backend(tmp_path, "held", lambda workspace, tools: loop)
     result = backend_step(held, batch(), held.initial_state())
     assert result.metrics["selected"] is True and result.pending is True
-    free = _backend(tmp_path, lambda context: skill)
+    free = loop_backend(tmp_path, "free", lambda workspace, tools: skill)
     result = backend_step(free, batch(), free.initial_state())
     assert result.metrics["selected"] is True and result.pending is False
-    listed = _backend(tmp_path, lambda context: skill, review_kinds=(TreeKind.SKILL,))
+    listed = loop_backend(tmp_path, "listed", lambda workspace, tools: skill, review_kinds=(TreeKind.SKILL,))
     assert backend_step(listed, batch(), listed.initial_state()).pending is True
     # A list that names another kind holds the loop just the same, and so does the step that takes the loop out.
-    unlisted = _backend(tmp_path, lambda context: loop, review_kinds=(TreeKind.SKILL,))
+    unlisted = loop_backend(tmp_path, "unlisted", lambda workspace, tools: loop, review_kinds=(TreeKind.SKILL,))
     with_loop = backend_step(unlisted, batch(), unlisted.initial_state())
     assert with_loop.metrics["selected"] is True and with_loop.pending is True
-    without = _backend(
+    without = loop_backend(
         tmp_path,
-        lambda context: TreePatch({"native/loops/main.py": None}),
+        "without",
+        lambda workspace, tools: TreePatch({"native/loops/main.py": None}),
         score=lambda task, result: 0.0 if result.trajectory[0]["data"].get("loop") else 1.0,
         seed={**NATIVE_SEED_FILES, **LOOP_FILE},
     )
@@ -1051,7 +1050,7 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     observed = {}
     for loop in ("main", None):
         result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
-        scored = worker._score_result(result, "task one")
+        scored = worker.score_result(result, "task one", ModelBindings(MODEL))
         assert scored.score is None and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {

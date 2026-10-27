@@ -1,4 +1,4 @@
-"""Guarantees of the harness source tree: the tree and patch values, the layout, validation, and the workspace."""
+"""Guarantees of the harness source tree: the tree and patch values, the layout, and validation."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from reef.harness.tree import (
     TreeKind,
     TreeLocation,
     TreePatch,
-    TreeWorkspace,
     ValidationResult,
     locate,
     source_path,
@@ -267,30 +266,3 @@ def test_a_validation_result_holds_distinct_non_empty_messages() -> None:
         ValidationResult(("",))
     with pytest.raises(ValueError):
         ValidationResult(("a", "a"))
-
-
-# -- the workspace -------------------------------------------------------------------------------------------------
-
-
-def test_a_workspace_reads_back_as_the_patch_of_the_agents_edits(tmp_path: Path) -> None:
-    base = HarnessTree({"rules.md": "old\n", "skills/a/SKILL.md": "a\n", "skills/b/SKILL.md": "b\n"})
-    workspace = TreeWorkspace.create(base, tmp_path / "harness")
-    assert workspace.read().patch == TreePatch({})
-    (tmp_path / "harness" / "rules.md").write_text("new\n")
-    (tmp_path / "harness" / "skills" / "a" / "SKILL.md").unlink()
-    (tmp_path / "harness" / "commands").mkdir()
-    (tmp_path / "harness" / "commands" / "go.md").write_text("Go.\n")
-    (tmp_path / "harness" / "notes.txt").write_text("scratch\n")
-    (tmp_path / "harness" / "skills" / "c").mkdir()
-    (tmp_path / "harness" / "skills" / "c" / "SKILL.md").write_bytes(b"\xff")
-    os.symlink(tmp_path / "harness" / "rules.md", tmp_path / "harness" / "skills" / "b" / "extra.md")
-    result = workspace.read()
-    assert dict(result.patch.changes) == {"commands/go.md": "Go.\n", "rules.md": "new\n", "skills/a/SKILL.md": None}
-    assert result.outside == ("notes.txt", "skills/b/extra.md", "skills/c/SKILL.md")
-
-
-def test_a_workspace_needs_an_empty_directory(tmp_path: Path) -> None:
-    (tmp_path / "busy").mkdir()
-    (tmp_path / "busy" / "file").write_text("x")
-    with pytest.raises(ValueError, match="not empty"):
-        TreeWorkspace.create(HarnessTree({"rules.md": "x"}), tmp_path / "busy")

@@ -853,10 +853,12 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     assert not list(tmp_path.rglob("*.sqlite3"))
 
 
-def build_harness_evolve_dispatcher(tmp_path, backend_factory, *, propose=lambda context: None, agent_record_dir=None):
+def build_harness_evolve_dispatcher(
+    tmp_path, backend_factory, *, method=lambda workspace, tools: None, agent_record_dir=None
+):
     """A dispatcher over a pi harness recipe; these tests need an artifact-producing recipe, not its semantics."""
     return Dispatcher(
-        harness_recipe(tmp_path, propose),
+        harness_recipe(tmp_path, method),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
@@ -892,14 +894,14 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
     started = Event()
     release = Event()
 
-    def blocking_proposer(context):
-        if source_record_id(context.samples[0]) != "a-i1":
+    def blocking_method(workspace, tools):
+        if workspace.traces()[0].record != "a-i1":
             return
         started.set()
         assert release.wait(1)
 
     dispatcher = build_harness_evolve_dispatcher(
-        tmp_path, harness_repository(tmp_path, PI_SEED.files), propose=blocking_proposer
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), method=blocking_method
     )
     dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
 
@@ -960,15 +962,13 @@ def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_p
     calls = 0
     should_fail = True
 
-    def proposer(context):
+    def method(workspace, tools):
         nonlocal calls
         calls += 1
         if should_fail:
-            raise RuntimeError("proposal failed")
+            raise RuntimeError("the method failed")
 
-    dispatcher = build_harness_evolve_dispatcher(
-        tmp_path, harness_repository(tmp_path, PI_SEED.files), propose=proposer
-    )
+    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path, PI_SEED.files), method=method)
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
@@ -976,7 +976,7 @@ def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_p
         if dispatcher.build_training_status()["error"] is not None:
             break
         time.sleep(0.001)
-    assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: proposal failed"
+    assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: the method failed"
 
     failed_attempts = calls
     should_fail = False
@@ -1223,11 +1223,11 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 1
     assert status["last_committed_step"]["step"] == 1
-    assert status["last_committed_step"]["metrics"]["skipped"] == "no proposal"
+    assert status["last_committed_step"]["metrics"]["skipped"] == "the method left the head tree unchanged"
     records = committed_records(agent_record_dir, scenario="skills")
     assert [record.step for record in records] == [1]
     assert records[0].metrics is not None
-    assert records[0].metrics["skipped"] == "no proposal"
+    assert records[0].metrics["skipped"] == "the method left the head tree unchanged"
 
     dispatcher.accept_record(trace_inference("i2"))
     dispatcher.accept_record(trace_report("r2", "i2"))
@@ -1287,7 +1287,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     assert first.get_or_create_scenario("skills").scenario_step == 1
     committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
     assert committed["step"] == 1
-    assert committed["metrics"]["skipped"] == "no proposal"
+    assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
 
     second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")

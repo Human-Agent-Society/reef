@@ -27,9 +27,6 @@ The map, one subpackage per job:
 ``delivery``
     the surface that serves a release to a client: its source tree rendered
     for the scenario's adapter.
-``step_result``
-    what a settled step means for the person who asked, in the words the
-    harness pages render.
 
 This package depends on core values, runtime and surface contracts, and
 sandbox execution, never on training, recipes, scenario coordination, or the

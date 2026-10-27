@@ -206,9 +206,6 @@ class TrainingPipeline:
         #: The sample-to-job stage that shapes the samples of the selected units into job data.
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
         self.supported_training_modes = self.sample2job.supported_training_modes
-        # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
-        if not context.manual_enabled:
-            self.supported_training_modes = self.supported_training_modes - {"manual", "hybrid"}
         self.training_requests: dict[str, TrainingRequest] = {}
         self.consumed_requests: set[str] = set()
         # The error of each buffered instruction whose step failed; its next job data is a skip row, not a run.

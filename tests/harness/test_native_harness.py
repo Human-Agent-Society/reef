@@ -17,7 +17,7 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_episode_scorer, resolve_method
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import (
     NATIVE_SEED_FILES,
@@ -29,8 +29,7 @@ from tests.support.harness_render import (
 )
 from tests.support.harness_steps import COMPONENT, TreeReleases
 
-from reef.evaluation import BackendAlwaysSelectPlugin
-from reef.evaluation.harness import ScoreComparisonPlugin
+from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
@@ -57,7 +56,7 @@ from reef.harness.runners.native.host import NativeHost
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
-from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.sandbox.process import SandboxExecutor
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -198,17 +197,15 @@ def _episode(tmp_path: Path, model, files, prompt="put hello in notes.txt and re
     return run_episode(NATIVE, rendered, prompt, binary=_launcher(tmp_path))
 
 
-def native_backend(tmp_path: Path, model, propose, score, tasks: tuple[str, ...]) -> HarnessBackend:
+def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...]) -> HarnessBackend:
     """A native backend over the launcher, bound to ``model``, whose head is the seed's native files."""
     recipe = HarnessEvolutionRecipe(
-        resolve_proposer(propose),
-        resolve_episode_scorer(score),
-        tasks,
-        adapter="native",
-        binary=_launcher(tmp_path),
+        method=resolve_method(method),
+        evolution=EvolutionSettings(adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")),
+        evaluation=EvaluationSettings(tasks=tasks),
+        scorer=resolve_episode_scorer(score),
         seed=HarnessTree(NATIVE_SEED_FILES),
         runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
-        proposals_dir=str(tmp_path / "proposals"),
     )
     return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
 
@@ -650,7 +647,7 @@ def test_a_long_tool_result_is_saved_under_the_workspace(tmp_path: Path) -> None
     assert model.requests[1]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": logged["content"]}
 
 
-def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_model) -> None:
+def test_native_harness_runs_through_the_evaluation(tmp_path: Path, fake_model) -> None:
     """A patch that adds a tool file is rendered, run on both sides, and scored like any other change."""
 
     def final_answer(task, result):
@@ -660,7 +657,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
     backend = native_backend(
         tmp_path,
         fake_model,
-        lambda context: TreePatch(TOOL),
+        lambda workspace, tools: TreePatch(TOOL),
         final_answer,
         ("put hello in notes.txt and read it back",),
     )
@@ -669,10 +666,10 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_tree.files
     assert "native/hooks/loop_guard.py" in prepared.candidate.candidate_tree.files
-    evaluator = ScoreComparisonPlugin(backend)
-    decision = evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
+    policy = ComparePolicy(backend)
+    decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
     result = backend.settle_step(prepared, decision)
-    # Both trees complete the scripted task, so the verdict is a tie and nothing publishes.
+    # Both trees complete the scripted task, so the comparison is a tie and nothing publishes.
     assert result.metrics["wins"] == 0 and result.metrics["losses"] == 0 and result.metrics["ties"] == 1
     assert result.metrics["selected"] is False
 
@@ -964,7 +961,7 @@ def test_a_tree_without_a_graph_runs_the_seed_graph_and_a_bad_graph_is_a_load_er
     assert broken.trajectory[-1]["data"]["reason"]["error"]["code"] == "LOAD_ERROR"
 
 
-def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Path) -> None:
+def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_comparison(tmp_path: Path) -> None:
     """The measured sieve failure: prose after a tool call scores 0.0 on the seed; the verify graph asks once more and scores 1.0."""
 
     def final_line(task, result):
@@ -990,7 +987,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
         backend = native_backend(
             tmp_path,
             model,
-            lambda context: TreePatch(native_json("graphs", VERIFY_GRAPH)),
+            lambda workspace, tools: TreePatch(native_json("graphs", VERIFY_GRAPH)),
             final_line,
             (
                 "[sieve] how many primes are below 100000? Reply with the count as a plain integer alone on the last line.",
@@ -1001,8 +998,8 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_tree.files["native/graphs/main.json"]) == SEED_GRAPH
         assert "check" in json.loads(prepared.candidate.candidate_tree.files["native/graphs/main.json"])["stages"]
-        evaluator = ScoreComparisonPlugin(backend)
-        decision = evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
+        policy = ComparePolicy(backend)
+        decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
         settled = backend.settle_step(prepared, decision)
         assert (settled.metrics["wins"], settled.metrics["losses"], settled.metrics["ties"]) == (1, 0, 0)
         assert settled.metrics["selected"] is True
@@ -1152,7 +1149,7 @@ def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> Non
         ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
         ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
-        # A proposer's pattern is bounded where it runs (bounded_search); admission keeps the length rule only.
+        # A method's pattern is bounded where it runs (bounded_search); admission keeps the length rule only.
         ({**route, "cases": [{"when": "last_text_matches", "value": "a" * 201, "outcome": "x"}]}, "at most 200"),
         ({"kind": "verify", "check": "last_line_matches", "pattern": "a" * 201}, "at most 200"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": 2, "outcome": "else"}]}, "other than else"),
@@ -1940,7 +1937,7 @@ def test_the_binding_rides_in_the_episode_render_and_the_published_tree_is_the_s
     backend = native_backend(
         tmp_path,
         fake_model,
-        lambda context: brief,
+        lambda workspace, tools: brief,
         lambda task, result: 1.0,
         ("put hello in notes.txt and read it back",),
     )
@@ -1949,10 +1946,8 @@ def test_the_binding_rides_in_the_episode_render_and_the_published_tree_is_the_s
     batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None
-    evaluator = BackendAlwaysSelectPlugin(backend)
-    settled = backend.settle_step(
-        prepared, evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
-    )
+    policy = NoEvaluationPolicy()
+    settled = backend.settle_step(prepared, policy.decide(prepared.candidate, policy.evaluate(prepared.candidate)))
     assert settled.metrics["selected"] is True and settled.artifact is not None
     published = settled.artifact.local_path
     assert published is not None
@@ -1968,7 +1963,7 @@ def test_bounded_search_answers_ordinary_patterns_and_gives_up_on_one_that_never
     started = time.monotonic()
     assert bounded_search("(a|a)+b", "a" * 40, timeout_s=0.5) == "timeout"
     assert time.monotonic() - started < 5.0
-    # The optional group a proposer writes for a numeric answer is admitted and runs.
+    # The optional group a method writes for a numeric answer is admitted and runs.
     validate_native_graph(
         {
             "name": "g",

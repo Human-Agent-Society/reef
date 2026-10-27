@@ -2,45 +2,31 @@
 
 A method imports this package's root and nothing below it::
 
-    from reef.train.harness_backend import Proposer, ProposalContext, TreeProposal
+    from reef.train.harness_backend import Method, StepResult, Tools, Workspace
 
-``contract`` defines what a method implements (``Proposer``, ``Promoter``)
-and what a step hands it (``ProposalContext``, ``TrialRunner``,
-``AgentHost``). ``backend`` holds ``HarnessBackend``, which the recipe
-``reef.recipe.harness.HarnessEvolutionRecipe`` builds; methods never subclass
-it. ``state`` is the backend's algorithm state, ``tasks`` the evaluation
-tasks of each step, ``calls`` the step's model-call budget, ``trials`` the
-trial episodes, ``inbox`` the clients' pending patches, ``records`` the step
-record, ``manifest`` the failure manifest, and ``capabilities`` what the
-service routes may ask a backend. The tree itself is ``reef.harness.tree``,
-and the evaluation is ``reef.evaluation.harness``.
+``contract`` defines what a method implements (``Method``) and what a step
+gives it (``Tools``, ``StepResult``); ``workspace`` is the step's directory
+(``Workspace``, ``Trace``). ``backend`` holds ``HarnessBackend``, which the
+recipe ``reef.recipe.harness.HarnessEvolutionRecipe`` builds; methods never
+subclass it. ``tools`` implements the tools of a step, ``calls`` its model
+budget, ``state`` the committed algorithm state, ``inbox`` the clients'
+pending patches, ``records`` the step records, ``manifest`` the failure
+manifest, and ``capabilities`` what the service routes may ask a backend.
+The tree itself is ``reef.harness.tree``; the evaluation, the history and the
+publication policies are ``reef.evaluation.harness``.
 """
 
-from reef.train.harness_backend.contract import (
-    AgentHost,
-    Promoter,
-    ProposalContext,
-    Proposer,
-    ProposerCalls,
-    RejectedProposal,
-    SampleSource,
-    StepOutcome,
-    TreeProposal,
-    TrialRunner,
-)
+from reef.train.harness_backend.contract import Method, ModelCalls, StepResult, Tools
 from reef.train.harness_backend.manifest import FailureManifest, FailureRecord
+from reef.train.harness_backend.workspace import Trace, Workspace
 
 __all__ = [
-    "AgentHost",
     "FailureManifest",
     "FailureRecord",
-    "Promoter",
-    "ProposalContext",
-    "Proposer",
-    "ProposerCalls",
-    "RejectedProposal",
-    "SampleSource",
-    "StepOutcome",
-    "TreeProposal",
-    "TrialRunner",
+    "Method",
+    "ModelCalls",
+    "StepResult",
+    "Tools",
+    "Trace",
+    "Workspace",
 ]

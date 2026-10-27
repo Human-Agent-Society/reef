@@ -7,12 +7,12 @@ import io
 import json
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Thread
 from typing import Any
 from urllib.request import Request
 
 import pytest
+from tests.support.harness_steps import evolution_config
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
@@ -364,7 +364,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
     assert binding.last_response() is None
 
 
-def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(monkeypatch) -> None:
+def test_a_failed_call_retains_reasoning_when_the_provider_returns_no_final_text(monkeypatch) -> None:
     from reef.harness.episodes.model_binding import ModelBindingError
     from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
@@ -455,50 +455,24 @@ def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> No
     )
 
 
-def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> None:
-    module = tmp_path / "demo_client_models.py"
-    module.write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.harness_backend.contract import Proposer\n\n"
-        "class Propose(Proposer):\n"
-        "    def propose(self, context):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
-        "    def score(self, task, result):\n        return 0.0\n"
-    )
-    import sys
+def test_recipe_reads_client_models_into_the_harness_surface() -> None:
+    runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
 
-    sys.path.insert(0, str(tmp_path))
-    try:
-        config = {
-            "model": {"path": "small"},
-            "evolution": {
-                "propose": "demo_client_models:Propose",
-                "evaluate": "demo_client_models:Evaluate",
-                "tasks": ["t"],
-                "client_models": ["big/one", "big/two"],
-            },
-        }
-        runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
-        built = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
-        assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
-        codex_config = {
-            **config,
-            "evolution": {
-                **config["evolution"],
-                "adapter": "codex",
-                "model_metadata": {
-                    "small": {"context_window": 640_000, "reasoning": True},
-                },
-            },
-        }
-        codex = HarnessEvolutionRecipe.from_environment({}, config=codex_config, runtime=runtime)
-        assert codex.model_binding().metadata.context_window == 640_000
-        assert codex.build_surface("s").harness.model_metadata["small"] == codex.model_binding().metadata
-        bad = {**config, "evolution": {**config["evolution"], "client_models": "big/one"}}
-        with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
-            HarnessEvolutionRecipe.from_environment({}, config=bad, runtime=runtime)
-    finally:
-        sys.path.remove(str(tmp_path))
+    def recipe(**evolution: Any) -> HarnessEvolutionRecipe:
+        config = {"model": {"path": "small"}, **evolution_config(**evolution)}
+        return HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
+
+    built = recipe(client_models=["big/one", "big/two"])
+    assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
+    codex = recipe(
+        client_models=["big/one", "big/two"],
+        adapter="codex",
+        model_metadata={"small": {"context_window": 640_000, "reasoning": True}},
+    )
+    assert codex.model_binding().metadata.context_window == 640_000
+    assert codex.build_surface("s").harness.model_metadata["small"] == codex.model_binding().metadata
+    with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
+        recipe(client_models="big/one")
 
 
 def test_unknown_api_is_refused() -> None:
@@ -525,7 +499,7 @@ def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> No
 
     Rendering the empty string made every evaluation episode exit 1 with
     "No API key found for the selected model" before reaching the endpoint,
-    so both sides of the gate scored 0 and no proposal could ever publish.
+    so both sides of the evaluation scored 0 and no candidate could ever publish.
     """
     files = bound_files(ModelBinding("http://127.0.0.1:11434", "m"), "pi")
     assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == NO_KEY_PLACEHOLDER
@@ -581,43 +555,20 @@ def test_from_config_reads_the_key_from_the_named_environment_variable() -> None
         ModelBinding.from_config({"model": "m"}, {}, where="evolution.models.t")
 
 
-def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
-    module = tmp_path / "demo_models.py"
-    module.write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.harness_backend.contract import Proposer\n\n"
-        "class Propose(Proposer):\n"
-        "    def propose(self, context):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
-        "    def score(self, task, result):\n        return 0.0\n"
-    )
-    import sys
+def test_recipe_declares_named_models_under_evolution_models() -> None:
+    runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
 
-    sys.path.insert(0, str(tmp_path))
-    try:
-        config = {
-            "model": {"path": "small"},
-            "evolution": {
-                "propose": "demo_models:Propose",
-                "evaluate": "demo_models:Evaluate",
-                "tasks": ["t"],
-                "models": {"teacher": {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}},
-            },
-        }
-        runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
-        built = HarnessEvolutionRecipe.from_environment({"TEACHER_KEY": "sk-t"}, config=config, runtime=runtime)
-        models = built.model_bindings()
-        assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
+    def recipe(models: dict[str, Any], environ: dict[str, str]) -> HarnessEvolutionRecipe:
+        config = {"model": {"path": "small"}, **evolution_config(models=models)}
+        return HarnessEvolutionRecipe.from_environment(environ, config=config, runtime=runtime)
 
-        bad = {**config, "evolution": {**config["evolution"], "models": {"served": {"url": "http://x", "model": "m"}}}}
-        with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
-            HarnessEvolutionRecipe.from_environment({}, config=bad, runtime=runtime)
-        bad = {**config, "evolution": {**config["evolution"], "models": {"t": {"model": "m"}}}}
-        with pytest.raises(RecipeConfigError, match=r"evolution\.models\.t\.url"):
-            HarnessEvolutionRecipe.from_environment({}, config=bad, runtime=runtime)
-    finally:
-        sys.path.remove(str(tmp_path))
-        sys.modules.pop("demo_models", None)
+    teacher = {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}
+    models = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"}).model_bindings()
+    assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
+    with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
+        recipe({"served": {"url": "http://x", "model": "m"}}, {})
+    with pytest.raises(RecipeConfigError, match=r"evolution\.models\.t\.url"):
+        recipe({"t": {"model": "m"}}, {})
 
 
 def models_overlay(binding: ModelBinding) -> dict:

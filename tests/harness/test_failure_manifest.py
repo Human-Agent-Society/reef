@@ -1,27 +1,25 @@
 """Guard tests for the failure manifest (issue #475): the state schema is
 pinned field by field, fingerprints are stable across processes and temp
-directories, the diff classes follow the streak rules, the proposer reads the
-committed manifest from its context, and the manifest rides the committer
-from one step's settlement to the next step's proposal."""
+directories, the diff classes follow the streak rules, the method reads the
+committed manifest from its workspace, and the manifest rides the committer
+from one step's settlement to the next step's workspace."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_recipe
+from tests.support.harness_steps import changed_rules, harness_backend
 
 from reef.artifact import ArtifactRef
 from reef.evaluation.harness import FailureObservation
 from reef.harness.tree import TreePatch
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.backend import ComponentReleases
-from reef.train.harness_backend import FailureManifest, FailureRecord
+from reef.train.harness_backend import FailureManifest, FailureRecord, Workspace
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.manifest import MANIFEST_KIND, advance, fingerprint, normalize_cause
 from reef.train.types import JobData, TrainStepResult
@@ -30,12 +28,16 @@ LAUNCH_CAUSE = "harness binary '/tmp/pytest-123/no-such-binary' not found"
 LAUNCH_FINGERPRINT = "75b82de293902cee"
 
 
-def backend(tmp_path: Path, propose, binary: str | None = None) -> HarnessBackend:
+def backend(tmp_path: Path, method, binary: str | None = None) -> HarnessBackend:
     """A pi backend over the fake binary, or over ``binary`` when given, whose head is the seed tree."""
-    recipe = harness_recipe(tmp_path, propose)
-    if binary is not None:
-        recipe = replace(recipe, binary=binary)
-    return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    built, _ = harness_backend(tmp_path, method, **({} if binary is None else {"binary": binary}))
+    return built
+
+
+def committed_manifest(workspace: Workspace) -> FailureManifest | None:
+    """The manifest a step's material holds, as a method reads it; ``None`` before the first evaluation."""
+    path = workspace.material / "failures.json"
+    return FailureManifest.from_state(json.loads(path.read_text(encoding="utf-8"))) if path.is_file() else None
 
 
 def batch() -> JobData:
@@ -144,27 +146,26 @@ def test_entries_serialize_sorted_by_fingerprint() -> None:
     assert fingerprints == sorted(fingerprints)
 
 
-# -- the proposer's view ---------------------------------------------------
+# -- the method's view -----------------------------------------------------
 
 
 def manifest_state() -> dict:
     return advance(None, 1, (observation("task one"),)).to_state()
 
 
-def test_the_proposer_reads_the_committed_manifest_from_its_context(tmp_path: Path) -> None:
+def test_the_method_reads_the_committed_manifest_from_its_workspace(tmp_path: Path) -> None:
     received = []
 
-    def propose(context):
-        received.append(context.manifest)
-        return
+    def method(workspace, tools):
+        received.append(committed_manifest(workspace))
 
-    b = backend(tmp_path, propose)
+    b = backend(tmp_path, method)
     first = backend_step(b, batch(), b.initial_state())
     assert received == [None]
     assert first.state["failure_manifest"] is None  # absence stays unknown, never an empty manifest
     result = backend_step(b, batch(), {"steps": 1, "failure_manifest": manifest_state()})
     assert received[1] == FailureManifest.from_state(manifest_state())
-    assert result.metrics["skipped"] == "no proposal"
+    assert result.metrics["skipped"] == "the method left the head tree unchanged"
     assert result.state["failure_manifest"] == manifest_state()  # a skip carries the manifest untouched
 
 
@@ -174,13 +175,13 @@ def test_the_proposer_reads_the_committed_manifest_from_its_context(tmp_path: Pa
 def failing_step(
     tmp_path: Path, binary: str | None, received: list[FailureManifest | None], state: dict
 ) -> TrainStepResult:
-    """One step whose proposal rewrites the rules, over ``binary`` (the fake pi when ``None``)."""
+    """One step whose method rewrites the rules, over ``binary`` (the fake pi when ``None``)."""
 
-    def propose(context):
-        received.append(context.manifest)
+    def method(workspace, tools):
+        received.append(committed_manifest(workspace))
         return TreePatch(changed_rules(f"rules {len(received)}\n"))
 
-    return backend_step(backend(tmp_path, propose, binary), batch(), state)
+    return backend_step(backend(tmp_path, method, binary), batch(), state)
 
 
 def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -> None:
@@ -198,7 +199,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
     assert entry.cause == "harness binary '<path>' not found"
     assert (entry.count, entry.first_seen_step, entry.last_seen_step) == (1, 1, 1)
 
-    # Step 2 on the committed state: propose observes the failure, and the
+    # Step 2 on the committed state: the method observes the failure, and the
     # unchanged failure persists with its streak extended.
     second = failing_step(tmp_path, missing, received, dict(first.state))
     assert isinstance(received[1], FailureManifest)

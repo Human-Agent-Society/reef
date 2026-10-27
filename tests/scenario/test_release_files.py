@@ -25,9 +25,9 @@ MARKER = TreePatch(changed_rules("marker rules\n"))
 MARKED = PI_SEED.apply(MARKER)
 
 
-def harness_scenario(tmp_path: Path, propose, *, durable: bool = True, **fields) -> tuple[Dispatcher, Scenario]:
+def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) -> tuple[Dispatcher, Scenario]:
     dispatcher = Dispatcher(
-        harness_recipe(tmp_path, propose, **fields),
+        harness_recipe(tmp_path, method, **fields),
         harness_repository(tmp_path, PI_SEED.files),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record" if durable else None),
@@ -45,7 +45,7 @@ def release_files(scenario: Scenario) -> ScenarioReleaseFiles:
 
 def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_it(tmp_path: Path) -> None:
     answers = iter((MARKER, None))
-    dispatcher, scenario = harness_scenario(tmp_path, lambda context: next(answers))
+    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, tools: next(answers))
     releases = release_files(scenario)
     base = scenario.repository.base_artifact.release_id
     created = scenario.current_artifact_ref().release_id
@@ -58,7 +58,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
         published = scenario.current_artifact_ref().release_id
         assert published != base
         assert releases.head(COMPONENT) == ReleaseFiles(published, dict(MARKED.files))
-        assert run_step(scenario, "2").metrics["skipped"] == "no proposal"
+        assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
         assert releases.head(COMPONENT).release_id == published
         # Every committed release reads by id, the base included; an id the scenario never committed is not found.
         assert releases.release(base, COMPONENT).files == PI_SEED.files
@@ -72,7 +72,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
 def test_a_pending_publish_is_the_head_the_next_step_builds_on(tmp_path: Path) -> None:
     trees = []
     dispatcher, scenario = harness_scenario(
-        tmp_path, lambda context: trees.append(context.tree) or MARKER, publish="review"
+        tmp_path, lambda workspace, tools: trees.append(workspace.tree()) or MARKER, publish="review"
     )
     created = scenario.current_artifact_ref().release_id
     try:
@@ -81,15 +81,15 @@ def test_a_pending_publish_is_the_head_the_next_step_builds_on(tmp_path: Path) -
         assert scenario.repository.require_current_artifact().release_id == created
         pending = release_files(scenario).head(COMPONENT)
         assert pending.release_id != created and pending.files == MARKED.files
-        # Step 2 proposes on the pending tree, where the same patch changes nothing, and once more on the retry.
-        assert run_step(scenario, "2").metrics["skipped"] == "the patch changes nothing"
-        assert trees == [PI_SEED, MARKED, MARKED]
+        # Step 2 starts from the pending tree, where the same patch changes nothing.
+        assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
+        assert trees == [PI_SEED, MARKED]
     finally:
         dispatcher.close()
 
 
 def test_a_promote_and_a_rollback_move_the_head(tmp_path: Path) -> None:
-    dispatcher, scenario = harness_scenario(tmp_path, lambda context: MARKER, publish="review")
+    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, tools: MARKER, publish="review")
     releases = release_files(scenario)
     created = scenario.current_artifact_ref().release_id
     try:
@@ -105,7 +105,7 @@ def test_a_promote_and_a_rollback_move_the_head(tmp_path: Path) -> None:
 
 
 def test_without_a_durable_history_the_head_is_the_served_release(tmp_path: Path) -> None:
-    dispatcher, scenario = harness_scenario(tmp_path, lambda context: MARKER, durable=False)
+    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, tools: MARKER, durable=False)
     releases = release_files(scenario)
     try:
         assert not scenario.store.durable

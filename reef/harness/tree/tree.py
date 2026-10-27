@@ -3,7 +3,7 @@
 A harness is one directory of text files. ``HarnessTree`` is that directory as
 a value: a release stores one, the harness backend reads the head tree from
 git, and ``render_tree`` turns one into the files an adapter's binary reads.
-``TreePatch`` is a change to a tree: a proposer returns one, the proposal
+``TreePatch`` is a change to a tree: a client proposes one, the proposal
 inbox stores one, and ``HarnessTree.apply`` applies it.
 """
 
@@ -53,8 +53,8 @@ class TreePatch:
     text of that file, or to ``None``, which removes the file. A key that
     ``changes`` does not name keeps its text. The empty patch changes nothing.
     The mapping is read-only, and its order has no meaning.
-    Purpose: a proposer returns a patch against the head tree, the proposal
-    inbox stores one from a client, and ``HarnessTree.apply`` applies it.
+    Purpose: the proposal inbox stores a client's patch against the head
+    tree, a method may build one, and ``HarnessTree.apply`` applies it.
     """
 
     changes: Mapping[str, str | None]
@@ -119,13 +119,13 @@ class HarnessTree:
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root).as_posix()
             if path.is_symlink():
-                raise ValueError(f"harness tree {root} holds a symbolic link at {relative!r}")
+                raise ValueError(f"{root} holds a symbolic link at {relative!r}")
             if not path.is_file():
                 continue
             try:
                 files[relative] = path.read_bytes().decode("utf-8")
             except UnicodeDecodeError as exc:
-                raise ValueError(f"harness tree file {relative!r} is not UTF-8 text: {exc}") from exc
+                raise ValueError(f"{root} holds a file that is not UTF-8 text at {relative!r}: {exc}") from exc
         return cls(files)
 
     def write(self, directory: Path) -> None:

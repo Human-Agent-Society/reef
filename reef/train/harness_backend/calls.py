@@ -1,9 +1,9 @@
 """The model-call budget, record and live activity of one harness step.
 
-Every model call a proposer makes in a step goes through ``StepCalls``: the
-bindings it receives in ``ProposalContext.models`` are ``BudgetedBinding``
-wrappers, and an agent proposer's gateway spends from the same object. The
-calls land in the step's ``proposer.json``, and the activity lines feed the
+Every model call a method makes in a step goes through ``StepCalls``: the
+bindings it receives in ``Tools.models`` are ``BudgetedBinding`` wrappers,
+and a gateway that serves an agent process spends from the same object. The
+calls land in the step's ``calls.json``, and the activity lines feed the
 request page while the step runs.
 """
 
@@ -16,8 +16,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.tree.checks import clip_record_text
-from reef.train.harness_backend.contract import ProposerCalls
+from reef.harness.tree.checks import redact_secret_shaped
+from reef.train.harness_backend.contract import ModelCalls
 from reef.train.harness_backend.records import bounded
 
 
@@ -25,17 +25,19 @@ from reef.train.harness_backend.records import bounded
 MAX_ACTIVITY = 300
 
 
-class StepCalls(ProposerCalls):
+class StepCalls(ModelCalls):
     """One step's model-call budget, record and live activity, shared by the budgeted bindings and an agent's gateway.
 
     Values: ``cap`` ≥ 0 is the step's call budget, 0 for none, and ``spent``
     ≤ ``cap`` when ``cap`` > 0 counts the calls so far. ``entries`` is the
-    list the step writes to ``proposer.json``, one mapping per call in call
-    order. ``lines`` holds the latest ``MAX_ACTIVITY`` activity lines, each
-    ``{at, kind, text}`` with ``failed`` on a line that went wrong.
-    Purpose: the backend makes one per step; the budgeted bindings and an
-    agent's gateway spend and record through it, and the request page reads
-    :meth:`activity` from another thread.
+    list the step writes to ``calls.json``, one mapping per call in call
+    order, each redacted and clipped as ``bounded`` makes it. ``lines`` holds
+    the latest ``MAX_ACTIVITY`` activity lines, each ``{at, kind, text}``
+    with ``failed`` on a line that went wrong, its text redacted.
+    Purpose: the backend makes one per step and hands it out as
+    ``Tools.calls``; the budgeted bindings and an agent's gateway spend and
+    record through it, and the request page reads :meth:`activity` from
+    another thread.
     """
 
     def __init__(self, cap: int, record: list[dict[str, Any]]) -> None:
@@ -46,15 +48,20 @@ class StepCalls(ProposerCalls):
         self.lock = threading.Lock()
 
     def spend(self) -> None:
-        if self.cap and self.spent >= self.cap:
-            raise RuntimeError(f"model call budget of {self.cap} per evolve step exhausted")
-        self.spent += 1
+        # A method may call models from several threads; the count and the check go together.
+        with self.lock:
+            if self.cap and self.spent >= self.cap:
+                raise RuntimeError(f"model call budget of {self.cap} per evolve step exhausted")
+            self.spent += 1
 
     def record(self, entry: Mapping[str, Any]) -> None:
-        self.entries.append(dict(entry))
+        # Every caller's entry, a gateway's too, is redacted and clipped before the record keeps it.
+        self.entries.append(bounded(entry))
 
     def note(self, kind: str, text: str, *, failed: bool = False) -> None:
-        line: dict[str, Any] = {"at": time.time(), "kind": kind, "text": " ".join(text.split())[:300]}
+        # A line can quote an error or a reply, which the request page shows: it is redacted as the record is.
+        shown = redact_secret_shaped(" ".join(text.split()))[:300]
+        line: dict[str, Any] = {"at": time.time(), "kind": kind, "text": shown}
         if failed:
             line["failed"] = True
         with self.lock:
@@ -71,12 +78,12 @@ class BudgetedBinding(ModelBinding):
     Values: ``inner`` is the binding the calls go to, and ``step_calls`` the
     step's ``StepCalls``; the endpoint fields repeat ``inner``'s. Every
     binding of one step shares one ``StepCalls``, so they spend one budget.
-    Purpose: ``budgeted_bindings`` wraps every binding a proposer receives.
+    Purpose: ``budgeted_bindings`` wraps every binding a method receives.
     Each call spends from the budget first, then lands in the step record:
     one entry with the model, the request, the reply or the error, the
     provider response when available, the seconds it took and the ``usage``
     (input and output tokens), every text cut at the record cap. A subclass,
-    so the proposer still receives ModelBinding values; it forwards to the
+    so the method still receives ModelBinding values; it forwards to the
     wrapped binding, so a method's own binding behavior is preserved.
     """
 
@@ -101,7 +108,8 @@ class BudgetedBinding(ModelBinding):
         kwargs: dict[str, Any] = dict(params)
         if timeout_s is not None:
             kwargs["timeout_s"] = timeout_s
-        entry: dict[str, Any] = {"model": self.model, "messages": bounded(messages), "params": bounded(kwargs)}
+        # The record bounds the entry, so it holds the call as made.
+        entry: dict[str, Any] = {"model": self.model, "messages": messages, "params": kwargs}
         # ``chat`` returns text only; keep the provider response too, including any reasoning it exposed.
         if isinstance(self.inner, ModelBinding):
             object.__setattr__(self.inner, "_last_usage", None)
@@ -111,16 +119,16 @@ class BudgetedBinding(ModelBinding):
             reply = self.inner.chat(messages, **kwargs)
         except BaseException as exc:
             # The failed call is the step's decision too: the record keeps it before the error propagates.
-            entry["error"] = clip_record_text(f"{type(exc).__name__}: {exc}")
+            entry["error"] = f"{type(exc).__name__}: {exc}"
             raise
         else:
-            entry["reply"] = clip_record_text(reply) if isinstance(reply, str) else bounded(reply)
+            entry["reply"] = reply
             return reply
         finally:
             # A provider may spend its budget on reasoning and return no final text; retain that response on error too.
             response = self.inner.last_response() if isinstance(self.inner, ModelBinding) else None
             if response is not None:
-                entry["response"] = bounded(response)
+                entry["response"] = response
             entry["seconds"] = round(time.monotonic() - started, 3)
             usage = self.inner.last_usage() if isinstance(self.inner, ModelBinding) else None
             if usage is not None:
@@ -131,10 +139,6 @@ class BudgetedBinding(ModelBinding):
     def last_response(self) -> dict[str, Any] | None:
         """The provider response of the latest call, as the wrapped binding kept it."""
         return self.inner.last_response() if isinstance(self.inner, ModelBinding) else None
-
-    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
-        """A method's own line in the step's activity, beside the lines the calls write."""
-        self.step_calls.note(kind, text, failed=failed)
 
     def note_answer(self, entry: Mapping[str, Any]) -> None:
         """One activity line for a finished call: how long it took and its tokens, or its error."""
@@ -155,17 +159,17 @@ class BudgetedBinding(ModelBinding):
         self.step_calls.spend()
         self.step_calls.note("model", f"asking {self.model}")
         kwargs: dict[str, Any] = {} if timeout_s is None else {"timeout_s": timeout_s}
-        entry: dict[str, Any] = {"model": self.model, "body": bounded(body), "params": bounded(kwargs)}
+        entry: dict[str, Any] = {"model": self.model, "body": body, "params": kwargs}
         started = time.monotonic()
         try:
             response = self.inner.complete(body, **kwargs)
         except BaseException as exc:
-            entry["error"] = clip_record_text(f"{type(exc).__name__}: {exc}")
+            entry["error"] = f"{type(exc).__name__}: {exc}"
             entry["seconds"] = round(time.monotonic() - started, 3)
             self.step_calls.record(entry)
             self.note_answer(entry)
             raise
-        entry["response"] = bounded(response)
+        entry["response"] = response
         entry["seconds"] = round(time.monotonic() - started, 3)
         # The wrapped binding's complete records the usage of the response it returned.
         usage = self.inner.last_usage()
@@ -176,7 +180,7 @@ class BudgetedBinding(ModelBinding):
         return response
 
 
-def proposer_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
+def call_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     """Input and output tokens summed over the record's calls that reported usage."""
     usages = [entry["usage"] for entry in record if isinstance(entry.get("usage"), Mapping)]
     return (
@@ -186,7 +190,7 @@ def proposer_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
 
 
 def budgeted_bindings(models: ModelBindings, calls: StepCalls) -> ModelBindings:
-    """The proposer's view: every ``chat`` shares the step's budget and lands in its record.
+    """The method's view: every ``chat`` shares the step's budget and lands in its record.
 
     The bindings are wrapped whatever the cap, so the record sees every call;
     with a cap of 0 nothing is refused. ``calls`` is per prepare_step call,
@@ -202,4 +206,4 @@ def budgeted_bindings(models: ModelBindings, calls: StepCalls) -> ModelBindings:
     )
 
 
-__all__ = ["BudgetedBinding", "StepCalls", "budgeted_bindings", "proposer_tokens"]
+__all__ = ["BudgetedBinding", "StepCalls", "budgeted_bindings", "call_tokens"]

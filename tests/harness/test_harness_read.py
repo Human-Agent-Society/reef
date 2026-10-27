@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support.harness_steps import IdleMethod, evolution_config
 
 from reef.artifact import Artifact, ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import EvaluationSettings
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
-from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
@@ -16,7 +17,7 @@ from reef.surface import Surface
 PI_RULES_RENDER = {"pi-agent/AGENTS.md": "rule\n", "pi-agent/models.json": "{}\n", "pi-agent/settings.json": "{}\n"}
 #: A pi harness evolution recipe: what its surface serves is the subject here, so it never builds a backend.
 PI_RECIPE = HarnessEvolutionRecipe(
-    resolve_proposer(lambda context: None), resolve_episode_scorer(lambda task, result: 0.0), ("t",)
+    method=IdleMethod(), evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none")
 )
 
 
@@ -131,25 +132,8 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     ]
 
 
-def test_harness_recipes_name_their_adapter(tmp_path, monkeypatch) -> None:
-    (tmp_path / "demo_adapter_surface.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.harness_backend.contract import Proposer\n\n"
-        "class Propose(Proposer):\n"
-        "    def propose(self, context):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
-        "    def score(self, task, result):\n        return 0.0\n"
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    config = {
-        "model": {"path": "small"},
-        "evolution": {
-            "propose": "demo_adapter_surface:Propose",
-            "evaluate": "demo_adapter_surface:Evaluate",
-            "tasks": ["t"],
-            "adapter": "claude",
-        },
-    }
+def test_harness_recipes_name_their_adapter() -> None:
+    config = {"model": {"path": "small"}, **evolution_config(adapter="claude")}
     built = HarnessEvolutionRecipe.from_environment(
         {}, config=config, runtime=InferenceProxyRuntime(model_path="small", base_url="http://up")
     )
