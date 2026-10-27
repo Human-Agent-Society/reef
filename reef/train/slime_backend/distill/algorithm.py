@@ -38,7 +38,7 @@ from reef.train.slime_backend.distill.teacher_engine import (
     TeacherEngine,
     validate_teacher_tokenizer,
 )
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 #: ``self``: the student's own weights read a privileged prefix (the current
 #: weights at update rate 1, an EMA of them below 1, a frozen snapshot at 0).
@@ -178,7 +178,7 @@ def _is_finite(value: object) -> bool:
 ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, teacher_tokens, sample_weight]"
 
 
-def distill_sample_row(sample: TrajectoryItem) -> list[Any]:
+def distill_sample_row(sample: TrajectorySample) -> list[Any]:
     """Shape one Reef sample into the family's 7-element wire row.
 
     A sample without a ``distill_sample_weight`` in its training data
@@ -474,7 +474,7 @@ class DistillAlgorithm(SlimeAlgorithm):
 
     # --- stage 2: shape row ---
 
-    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
+    def shape_sample_row(self, sample: TrajectorySample) -> list[Any]:
         return distill_sample_row(sample)
 
     # --- stage 3: build batch ---

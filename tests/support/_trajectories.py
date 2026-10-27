@@ -4,7 +4,7 @@ from dataclasses import asdict
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 
 def policy_trajectory(
@@ -21,7 +21,7 @@ def policy_trajectory(
     topk_log_probs=(),
     extras=None,
     runtime_load_spans=(),
-) -> TrajectoryItem:
+) -> TrajectorySample:
     item = recorded_trajectory(source_agent_record_id, {}, reward)
     return item.with_training(
         tokens=list(tokens),
@@ -38,7 +38,7 @@ def policy_trajectory(
     )
 
 
-def recorded_trajectory(source_agent_record_id, payload, score, feedback=None, trajectory=()) -> TrajectoryItem:
+def recorded_trajectory(source_agent_record_id, payload, score, feedback=None, trajectory=()) -> TrajectorySample:
     payloads = trajectory or (payload,)
     records = tuple(
         AgentRecord.create(

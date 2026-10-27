@@ -21,7 +21,7 @@ from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.sandbox.process import EpisodeExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 
 @dataclass(frozen=True)
@@ -158,7 +158,7 @@ class Proposer(ConfiguredPlugin, ABC):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -182,7 +182,7 @@ class Promoter(ConfiguredPlugin, ABC):
     @abstractmethod
     def promote(
         self,
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:

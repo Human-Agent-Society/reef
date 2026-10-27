@@ -48,7 +48,7 @@ from reef.sandbox.environment import download_directory, execute
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 logger = logging.getLogger(__name__)
 
@@ -510,7 +510,7 @@ class AgentProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -530,7 +530,7 @@ class AgentProposer(Proposer):
 def answer_with_agent(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
     host: AgentHost,

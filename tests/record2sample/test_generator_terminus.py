@@ -13,7 +13,7 @@ tmux_session = pytest.importorskip("harbor.agents.terminus_2.tmux_session")
 harbor_environments = pytest.importorskip("harbor.environments.base")
 harbor_llms = pytest.importorskip("harbor.llms.base")
 agent_context = pytest.importorskip("harbor.models.agent.context")
-generator_terminus = pytest.importorskip("reef.record2task.generator.terminus")
+generator_terminus = pytest.importorskip("reef.record2sample.generator.terminus")
 
 
 def terminal_lost() -> RuntimeError:

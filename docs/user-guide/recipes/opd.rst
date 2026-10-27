@@ -22,8 +22,8 @@ The learning loop
    Train* :: minimize sampled-token reverse KL with one optimizer update
    Publish :: serve the updated student weights
 
-Teacher and student see identical token sequences. The record-to-task stage
-(``OPDTasks``) uses the captured inference tokens, preserving thinking switches and assistant
+Teacher and student see identical token sequences. The record-to-sample stage
+(``OPDSamples``) uses the captured inference tokens, preserving thinking switches and assistant
 prefixes, and loads no tokenizer. It rejects a non-empty teacher context. A
 reported score is kept as metadata and does not enter the loss.
 
@@ -51,10 +51,10 @@ Slime's ``--global-batch-size`` is the responses of one optimizer step:
 .. code:: yaml
 
    pipeline:
-     record2task:
+     record2sample:
        config:
          max_teacher_tokens: 8192
-     task2job:
+     sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
    training:
@@ -63,9 +63,9 @@ Slime's ``--global-batch-size`` is the responses of one optimizer step:
 
 .. config::
 
-   pipeline.task2job.config.job_samples | required | responses in one job. Set it to ``training.config.global_batch_size`` so that one job is one step.
+   pipeline.sample2job.config.job_samples | required | responses in one job. Set it to ``training.config.global_batch_size`` so that one job is one step.
    training.config.global_batch_size | responses in one optimizer step. Sample this many responses before you wait for publication, so that one job is one step.
-   pipeline.record2task.config.max_teacher_tokens | 0 | maximum recorded sequence length; a longer report is skipped and counted in ``teacher_overflow_reports``. 0 disables the check.
+   pipeline.record2sample.config.max_teacher_tokens | 0 | maximum recorded sequence length; a longer report is skipped and counted in ``teacher_overflow_reports``. 0 disables the check.
 
 The Slime options belong in ``training.options``:
 

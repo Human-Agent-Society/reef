@@ -15,7 +15,7 @@ from recipes.tttd import (
     TTTDJobData,
     TTTDRecipe,
     TTTDRecord2Record,
-    TTTDTasks,
+    TTTDSamples,
 )
 from recipes.tttd.objective import TttdObjective
 from reef.artifact import ArtifactRef
@@ -25,7 +25,7 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
 from reef.record2record import NoRecordSets
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
@@ -33,7 +33,7 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import TrajectoryItem, trajectory_groups
+from reef.train.types import TrajectorySample, trajectory_groups
 
 
 class _ExperimentLogger:
@@ -102,8 +102,8 @@ def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=record2record,
-        record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2job=TTTDJobData(context, record2record, None, job_samples),
+        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
+        sample2job=TTTDJobData(context, record2record, None, job_samples),
     )
 
 
@@ -122,7 +122,7 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
             "data": {},
             "pipeline": {
                 "record2record": {"config": {"groups_per_step": 2, "rollouts_per_group": 3}},
-                "record2task": {"config": {"accept_multi_turn_policy_samples": True}},
+                "record2sample": {"config": {"accept_multi_turn_policy_samples": True}},
             },
         }
     )
@@ -130,20 +130,20 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
     pipeline = recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
 
     assert isinstance(pipeline.record2record, TTTDRecord2Record)
-    assert isinstance(pipeline.record2task, TTTDTasks)
-    assert isinstance(pipeline.task2job, TTTDJobData)
-    assert (pipeline.record2task.groups_per_step, pipeline.record2task.rollouts_per_group) == (2, 3)
-    assert (pipeline.task2job.groups_per_step, pipeline.task2job.rollouts_per_group) == (2, 3)
-    assert pipeline.record2task.assembly.settings.accept_multi_turn_policy_samples
-    assert pipeline.task2job.max_job_samples == 6
+    assert isinstance(pipeline.record2sample, TTTDSamples)
+    assert isinstance(pipeline.sample2job, TTTDJobData)
+    assert (pipeline.record2sample.groups_per_step, pipeline.record2sample.rollouts_per_group) == (2, 3)
+    assert (pipeline.sample2job.groups_per_step, pipeline.sample2job.rollouts_per_group) == (2, 3)
+    assert pipeline.record2sample.assembly.settings.accept_multi_turn_policy_samples
+    assert pipeline.sample2job.max_job_samples == 6
 
 
 @pytest.mark.unit
 def test_tttd_default_grid_is_the_paper_grid() -> None:
     pipeline = _recipe({"data": {}}).build_pipeline(PipelineContext("discovery"))
 
-    assert isinstance(pipeline.task2job, TTTDJobData)
-    assert (pipeline.task2job.groups_per_step, pipeline.task2job.rollouts_per_group) == (8, 64)
+    assert isinstance(pipeline.sample2job, TTTDJobData)
+    assert (pipeline.sample2job.groups_per_step, pipeline.sample2job.rollouts_per_group) == (8, 64)
 
 
 @pytest.mark.unit
@@ -159,8 +159,8 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
     [
         ({"record2record": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
         ({"record2record": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
-        ({"record2task": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
-        ({"task2job": {"config": {"batch_size": 2}}}, "TTTDJobData: unknown config fields: batch_size"),
+        ({"record2sample": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
+        ({"sample2job": {"config": {"batch_size": 2}}}, "TTTDJobData: unknown config fields: batch_size"),
     ],
 )
 def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, message: str) -> None:
@@ -184,12 +184,12 @@ def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stage", [TTTDTasks, TTTDJobData])
+@pytest.mark.parametrize("stage", [TTTDSamples, TTTDJobData])
 def test_tttd_later_stages_need_the_tttd_record_stage(stage: type) -> None:
     context = PipelineContext("discovery")
     stages = {"record2record": NoRecordSets()}
     if stage is TTTDJobData:
-        stages["record2task"] = TTTDTasks(SampleAssemblySettings(), TTTDRecord2Record(context, TTTDGridSettings()))
+        stages["record2sample"] = TTTDSamples(SampleAssemblySettings(), TTTDRecord2Record(context, TTTDGridSettings()))
     with pytest.raises(PluginConfigError, match=f"{stage.__name__} needs TTTDRecord2Record"):
         stage.from_config({}, context=context, environ={}, **stages)
 
@@ -334,7 +334,7 @@ def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
 
 @pytest.mark.unit
 def test_tttd_caches_policy_samples_at_push(monkeypatch) -> None:
-    from reef.record2task import assembly as reported_module
+    from reef.record2sample import assembly as reported_module
 
     calls = 0
     make_sample = reported_module.make_policy_trajectory
@@ -381,7 +381,7 @@ def test_tttd_refuses_reports_before_their_inferences() -> None:
 def test_tttd_invalid_single_report_does_not_wait_for_missing_inference() -> None:
     processor = _processor()
     with pytest.raises(ReportValidationError):
-        processor.push(_report(0, processor.record2task.groups_per_step, 0, 1.0))
+        processor.push(_report(0, processor.record2sample.groups_per_step, 0, 1.0))
     assert not processor.ready(6)
 
 
@@ -617,7 +617,7 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     from reef.train.algos.registry import resolve_objective
     from reef.train.types import JobData
 
-    def sample(record_id: str, reward: float) -> TrajectoryItem:
+    def sample(record_id: str, reward: float) -> TrajectorySample:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
     objective = resolve_objective("tttd")

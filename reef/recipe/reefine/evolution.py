@@ -39,7 +39,7 @@ from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 Proposal = tuple[str, str, dict[str, Any]]
 
@@ -460,7 +460,7 @@ API_SECTION = (
 
 def propose(
     nodes: Sequence[tuple[str, Any]],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     *,
     requests: Sequence[Mapping[str, Any]] = (),
@@ -529,7 +529,7 @@ def propose(
 def _answer_request(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
     adapter: str = EXTENSION_ADAPTER,
@@ -966,7 +966,7 @@ def reserved_sentence(adapter: str) -> str:
 def _request_prompt(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
     adapter: str = EXTENSION_ADAPTER,
@@ -1256,7 +1256,7 @@ def _max_tokens(default: int) -> int:
         return default
 
 
-def failures_text(samples: Sequence[TrajectoryItem]) -> str:
+def failures_text(samples: Sequence[TrajectorySample]) -> str:
     """The failing samples as the proposer reads them: one object per sample with the request as served, the
     score its report gave and the report's feedback verbatim (``null`` when the report carried none)."""
     views = [
@@ -1344,7 +1344,7 @@ class TextProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,

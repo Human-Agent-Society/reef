@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data
@@ -45,7 +45,7 @@ class OpenclawrlSettings:
             raise ValueError(f"openclawrl subset_mode must be one of: {', '.join(_SUBSET_MODES)}")
 
 
-def openclawrl_sample_row(sample: TrajectoryItem) -> list[Any]:
+def openclawrl_sample_row(sample: TrajectorySample) -> list[Any]:
     """Shape one Reef sample into this family's 8-column wire row.
 
     Outbound mirror of :func:`build_openclawrl_rollout_data`.

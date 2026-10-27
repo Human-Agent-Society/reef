@@ -123,7 +123,7 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     from reef.storage.sqlite import SQLiteRecordStore
 
     config, _ = resolve_deployment_config(
-        {**deployment(), "pipeline": {"task2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
+        {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = SQLiteRecordStore()

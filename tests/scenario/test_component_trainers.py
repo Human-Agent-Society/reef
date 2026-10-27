@@ -54,8 +54,9 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import JudgedTasks
+from reef.record2sample import JudgedSamples
 from reef.runtime.jobs import JobStatus, TrainingJob
+from reef.sample2job import Sample2Job
 from reef.scenario import Scenario
 from reef.scenario.scenario import validate_component_trainers
 from reef.service.app import create_app
@@ -69,11 +70,10 @@ from reef.storage.commits import (
 )
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import ComponentSurface, Surface, TextFileTree
-from reef.task2job import Task2Job
 from reef.train import ComponentTrainer, Trainer, TrainStepResult
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 
 class _SlowBackend(_ComponentBackend):
@@ -177,7 +177,7 @@ def _commit_step(scenario: Scenario, component: str) -> list[tuple[str, ...]] | 
         return None
     batch = scenario.trainer_for(component).pending_job_data
     assert batch is not None
-    sources = [tuple(item.source_agent_record_ids) for item in batch.items]
+    sources = [tuple(item.source_agent_record_ids) for item in batch.samples]
     scenario.commit(result, component=component)
     return sources
 
@@ -243,7 +243,7 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
     assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = training.submitted
-    assert [item.source_agent_record_ids for item in job.data.items] == [("i1", "r1")]
+    assert [item.source_agent_record_ids for item in job.data.samples] == [("i1", "r1")]
     assert _commit_step(scenario, HARNESS) == [("i1", "r1")]
     for _ in range(2):
         result = scenario.prepare_training_step(WEIGHTS)
@@ -838,7 +838,7 @@ class _RetiringRetriesJudging(RecordJudging):
         return job
 
 
-class _RetiringRetriesTasks(JudgedTasks):
+class _RetiringRetriesSamples(JudgedSamples):
     """One-token stub samples for every judged turn."""
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
@@ -852,11 +852,11 @@ class _RetiringRetriesTasks(JudgedTasks):
         )
 
 
-class RetiringRetriesJobData(Task2Job):
+class RetiringRetriesJobData(Sample2Job):
     """Batches the judged turns of ``_RetiringRetriesJudging``."""
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 @dataclass(frozen=True)
@@ -869,8 +869,8 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
             return TrainingPipeline(
                 context,
                 record2record=JudgingRecord2Record(_RetiringRetriesJudging(), JudgedAtOnce()),
-                record2task=_RetiringRetriesTasks(),
-                task2job=RetiringRetriesJobData(context, None, None),
+                record2sample=_RetiringRetriesSamples(),
+                sample2job=RetiringRetriesJobData(context, None, None),
             )
         return threshold_pipeline(context)
 
@@ -1578,7 +1578,7 @@ class _InstructedRecipe(_TwoTrainerRecipe):
     """The two trainer recipe whose trainers take training instructions."""
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, task2job=InstructedJobData(context, None, None))
+        return threshold_pipeline(context, sample2job=InstructedJobData(context, None, None))
 
 
 @pytest.mark.unit
@@ -1637,7 +1637,7 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     assert training.submitted[0] == job
     # The rows behind the job train in the next job, which starts from the job's checkpoint.
     assert _wait_for(lambda: len(training.submitted) == 2)
-    assert [item.source_agent_record_ids for item in training.submitted[1].data.items] == [("i2", "r2")]
+    assert [item.source_agent_record_ids for item in training.submitted[1].data.samples] == [("i2", "r2")]
     assert training.submitted[1].start == str(tmp_path / "checkpoints" / "1")
 
 

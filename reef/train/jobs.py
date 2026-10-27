@@ -144,7 +144,7 @@ class EvaluationJob:
     parameters: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.data, JobData) or not self.data.items:
+        if not isinstance(self.data, JobData) or not self.data.samples:
             raise ValueError("EvaluationJob.data must be a JobData with one or more items")
         if not isinstance(self.parameters, Mapping):
             raise TypeError("EvaluationJob.parameters must be a mapping")
@@ -357,7 +357,7 @@ class JobLoop:
         identity = {
             "scenario": self.scenario,
             "job": state.finished_jobs,
-            "items": encoded["items"],
+            "samples": encoded["samples"],
             "request": encoded["request"],
         }
         return job_id_for(self.component.name, start, identity, parameters)

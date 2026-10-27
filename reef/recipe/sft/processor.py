@@ -1,9 +1,9 @@
 """The SFT stages: each report becomes one sample of a recorded request and its target response.
 
-``SFTRecord2Record`` makes each report its own record set. ``SFTTasks``
+``SFTRecord2Record`` makes each report its own record set. ``SFTSamples``
 renders the request and the target with the served model's chat template.
 The loss mask selects the target tokens. ``SFTJobData`` puts the tasks into
-job data, together with uploaded ATIF trajectories, which ``SFTTasks``
+job data, together with uploaded ATIF trajectories, which ``SFTSamples``
 renders with every agent turn trained.
 """
 
@@ -15,17 +15,17 @@ from dataclasses import dataclass
 from typing import Any, Self, cast
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import NoSettings, PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import atif_messages, make_trajectory
 from reef.inference.chat import template_kwargs_of
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ExclusiveReportRecord2Record, Record2Record, ReportContext
-from reef.record2task import ReportTasks, SkippedReport
-from reef.record2task.distill import normalize_messages_for_template
-from reef.record2task.samples import recorded_request, recorded_response_message
-from reef.task2job import DistillJobData
+from reef.record2sample import ReportSamples, SkippedReport
+from reef.record2sample.distill import normalize_messages_for_template
+from reef.record2sample.samples import recorded_request, recorded_response_message
+from reef.sample2job import DistillJobData
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class SFTRecord2Record(ExclusiveReportRecord2Record):
 
 @dataclass(frozen=True)
 class SFTSettings(PluginSettings):
-    """The config of ``SFTTasks``: the tokenizer, the target, and the maximum sample length."""
+    """The config of ``SFTSamples``: the tokenizer, the target, and the maximum sample length."""
 
     tokenizer_path: str = config_option(
         "", help="The served model's tokenizer. It renders the request and the target."
@@ -82,7 +82,7 @@ class SFTSettings(PluginSettings):
         template_kwargs_of(self.chat_template_kwargs, "chat_template_kwargs")
 
 
-class SFTTasks(ReportTasks):
+class SFTSamples(ReportSamples):
     """Make one supervised sample from one report and its recorded request.
 
     The sample tokens are the recorded request with the generation prompt,
@@ -102,7 +102,7 @@ class SFTTasks(ReportTasks):
         self.target = settings.target
         self.max_tokens = settings.max_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer_path, trust_remote_code=True)
-        #: The chat template arguments of every render; a task-to-job stage that renders reuses them.
+        #: The chat template arguments of every render; a sample-to-job stage that renders reuses them.
         self.chat_template_kwargs = template_kwargs_of(settings.chat_template_kwargs, "chat_template_kwargs")
         self.overflow_count = 0
 
@@ -160,7 +160,7 @@ class SFTTasks(ReportTasks):
             raise ValueError("the target response renders to no tokens")
         return sequence_ids, len(sequence_ids) - len(prompt_ids)
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """Render an uploaded ATIF conversation with the chat template, with every generated agent turn trained.
 
         An agent step with ``is_copied_context: true`` (ATIF's mark for a step copied from earlier context) is
@@ -208,7 +208,7 @@ class SFTTasks(ReportTasks):
             loss_mask[start - prompt_length : end - prompt_length] = [1] * (end - start)
         return trajectory.with_training(tokens=tokens, loss_mask=loss_mask, rollout_log_probs=[])
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         parsed = context.parsed_report
         if not isinstance(parsed, TeacherContextReport):
             raise ValueError(f"{type(self).__name__} requires the TeacherContextReport schema")
@@ -236,9 +236,9 @@ class SFTTasks(ReportTasks):
 
 
 class SFTJobData(DistillJobData):
-    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTTasks.uploaded_sample`` renders."""
+    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTSamples.uploaded_sample`` renders."""
 
     accepts_trajectories = True
 
 
-__all__ = ["SFT_TARGETS", "SFTJobData", "SFTRecord2Record", "SFTSettings", "SFTTasks"]
+__all__ = ["SFT_TARGETS", "SFTJobData", "SFTRecord2Record", "SFTSamples", "SFTSettings"]

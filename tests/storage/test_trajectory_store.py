@@ -4,14 +4,14 @@ from contextlib import closing
 
 import pytest
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.trajectories import TrajectoryConflict
 
 
-def trajectory(text: str, **fields) -> TrajectoryItem:
-    return TrajectoryItem(
+def trajectory(text: str, **fields) -> TrajectorySample:
+    return TrajectorySample(
         {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": text}]},
         **fields,
     )

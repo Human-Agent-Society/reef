@@ -1,10 +1,10 @@
-"""The relay an E2B sandbox runs so its processes reach one loopback port of the Reef host.
+"""The relay a remote sandbox (E2B or Modal) runs so its processes reach one loopback port of the Reef host.
 
 Uploaded into the sandbox and started as root with the standard library only
 (the sandbox's ``python3``); nothing in Reef imports it. It listens on
 ``127.0.0.1:<port>`` inside the sandbox, the port the processes were told
 (the Reef gateway's own, so no URL is rewritten), and on ``0.0.0.0:<tunnel>``,
-which E2B exposes at a public address. The sandbox cannot reach the Reef host,
+which the provider exposes at a public address. The sandbox cannot reach the Reef host,
 so Reef reaches in: it polls ``GET /next`` for the next request a process
 made and answers it with ``POST /reply/<id>`` pieces, the first carrying the
 status and headers, the last ``end``. The tunnel refuses a request without

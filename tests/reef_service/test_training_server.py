@@ -158,7 +158,9 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
 
 @pytest.mark.unit
 def test_service_config_reads_the_pipeline_section() -> None:
-    section = {"record2task": {"module": "reef.recipe.generated_tasks:GeneratedTaskTasks", "config": {"rounds": 1}}}
+    section = {
+        "record2sample": {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"rounds": 1}}
+    }
 
     args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "pipeline": section})
 
@@ -389,7 +391,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
-            pipeline_settings={"task2job": {"config": {"buffer_size": 4}}},
+            pipeline_settings={"sample2job": {"config": {"buffer_size": 4}}},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
@@ -401,7 +403,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
 
 
 @pytest.mark.unit
-def test_a_task2job_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) -> None:
+def test_a_sample2job_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) -> None:
     # The training backend owns the batch size; the stage config has no batch_size key and no fallback.
     monkeypatch.setattr(
         GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda scenario: object()
@@ -409,7 +411,7 @@ def test_a_task2job_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) ->
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
-            pipeline_settings={"task2job": {"config": {"batch_size": 4}}},
+            pipeline_settings={"sample2job": {"config": {"batch_size": 4}}},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
@@ -473,8 +475,8 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
     generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
     pipeline = {
         "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record", "config": {}},
-        "record2task": {
-            "module": "reef.recipe.generated_tasks:GeneratedTaskTasks",
+        "record2sample": {
+            "module": "reef.recipe.generated_tasks:GeneratedTaskSamples",
             "config": {"generator": generator},
         },
     }
@@ -488,22 +490,22 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
 
     stages = dispatcher.recipe.pipeline_stages
     # A stage the section leaves out is the recipe's own, with no config.
-    assert stages is not None and stages.task2job.plugin_class.__name__ == "GeneratedTaskJobData"
-    assert stages.task2job.config == {}
+    assert stages is not None and stages.sample2job.plugin_class.__name__ == "GeneratedTaskJobData"
+    assert stages.sample2job.config == {}
     assert (
         stages.record2record is not None and stages.record2record.plugin_class.__name__ == "GeneratedTaskRecord2Record"
     )
-    assert stages.record2task is not None and stages.record2task.plugin_class.__name__ == "GeneratedTaskTasks"
-    assert stages.record2task.config == {"generator": generator}
+    assert stages.record2sample is not None and stages.record2sample.plugin_class.__name__ == "GeneratedTaskSamples"
+    assert stages.record2sample.config == {"generator": generator}
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("recipe", "error", "message"),
     [
-        (OPENCLAWRL_RECIPE, RecipeConfigError, "must name a class that inherits Record2Task"),
+        (OPENCLAWRL_RECIPE, RecipeConfigError, "must name a class that inherits Record2Sample"),
         # A recipe that trains no weights reads the section too, and refuses the same mistake.
-        ("reef.recipe.base:Recipe", RecipeConfigError, "must name a class that inherits Record2Task"),
+        ("reef.recipe.base:Recipe", RecipeConfigError, "must name a class that inherits Record2Sample"),
         # A preset sets its pipeline section in its own file.
         ("recipe", ValueError, "set its pipeline section in the preset file"),
     ],
@@ -522,7 +524,7 @@ def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
             _settings(
                 recipe=recipe,
                 pipeline_settings={
-                    "record2task": {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator"}
+                    "record2sample": {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator"}
                 },
                 agent_record_dir=str(tmp_path / "agent-record"),
             ),

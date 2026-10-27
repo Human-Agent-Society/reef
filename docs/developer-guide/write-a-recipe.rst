@@ -76,7 +76,7 @@ A weight recipe is four pieces plus the class that binds them.
 .. config::
 
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
-   pipeline stages | the record stage, the record-to-task stage, and the task-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
+   pipeline stages | the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
    candidate evaluation | measures each checkpoint that a training job saved and decides select or reject. Every recipe carries one; the default, ``AlwaysSelectCheckpointPlugin``, selects every checkpoint
    recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``job_plan()`` returns the ``JobPlan`` that gives each training job's parameters
@@ -112,7 +112,7 @@ Copy a weight-training config as described in `Evolve your model
    recipe:
      implementation: "my_pkg.my_method:MyMethodRecipe"
    pipeline:
-     task2job:
+     sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
    training:
@@ -122,7 +122,7 @@ Copy a weight-training config as described in `Evolve your model
        global-batch-size: "${training.config.global_batch_size}"
 
 This fragment shows only the new keys; keep the inference, storage and training
-settings from the config you copied. ``pipeline.task2job.config.job_samples``
+settings from the config you copied. ``pipeline.sample2job.config.job_samples``
 is required: Reef submits a job when it holds this many samples. The batch
 size belongs to the training component. For Slime it is
 ``training.options.global-batch-size``, and Slime cuts each job's data into

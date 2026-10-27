@@ -35,7 +35,7 @@ Propose a change
 ``Proposer.propose`` receives three positional arguments:
 
 - ``nodes``: the current tree as ``(kind, config)`` pairs in tree order.
-- ``samples``: the ATIF ``TrajectoryItem`` values of the step's job data. Read the trajectory
+- ``samples``: the ATIF ``TrajectorySample`` values of the step's job data. Read the trajectory
   from ``item.trajectory``, reward and feedback from ``item.metadata``, and
   original provider exchanges through ``reef.core.trajectories.recorded_payloads``.
 - ``models``: bindings for models the method can call. ``models.served`` is
@@ -178,7 +178,7 @@ Two trace sources
 ~~~~~~~~~~~~~~~~~
 
 The deployment's ``pipeline`` section selects the source of each step's
-traces. ``pipeline.task2job.config.job_samples`` sets the number of traces
+traces. ``pipeline.sample2job.config.job_samples`` sets the number of traces
 in one step. Without it, ``recipe.config.evolution.batch_size`` (default 1)
 gives the number.
 
@@ -194,8 +194,8 @@ gives the number.
      pipeline:
        record2record:
          module: reef.record2record:InferenceRecord2Record
-       record2task:
-         module: reef.train.cordis_backend.processor:InferenceTasks
+       record2sample:
+         module: reef.train.cordis_backend.processor:InferenceSamples
 
 Configure it
 ~~~~~~~~~~~~

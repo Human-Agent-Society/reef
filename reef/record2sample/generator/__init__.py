@@ -24,7 +24,7 @@ What is method policy, the prompt's experience section, the measurement arms a t
 proposal earns, stays with the method's task generator (``recipes/beta/spade`` is the first).
 """
 
-from reef.record2task.generator.client import (
+from reef.record2sample.generator.client import (
     DuplicateTask,
     Generator,
     GeneratorError,
@@ -33,7 +33,7 @@ from reef.record2task.generator.client import (
     TaskNameConflict,
     WrittenTask,
 )
-from reef.record2task.generator.designer import (
+from reef.record2sample.generator.designer import (
     Designer,
     DesignerAnswer,
     DesignerError,
@@ -45,7 +45,7 @@ from reef.record2task.generator.designer import (
     designer_prompt,
     parse_harbor_reply,
 )
-from reef.record2task.generator.harbor import (
+from reef.record2sample.generator.harbor import (
     GeneratedHarborTask,
     HarborRuns,
     OracleResult,
@@ -55,8 +55,8 @@ from reef.record2task.generator.harbor import (
     oracle_check,
     reply_errors,
 )
-from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.service import (
+from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator.service import (
     GeneratorService,
     HarborChecks,
     JobRunner,

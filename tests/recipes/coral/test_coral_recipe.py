@@ -36,12 +36,12 @@ def test_training_spec_binds_processor_and_grouped_machinery():
     recipe_cls = _recipe_cls()
     spec = recipe_cls.training_spec()
     stages = recipe_cls.pipeline_spec()
-    from recipes.beta.coral.processor import CoralJobData, CoralTasks
+    from recipes.beta.coral.processor import CoralJobData, CoralSamples
     from recipes.beta.coral.recipe import CoralRecord2Record
 
-    assert (stages.record2record, stages.record2task, stages.task2job) == (
+    assert (stages.record2record, stages.record2sample, stages.sample2job) == (
         CoralRecord2Record,
-        CoralTasks,
+        CoralSamples,
         CoralJobData,
     )
     assert spec.objective == "tttd"
@@ -54,7 +54,7 @@ def test_importing_the_recipe_registers_the_reused_objective():
 
 
 def test_example_pipeline_section_builds_the_coral_stages():
-    from recipes.beta.coral.processor import CoralJobData, CoralTasks
+    from recipes.beta.coral.processor import CoralJobData, CoralSamples
     from recipes.beta.coral.recipe import CoralGrouping, CoralRecord2Record
 
     deployment = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
@@ -63,9 +63,9 @@ def test_example_pipeline_section_builds_the_coral_stages():
     assert isinstance(pipeline.record2record, CoralRecord2Record)
     assert isinstance(pipeline.record2record.grouping, CoralGrouping)
     assert pipeline.record2record.grouping.group_size == 2
-    assert isinstance(pipeline.record2task, CoralTasks)
-    assert pipeline.record2task.assembly.settings.accept_multi_turn_policy_samples
-    assert isinstance(pipeline.task2job, CoralJobData)
+    assert isinstance(pipeline.record2sample, CoralSamples)
+    assert pipeline.record2sample.assembly.settings.accept_multi_turn_policy_samples
+    assert isinstance(pipeline.sample2job, CoralJobData)
 
 
 def test_default_group_size_is_four():
@@ -84,8 +84,8 @@ def test_group_size_in_the_recipe_config_is_refused(key):
     ("pipeline", "message"),
     [
         ({"record2record": {"config": {"group_size": 1}}}, "at least two"),
-        ({"task2job": {"config": {"group_size": 2}}}, "CoralJobData: unknown config fields: group_size"),
-        ({"record2task": {"config": {"group_size": 2}}}, "group_size"),
+        ({"sample2job": {"config": {"group_size": 2}}}, "CoralJobData: unknown config fields: group_size"),
+        ({"record2sample": {"config": {"group_size": 2}}}, "group_size"),
     ],
 )
 def test_bad_stage_config_is_refused_when_the_pipeline_builds(pipeline, message):

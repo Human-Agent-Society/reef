@@ -65,7 +65,7 @@ from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress,
 from reef.train.cordis_backend.manifest import FailureManifest, advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import AgentHost, Promoter, Proposer, ProposerCalls, StepProposal
-from reef.train.types import JobData, TrainStepResult, TrajectoryItem, trajectories
+from reef.train.types import JobData, TrainStepResult, TrajectorySample, trajectories
 
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
@@ -91,7 +91,7 @@ def _mutation_record(mutation: Mutation) -> dict[str, Any]:
     return {"op": mutation.op, "id": mutation.id, "options": options}
 
 
-def _prompt_of(sample: TrajectoryItem) -> str | None:
+def _prompt_of(sample: TrajectorySample) -> str | None:
     """The trace's last user message, the prompt ``evaluate`` scores; ``None`` for a tool-only turn."""
     messages = recorded_payload(sample).get("messages")
     if not isinstance(messages, Sequence):
@@ -111,13 +111,13 @@ def _prompt_of(sample: TrajectoryItem) -> str | None:
     return None
 
 
-def _default_promote(samples: Sequence[TrajectoryItem]) -> list[str]:
+def _default_promote(samples: Sequence[TrajectorySample]) -> list[str]:
     """The default policy: every trace's user prompt is a candidate task."""
     prompts = (_prompt_of(sample) for sample in samples)
     return [prompt for prompt in prompts if prompt is not None]
 
 
-def _client_of(sample: TrajectoryItem) -> str:
+def _client_of(sample: TrajectorySample) -> str:
     """The client that sent a trace: its x-reef-tag-client, else its session tag, else ``untagged``."""
     metadata = recorded_payload(sample).get("metadata")
     tags = metadata.get("tags") if isinstance(metadata, Mapping) else None
@@ -128,7 +128,7 @@ def _client_of(sample: TrajectoryItem) -> str:
     return "untagged"
 
 
-def _source_of(sample: TrajectoryItem) -> dict[str, Any]:
+def _source_of(sample: TrajectorySample) -> dict[str, Any]:
     """What a proposer may know about where a sample came from; the text itself stays untrusted."""
     return {"record": source_record_id(sample), "client": _client_of(sample), "untrusted": True}
 
