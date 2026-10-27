@@ -73,13 +73,14 @@ class NoChecks(CandidateChecks):
 
 
 class ScriptedSession(E2BSession):
-    """A sandbox that runs no pi: launch writes a scripted session log; with ``stop``, it sets the stop signal (a
-    cancellation mid run) and waits for the sandbox to be closed."""
+    """A sandbox that runs no pi: launch writes a scripted session log and keeps the command it was given; with
+    ``stop``, it sets the stop signal (a cancellation mid run) and waits for the sandbox to be closed."""
 
     def __init__(self, events: list[dict[str, object]], *, stop: threading.Event | None = None) -> None:
         self.events = events
         self.stop = stop
         self.is_closed = threading.Event()
+        self.argv: list[str] = []
 
     def launch(
         self,
@@ -92,6 +93,7 @@ class ScriptedSession(E2BSession):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
+        self.argv = list(argv)
         if self.stop is not None:
             self.stop.set()
             self.is_closed.wait(10)
@@ -130,6 +132,7 @@ def run_agent(
     *,
     checks: CandidateChecks | None = None,
     has_behaviour_rule: bool = True,
+    variant: TaskVariant | None = None,
 ) -> None:
     """The agent's run in ``tmp_path / "run"`` over a scripted sandbox, its calls through a gateway to no Reef."""
     author = AgentAuthor(
@@ -148,7 +151,7 @@ def run_agent(
     gateway = RecordingGateway(author.upstream, calls, tools, headers={})
     gateway.start()
     try:
-        author.run(tmp_path / "run", gateway, tools, calls, stop)
+        author.run(tmp_path / "run", gateway, tools, calls, stop, variant=variant)
     finally:
         gateway.stop()
 
@@ -211,15 +214,23 @@ def fenced(document: Mapping[str, object]) -> str:
     return "Here is the task.\n```json\n" + json.dumps(document) + "\n```"
 
 
-def agent_files(tmp_path: Path, *, has_behaviour_rule: bool, checks: CandidateChecks) -> str:
+def agent_files(
+    tmp_path: Path,
+    *,
+    has_behaviour_rule: bool,
+    checks: CandidateChecks,
+    session: ScriptedSession | None = None,
+    variant: TaskVariant | None = None,
+) -> str:
     """Everything the agent's run wrote beside its workspace, its rules among them."""
     run_agent(
         tmp_path,
-        ScriptedSession([]),
+        session if session is not None else ScriptedSession([]),
         ModelCalls(5),
         threading.Event(),
         checks=checks,
         has_behaviour_rule=has_behaviour_rule,
+        variant=variant,
     )
     return "\n".join(path.read_text(errors="replace") for path in (tmp_path / "run").rglob("*") if path.is_file())
 

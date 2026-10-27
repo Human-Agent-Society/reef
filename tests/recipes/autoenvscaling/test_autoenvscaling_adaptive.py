@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import pytest
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
     NoChecks,
+    ScriptedSession,
     StandInAuthor,
+    agent_files,
     autoenvscaling,
     cursor,
     generating_config,
@@ -24,6 +26,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
 from recipes.beta.autoenvscaling import AgentAuthor, AutoEnvScalingGenerator, TaskVariant
 from recipes.beta.autoenvscaling import author as author_module
 from recipes.beta.autoenvscaling import generator as generator_module
+from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
 from reef.core.plugins import PluginConfigError
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask
@@ -34,8 +37,9 @@ def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
     stand_in_e2b_package(monkeypatch)
 
 
-def parents(tmp_path: Path) -> list[dict[str, Any]]:
-    return json.loads((tmp_path / "state" / "adaptive.json").read_text())
+def parents(tmp_path: Path) -> list[dict[str, object]]:
+    kept: list[dict[str, object]] = json.loads((tmp_path / "state" / "adaptive.json").read_text())
+    return kept
 
 
 def test_without_adaptive_the_generator_keeps_no_parents_and_its_report_is_unchanged(tmp_path: Path) -> None:
@@ -102,17 +106,62 @@ def test_eval_tasks_and_outages_never_become_parents(tmp_path: Path) -> None:
     assert not (tmp_path / "state" / "parents").exists()
 
 
-def test_a_replayed_result_adds_its_parent_once_and_a_parent_is_varied_once_across_restarts(tmp_path: Path) -> None:
+def test_a_generation_closed_again_after_a_crash_adds_its_parent_once(tmp_path: Path) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+    results = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
+    open_file = generator.open_path(0).read_bytes()
+    asyncio.run(generator.record_results(results, generation=0))
+    # A crash after the parents were saved and before the open generation was removed: a restart closes it again.
+    generator.open_path(0).write_bytes(open_file)
+    restarted = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+    asyncio.run(restarted.record_results(results, generation=0))
+    assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0]]
+    assert not restarted.open_path(0).exists()
+
+
+def test_a_restart_keeps_the_parents_and_a_parent_is_varied_once(tmp_path: Path) -> None:
     author = StandInAuthor()
     generator = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
-    results = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
-    asyncio.run(generator.record_results(results, generation=0))
-    asyncio.run(generator.record_results(results, generation=0))
-    assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0]]
-    asyncio.run(generator.generate(REQUEST))
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    # The parent was saved by the first generator; the restarted one reads it and varies it.
     restarted = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
-    asyncio.run(restarted.generate(REQUEST))
-    assert [call["variant"] is not None for call in author.calls] == [False, False, True, False, False, False]
+    # The variant, the first task of generation 1, falls below the band and becomes a parent too.
+    asyncio.run(restarted.record_results(run_tasks(restarted, (0.0, 0.0), (0.5, 0.5)), generation=0))
+    variant_name = "harbor-00001-000-autoenvscaling"
+    assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0], variant_name]
+    again = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
+    asyncio.run(again.generate(REQUEST))
+    varied = [call["variant"].parent for call in author.calls if call["variant"] is not None]
+    assert varied == [NAMES[0], variant_name], "each parent is varied once, after a restart too"
+
+
+def test_a_generation_varies_the_newest_unvaried_parents_that_still_have_a_session_and_files(tmp_path: Path) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=4, is_adaptive=True, variant_share=0.5)
+    generator.parents = [ParentTask(f"t-{number}", "session-1", number, 1.0, 2, "harder") for number in range(6)]
+    generator.parents[4] = replace(generator.parents[4], varied=True)
+    generator.parents[3] = replace(generator.parents[3], source_record_id="session-9")
+    for parent in generator.parents[:5]:
+        (tmp_path / "state" / "parents" / parent.name).mkdir(parents=True)
+    # t-5 has no files, t-4 was varied and t-3's session left the sources: two slots go to t-2 and t-1.
+    assert [parent.name for parent, _ in generator.variants()] == ["t-2", "t-1"]
+
+
+@pytest.mark.parametrize(("count", "share", "slots"), [(2, 0.5, 1), (3, 0.5, 1), (100, 0.29, 29), (4, 1, 4)])
+def test_variant_slots_are_the_share_of_count_rounded_down(
+    tmp_path: Path, count: int, share: float, slots: int
+) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=count, is_adaptive=True, variant_share=share)
+    assert generator.variant_slots == slots
+
+
+def test_a_task_whose_mean_reward_is_outside_zero_to_one_becomes_no_parent_and_the_generation_closes(
+    tmp_path: Path,
+) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+    asyncio.run(generator.record_results(run_tasks(generator, (2.0, 2.0), (-1.0, -1.0)), generation=0))
+    assert parents(tmp_path) == []
+    assert not (tmp_path / "state" / "parents").exists()
+    assert report(tmp_path)["tasks"] and not generator.open_path(0).exists()
 
 
 def test_the_oldest_parents_and_their_files_go_beyond_the_bound(
@@ -132,6 +181,10 @@ def test_the_oldest_parents_and_their_files_go_beyond_the_bound(
         ({"adaptive": "yes"}, "adaptive must be true or false"),
         ({"adaptive": True, "author": "prompt"}, "adaptive generation needs author: agent"),
         ({"adaptive": True, "variant_share": 0}, r"variant_share must be in \(0, 1\]"),
+        ({"adaptive": True, "variant_share": True}, r"variant_share must be in \(0, 1\]"),
+        ({"adaptive": True, "variant_share": "0.5"}, r"variant_share must be in \(0, 1\]"),
+        ({"adaptive": True, "count": 1}, "variant_share 0.5 of count 1 gives no variant slot"),
+        ({"variant_share": 0.5}, "variant_share needs adaptive: true"),
     ],
 )
 def test_from_config_refuses_an_adaptive_config_that_cannot_run(
@@ -155,12 +208,13 @@ def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
     monkeypatch.setattr(author_module, "session_text", lambda reef, source: "the session")
     monkeypatch.setattr(author_module, "repository_snapshot", lambda source, cache_dir: repository)
     seen: dict[str, object] = {}
+    inputs: set[str] = set()
 
     def run(
         self: AgentAuthor, work_dir: Path, gateway: object, tools: object, calls: object, stop: object, **kw: object
     ) -> None:
         seen.update(kw)
-        seen["inputs"] = sorted(str(path.relative_to(work_dir)) for path in (work_dir / "inputs").rglob("*"))
+        inputs.update(str(path.relative_to(work_dir)) for path in (work_dir / "inputs").rglob("*"))
         seen["variant.md"] = (work_dir / "inputs" / "variant.md").read_text()
 
     monkeypatch.setattr(AgentAuthor, "run", run)
@@ -179,41 +233,47 @@ def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
     source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
     agent.author(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
     assert seen["variant"] == variant
-    assert {"inputs/parent/instruction.md", "inputs/parent/tests/test.sh", "inputs/variant.md"} <= set(
-        seen["inputs"]  # type: ignore[arg-type]
-    )
+    assert {"inputs/parent/instruction.md", "inputs/parent/tests/test.sh", "inputs/variant.md"} <= inputs
     assert seen["variant.md"] == (
         "The solver passed the task in ../inputs/parent/ (t-0) in 12% of 8 episodes.\n"
         "Write a simpler task: the solver passes the parent too rarely to learn from it.\n"
     )
-    rules_with = author_module.AGENT_RULES.format(
-        system_prompt="", rules="", max_checks=1, review="", variant=author_module.VARIANT_INPUTS_TEXT
+
+
+def test_a_variant_run_gives_the_agent_the_variant_rules_and_prompt(tmp_path: Path) -> None:
+    variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, episodes=2)
+    sessions = {"variant": ScriptedSession([]), "rebuild": ScriptedSession([])}
+    with_variant = agent_files(
+        tmp_path / "variant", has_behaviour_rule=True, checks=NoChecks(1), session=sessions["variant"], variant=variant
     )
-    rules_without = author_module.AGENT_RULES.format(system_prompt="", rules="", max_checks=1, review="", variant="")
-    assert "THIS RUN WRITES A VARIANT" in rules_with and "../inputs/parent/" in rules_with
-    assert "../inputs/parent/" not in rules_without and "VARIANT" not in rules_without
+    without = agent_files(
+        tmp_path / "rebuild", has_behaviour_rule=True, checks=NoChecks(1), session=sessions["rebuild"]
+    )
+    assert "THIS RUN WRITES A VARIANT" in with_variant and "../inputs/parent/" in with_variant
+    assert "THIS RUN WRITES A VARIANT" not in without and "../inputs/parent/" not in without
+    # pi takes its prompt as the argument after -p.
+    prompts = {name: session.argv[session.argv.index("-p") + 1] for name, session in sessions.items()}
+    assert prompts == {
+        "variant": author_module.VARIANT_PROMPT.format(direction="harder"),
+        "rebuild": author_module.AGENT_PROMPT,
+    }
 
 
 @pytest.mark.parametrize(
-    "fields",
-    [
-        {"direction": "sideways"},
-        {"pass_rate": 1.5},
-        {"episodes": 0},
-        {"parent": ""},
-    ],
+    ("parent", "direction", "pass_rate", "episodes"),
+    [("t-0", "sideways", 1.0, 2), ("t-0", "harder", 1.5, 2), ("t-0", "harder", 1.0, 0), ("", "harder", 1.0, 2)],
 )
-def test_a_variant_refuses_fields_outside_its_definition(tmp_path: Path, fields: dict[str, object]) -> None:
-    values: dict[str, Any] = {
-        "parent": "t-0",
-        "parent_dir": tmp_path,
-        "direction": "harder",
-        "pass_rate": 1.0,
-        "episodes": 2,
-        **fields,
-    }
+def test_a_variant_refuses_fields_outside_its_definition(
+    tmp_path: Path, parent: str, direction: str, pass_rate: float, episodes: int
+) -> None:
     with pytest.raises(ValueError, match="a variant's"):
-        TaskVariant(**values)
+        TaskVariant(parent=parent, parent_dir=tmp_path, direction=direction, pass_rate=pass_rate, episodes=episodes)
+
+
+@pytest.mark.parametrize("name", ["", "../escape", "Upper", "a/b"])
+def test_a_parent_refuses_a_name_that_is_not_a_task_name(name: str) -> None:
+    with pytest.raises(ValueError, match="a parent's name"):
+        ParentTask(name, "session-1", 0, 1.0, 2, "harder")
 
 
 def test_the_prompt_designer_refuses_a_variant(tmp_path: Path) -> None:

@@ -36,7 +36,7 @@ beta/autoenvscaling/
   author.py         the author contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
   author_tools.ts   the agent's task_check tool
   checks.py         the task checks: Harbor's oracle and nop agents, and the test review
-  generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks and the band
+  generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band and the parents
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
@@ -108,7 +108,7 @@ The generator's `config` keys:
 | `max_model_calls` | 250 | the agent's model calls in one run |
 | `agent_timeout_seconds` | 2700 | the longest one agent run lasts |
 | `adaptive` | false | vary tasks outside the band in later generations ([adaptive generation](#adaptive-generation)); needs `author: agent` |
-| `variant_share` | 0.5 | with `adaptive`, the largest share of a generation's slots that go to variants |
+| `variant_share` | 0.5 | with `adaptive`, the largest share of a generation's slots that go to variants, rounded down; a share that gives no slot is refused |
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
@@ -130,7 +130,7 @@ The band does not decide what trains. The recipe trains on the training episodes
 
 With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator keeps its files under `state_dir/<scenario>/parents/` and its pass rate in `adaptive.json`. A later generation gives up to `variant_share` of its slots, rounded down, to the newest parents. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
 
-Eval tasks and outages never become parents, a parent gets one variant slot whatever becomes of the variant, and the generator keeps at most 256 parents, dropping the oldest. A replayed result adds nothing, because a closed generation is not closed again. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. Calibration before admission, proposer training and retiring tasks from the pool are not part of this mode.
+Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, and the generator keeps at most 256 parents, dropping the oldest. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. Calibration before admission, proposer training and retiring tasks from the pool are not part of this mode.
 
 ## The task checks
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import shlex
 import shutil
@@ -51,6 +52,7 @@ from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewC
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
+from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -379,7 +381,8 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 class ParentTask:
     """A training task whose pass rate fell outside the band: one an adaptive generation may vary.
 
-    Values: ``name`` is the task's name and ``source_record_id`` its session's record id. ``generation`` is the
+    Values: ``name`` is the task's name (a Harbor task name) and ``source_record_id`` its session's record id.
+    ``generation`` is the
     generator's number of the generation that made it, a non-negative int. ``pass_rate`` is in [0, 1], the mean of
     its ``episodes`` (a positive int) rollout rewards, and ``direction`` is ``harder`` or ``simpler``. ``varied``
     is true once a generation gave it a variant slot.
@@ -396,6 +399,9 @@ class ParentTask:
     varied: bool = False
 
     def __post_init__(self) -> None:
+        # The name names the parent's directory, which a bounded list removes.
+        if not TASK_NAME_PATTERN.fullmatch(self.name) or ".." in self.name:
+            raise ValueError(f"a parent's name must be a task name matching {TASK_NAME_PATTERN.pattern}")
         if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
             raise ValueError(f"a parent's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
         if not 0 <= self.pass_rate <= 1 or self.episodes < 1 or self.generation < 0:
@@ -532,6 +538,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
             or not 0 < variant_share <= 1
         ):
             raise ValueError("variant_share must be in (0, 1]")
+        # The tolerance keeps a share such as 0.29 of 100 slots at 29, not 28.
+        variant_slots = math.floor(count * variant_share + 1e-9)
+        if is_adaptive and variant_slots < 1:
+            raise ValueError(f"variant_share {variant_share} of count {count} gives no variant slot")
         for label, bound in (("band_low", band_low), ("band_high", band_high)):
             if bound is not None and not 0 <= bound <= 1:
                 raise ValueError(f"{label} must be in [0, 1] or null")
@@ -560,7 +570,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         # The generation that generate makes now; generate takes the next number from the cursor.
         self.generation = self.cursor.next_generation
         self.is_adaptive = is_adaptive
-        self.variant_share = float(variant_share)
+        # The most slots of a generation that go to variants: variant_share of count, rounded down.
+        self.variant_slots = variant_slots
         feedback_path = state_dir / FEEDBACK_FILE
         self.parents: list[ParentTask] = (
             PARENTS.validate_json(feedback_path.read_bytes()) if is_adaptive and feedback_path.is_file() else []
@@ -582,10 +593,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
         if not state_dir or not sources_path:
             raise PluginConfigError("AutoEnvScalingGenerator needs a state_dir and a sources_path")
         is_adaptive = config.get("adaptive", False)
-        if not isinstance(is_adaptive, bool):
-            raise PluginConfigError("AutoEnvScalingGenerator adaptive must be true or false")
-        if is_adaptive and config.get("author", DEFAULT_AUTHOR) != "agent":
+        if is_adaptive is True and config.get("author", DEFAULT_AUTHOR) != "agent":
             raise PluginConfigError("AutoEnvScalingGenerator adaptive generation needs author: agent")
+        if "variant_share" in config and is_adaptive is not True:
+            raise PluginConfigError("AutoEnvScalingGenerator variant_share needs adaptive: true")
         # Each scenario keeps its own cursor, reports, runs and repository snapshots.
         scenario_dir = Path(state_dir) / scenario
         try:
@@ -603,7 +614,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 max_checks=int(config.get("max_checks", DEFAULT_MAX_CHECKS)),
                 task_checks=() if review is None else (review,),
                 is_adaptive=is_adaptive,
-                variant_share=float(config.get("variant_share", DEFAULT_VARIANT_SHARE)),
+                variant_share=config.get("variant_share", DEFAULT_VARIANT_SHARE),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
@@ -628,15 +639,15 @@ class AutoEnvScalingGenerator(TaskGenerator):
     def variants(self) -> list[tuple[ParentTask, SessionSource]]:
         """The parents this generation varies, newest first, with their sessions; none unless adaptive.
 
-        At most ``variant_share`` of ``count`` slots, rounded down; a parent whose session left the sources file,
-        or whose files are gone, is skipped.
+        At most ``variant_slots``; a parent whose session left the sources file, or whose files are gone, is
+        skipped.
         """
         if not self.is_adaptive:
             return []
         sessions = {source.record_id: source for source in self.sources}
         chosen: list[tuple[ParentTask, SessionSource]] = []
         for parent in sorted(self.parents, key=lambda parent: (-parent.generation, parent.name)):
-            if len(chosen) >= int(self.count * self.variant_share):
+            if len(chosen) >= self.variant_slots:
                 break
             source = sessions.get(parent.source_record_id)
             if parent.varied or source is None or not (self.state_dir / PARENTS_DIR / parent.name).is_dir():
@@ -841,24 +852,31 @@ class AutoEnvScalingGenerator(TaskGenerator):
     ) -> None:
         """Keep each training task outside the band as a parent, with its files; the oldest beyond the bound go.
 
-        Only rolled out training tasks reach ``outcomes``: eval tasks and outages never become parents.
+        Only rolled out training tasks reach ``outcomes``: eval tasks and outages never become parents. A task
+        whose mean reward is outside [0, 1] has no pass rate to tell a variant, so it becomes no parent either.
         """
         known = {parent.name for parent in self.parents}
         root = self.state_dir / PARENTS_DIR
         for name, outcome in outcomes.items():
             if outcome.band == BAND_INSIDE or name in known:
                 continue
-            write_harbor_task(ran[name], root)
-            self.parents.append(
-                ParentTask(
-                    name=name,
-                    source_record_id=outcome.source_record_id,
-                    generation=generation,
-                    pass_rate=outcome.pass_rate,
-                    episodes=len(outcome.rollout_rewards),
-                    direction=VARIANT_HARDER if outcome.band == BAND_ABOVE else VARIANT_SIMPLER,
+            if not 0 <= outcome.pass_rate <= 1:
+                logger.warning(
+                    "AutoEnvScaling keeps no parent for %s: its mean reward %s is outside [0, 1]",
+                    name,
+                    outcome.pass_rate,
                 )
+                continue
+            parent = ParentTask(
+                name=name,
+                source_record_id=outcome.source_record_id,
+                generation=generation,
+                pass_rate=outcome.pass_rate,
+                episodes=len(outcome.rollout_rewards),
+                direction=VARIANT_HARDER if outcome.band == BAND_ABOVE else VARIANT_SIMPLER,
             )
+            write_harbor_task(ran[name], root)
+            self.parents.append(parent)
         while len(self.parents) > MAX_PARENTS:
             dropped = self.parents.pop(0)
             shutil.rmtree(root / dropped.name, ignore_errors=True)
