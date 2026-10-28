@@ -1411,13 +1411,10 @@ the selected backend resolves its own loss implementation lazily.
 Harness method
 --------------
 
-A harness evolution method is one ``Method`` class. Reef runs the loop around
-it: it reads the head tree from the scenario's git history, writes the step's
-workspace, calls ``step``, validates the tree that the method leaves,
-evaluates it under ``evolution.evaluation``, and publishes the candidate or
-keeps the head. `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__ is the guide; this section
-is the reference.
+This section lists the harness method API. `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ explains the step, the
+plugin settings (``from_config`` and ``PluginSettings``), and when a step is
+skipped or fails.
 
 .. code:: python
 
@@ -1430,14 +1427,6 @@ is the reference.
 
    class MyScorer(EpisodeScorer):
        def score(self, task, result) -> float: ...
-
-A deployment names each class as ``package.module:ClassName``, or as a mapping
-with ``module`` and ``config``. Reef builds it with the class method
-``from_config``. ``Method``, ``EpisodeScorer`` and ``TaskCollector`` inherit
-``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
-builds the class with no arguments and refuses a non-empty ``config``. A
-class with settings parses ``config`` into a ``reef.core.plugins.PluginSettings``
-dataclass, which refuses an unknown key.
 
 .. list-table::
    :header-rows: 1
@@ -1529,12 +1518,6 @@ dataclass, which refuses an unknown key.
        ``current_scores`` is empty under ``floor``, which runs the candidate
        alone. Under ``policy: none``, which runs no episode, it holds no
        score
-
-A step whose method leaves the tree unchanged is skipped: its row's
-``skipped`` reads ``the method left the head tree unchanged``. A candidate
-that fails validation skips the step too, and ``skipped`` names its problems.
-Either way the step commits the method's ``state/``. If ``step`` raises, the
-step fails and publishes nothing.
 
 ``reef.evaluation.harness`` holds the publication policies that
 ``evolution.evaluation.policy`` names: ``ComparePolicy`` (``compare``, with

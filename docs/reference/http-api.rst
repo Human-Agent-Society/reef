@@ -1005,71 +1005,22 @@ stays addressable by id through ``?release_id=`` on the manifest.
 Version page
 ~~~~~~~~~~~~
 
-``GET /reef/harness/releases/{step}/page`` answers one self contained HTML
-page (``text/html``, no asset, its data inline) for one catalog row. ``step``
-is the row's position in ``GET /reef/harness/releases`` oldest first, the
-creation row being 0, which is the commit step: a rejected step publishes
-nothing and its row carries the head's release id, so the step is what names
-it. The page shares its chrome with the request page below: the same branded
-header, palette, card layout, automatic light and dark themes and responsive
-behavior, and one status vocabulary, so a step reads ``Published``,
-``Ready for review``, ``Not selected`` or ``No changes`` in place of the
-record's own field names.
+``GET /reef/harness/releases/{step}/page`` answers one self-contained HTML
+page (``text/html``) for one catalog row. ``step`` is the row's position in
+``GET /reef/harness/releases``, oldest first, with the creation row as 0. A
+rejected step publishes nothing and its row carries the head's release id, so
+the step, not the release id, names the page.
 
-The page has these sections, each its own card, in this order:
-
-- **Why**: the request that the step read, else the claimed proposal's
-  reason, else a failure in the job data.
-- **Method summary**: ``method_summary`` as plain text with its line breaks.
-  Only when the step recorded one.
-- **What changed**: the step's patch, file by file: ``create`` with the new
-  text, ``update`` as a line diff against the release that the step ran on,
-  and ``remove``. When that release cannot be restored, a written file shows
-  as ``write`` with its new text.
-- **Result**: the result and what it means, then the evaluation's numbers,
-  each when the row carries it:
-
-  - ``wins``, ``losses`` and ``ties`` under ``compare``, or the two means
-    with ``statistic: mean``;
-  - ``passed``, ``failed`` and ``floor_score`` under ``floor``, which runs
-    no current side;
-  - the sum of each side's scores, the episode failures, and the episodes
-    run and reused;
-  - the method's model calls, their seconds and tokens, and the episodes it
-    ran;
-  - the tokens of the evaluation's episodes.
-
-  Then the skip reason, the selection reason, the candidate episodes that
-  failed or scored below the floor (for a rejected step), the step record
-  directory, and the step's error.
-- **Method notes**: ``method_notes`` as JSON. Only when the step recorded
-  them.
-- **Setup**: the request's ``requires`` with name, kind, check and prompt,
-  then the items that the release carries from earlier steps in its chain,
-  the same union that the manifest's ``requires`` carries. A rejected or
-  skipped row lists only its own items, since its release id is the head's.
-  Last, under "Refused by the step", the items that the step refused, from
-  ``training_request.refused_requires``, each as written with its reason;
-  nothing when there are none.
-- **Chain**: the parent release, this release, and its children: the steps
-  evaluated on it, won, lost or pending, and a promote or rollback made on
-  it, each linking that step's own page. A rejected or skipped step
-  published nothing, so its Chain names the head it ran on and no children.
-
-Above the sections, a step walk links the neighbouring steps, and the logo
-and the "Harness" crumb lead to the served head; a dead end, and the served
-head's own page, leave the link as plain text. Every link either page draws
-is one of the two ``/page`` routes, the only ones a browser can open, since
-the catalog answers JSON and refuses a query token. The line under the title
-carries the release id, marks the served head as ``Currently served`` and
-reads the commit time as a date in UTC. The served head is the newest row
-that is neither pending nor a rejected or skipped step. A pending row that a
-later ``promote`` row names in ``rollback_target_release_id`` reads
-``Promoted at vN``, where N is that later row's step. A step outside the
-catalog is HTTP 404 naming the range; a step that is not a number, or longer
-than nine digits, is HTTP 404 too. The row itself rides in a
-``<script type="application/json">`` block at the end of the page, every
-``<`` escaped.
+The page shows why the step ran (the request, the claimed proposal's reason,
+or a failure in the job data), ``method_summary``, the patch file by file as a
+diff against the release the step ran on, the result with the evaluation's
+numbers, ``method_notes``, the release's ``requires`` (and the items the step
+refused), and the chain: the parent release and the steps, promotes and
+rollbacks made on this one, each linked to its own page. A pending row that a
+later ``promote`` row names reads ``Promoted at vN``. The row itself is in a
+``<script type="application/json">`` block at the end of the page. A step
+outside the catalog, or one that is not a number of at most nine digits, is
+HTTP 404.
 
 .. code:: bash
 
@@ -1079,88 +1030,61 @@ than nine digits, is HTTP 404 too. The row itself rides in a
 Request page
 ~~~~~~~~~~~~
 
-``GET /reef/harness/requests/{record_id}/page`` answers one self contained
-HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
-harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; that answer's ``page_path`` links this page.
-Until the step settles the page reloads itself every five
-seconds. A four-stage progress strip and a status badge summarize the
-request. The responsive layout places Request beside Progress on desktop
-and stacks them on narrow screens, with automatic light and dark themes; it
-shares that chrome and its status wording with the version page above.
-Request highlights the instruction; session, release, request ID, submission
-time and machine requirements are available in expandable details.
-Progress shows
-the request's state and what it means: ``queued`` while no step has taken
-the request, ``proposing`` while the method makes the candidate,
-``evaluating`` while the candidate's episodes run (with their count and the
-step record directory when the backend reports them, and the time into the
-step), and ``running`` while the trainer holds the request and the backend
-reports no phase. While a step holds the request, Activity lists what the
-step has done so far, newest first, each line at its time into the step and
-the newest with how long ago it happened: every model call as it starts and
-as it answers (its seconds and tokens, or its error), each batch of episodes
-that the method's ``tools.evaluate`` runs, and each line the method notes
-itself (an agent method can note each tool its agent calls, say); failed
-lines are marked. The page lists the latest 80; the step record
-keeps every call. The catalog row whose ``metrics.training_request.id`` is the record
-id settles the page: the reload stops and Progress gives way to Result
-(the result as the version page words it, what it means and the next
-action, a failed instruction's ``error``, the release id and a link to the
-version page), Method summary (when the step recorded one), What changed
-(each file the patch writes or removes, with its kind in the harness layout;
-labeled Proposed changes for pending, rejected, skipped or failed steps), and
-Method notes (when the step recorded them). A published result names the next action,
-``GET /reef/harness``, with what the release requires where the harness
-runs; a pending result names the promote request. An unknown
-id, or one that is not a training instruction, is HTTP 404 naming it.
+``GET /reef/harness/requests/{record_id}/page`` answers one self-contained
+HTML page (``text/html``, ``Cache-Control: no-store``) for a harness request
+filed through ``POST /reef/train``; ``record_id`` is the ``agent_record_id``
+that the request answered, and its ``page_path`` links this page. Until a
+step settles the request, the page reloads every five seconds and shows the
+request's state and the step's activity (its latest 80 lines). The catalog row
+whose ``metrics.training_request.id`` is the record id settles the page: it
+then shows the result, the next action (``GET /reef/harness`` for a published
+release, the promote request for a pending one), ``method_summary``, the
+patch and ``method_notes``. An unknown id, or one that is not a training
+instruction, is HTTP 404.
 
-``GET /reef/harness/requests/{record_id}/progress`` answers the same reading
-as JSON (``Cache-Control: no-store``), for a client that polls rather than a
-browser that renders: ``request_id``, ``settled``, ``step`` (the step the
-row landed as once it settles, else null), ``state`` (the page's own
-``queued``, ``proposing``, ``evaluating`` or ``running``, and
-the settled row's result once a row answers the request, including ``failed``
-for a step that failed), ``meaning`` (the
-words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total``,
-``step_record`` and ``activity`` (the Activity lines oldest first, each
-``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
-``model`` for a model call, ``evaluate`` for the method's episodes, or a kind
-that the method notes itself; empty otherwise) from the backend's progress. Unlike the two pages this is
-an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
-401. An unknown id, or one that is not a training instruction, is HTTP 404
-naming it.
+``GET /reef/harness/requests/{record_id}/progress`` answers the same state as
+JSON (``Cache-Control: no-store``) for a client that polls:
 
-Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
-``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
-phase ``evaluating``. Settled proposals store their outcome under
-``result``. A harness manifest carries the evaluation metrics under
-``evaluation`` only.
+- ``request_id`` and ``settled``;
+- ``step``: the step the row landed as once it settles, else ``null``;
+- ``state``: ``queued`` (no step has taken the request), ``proposing`` (the
+  method makes the candidate), ``evaluating`` (the candidate's episodes run),
+  ``running`` (the trainer holds the request and reports no phase), or the
+  settled row's result, ``failed`` included;
+- ``meaning``: the words the page prints beside the state, ``null`` once
+  settled;
+- while a step holds the request: ``started_at``, ``episodes_total``,
+  ``step_record`` and ``activity``, the activity lines oldest first, each
+  ``{at, kind, text}`` with ``failed: true`` on a failed line. ``kind`` is
+  ``model`` for a model call, ``evaluate`` for the method's episodes, or a
+  kind that the method notes itself.
 
-Both pages are links a person opens in a browser, which sends no header, so
-they also take the scenario and a credential as query parameters,
-``?scenario=<name>&key=<page key>``, in place of ``x-reef-scenario`` and
-``Authorization: Bearer``; a header wins when present, and each page's links
-to the other carry the parameters it was opened with. Clients never build
-these links: ``POST /reef/train`` answers ``page_path`` for the request's
-page and ``GET /reef/harness/releases`` one per row for its step's page,
-and a client prints its service URL followed by that path. The path's query
-holds the page key when the request presented a service token (an
-evaluation token gets none, and with authentication off the query names
-the scenario alone). The key opens these two pages of that one scenario and
-no other route, a request whose ``x-reef-scenario`` header names another
-scenario is HTTP 401, and the token cannot be read back from it (the
-service derives it as an HMAC SHA-256 of the scenario keyed by the token's
-digest). So a client may print these links where a session's model reads
-them, and a captured session that holds one exposes these two pages alone.
-The token itself is never read from a query: ``?token=`` is HTTP 401 on
-every route, the pages included. Every other route reads the headers alone;
-a ``?key=`` elsewhere is HTTP 401.
+This route reads the headers alone; a ``?key=`` is HTTP 401. An unknown id is
+HTTP 404.
+
+Page links
+~~~~~~~~~~
+
+A browser sends no header, so the two pages also take the scenario and a
+credential as query parameters, ``?scenario=<name>&key=<page key>``; a header
+wins when present. Clients never build these links: ``POST /reef/train``
+answers ``page_path`` for the request page, and ``GET /reef/harness/releases``
+one per row for its step's page. A client prints its service URL followed by
+that path.
 
 .. code:: text
 
    $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&key=<page key>
+
+The path holds a page key only when the request presented a service token;
+an evaluation token gets none, and with authentication off the query names
+the scenario alone. The key is an HMAC SHA-256 of the scenario, keyed by the
+token's digest. It opens these two pages of that one scenario and no other
+route, and the token cannot be read back from it, so a client may print the
+links where a session's model reads them. A request whose
+``x-reef-scenario`` header names another scenario is HTTP 401. The token
+itself is never read from a query: ``?token=`` is HTTP 401 on every route, and
+``?key=`` is HTTP 401 on every route but the two pages.
 
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
