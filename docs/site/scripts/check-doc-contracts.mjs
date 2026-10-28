@@ -210,6 +210,7 @@ function terminologySource(path, source) {
     "reef/service/routing_preview.py",
     "tests/reef_service/routing/routing_fakes.py",
     "tests/reef_service/routing/test_routing_preview.py",
+    "tests/reef_service/routing/test_routing.py",
   ].includes(path)) {
     source = source.replace(/(["'])selection_provenance(?=\1|\.)/g, "$1selection_metadata");
   }

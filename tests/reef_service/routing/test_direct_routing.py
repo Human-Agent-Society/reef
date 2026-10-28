@@ -9,6 +9,7 @@ answers.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import importlib.util
@@ -17,6 +18,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from aiohttp import ClientResponse, web
@@ -41,7 +43,7 @@ from reef.service.assembly import build_app
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.errors import translate_error
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
-from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot
+from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
 
 pytestmark = pytest.mark.unit
@@ -50,12 +52,33 @@ CONTROL_HEADERS = {"Authorization": "Bearer control"}
 PROVIDER_MODELS = {"student": "student-v1", "teacher": "teacher-v2", "math-student": "math-v1", "retired": "old-v0"}
 
 
-def write_manifest(path: Path, provider_url: str, *, keyword: str = "reef_teacher_required") -> Path:
-    """Two Scenarios sharing a teacher; the coding Scenario also lists a disabled target."""
+def write_manifest(
+    path: Path, provider_url: str, *, keyword: str = "reef_teacher_required", domain: bool = False
+) -> Path:
+    """Two Scenarios sharing a teacher; the coding Scenario also lists a disabled target.
+
+    With ``domain``, each Scenario also has a ``math_request`` domain rule for the teacher, after any keyword
+    rule. Its classifier names a directory that does not exist: serving requests never reads it.
+    """
     targets = {
         target_id: {"provider_model": model, "revision": "r1", "url": provider_url, "enabled": target_id != "retired"}
         for target_id, model in PROVIDER_MODELS.items()
     }
+    domain_rules = [{"name": "math_request", "domains": ["math"], "target": "teacher"}] if domain else []
+    deployment: dict[str, object] = {"semantic_router_image": "semantic-router@sha256:" + "a" * 64}
+    if domain:
+        deployment["domain_classifier"] = {
+            "model_directory": "/nonexistent/reef-domain-classifier",
+            "threshold": 0.5,
+            "files": {
+                name: "sha256:" + digit * 64
+                for name, digit in zip(
+                    ("config.json", "tokenizer.json", "model.safetensors", "category_mapping.json"),
+                    "1234",
+                    strict=True,
+                )
+            },
+        }
     manifest = {
         "schema_version": 2,
         "automatic_model": "auto",
@@ -64,13 +87,11 @@ def write_manifest(path: Path, provider_url: str, *, keyword: str = "reef_teache
             "coding": {
                 "default_target": "student",
                 "targets": ["student", "teacher", "retired"],
-                "rules": [{"name": "teacher_requested", "keywords": [keyword], "target": "teacher"}],
+                "rules": [{"name": "teacher_requested", "keywords": [keyword], "target": "teacher"}, *domain_rules],
             },
-            "math": {"default_target": "math-student", "targets": ["math-student", "teacher"]},
+            "math": {"default_target": "math-student", "targets": ["math-student", "teacher"], "rules": domain_rules},
         },
-        "deployment": {
-            "semantic_router_image": "semantic-router@sha256:" + "a" * 64,
-        },
+        "deployment": deployment,
     }
     path.write_text(json.dumps(manifest), encoding="utf-8")
     return path
@@ -147,6 +168,7 @@ async def routed_service(
     keyword: str = "reef_teacher_required",
     timeout_seconds: int = 5,
     reply_changes: Mapping[str, object] | None = None,
+    domain: bool = False,
 ) -> AsyncIterator[RoutedService]:
     """Start a provider, a fake router and a routed Reef; ``managed`` adds the private lifecycle control."""
     provider = Provider()
@@ -156,7 +178,7 @@ async def routed_service(
     provider_app.router.add_post("/v1/chat/completions", provider.chat)
     async with TestServer(provider_app) as provider_server:
         url = str(provider_server.make_url("")).rstrip("/")
-        path = write_manifest(tmp_path / "routing.json", url, keyword=keyword)
+        path = write_manifest(tmp_path / "routing.json", url, keyword=keyword, domain=domain)
         adapter = RoutingAdapter.from_manifest(path, router_config_hash=ROUTER_HASH, environ={})
         dispatcher = routing_dispatcher(tmp_path)
         lifecycle = None
@@ -286,6 +308,64 @@ def test_a_stream_shares_the_selection_and_its_receipt_links_feedback(tmp_path: 
                 "/reef/report", headers=routing_headers(), json={"score": 0, "references": [receipt]}
             )
             assert report.status == 200, await report.text()
+
+    asyncio.run(run())
+
+
+def test_domain_rule_selections_are_served_and_recorded_per_scenario_like_keyword_rules(tmp_path: Path) -> None:
+    def receipt_of(text: str, headers: Mapping[str, str], stream: bool) -> str:
+        if not stream:
+            return headers["x-reef-agent-record-id"]
+        assert text.endswith("data: [DONE]\n\n")
+        return next(
+            json.loads(line.removeprefix("data: "))["reef"]["agent_record_id"]
+            for line in text.splitlines()
+            if line.startswith("data: {") and '"reef"' in line
+        )
+
+    async def run() -> None:
+        async with routed_service(tmp_path, managed=True, domain=True) as service:
+            # (Scenario, prediction, text, stream) -> (target, reason, rule)
+            cases = [
+                ("coding", "math", "solve x squared equals four", False, ("teacher", "rule", "math_request")),
+                ("coding", "math", "solve x squared equals four", True, ("teacher", "rule", "math_request")),
+                # An earlier keyword rule outranks a later domain rule that also matches.
+                ("coding", "math", "reef_teacher_required solve it", False, ("teacher", "rule", "teacher_requested")),
+                ("coding", "biology", "explain photosynthesis", False, ("student", "default", "default")),
+                ("math", "math", "solve x squared equals four", True, ("teacher", "rule", "math_request")),
+                ("math", "biology", "explain photosynthesis", False, ("math-student", "default", "default")),
+            ]
+            receipts: dict[str, list[str]] = {"coding": [], "math": []}
+            for scenario, prediction, text, stream, _ in cases:
+                service.router.predicted_domain = prediction
+                body = {"model": "auto", "stream": stream, "messages": user_message(text)}
+                status, response_text, headers = await service.chat(body, **{"x-reef-scenario": scenario})
+                assert status == 200, response_text
+                receipts[scenario].append(receipt_of(response_text, headers, stream))
+            # A pin still bypasses the router, whatever the classifier would predict.
+            previews = len(service.router.selections)
+            pin = {"model": "teacher", "messages": user_message("solve")}
+            pinned = await service.chat(pin, **{"x-reef-scenario": "math"})
+            assert pinned[0] == 200 and len(service.router.selections) == previews
+            for scenario in ("coding", "math"):
+                expected = [outcome for name, *_, outcome in cases if name == scenario]
+                routing = [record["metadata"]["routing"] for record in service.records(scenario)]
+                selected = routing[: len(expected)]
+                assert [(item["target_id"], item["reason"], item["rule_name"]) for item in selected] == expected
+                assert all(item["router_config_hash"] == ROUTER_HASH for item in selected)
+                assert all(item["policy_id"] == "static" for item in routing)
+                report = await service.client.post(
+                    "/reef/report",
+                    headers={**routing_headers(), "x-reef-scenario": scenario},
+                    json={"score": 1, "references": receipts[scenario]},
+                )
+                assert report.status == 200, await report.text()
+            foreign = await service.client.post(
+                "/reef/report",
+                headers={**routing_headers(), "x-reef-scenario": "math"},
+                json={"score": 1, "references": receipts["coding"][:1]},
+            )
+            assert foreign.status == 400
 
     asyncio.run(run())
 
@@ -688,6 +768,67 @@ def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
             environ={},
             lifecycle=managed,
         )
+
+
+@pytest.fixture
+def domain_smoke() -> ModuleType:
+    script = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/domain_smoke.py"
+    spec = importlib.util.spec_from_file_location("reef_tutorial_domain_smoke", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("the tutorial domain smoke is missing")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("pid", [-1, 0, 1])
+def test_domain_smoke_rejects_group_or_system_pids_before_doing_work(domain_smoke: ModuleType, pid: int) -> None:
+    with pytest.raises(ValueError, match="greater than 1"):
+        domain_smoke.check(argparse.Namespace(reef_pid=pid))
+
+
+def test_domain_smoke_does_not_forward_credentials_on_redirect(domain_smoke: ModuleType) -> None:
+    async def run() -> None:
+        forwarded: list[str] = []
+
+        async def destination(request: web.Request) -> web.Response:
+            forwarded.append(request.headers.get("Authorization", ""))
+            return web.Response(text="unexpected")
+
+        target = web.Application()
+        target.router.add_route("*", "/", destination)
+        async with TestServer(target) as other:
+
+            async def redirect(request: web.Request) -> web.Response:
+                raise web.HTTPFound(str(other.make_url("/")))
+
+            app = web.Application()
+            app.router.add_post("/v1/chat/completions", redirect)
+            async with TestServer(app) as server:
+                client = domain_smoke.SmokeClient(str(server.make_url("")), "test-token")
+                status, _, _ = await asyncio.to_thread(client.post, "/v1/chat/completions", "code-opd", {})
+                assert status == 302 and forwarded == []
+
+    asyncio.run(run())
+
+
+def test_the_tutorial_domain_smoke_writes_manifests_that_differ_only_in_a_reloadable_rule(
+    tmp_path: Path, domain_smoke: ModuleType
+) -> None:
+    domain_smoke.write_manifests(tmp_path / "vela-domain", tmp_path / "manifests")
+    initial = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.yaml")
+    updated = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.updated.yaml")
+    check_policy_change(initial, updated)
+    assert initial.domain_classifier is not None and initial.domain_classifier == updated.domain_classifier
+    assert initial.domain_classifier.files == domain_smoke.VELA_DOMAIN_FILES
+    assert initial.domain_classifier.model_directory == str(tmp_path / "vela-domain")
+    targets = {
+        (name, snapshot.scenarios["code-opd"].target_for_rule("math_request"))
+        for name, snapshot in (("initial", initial), ("updated", updated))
+    }
+    assert targets == {("initial", "code-teacher"), ("updated", "code-student")}
+    assert initial.scenarios["math-opd"] == updated.scenarios["math-opd"]
+    assert initial.scenarios["math-opd"].target_for_rule("math_request") == "math-teacher"
 
 
 def test_the_tutorial_fake_provider_serves_auto_pin_json_sse_and_feedback(tmp_path: Path) -> None:

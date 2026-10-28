@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import stat
 from pathlib import Path
 
 import pytest
 import yaml
+from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, write_domain_classifier
 
 from reef.service.deploy.routing.renderer import UNUSED_BACKEND, ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
@@ -226,6 +229,225 @@ def test_renderer_does_not_follow_output_symlinks(deployment_manifest: Path, tmp
     with pytest.raises(ValueError, match="symlink"):
         render(deployment_manifest, link)
     assert list(outside.iterdir()) == []
+
+
+def policy_manifest(path: Path, classifier: dict[str, object] | None, **domain_rule: object) -> Path:
+    """Two Scenarios with every keyword option and, given ``classifier``, one domain rule last in each."""
+    keyword_rules: list[dict[str, object]] = [
+        {"name": "teacher_requested", "keywords": ["reef_teacher_required"], "target": "teacher"},
+        {"name": "any_words", "keywords": ["urgenttrigger", "escalatetrigger"], "match": "any", "target": "teacher"},
+        {"name": "both_words", "keywords": ["redflag", "escalate"], "match": "all", "target": "teacher"},
+        {"name": "exact_case", "keywords": ["CaseSensitiveGate"], "case_sensitive": True, "target": "teacher"},
+    ]
+    deployment: dict[str, object] = {"semantic_router_image": "example/router@sha256:" + "a" * 64}
+    code_rules, math_rules = list(keyword_rules), []
+    if classifier is not None:
+        deployment["domain_classifier"] = classifier
+        code_rules.append({"name": "math_request", "domains": ["math"], "target": "teacher", **domain_rule})
+        math_rules.append({"name": "math_request", "domains": ["math", "physics"], "target": "math-teacher"})
+    manifest = {
+        "schema_version": 2,
+        "automatic_model": "auto",
+        "deployment": deployment,
+        "targets": {
+            name: {"provider_model": name, "revision": "r1", "url": f"http://127.0.0.1:{port}"}
+            for port, name in enumerate(["student", "teacher", "math-student", "math-teacher"], start=8101)
+        },
+        "scenarios": {
+            "code-opd": {"default_target": "student", "targets": ["student", "teacher"], "rules": code_rules},
+            "math-opd": {
+                "default_target": "math-student",
+                "targets": ["math-student", "math-teacher"],
+                "rules": math_rules,
+            },
+        },
+    }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("code_rule_name", ["math_request", "algebra_request"])
+def test_keyword_options_and_domain_rules_become_native_signals_in_rule_order(
+    tmp_path: Path, code_rule_name: str
+) -> None:
+    classifier = write_domain_classifier(tmp_path / "vela-domain")
+    output = tmp_path / "generated"
+    snapshot = render(policy_manifest(tmp_path / "manifest.json", classifier, name=code_rule_name), output)
+    router = yaml.safe_load((output / "router.yaml").read_text())
+    recipes = {recipe["name"]: recipe["routing"] for recipe in router["recipes"]}
+    keyword_signals = [
+        ("teacher_requested", "OR", ["reef_teacher_required"], False),
+        ("any_words", "OR", ["urgenttrigger", "escalatetrigger"], False),
+        ("both_words", "AND", ["redflag", "escalate"], False),
+        ("exact_case", "OR", ["CaseSensitiveGate"], True),
+    ]
+    assert recipes["code-opd"]["signals"] == {
+        "keywords": [
+            {"name": name, "operator": operator, "keywords": keywords, "case_sensitive": case_sensitive}
+            for name, operator, keywords, case_sensitive in keyword_signals
+        ],
+        "domains": [{"name": code_rule_name, "mmlu_categories": ["math"]}],
+    }
+    decisions = recipes["code-opd"]["decisions"]
+    assert [(decision["name"], decision["rules"]["conditions"]) for decision in decisions] == [
+        ("teacher_requested", [{"type": "keyword", "name": "teacher_requested"}]),
+        ("any_words", [{"type": "keyword", "name": "any_words"}]),
+        ("both_words", [{"type": "keyword", "name": "both_words"}]),
+        ("exact_case", [{"type": "keyword", "name": "exact_case"}]),
+        (code_rule_name, [{"type": "domain", "name": code_rule_name}]),
+        ("default", []),
+    ]
+    # Earlier rules outrank later ones whatever their kind; every decision keeps one static target.
+    priorities = [decision["priority"] for decision in decisions]
+    assert priorities == sorted(priorities, reverse=True) and len(set(priorities)) == len(priorities)
+    for decision in decisions:
+        assert decision["algorithm"] == {"type": "static"} and len(decision["modelRefs"]) == 1
+    math_signal = {"name": "math_request", "mmlu_categories": ["math", "physics"]}
+    assert recipes["math-opd"]["signals"] == {"domains": [math_signal]}
+    catalog = router["global"]["model_catalog"]
+    assert catalog["system"] == {"domain_classifier": "/models/reef-domain"}
+    assert catalog["modules"]["classifier"]["domain"] == {
+        "enabled": True,
+        "model_ref": "domain_classifier",
+        "model_id": "/models/reef-domain",
+        "category_mapping_path": "/models/reef-domain/category_mapping.json",
+        "use_cpu": True,
+        "threshold": 0.5,
+        "fallback_category": "other",
+    }
+    # Every other learned module stays disabled.
+    assert catalog["modules"]["prompt_guard"]["enabled"] is False
+    assert catalog["modules"]["feedback_detector"]["enabled"] is False
+    assert catalog["modules"]["classifier"]["pii"] == {"model_ref": "", "model_id": "", "pii_mapping_path": ""}
+    assert router["global"]["router"]["learning"] == {"enabled": False}
+    # The router configuration names only the container path; the host directory appears in Compose alone.
+    assert str(classifier["model_directory"]) not in (output / "router.yaml").read_text()
+    service = yaml.safe_load((output / "compose.yaml").read_text())["services"]["semantic-router"]
+    assert service["volumes"] == ["./router-config:/app/config"] + [
+        {
+            "type": "bind",
+            "source": f"{classifier['model_directory']}/{name}",
+            "target": f"/models/reef-domain/{name}",
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
+        for name in sorted(["config.json", "tokenizer.json", "model.safetensors", "category_mapping.json"])
+    ]
+    assert service["environment"] == [
+        "REEF_SR_MANAGEMENT_TOKEN",
+        "REEF_SR_SELECTION_TOKEN",
+        "HF_HUB_OFFLINE=1",
+        "TRANSFORMERS_OFFLINE=1",
+        "HF_DATASETS_OFFLINE=1",
+    ]
+    assert snapshot.domain_classifier is not None
+    assert RoutingSnapshot.load(output / "manifest.yaml").domain_classifier == snapshot.domain_classifier
+
+
+def test_classifier_mount_paths_keep_literal_dollars_for_compose(tmp_path: Path) -> None:
+    classifier = write_domain_classifier(tmp_path / "${REEF_TEST_COMPONENT}-$literal")
+    output = tmp_path / "generated"
+    snapshot = render(policy_manifest(tmp_path / "manifest.json", classifier), output)
+    service = yaml.safe_load((output / "compose.yaml").read_text())["services"]["semantic-router"]
+    assert snapshot.domain_classifier is not None
+    assert snapshot.domain_classifier.model_directory == classifier["model_directory"]
+    for volume in service["volumes"][1:]:
+        name = Path(volume["target"]).name
+        assert volume["source"] == f"{classifier['model_directory']}/{name}".replace("$", "$$")
+
+
+def test_a_manifest_without_a_classifier_keeps_every_learned_module_disabled(tmp_path: Path) -> None:
+    output = tmp_path / "generated"
+    render(policy_manifest(tmp_path / "manifest.json", None), output)
+    catalog = yaml.safe_load((output / "router.yaml").read_text())["global"]["model_catalog"]
+    assert set(catalog) == {"embeddings", "modules"}
+    assert catalog["modules"]["classifier"]["domain"] == {"model_ref": "", "model_id": "", "category_mapping_path": ""}
+    service = yaml.safe_load((output / "compose.yaml").read_text())["services"]["semantic-router"]
+    assert service["volumes"] == ["./router-config:/app/config"]
+    assert service["environment"] == ["REEF_SR_MANAGEMENT_TOKEN", "REEF_SR_SELECTION_TOKEN"]
+
+
+def break_classifier(directory: Path, fault: str, classifier: dict[str, object]) -> dict[str, object]:
+    """Apply one fault to a written stand-in classifier and return the manifest value to render with."""
+    files = dict(json.loads(json.dumps(classifier["files"])))
+    if fault == "missing_directory":
+        return {**classifier, "model_directory": str(directory) + "-missing"}
+    if fault == "symlinked_directory":
+        link = directory.parent / "linked-domain"
+        link.symlink_to(directory, target_is_directory=True)
+        return {**classifier, "model_directory": str(link)}
+    if fault == "symlinked_file":
+        copy = directory.parent / "config-copy.json"
+        copy.write_bytes((directory / "config.json").read_bytes())
+        (directory / "config.json").unlink()
+        (directory / "config.json").symlink_to(copy)
+    elif fault == "fifo":
+        (directory / "tokenizer.json").unlink()
+        os.mkfifo(directory / "tokenizer.json")
+    elif fault == "directory_as_file":
+        (directory / "model.safetensors").unlink()
+        (directory / "model.safetensors").mkdir()
+    elif fault == "missing_file":
+        (directory / "category_mapping.json").unlink()
+    elif fault == "changed_weights":
+        (directory / "model.safetensors").write_text("other weights")
+    elif fault == "oversized_labels":
+        text = json.dumps({"id2label": {"0": "other"}, "padding": "x" * (1024 * 1024)})
+        (directory / "config.json").write_text(text)
+        files["config.json"] = "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+    return {**classifier, "files": files}
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        ("missing_directory", "existing directory without symlinks"),
+        ("symlinked_directory", "existing directory without symlinks"),
+        ("symlinked_file", "config.json cannot be read as a regular file without a symlink"),
+        ("fifo", "tokenizer.json must be a regular file"),
+        ("directory_as_file", "model.safetensors must be a regular file"),
+        ("missing_file", "category_mapping.json cannot be read"),
+        ("changed_weights", "model.safetensors does not match its sha256 digest"),
+        ("oversized_labels", "config.json is larger than"),
+    ],
+)
+def test_classifier_files_are_checked_on_the_host_before_any_file_is_written(
+    tmp_path: Path, fault: str, message: str
+) -> None:
+    directory = tmp_path / "vela-domain"
+    classifier = break_classifier(directory, fault, write_domain_classifier(directory))
+    output = tmp_path / "generated"
+    with pytest.raises(ValueError, match=message):
+        render(policy_manifest(tmp_path / "manifest.json", classifier), output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("labels", "mapping_labels", "rule", "message"),
+    [
+        (DOMAIN_LABELS, DOMAIN_LABELS[::-1], {}, "same order"),
+        (DOMAIN_LABELS, DOMAIN_LABELS[:-1], {}, "same order"),
+        (tuple(label for label in DOMAIN_LABELS if label != "other"), None, {}, "label 'other'"),
+        ((*DOMAIN_LABELS, "math"), None, {}, "repeats a label"),
+        (DOMAIN_LABELS, None, {"domains": ["astronomy"]}, "does not have"),
+        (DOMAIN_LABELS, None, {"domains": ["Math"]}, "does not have"),
+        # The router reports an unconfigured predicted label under its own name, which would match this rule.
+        (DOMAIN_LABELS, None, {"name": "physics", "domains": ["chemistry"]}, "named like a classifier label"),
+    ],
+    ids=["reordered", "shorter", "no_fallback", "repeated", "unknown", "other_case", "rule_named_like_label"],
+)
+def test_domain_labels_must_agree_between_the_classifier_files_and_the_rules(
+    tmp_path: Path,
+    labels: tuple[str, ...],
+    mapping_labels: tuple[str, ...] | None,
+    rule: dict[str, object],
+    message: str,
+) -> None:
+    classifier = write_domain_classifier(tmp_path / "vela-domain", labels, mapping_labels=mapping_labels)
+    output = tmp_path / "generated"
+    with pytest.raises(ValueError, match=message):
+        render(policy_manifest(tmp_path / "manifest.json", classifier, **rule), output)
+    assert not output.exists()
 
 
 def test_managed_settings_parse_at_the_service_boundary() -> None:

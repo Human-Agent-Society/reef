@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from reef.inference.http import HttpInferenceHandler
 from reef.service.errors import ROUTING_ERRORS
 from reef.service.routing import (
     ROUTING_ERROR_STATUSES,
+    DomainClassifier,
     RoutingAdapter,
     RoutingDecision,
     RoutingRequestError,
@@ -23,6 +25,7 @@ from reef.service.routing import (
     RoutingScenario,
     RoutingSnapshot,
     RoutingTarget,
+    check_policy_change,
 )
 from reef.service.routing_preview import checked_selection
 
@@ -539,3 +542,250 @@ def test_readiness_checks_enabled_model_ids_and_reuses_endpoint_probe(
             await runner.cleanup()
 
     asyncio.run(run())
+
+
+CLASSIFIER_FILES = {
+    "config.json": "sha256:" + "1" * 64,
+    "tokenizer.json": "sha256:" + "2" * 64,
+    "model.safetensors": "sha256:" + "3" * 64,
+    "category_mapping.json": "sha256:" + "4" * 64,
+}
+#: A manifest classifier with well-formed digests; parsing never reads its files.
+CLASSIFIER: dict[str, object] = {
+    "model_directory": "/srv/models/vela-domain",
+    "threshold": 0.5,
+    "files": CLASSIFIER_FILES,
+}
+MATH_RULE = {"name": "math_request", "domains": ["math"], "target": "code-teacher"}
+
+
+def with_rules(
+    manifest: dict[str, object], rules: list[object], classifier: object = CLASSIFIER, scenario: str = "code-opd"
+) -> dict[str, object]:
+    """A copy of ``manifest`` whose ``scenario`` has ``rules``, with ``classifier`` unless it is None."""
+    changed = json.loads(json.dumps(manifest))
+    changed["scenarios"][scenario]["rules"] = rules
+    if classifier is not None:
+        changed["deployment"]["domain_classifier"] = json.loads(json.dumps(classifier))
+    return changed
+
+
+def test_keyword_rules_default_to_any_keyword_ignoring_case(manifest: dict[str, object]) -> None:
+    snapshot = RoutingSnapshot.from_mapping(manifest)
+    [rule] = snapshot.scenarios["code-opd"].rules
+    # Existing manifests and positional construction keep their meaning.
+    assert rule == RoutingRule("teacher_requested", ("reef_teacher_required",), "code-teacher")
+    assert (rule.match, rule.case_sensitive, rule.domains) == ("any", False, ())
+    assert snapshot.domain_classifier is None
+    both = {
+        "name": "both",
+        "keywords": ["Red", "flag"],
+        "match": "all",
+        "case_sensitive": True,
+        "target": "code-teacher",
+    }
+    [rule] = RoutingSnapshot.from_mapping(with_rules(manifest, [both], None)).scenarios["code-opd"].rules
+    assert (rule.keywords, rule.match, rule.case_sensitive) == (("Red", "flag"), "all", True)
+
+
+def test_domain_rules_need_a_classifier_and_keep_their_place_among_keyword_rules(manifest: dict[str, object]) -> None:
+    keyword = {"name": "teacher_requested", "keywords": ["reef_teacher_required"], "target": "code-teacher"}
+    law = {"name": "law_request", "domains": ["law", "economics"], "target": "code-student"}
+    rules: list[object] = [keyword, MATH_RULE, law]
+    with pytest.raises(ValueError, match=r"need deployment\.domain_classifier"):
+        RoutingSnapshot.from_mapping(with_rules(manifest, rules, None))
+    # The same label may serve rules in different Scenarios.
+    other = with_rules(with_rules(manifest, rules), [{**MATH_RULE, "target": "math-teacher"}], scenario="math-opd")
+    snapshot = RoutingSnapshot.from_mapping(other)
+    scenario = snapshot.scenarios["code-opd"]
+    assert [rule.name for rule in scenario.rules] == ["teacher_requested", "math_request", "law_request"]
+    assert scenario.rules[1] == RoutingRule("math_request", (), "code-teacher", domains=("math",))
+    assert scenario.rules[2].domains == ("law", "economics") and scenario.rules[2].keywords == ()
+    assert scenario.target_for_rule("law_request") == "code-student"
+    assert snapshot.scenarios["math-opd"].target_for_rule("math_request") == "math-teacher"
+    classifier = snapshot.domain_classifier
+    assert classifier is not None and classifier.model_directory == "/srv/models/vela-domain"
+    assert type(classifier.threshold) is float and classifier.files == CLASSIFIER_FILES
+    with pytest.raises(TypeError):
+        classifier.files["label_mapping.json"] = "sha256:" + "5" * 64
+    # An integral threshold is a number too; the classifier is part of the snapshot's identity.
+    integral = RoutingSnapshot.from_mapping(with_rules(manifest, rules, {**CLASSIFIER, "threshold": 1}))
+    assert integral.domain_classifier is not None and integral.domain_classifier.threshold == 1.0
+    assert integral.version != RoutingSnapshot.from_mapping(with_rules(manifest, rules)).version
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        [MATH_RULE, {"name": "maths", "domains": ["Math"], "target": "code-student"}],
+        [{"name": "math_request", "domains": ["math", "MATH"], "target": "code-teacher"}],
+    ],
+    ids=["two_rules", "one_rule"],
+)
+def test_a_domain_label_belongs_to_one_rule_of_a_scenario_ignoring_case(
+    manifest: dict[str, object], rules: list[object]
+) -> None:
+    # The router keeps one rule per lowercased label, so a later rule would silently replace an earlier one.
+    with pytest.raises(ValueError, match="only one rule per label"):
+        RoutingSnapshot.from_mapping(with_rules(manifest, rules))
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"name": "hard", "keywords": ["x"], "match": "some", "target": "code-teacher"},
+        {"name": "hard", "keywords": ["x"], "match": None, "target": "code-teacher"},
+        {"name": "hard", "keywords": ["x"], "match": "ALL", "target": "code-teacher"},
+        {"name": "hard", "keywords": ["x"], "case_sensitive": "yes", "target": "code-teacher"},
+        {"name": "hard", "keywords": ["x"], "case_sensitive": None, "target": "code-teacher"},
+        {"name": "hard", "keywords": ["x"], "domains": ["math"], "target": "code-teacher"},
+        {"name": "hard", "domains": ["math"], "match": "all", "target": "code-teacher"},
+        # Keyword options are refused on a domain rule even with their default values.
+        {"name": "hard", "domains": ["math"], "case_sensitive": False, "target": "code-teacher"},
+        {"name": "hard", "domains": [], "target": "code-teacher"},
+        {"name": "hard", "domains": ["math", "math"], "target": "code-teacher"},
+        {"name": "hard", "domains": ("math",), "target": "code-teacher"},
+        {"name": "hard", "domains": None, "target": "code-teacher"},
+        {"name": "hard", "domains": [" math"], "target": "code-teacher"},
+        {"name": "hard", "target": "code-teacher"},
+        {"name": "default", "domains": ["math"], "target": "code-teacher"},
+        {"name": "hard", "domains": ["math"], "target": "math-teacher"},
+    ],
+)
+def test_invalid_keyword_options_and_domain_rules_fail_at_load(manifest: dict[str, object], rule: object) -> None:
+    with pytest.raises(ValueError):
+        RoutingSnapshot.from_mapping(with_rules(manifest, [rule]))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("model_directory", "relative/vela-domain"),
+        ("model_directory", "/srv/models/vela-domain/"),
+        ("model_directory", "/srv/models/../vela-domain"),
+        ("model_directory", "/srv/models/./vela-domain"),
+        ("model_directory", None),
+        ("threshold", True),
+        ("threshold", "0.5"),
+        ("threshold", 1.5),
+        ("threshold", -0.1),
+        ("threshold", None),
+        ("files", {**CLASSIFIER_FILES, "label_mapping.json": "sha256:" + "5" * 64}),
+        ("files", {"config.json": "sha256:" + "1" * 64}),
+        ("files", {**CLASSIFIER_FILES, "tokenizer.json": "sha256:" + "A" * 64}),
+        ("files", {**CLASSIFIER_FILES, "model.safetensors": "https://example.com/model"}),
+        ("files", None),
+        ("repository", "vllm-sr/Vela-1.0-Encoder-307M-Domain"),
+    ],
+)
+def test_an_invalid_domain_classifier_fails_at_load(
+    manifest: dict[str, object], field_name: str, value: object
+) -> None:
+    with pytest.raises(ValueError):
+        RoutingSnapshot.from_mapping(with_rules(manifest, [MATH_RULE], {**CLASSIFIER, field_name: value}))
+
+
+def test_a_directly_made_classifier_keeps_its_definition() -> None:
+    assert DomainClassifier("/srv/models/vela-domain", 0, CLASSIFIER_FILES).threshold == 0.0
+    for threshold in (math.nan, math.inf):
+        with pytest.raises(ValueError):
+            DomainClassifier("/srv/models/vela-domain", threshold, CLASSIFIER_FILES)
+    with pytest.raises(ValueError, match="only to keyword rules"):
+        RoutingRule("math_request", (), "code-teacher", match="all", domains=("math",))
+    with pytest.raises(ValueError, match="either keywords or domains"):
+        RoutingRule("math_request", ("x",), "code-teacher", domains=("math",))
+
+
+def test_a_policy_update_may_change_domain_rules_but_not_the_classifier(manifest: dict[str, object]) -> None:
+    current = RoutingSnapshot.from_mapping(with_rules(manifest, [MATH_RULE]))
+    for rules in (
+        [{**MATH_RULE, "target": "code-student"}],
+        [{**MATH_RULE, "domains": ["math", "physics"]}],
+        [{"name": "both", "keywords": ["a", "b"], "match": "all", "target": "code-teacher"}, MATH_RULE],
+    ):
+        check_policy_change(current, RoutingSnapshot.from_mapping(with_rules(manifest, rules)))
+    files = {**CLASSIFIER_FILES, "model.safetensors": "sha256:" + "9" * 64}
+    for classifier in (
+        {**CLASSIFIER, "threshold": 0.6},
+        {**CLASSIFIER, "model_directory": "/srv/models/other"},
+        {**CLASSIFIER, "files": files},
+    ):
+        with pytest.raises(ValueError, match=r"classifier .* restart"):
+            check_policy_change(current, RoutingSnapshot.from_mapping(with_rules(manifest, [MATH_RULE], classifier)))
+    keyword_only = RoutingSnapshot.from_mapping(manifest)
+    for before, after in ((current, keyword_only), (keyword_only, current)):
+        with pytest.raises(ValueError, match=r"classifier .* restart"):
+            check_policy_change(before, after)
+
+
+def native_domain_reply(scenario: str, rule: str, target: str, label: str) -> dict[str, object]:
+    """A preview reply shaped like the pinned router's real answer for a domain decision, trace included.
+
+    Recorded from the pinned router with the Vela Domain classifier; names are this test's and the metrics
+    are trimmed to the domain entry.
+    """
+    matched = rule != "default"
+    signals = {"domains": [rule]} if matched else {}
+    confidence = 0.9969121217727661
+    return {
+        "config_hash": ROUTER_HASH,
+        "original_text": "Solve the quadratic equation x squared minus five x plus six equals zero.",
+        "requested_model": f"reef-entrypoint/{scenario}",
+        "recipe": scenario,
+        "decision_result": {
+            "decision_name": rule,
+            "algorithm": "static",
+            "used_signals": signals,
+            "matched_signals": {"domains": [rule if matched else label]},
+            "unmatched_signals": {"domains": [] if matched else ["math_request"]},
+        },
+        "eval_trace": [
+            {
+                "decision_name": rule,
+                "state": "true",
+                "matched": True,
+                "confidence": confidence if matched else 0,
+                "root_trace": {"node_type": "AND", "state": "true", "matched": True, "confidence_scored": True},
+            }
+        ],
+        "recommended_models": [target],
+        "selected_model": target,
+        "selection_status": "selected",
+        "selection_method": "single",
+        "selection_reason": "single declared candidate",
+        "selection_provenance": {
+            "mode": "stateless",
+            "config_hash": ROUTER_HASH,
+            "state_dependent": False,
+            "sampled": False,
+        },
+        "routing_decision": rule,
+        "metrics": {"domain": {"execution_time_ms": 95.288, "confidence_available": True, "confidence": confidence}},
+        "signal_confidences": {f"domain:{rule if matched else label}": confidence},
+        "decision_ranking": {"strategy": "priority", "tiered": False, "winner": rule, "candidates": 2},
+    }
+
+
+def test_a_native_domain_preview_passes_the_unchanged_selection_check(manifest: dict[str, object]) -> None:
+    snapshot = RoutingSnapshot.from_mapping(with_rules(manifest, [MATH_RULE]))
+    adapter = RoutingAdapter(snapshot, ROUTER_HASH, {})
+    scenario = snapshot.scenarios["code-opd"]
+    decision = checked_selection(
+        adapter, scenario, native_domain_reply("code-opd", "math_request", "code-teacher", "math"), [ROUTER_HASH]
+    )
+    assert (decision.reason, decision.rule_name, decision.target.target_id) == ("rule", "math_request", "code-teacher")
+    assert decision.metadata()["policy_id"] == "static"
+    # A predicted label no rule names reaches the catch-all; the trace does not make it a rule decision.
+    default = checked_selection(
+        adapter, scenario, native_domain_reply("code-opd", "default", "code-student", "biology"), [ROUTER_HASH]
+    )
+    assert (default.reason, default.rule_name, default.target.target_id) == ("default", "default", "code-student")
+    # Classifier errors and state-dependent selections are still refused.
+    for changes in (
+        {"signal_errors": {"domain": "classifier failed"}},
+        {"selection_provenance": {"mode": "read_only_snapshot", "config_hash": ROUTER_HASH, "state_dependent": True}},
+        {"selected_model": "code-student"},
+    ):
+        reply = {**native_domain_reply("code-opd", "math_request", "code-teacher", "math"), **changes}
+        with pytest.raises(RoutingRequestError):
+            checked_selection(adapter, scenario, reply, [ROUTER_HASH])

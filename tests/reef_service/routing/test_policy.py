@@ -33,6 +33,7 @@ from tests.reef_service.routing.routing_fakes import (
     routing_dispatcher,
     routing_headers,
     running_router,
+    write_domain_classifier,
 )
 
 from reef.service.app import CONTROL_APPLICATION, create_app
@@ -69,26 +70,27 @@ def write_source(
     url: str = "http://127.0.0.1:9",
     automatic_model: str = "auto",
     scenario: str = "coding",
+    domain_classifier: dict[str, object] | None = None,
+    domain_target: str | None = None,
     **student_change: str,
 ) -> Path:
+    """A one-Scenario source; ``domain_target`` adds a ``math_request`` domain rule after the keyword rule."""
     targets = {
         "student": {"provider_model": "student-v1", "revision": "r1", "url": url, **student_change},
         "teacher": {"provider_model": "teacher-v2", "revision": "r1", "url": url},
     }
+    rules: list[dict[str, object]] = [{"name": rule, "keywords": [keyword], "target": "teacher"}]
+    if domain_target is not None:
+        rules.append({"name": "math_request", "domains": ["math"], "target": domain_target})
+    deployment: dict[str, object] = {"semantic_router_image": "semantic-router@sha256:" + "a" * 64}
+    if domain_classifier is not None:
+        deployment["domain_classifier"] = domain_classifier
     manifest = {
         "schema_version": 2,
         "automatic_model": automatic_model,
         "targets": targets,
-        "scenarios": {
-            scenario: {
-                "default_target": "student",
-                "targets": ["student", "teacher"],
-                "rules": [{"name": rule, "keywords": [keyword], "target": "teacher"}],
-            }
-        },
-        "deployment": {
-            "semantic_router_image": "semantic-router@sha256:" + "a" * 64,
-        },
+        "scenarios": {scenario: {"default_target": "student", "targets": ["student", "teacher"], "rules": rules}},
+        "deployment": deployment,
     }
     path.write_text(json.dumps(manifest), encoding="utf-8")
     return path
@@ -303,8 +305,22 @@ class PolicyCase:
 
 @pytest.fixture
 def case(tmp_path: Path) -> Iterator[PolicyCase]:
+    with started_case(tmp_path, write_source(tmp_path / "source.json")) as started:
+        yield started
+
+
+@pytest.fixture
+def domain_case(tmp_path: Path) -> Iterator[PolicyCase]:
+    """A ready case whose policy has a stand-in domain classifier and a domain rule for the teacher."""
+    classifier = write_domain_classifier(tmp_path / "vela-domain")
+    source = write_source(tmp_path / "source.json", domain_classifier=classifier, domain_target="teacher")
+    with started_case(tmp_path, source) as started:
+        yield started
+
+
+@contextlib.contextmanager
+def started_case(tmp_path: Path, source: Path) -> Iterator[PolicyCase]:
     actions: list[str] = []
-    source = write_source(tmp_path / "source.json")
     policy = RoutingDeploymentSettings(
         deployment_id="unit-routing",
         ready_timeout_seconds=2,
@@ -947,6 +963,72 @@ def test_diagnostic_policy_outcome_keeps_dependency_monitoring_live(case: Policy
     case.controller.next_probe = 0
     with pytest.raises(RoutingDeploymentError, match="fail_stop"):
         case.controller.tick()
+
+
+def last_event(case: PolicyCase) -> dict[str, object]:
+    return json.loads((case.controller.directory / "lifecycle-events.jsonl").read_text().splitlines()[-1])
+
+
+def test_a_domain_rule_reloads_in_place_while_the_classifier_stays(domain_case: PolicyCase) -> None:
+    classifier = json.loads(domain_case.source.read_text())["deployment"]["domain_classifier"]
+    write_source(domain_case.source, domain_classifier=classifier, domain_target="student")
+    reload(domain_case)
+    assert domain_case.events()[-2:] == ["policy_committed", "ready"]
+    controller, control = domain_case.controller, domain_case.control
+    assert controller.snapshot_version == control.snapshot_version != domain_case.startup_version
+    recipe = yaml.safe_load(domain_case.router.document)["recipes"][0]["routing"]
+    math_rule = next(decision for decision in recipe["decisions"] if decision["name"] == "math_request")
+    assert math_rule["modelRefs"] == [{"model": "student", "use_reasoning": False}]
+    assert recipe["signals"]["domains"] == [{"name": "math_request", "mmlu_categories": ["math"]}]
+
+
+@pytest.mark.parametrize("change", ["threshold", "changed_file", "removed"])
+def test_a_classifier_change_is_rejected_and_the_serving_policy_stays(domain_case: PolicyCase, change: str) -> None:
+    classifier = json.loads(domain_case.source.read_text())["deployment"]["domain_classifier"]
+    if change == "threshold":
+        write_source(domain_case.source, domain_classifier={**classifier, "threshold": 0.6}, domain_target="teacher")
+    elif change == "changed_file":
+        # The host changed a file after startup; the next render checks it again and refuses the update.
+        (Path(classifier["model_directory"]) / "model.safetensors").write_text("other weights")
+        write_source(domain_case.source, domain_classifier=classifier, domain_target="student")
+    else:
+        write_source(domain_case.source)
+    reload(domain_case)
+    event = last_event(domain_case)
+    assert event["state"] == "policy_rejected"
+    assert "sha256" in str(event["reason"]) if change == "changed_file" else "restart" in str(event["reason"])
+    assert domain_case.controller.state == "ready" and domain_case.router.puts == []
+    controller, control = domain_case.controller, domain_case.control
+    assert control.snapshot_version == controller.snapshot_version == domain_case.startup_version
+    assert "control:close" not in domain_case.actions
+
+
+@pytest.mark.parametrize("fault", ["oversized_threshold", "deep_label_json"])
+def test_invalid_classifier_updates_leave_the_active_policy_serving(domain_case: PolicyCase, fault: str) -> None:
+    classifier = json.loads(domain_case.source.read_text())["deployment"]["domain_classifier"]
+    if fault == "oversized_threshold":
+        classifier["threshold"] = 10**1000
+    else:
+        # Valid JSON can exceed the decoder's nesting limit even in a small file.
+        content = '{"padding":' + "[" * 1200 + "0" + "]" * 1200 + "}"
+        (Path(classifier["model_directory"]) / "config.json").write_text(content)
+        classifier["files"]["config.json"] = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    write_source(domain_case.source, domain_classifier=classifier, domain_target="student")
+    reload(domain_case)
+    assert last_event(domain_case)["state"] == "policy_rejected"
+    assert domain_case.controller.state == "ready" and domain_case.router.puts == []
+    assert (
+        domain_case.control.snapshot_version == domain_case.controller.snapshot_version == domain_case.startup_version
+    )
+    assert "control:close" not in domain_case.actions
+
+
+def test_adding_a_classifier_needs_a_restart(case: PolicyCase, tmp_path: Path) -> None:
+    classifier = write_domain_classifier(tmp_path / "vela-domain")
+    write_source(case.source, domain_classifier=classifier, domain_target="teacher")
+    reload(case)
+    assert last_event(case)["state"] == "policy_rejected" and "restart" in str(last_event(case)["reason"])
+    assert case.router.puts == [] and case.controller.snapshot_version == case.startup_version
 
 
 COMMITTED = {

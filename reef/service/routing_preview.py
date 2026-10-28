@@ -2,7 +2,7 @@
 
 ``POST /api/v1/routing/preview`` asks an unmodified router which target a
 Scenario's private entrypoint selects for one request, without sending the
-request to any model. Reef makes one such call for each automatic request and
+request to a generation model. Reef makes one such call for each automatic request and
 checks the reply against the routing policy the request captured: its
 manifest and the router runtime hash it was published with. The checked reply
 becomes the request's ``RoutingDecision``; the provider call that follows
@@ -11,8 +11,8 @@ never asks the router again.
 Each call goes to the router's loopback management listener with the
 selection-only bearer token and the expected runtime hash. The body holds
 only the Scenario's entrypoint and the request's messages, reduced to the
-fields the router's strict ``IntentRequest`` decoder accepts. Reef's keyword
-rules read only message text, so tools, generation parameters and response
+fields the router's strict ``IntentRequest`` decoder accepts. The supported keyword
+and domain rules read message text. Tools, generation parameters and response
 formats are left out. The caller's credentials and provider secrets are never
 sent. Nothing is retried, proxied or redirected, router error text is never
 relayed, and no log line carries a token or request text.

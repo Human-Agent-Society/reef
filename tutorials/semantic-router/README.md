@@ -4,11 +4,11 @@ Clients call a record-only Reef service directly. `reef serve` runs one
 unmodified Semantic Router (SR) container next to Reef and asks it which model
 an automatic request should use; Reef then calls that model and returns its
 normal JSON or SSE response with a receipt. Each Scenario has its own targets,
-default target and keyword rules:
+default target and routing rules:
 
 - `model: auto` goes to the Scenario's default target (the student), unless
-  the request's latest user message contains one of a rule's keywords; then
-  it goes to that rule's target (the teacher). Reef asks SR through its HTTP
+  a keyword or domain rule matches the request. It then goes to that rule's
+  target (the teacher in this example). Reef asks SR through its HTTP
   routing preview and checks the answer against the manifest and the SR
   runtime it verified.
 - `model: <target ID>` pins one of the Scenario's own targets. A pin never
@@ -28,10 +28,12 @@ What this covers, and what it does not:
 
 - Reef listens on `127.0.0.1` only, runs with the local `uni` executor, and
   calls existing OpenAI-compatible Chat Completions services. It does not start
-  or load models.
-- Routing uses a default target, keyword rules (SR's static selection) and
-  explicit pins. Other SR policies, such as classifiers, confidence escalation,
-  fallback or shadow requests, are not used.
+  generation models. When configured, SR loads the domain classifier.
+- Routing uses a default target, keyword rules, optional rules on a
+  pretrained domain classifier's prediction, and explicit pins. Every rule
+  names one target (SR's static selection). Other SR policies, such as
+  learned model selectors, confidence escalation, fallback or shadow
+  requests, are not used.
 - The service records inference and feedback. It does not train models.
 - Any holder of a Reef service token may name any configured Scenario. Binding
   callers to Scenarios belongs to a gateway in front of Reef.
@@ -120,7 +122,11 @@ edit it:
   environment variable that holds a service's API key.
 - `scenarios.<name>` lists the Scenario's `targets`, its `default_target`, and
   `rules`. Each rule has a `name`, `keywords` and the `target` an automatic
-  request matching a keyword uses. Scenarios may share a target.
+  request matching a keyword uses. Optional `match: all` requires every
+  keyword instead of any one, and `case_sensitive: true` stops ignoring case.
+  A rule may instead name `domains`; see
+  [Route by a pretrained domain classifier](#route-by-a-pretrained-domain-classifier).
+  Scenarios may share a target.
 - `deployment.semantic_router_image` is the `repository@sha256:...` reference
   from step 1. Image tags without a digest are rejected.
 
@@ -235,10 +241,119 @@ against the running image for the cases in parentheses:
   system, developer and assistant texts together instead (a keyword in a
   system or assistant message then selects the rule). Tool results are never
   checked.
-- Keywords match regardless of case (an uppercase keyword selects the rule). A
-  keyword made of letters, digits or underscores matches only as a whole word.
-- If several rules match, the rule listed first in the manifest is used. No
-  match means the default target.
+- Keywords match regardless of case (an uppercase keyword selects the rule),
+  unless the rule sets `case_sensitive: true`. A keyword made of letters,
+  digits or underscores matches only as a whole word.
+- A rule matches when the text contains any of its keywords, or every one with
+  `match: all`.
+- If several rules match, the rule listed first in the manifest is used, also
+  between keyword and domain rules. No match means the default target.
+
+## Route by a pretrained domain classifier
+
+A rule can name `domains` instead of `keywords`. SR then runs a local
+pretrained classifier on the request text and the rule matches when the
+classifier predicts one of its labels. The rule still names one target: this is
+a trained prediction followed by a fixed mapping. It is not a learned model
+selector, and it trains nothing.
+
+Reef supports the local ModernBERT classifier layout of
+[`vllm-sr/Vela-1.0-Encoder-307M-Domain`](https://huggingface.co/vllm-sr/Vela-1.0-Encoder-307M-Domain)
+(Apache-2.0), tested at revision `736c049c8710e16011c0216ff1bd79c5a1c399db`.
+Download its four runtime files into a private directory once; Reef and SR
+never download them:
+
+```bash
+REV=736c049c8710e16011c0216ff1bd79c5a1c399db
+mkdir -p ~/models/vela-domain && cd ~/models/vela-domain
+for file in config.json tokenizer.json model.safetensors category_mapping.json; do
+  curl -fLO "https://huggingface.co/vllm-sr/Vela-1.0-Encoder-307M-Domain/resolve/$REV/$file"
+done
+sha256sum config.json tokenizer.json model.safetensors category_mapping.json
+cd -
+```
+
+Add the classifier to `deployment` and domain rules to the Scenarios:
+
+```yaml
+deployment:
+  semantic_router_image: reef-direct-sr@sha256:...
+  domain_classifier:
+    model_directory: /home/you/models/vela-domain   # absolute, no symlinks
+    threshold: 0.5
+    files:   # the digests printed above; these are for revision 736c049c
+      config.json: sha256:2741d5ac33b7c56fd3c716e6b434e4616d6f0d943b9f0634fbf3bb1e7dd8cafd
+      tokenizer.json: sha256:609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f
+      model.safetensors: sha256:be89c0202dc630796e0487b2cb661103782fc2d8aa181a8f92bd67b697d089a4
+      category_mapping.json: sha256:48ce5b71a0d3479e460af7e5a39dd05a7c66728380f201a1f794b335de915b1a
+scenarios:
+  code-opd:
+    rules:
+      - name: teacher_requested
+        keywords: [reef_teacher_required]
+        target: code-teacher
+      - name: math_request          # not a label name, such as "math"
+        domains: [math]
+        target: code-teacher
+```
+
+- A domain rule takes `name`, `domains` and `target` only. Labels are the
+  classifier's own: `biology`, `business`, `chemistry`, `computer science`,
+  `economics`, `engineering`, `health`, `history`, `law`, `math`, `other`,
+  `philosophy`, `physics` and `psychology`. Within one Scenario a label can
+  appear in only one rule, ignoring case, because SR keeps one rule per label.
+- A domain rule cannot be named like a label. SR reports a predicted label that
+  no rule names under the label itself, which would match such a rule.
+- Below `threshold`, preview matches no domain rule. Other matching rules or
+  the Scenario default can still select a target. Each Scenario uses only its
+  own rules; the same label may serve different targets in different Scenarios.
+- When it renders a configuration, at startup, at each `SIGHUP` and in the
+  `validate` command, Reef refuses a classifier unless each of the four files
+  is a regular file reached without a symlink and has its digest, and
+  `config.json` and `category_mapping.json` list the same labels in the same
+  order. It then mounts only these four files, read-only, at
+  `/models/reef-domain/` in the SR container, with Hugging Face offline mode
+  set. Other learned SR modules stay disabled.
+- Domain rules, keyword rules, defaults and target membership can change with
+  `SIGHUP`. Changing the classifier's directory, files or threshold needs a
+  restart.
+- The digests are checked when a configuration is rendered. The read-only
+  mount stops the container from changing the files, not the host: do not
+  change them while the deployment runs.
+- With rootless Docker or user namespace remapping, the container's mapped
+  user also needs permission to read the four host files.
+- The pinned SR reads at most 512 tokens of a request for this classifier and
+  drops the rest, although the model accepts longer input.
+
+### Check it end to end
+
+[`domain_smoke.py`](domain_smoke.py) is an opt-in functional check against the
+real SR; it is not run by the test suite. It needs the four CPU stand-ins of
+step 2. Write the two manifests, start `reef serve` with the first one, then
+run the check in another terminal with the same `REEF_TOKEN`:
+
+```bash
+python tutorials/semantic-router/domain_smoke.py manifests \
+  --model-directory ~/models/vela-domain --output-directory ~/reef-routing
+# Set reef.routing_manifest to ~/reef-routing/manifest.yaml, then start reef serve as in step 4.
+python tutorials/semantic-router/domain_smoke.py check \
+  --manifest ~/reef-routing/manifest.yaml \
+  --updated-manifest ~/reef-routing/manifest.updated.yaml \
+  --reef-pid <PID-of-this-reef-serve-process>
+```
+
+Before starting Reef, set `semantic_router_image` in both generated manifests
+to the digest built in step 1. Use the PID of that Reef deployment for the check.
+The check sends math prompts as JSON and SSE to `code-opd`, as SSE to
+`math-opd`, and biology prompts as JSON to both Scenarios. It
+pins a target, checks that a pin to another Scenario's target is refused, and
+checks each receipt. It then replaces the manifest with the updated one, which sends
+`code-opd`'s math rule to its student, sends `SIGHUP`, and repeats the
+requests. Last, it sends one feedback report per Scenario for that Scenario's
+receipts and checks that a report for another Scenario's receipt is refused.
+It prints each check and exits 1 if any fails. The prompts are the ones the
+classifier sorted into `math` and `biology` in a direct SR probe; they test
+the routing path, not the classifier's accuracy.
 
 ## Errors
 
@@ -278,8 +393,8 @@ the previous policy and reopens with it; if Reef cannot confirm what SR runs,
 the deployment stops instead of reopening. A `SIGHUP` sent while `reef serve` is
 starting is applied once it is ready; one sent while it is stopping is ignored.
 
-Changes to targets, endpoints, revisions, Scenario names, the image or the
-preview settings need a restart. Check a candidate configuration first; this
+Changes to targets, endpoints, revisions, Scenario names, the image, the
+domain classifier or the preview settings need a restart. Check a candidate configuration first; this
 uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 

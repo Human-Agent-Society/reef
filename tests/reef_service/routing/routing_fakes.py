@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
+import os
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,7 +36,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, R
 from reef.service.deploy.routing.registry import DeploymentOwnership
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
-from reef.service.routing import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingSnapshot
+from reef.service.routing import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingRule, RoutingSnapshot
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_HASH_HEADER, PreviewSettings
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -44,6 +46,57 @@ SELECTION_TOKEN = "selection-test-token"
 SERVICE_TOKEN = "gateway-test-token"
 #: An ``open_deadline_monotonic`` no test reaches; it is fixed, so a repeated open is the same command.
 OPEN_DEADLINE = time.monotonic() + 24 * 3600
+#: The labels of vllm-sr/Vela-1.0-Encoder-307M-Domain at 736c049c8710e16011c0216ff1bd79c5a1c399db, in index order.
+DOMAIN_LABELS = (
+    "biology",
+    "business",
+    "chemistry",
+    "computer science",
+    "economics",
+    "engineering",
+    "health",
+    "history",
+    "law",
+    "math",
+    "other",
+    "philosophy",
+    "physics",
+    "psychology",
+)
+
+
+def write_domain_classifier(
+    directory: Path, labels: Sequence[str] = DOMAIN_LABELS, *, mapping_labels: Sequence[str] | None = None
+) -> dict[str, object]:
+    """Write small stand-in classifier files and return the ``deployment.domain_classifier`` that names them.
+
+    ``config.json`` and ``category_mapping.json`` have the real layout, with ``labels`` in ``id2label`` and
+    ``mapping_labels`` (default: the same) in the mapping. The tokenizer and weights are placeholder bytes:
+    nothing here loads a model. The digests are the files' own, and the directory is given without symlinks.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    in_mapping = labels if mapping_labels is None else mapping_labels
+    contents = {
+        "config.json": json.dumps(
+            {
+                "architectures": ["ModernBertForSequenceClassification"],
+                "id2label": {str(index): label for index, label in enumerate(labels)},
+            }
+        ),
+        "category_mapping.json": json.dumps(
+            {
+                "category_to_idx": {label: index for index, label in enumerate(in_mapping)},
+                "idx_to_category": {str(index): label for index, label in enumerate(in_mapping)},
+            }
+        ),
+        "tokenizer.json": '{"model": "placeholder tokenizer"}',
+        "model.safetensors": "placeholder weights",
+    }
+    files = {}
+    for name, text in contents.items():
+        (directory / name).write_text(text, encoding="utf-8")
+        files[name] = "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+    return {"model_directory": os.path.realpath(directory), "threshold": 0.5, "files": files}
 
 
 def routing_manifest(upstream_url: str, *, teacher_url: str | None = None) -> dict[str, object]:
@@ -103,9 +156,14 @@ def routing_dispatcher(tmp_path: Path) -> Dispatcher:
     return build_default_dispatcher(local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage())
 
 
-def preview_reply(scenario: str, rule: str, target: str, runtime_hash: str) -> dict[str, object]:
-    """A selection shaped like the pinned router's EvalResponse for a static, single-target decision."""
-    signals = None if rule == DEFAULT_RULE else {"keywords": [rule]}
+def preview_reply(
+    scenario: str, rule: str, target: str, runtime_hash: str, signal_kind: str = "keywords"
+) -> dict[str, object]:
+    """A selection shaped like the pinned router's EvalResponse for a static, single-target decision.
+
+    ``signal_kind`` is the native signal collection of the rule: ``keywords`` or ``domains``.
+    """
+    signals = None if rule == DEFAULT_RULE else {signal_kind: [rule]}
     return {
         "config_hash": runtime_hash,
         "original_text": "",
@@ -155,9 +213,12 @@ class FakeSemanticRouter:
     answer until it is set, after setting ``arrived``; ``disconnected`` is set when Reef drops a held
     preview. Then the first failing check answers with an error body: a token other than the selection
     token is 401, an expected hash other than ``runtime_hash`` is 412, ``failure`` gives its status and
-    code, and a model outside ``snapshot``'s entrypoints is 400. Otherwise it selects the first rule with a
-    keyword in the last user text, ignoring case, or the default, and answers under ``runtime_hash``;
-    ``reply_changes`` overwrites reply fields, so a test can send replies that Reef must refuse.
+    code, and a model outside ``snapshot``'s entrypoints is 400. Otherwise it selects the first matching rule,
+    or the default, and answers under ``runtime_hash``. A keyword rule matches when the last user text
+    contains any of its keywords (``match: all``: every one), ignoring case unless ``case_sensitive``. A
+    domain rule matches when ``predicted_domain``, which a test sets in place of a classifier, is one of its
+    labels, ignoring case. ``reply_changes`` overwrites reply fields, so a test can send replies that Reef must
+    refuse.
     """
 
     def __init__(self, snapshot: RoutingSnapshot, runtime_hash: str = ROUTER_HASH) -> None:
@@ -171,6 +232,17 @@ class FakeSemanticRouter:
         self.hold: asyncio.Event | None = None
         self.arrived = asyncio.Event()
         self.disconnected = asyncio.Event()
+        self.predicted_domain: str | None = None
+
+    def matches(self, rule: RoutingRule, text: str) -> bool:
+        if rule.domains:
+            labels = {label.casefold() for label in rule.domains}
+            return self.predicted_domain is not None and self.predicted_domain.casefold() in labels
+        if rule.case_sensitive:
+            found = [keyword in text for keyword in rule.keywords]
+        else:
+            found = [keyword.casefold() in text.casefold() for keyword in rule.keywords]
+        return all(found) if rule.match == "all" else any(found)
 
     @property
     def selections(self) -> list[tuple[dict[str, str], dict[str, object]]]:
@@ -205,13 +277,12 @@ class FakeSemanticRouter:
         if error is not None or scenario is None:
             status, code = error
             return web.json_response({"error": {"code": code, "message": "fake router error"}}, status=status)
-        text = last_user_text(body["messages"]).casefold()
-        rule = next(
-            (rule.name for rule in scenario.rules if any(word.casefold() in text for word in rule.keywords)),
-            DEFAULT_RULE,
-        )
+        text = last_user_text(body["messages"])
+        matched = next((rule for rule in scenario.rules if self.matches(rule, text)), None)
+        rule = DEFAULT_RULE if matched is None else matched.name
+        kind = "domains" if matched is not None and matched.domains else "keywords"
         target = scenario.target_for_rule(rule)
-        reply = {**preview_reply(scenario.name, rule, str(target), self.runtime_hash), **self.reply_changes}
+        reply = {**preview_reply(scenario.name, rule, str(target), self.runtime_hash, kind), **self.reply_changes}
         return web.json_response(reply, headers={RETURNED_HASH_HEADER: self.runtime_hash})
 
 

@@ -57,7 +57,7 @@ Scenario routing between students and teachers
 from an immutable deployment manifest. It is unset by default. This mode
 supports ordinary and SSE ``/v1/chat/completions`` requests for online OPD:
 each configured Scenario serves its default target (usually the student),
-sends requests that match a keyword rule to another target (usually the
+sends requests that match a keyword or domain rule to another target (usually the
 teacher), and accepts explicit pins to its own targets.
 
 Clients call Reef directly. ``reef serve`` owns one unmodified Semantic Router
@@ -84,15 +84,29 @@ The manifest (``schema_version: 2``) has three parts:
   external deployment revisions. Optional ``api_key_env`` fields name provider
   credential environment variables.
 * ``scenarios`` lists, for each Scenario, its ``targets``, its
-  ``default_target``, and optional ``rules``. A rule names keywords and the
-  target that automatic requests containing them use. SR checks only the
-  latest user message that has text, ignoring case; a keyword of letters,
-  digits or underscores matches only as a whole word. Only when no user
-  message has text or an inline image does SR check the system, developer and
-  assistant text instead; tool results are never checked. If several rules
-  match, the first one listed is used.
+  ``default_target``, and optional ``rules``. Each rule has a ``name``, a
+  ``target`` and exactly one of ``keywords`` or ``domains``. A keyword rule
+  matches automatic requests whose text contains any of its keywords
+  (``match: any``, the default) or all of them (``match: all``), ignoring case
+  unless ``case_sensitive: true``. SR checks only the latest user message that
+  has text; a keyword of letters, digits or underscores matches only as a
+  whole word. Only when no user message has text or an inline image does SR
+  check the system, developer and assistant text instead; tool results are
+  never checked. A domain rule matches when the deployment's domain classifier
+  predicts one of its labels; it needs ``deployment.domain_classifier``, and
+  within one Scenario a label may appear in only one rule, ignoring case. If
+  several rules match, the first one listed is used, whatever its kind.
 * ``deployment`` pins the Semantic Router image (``semantic_router_image``) by
-  digest.
+  digest. Optional ``domain_classifier`` names a local pretrained domain
+  classifier: ``model_directory`` (an absolute path without symlinks),
+  ``threshold`` (a number from 0 to 1) and ``files``, the ``sha256:`` digest
+  of each of exactly ``config.json``, ``tokenizer.json``, ``model.safetensors``
+  and ``category_mapping.json``. Reef checks the files and labels when it
+  renders a configuration and mounts only these four files read-only into SR.
+  Rules, defaults and Scenario target membership can change in place. A
+  classifier change or a target catalog change needs a restart.
+  See the `domain classifier section
+  <../../tutorials/semantic-router/README.md#route-by-a-pretrained-domain-classifier>`__.
 
 Target IDs and ``automatic_model`` must not start with ``reef-entrypoint/``,
 in any letter case: that prefix names the private router entrypoints.

@@ -44,8 +44,13 @@ SINGLE_VALUE_HEADERS = frozenset({"authorization", "x-api-key", "content-type"})
 ROUTER_CONFIG_HASH = re.compile(r"[0-9a-f]{64}")
 #: A routing snapshot version or a deployment configuration digest.
 SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-#: A keyword rule's name; the Semantic Router reports it as the decision name.
+#: A rule's name; the Semantic Router reports it as the decision name.
 RULE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+#: How a keyword rule combines its keywords: ``any`` needs one of them in the request text, ``all`` every one.
+KEYWORD_MATCHES = ("any", "all")
+#: The files of the supported local domain classifier: a ModernBERT sequence classifier's configuration,
+#: tokenizer and safetensors weights, and the category mapping the router reads the labels from.
+DOMAIN_CLASSIFIER_FILES = frozenset({"config.json", "tokenizer.json", "model.safetensors", "category_mapping.json"})
 #: An environment variable name that may hold a target's credential.
 ENVIRONMENT_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 #: Every status a ``RoutingRequestError`` reports; ``reef.service.errors`` translates each one.
@@ -187,25 +192,49 @@ class RoutingTarget:
 
 @dataclass(frozen=True)
 class RoutingRule:
-    """A keyword rule that sends a matching automatic request to one target.
+    """A rule that sends a matching automatic request to one target, by its keywords or by a predicted domain.
 
-    Values: ``name`` matches ``RULE_NAME`` and is not ``DEFAULT_RULE``. ``keywords`` is a non-empty tuple of
-    distinct manifest strings in manifest order; distinctness compares the exact strings, and a list given
-    to the constructor is stored as a tuple. ``target_id`` is a manifest string.
-    Purpose: ``parse_scenario`` makes it. The renderer turns it into one Semantic Router keyword signal: the
-    rule matches a request whose text contains any keyword, ignoring case. Its Scenario and the snapshot
-    check that ``target_id`` is one of the Scenario's enabled targets.
+    Values: ``name`` matches ``RULE_NAME`` and is not ``DEFAULT_RULE``. ``target_id`` is a manifest string.
+    Exactly one of ``keywords`` and ``domains`` is non-empty: a keyword rule or a domain rule. Each is a tuple of
+    distinct manifest strings in manifest order; distinctness compares the exact strings, and a list given to the
+    constructor is stored as a tuple. ``match`` is ``"any"`` or ``"all"`` and ``case_sensitive`` is a bool; a
+    domain rule has their defaults, ``"any"`` and False, and does not use them.
+    Purpose: ``parse_scenario`` makes it. The renderer turns a keyword rule into one Semantic Router keyword
+    signal, which matches a request whose text contains any keyword (``match: any``) or every keyword
+    (``all``), ignoring case unless ``case_sensitive``. It turns a domain rule into one domain signal, which
+    matches when the deployment's domain classifier predicts one of ``domains`` for the request. The rule's
+    Scenario and snapshot check that ``target_id`` is one of the Scenario's enabled targets, and that a
+    domain rule has a classifier.
     """
 
     name: str
     keywords: tuple[str, ...]
     target_id: str
+    match: Literal["any", "all"] = "any"
+    case_sensitive: bool = False
+    domains: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not RULE_NAME.fullmatch(self.name) or self.name == DEFAULT_RULE:
             raise ValueError(f"routing rule names must be short identifiers other than {DEFAULT_RULE!r}")
-        object.__setattr__(self, "keywords", distinct_strings(self.keywords, f"rules.{self.name}.keywords"))
-        manifest_string(self.target_id, f"rules.{self.name}.target")
+        name = f"rules.{self.name}"
+        if not isinstance(self.keywords, (list, tuple)) or not isinstance(self.domains, (list, tuple)):
+            raise ValueError(f"{name}.keywords and {name}.domains must be lists")
+        if bool(self.keywords) == bool(self.domains):
+            raise ValueError(f"{name} must name either keywords or domains")
+        if self.domains:
+            object.__setattr__(self, "domains", distinct_strings(self.domains, f"{name}.domains"))
+            object.__setattr__(self, "keywords", ())
+            if self.match != "any" or self.case_sensitive is not False:
+                raise ValueError(f"{name}: match and case_sensitive apply only to keyword rules")
+        else:
+            object.__setattr__(self, "keywords", distinct_strings(self.keywords, f"{name}.keywords"))
+            object.__setattr__(self, "domains", ())
+            if self.match not in KEYWORD_MATCHES:
+                raise ValueError(f"{name}.match must be any or all")
+            if type(self.case_sensitive) is not bool:
+                raise ValueError(f"{name}.case_sensitive must be a boolean")
+        manifest_string(self.target_id, f"{name}.target")
 
 
 @dataclass(frozen=True)
@@ -214,8 +243,10 @@ class RoutingScenario:
 
     Values: ``name`` is a manifest string outside ``RESERVED_SCENARIOS``. ``target_ids`` is a non-empty tuple of
     distinct manifest strings; ``default_target`` ∈ ``target_ids``. ``rules`` is a tuple, possibly empty, of
-    ``RoutingRule`` values with distinct names, and ``rule.target_id`` ∈ ``target_ids`` for each rule. Earlier
-    rules take priority. The constructor stores a list of target IDs or rules as a tuple.
+    ``RoutingRule`` values with distinct names, and ``rule.target_id`` ∈ ``target_ids`` for each rule. No two
+    domain labels of the Scenario's rules are equal ignoring case: the router keeps one rule per label, case
+    folded. Earlier rules take priority, whatever their kind. The constructor stores a list of target IDs or
+    rules as a tuple.
     Which of these targets exist and are enabled is checked by the ``RoutingSnapshot`` that holds the
     Scenario.
     Purpose: ``parse_scenario`` makes it. ``target_for_rule`` maps the Semantic Router's decision name to a
@@ -240,9 +271,17 @@ class RoutingScenario:
         names = [rule.name for rule in rules]
         if len(set(names)) != len(names):
             raise ValueError(f"{name}.rules repeats a rule name")
+        labels: dict[str, str] = {}
         for rule in rules:
             if rule.target_id not in self.target_ids:
                 raise ValueError(f"{name}.rules.{rule.name}.target must identify one of its targets")
+            for label in rule.domains:
+                if label.casefold() in labels:
+                    raise ValueError(
+                        f"{name}.rules.{rule.name}.domains repeats {label!r}, already in rule "
+                        f"{labels[label.casefold()]!r}; the router keeps only one rule per label, ignoring case"
+                    )
+                labels[label.casefold()] = rule.name
         object.__setattr__(self, "rules", rules)
 
     def target_for_rule(self, rule_name: str) -> str | None:
@@ -277,6 +316,63 @@ def parse_target(target_id: str, value: object) -> RoutingTarget:
     )
 
 
+@dataclass(frozen=True)
+class DomainClassifier:
+    """A pretrained local domain classifier that the router runs for domain rules, named by its file digests.
+
+    Values: ``model_directory`` is a manifest string that is an absolute path ``os.path.normpath`` leaves
+    unchanged. ``threshold`` is a finite float with ``0 ≤ threshold ≤ 1``; the constructor takes an int or a
+    float, never a bool, and stores a float. ``files`` is a read-only mapping whose keys are exactly
+    ``DOMAIN_CLASSIFIER_FILES`` and whose values are ``sha256:<hex>`` digests; the constructor stores a
+    read-only copy.
+    Purpose: ``parse_domain_classifier`` makes it from ``deployment.domain_classifier``. Before the renderer
+    writes a generation, it checks on the host that ``model_directory`` has no symlink and that each file there
+    is a regular file with its digest; it then mounts only these files, read-only, into the router. The path,
+    digests and threshold are the classifier's identity, and changing any of them needs a restart. They say
+    nothing about where the model came from or how accurate it is.
+    """
+
+    model_directory: str
+    threshold: float
+    files: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        name = "deployment.domain_classifier"
+        directory = manifest_string(self.model_directory, f"{name}.model_directory")
+        if not os.path.isabs(directory) or os.path.normpath(directory) != directory:
+            raise ValueError(f"{name}.model_directory must be an absolute path without '.', '..' or a trailing '/'")
+        threshold = self.threshold
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or not 0 <= threshold <= 1
+            or not math.isfinite(threshold)
+        ):
+            raise ValueError(f"{name}.threshold must be a number from 0 to 1")
+        object.__setattr__(self, "threshold", float(threshold))
+        if not isinstance(self.files, Mapping) or set(self.files) != DOMAIN_CLASSIFIER_FILES:
+            raise ValueError(f"{name}.files must name exactly " + ", ".join(sorted(DOMAIN_CLASSIFIER_FILES)))
+        for file_name, digest in self.files.items():
+            if not isinstance(digest, str) or not SHA256_DIGEST.fullmatch(digest):
+                raise ValueError(f"{name}.files.{file_name} must be a sha256:<64 lowercase hex> digest")
+        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+
+
+def parse_domain_classifier(value: object) -> DomainClassifier:
+    """Read ``deployment.domain_classifier``, refusing unknown fields; ``DomainClassifier`` checks the domains."""
+    name = "deployment.domain_classifier"
+    classifier = manifest_mapping(value, name, {"model_directory", "threshold", "files"})
+    threshold = classifier.get("threshold")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise ValueError(f"{name}.threshold must be a number from 0 to 1")
+    files = manifest_mapping(classifier.get("files"), f"{name}.files", set(DOMAIN_CLASSIFIER_FILES))
+    return DomainClassifier(
+        manifest_string(classifier.get("model_directory"), f"{name}.model_directory"),
+        threshold,
+        {file_name: manifest_string(digest, f"{name}.files.{file_name}") for file_name, digest in files.items()},
+    )
+
+
 def parse_scenario(name: str, value: object) -> RoutingScenario:
     """Read one Scenario entry and its rules; ``RoutingScenario`` and ``RoutingRule`` check their domains."""
     scenario = manifest_mapping(value, f"scenarios.{name}", {"default_target", "targets", "rules"})
@@ -285,13 +381,34 @@ def parse_scenario(name: str, value: object) -> RoutingScenario:
         raise ValueError(f"scenarios.{name}.rules must be a list")
     rules: list[RoutingRule] = []
     for raw_rule in raw_rules:
-        rule = manifest_mapping(raw_rule, f"scenarios.{name}.rules[]", {"name", "keywords", "target"})
+        rule = manifest_mapping(
+            raw_rule,
+            f"scenarios.{name}.rules[]",
+            {"name", "keywords", "match", "case_sensitive", "domains", "target"},
+        )
         rule_name = manifest_string(rule.get("name"), f"scenarios.{name}.rules[].name")
+        field_name = f"scenarios.{name}.rules.{rule_name}"
+        target = manifest_string(rule.get("target"), f"{field_name}.target")
+        if "domains" in rule:
+            if rule.keys() & {"keywords", "match", "case_sensitive"}:
+                raise ValueError(f"{field_name} names domains, so it takes no keywords, match or case_sensitive")
+            rules.append(
+                RoutingRule(rule_name, (), target, domains=manifest_strings(rule["domains"], f"{field_name}.domains"))
+            )
+            continue
+        match = rule.get("match", "any")
+        if match not in KEYWORD_MATCHES:
+            raise ValueError(f"{field_name}.match must be any or all")
+        case_sensitive = rule.get("case_sensitive", False)
+        if not isinstance(case_sensitive, bool):
+            raise ValueError(f"{field_name}.case_sensitive must be a boolean")
         rules.append(
             RoutingRule(
                 rule_name,
-                manifest_strings(rule.get("keywords"), f"scenarios.{name}.rules.{rule_name}.keywords"),
-                manifest_string(rule.get("target"), f"scenarios.{name}.rules.{rule_name}.target"),
+                manifest_strings(rule.get("keywords"), f"{field_name}.keywords"),
+                target,
+                "all" if match == "all" else "any",
+                case_sensitive,
             )
         )
     return RoutingScenario(
@@ -311,7 +428,8 @@ class RoutingSnapshot:
     equals its target's ``target_id``. ``scenarios`` is a non-empty read-only mapping of ``RoutingScenario``
     values in which each key equals its Scenario's ``name``. For each Scenario ``s``: ``target_ids(s) ⊆ keys(targets)``, and its default target and every
     rule target are enabled. Targets may be shared between Scenarios. ``version`` is a ``sha256:<hex>``
-    digest; the constructor checks only its form.
+    digest; the constructor checks only its form. ``domain_classifier`` is None or a ``DomainClassifier``, and
+    it is not None when any rule of any Scenario names domains.
     Purpose: ``from_mapping`` makes it and sets ``version`` to the SHA-256 of the manifest's canonical JSON,
     including fields the snapshot does not keep. ``RoutingAdapter`` and the renderer read it; nothing
     changes it after construction.
@@ -321,6 +439,7 @@ class RoutingSnapshot:
     targets: Mapping[str, RoutingTarget]
     scenarios: Mapping[str, RoutingScenario]
     version: str
+    domain_classifier: DomainClassifier | None = None
 
     def __post_init__(self) -> None:
         targets = MappingProxyType(dict(self.targets))
@@ -355,6 +474,13 @@ class RoutingSnapshot:
                     raise ValueError(
                         f"scenarios.{scenario_name}.rules.{rule.name}.target must identify one of its enabled targets"
                     )
+                if rule.domains and self.domain_classifier is None:
+                    raise ValueError(
+                        f"scenarios.{scenario_name}.rules.{rule.name} names domains, which need "
+                        "deployment.domain_classifier"
+                    )
+        if self.domain_classifier is not None and not isinstance(self.domain_classifier, DomainClassifier):
+            raise ValueError("deployment.domain_classifier must be a domain classifier")
         if not isinstance(self.version, str) or not SHA256_DIGEST.fullmatch(self.version):
             raise ValueError("routing snapshot version must be a sha256 digest")
 
@@ -383,7 +509,9 @@ class RoutingSnapshot:
             raise ValueError("routing manifest schema_version must be 2")
         automatic_model = manifest_string(manifest.get("automatic_model"), "automatic_model")
         deployment = manifest_mapping(
-            manifest.get("deployment"), "deployment", {"semantic_router_image", "configuration_digest"}
+            manifest.get("deployment"),
+            "deployment",
+            {"semantic_router_image", "configuration_digest", "domain_classifier"},
         )
         image = manifest_string(deployment.get("semantic_router_image"), "deployment.semantic_router_image")
         if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
@@ -408,22 +536,27 @@ class RoutingSnapshot:
         for raw_name, raw_scenario in raw_scenarios.items():
             name = manifest_string(raw_name, "scenario name")
             scenarios[name] = parse_scenario(name, raw_scenario)
+        classifier = (
+            parse_domain_classifier(deployment["domain_classifier"]) if "domain_classifier" in deployment else None
+        )
         canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         version = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(automatic_model, targets, scenarios, version)
+        return cls(automatic_model, targets, scenarios, version, classifier)
 
 
 def check_policy_change(current: RoutingSnapshot, candidate: RoutingSnapshot) -> None:
     """Allow a policy update to change only rules, defaults and Scenario membership within the same catalog.
 
-    The managed owner checks a candidate before it changes the router, and the
-    REEF child checks it again before it publishes the candidate.
+    Keyword and domain rules may change; the domain classifier may not. The managed owner checks a candidate
+    before it changes the router, and the REEF child checks it again before it publishes the candidate.
 
     Raises:
         ValueError: The candidate changes something that needs a restart.
     """
     if candidate.targets != current.targets:
         raise ValueError("target catalog, provider, revision or endpoint changed; restart the deployment")
+    if candidate.domain_classifier != current.domain_classifier:
+        raise ValueError("domain classifier directory, files or threshold changed; restart the deployment")
     if candidate.automatic_model != current.automatic_model:
         raise ValueError("automatic selector changed; restart the deployment")
     if set(candidate.scenarios) != set(current.scenarios):
@@ -440,7 +573,7 @@ class RoutingDecision:
     - ``explicit_pin``: the caller named the target, so ``original_selector == target.target_id``, and
       ``rule_name`` and ``router_config_hash`` are None.
     - ``default``: the router chose the Scenario's default, so ``rule_name == DEFAULT_RULE``.
-    - ``rule``: the router matched a keyword rule, so ``rule_name`` matches ``RULE_NAME`` and is not
+    - ``rule``: the router matched a keyword or domain rule, so ``rule_name`` matches ``RULE_NAME`` and is not
       ``DEFAULT_RULE``.
 
     For ``default`` and ``rule``, ``router_config_hash`` is a router runtime hash: that of the router that
