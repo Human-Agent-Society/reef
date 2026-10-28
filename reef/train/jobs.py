@@ -29,6 +29,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.evaluation import CandidateEvaluationPlugin, CheckpointCandidate
 from reef.core.job_data import JobData, JobOutcome
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
+from reef.train.release import WEIGHT_RELEASES
 from reef.train.types import TrainStepResult
 
 #: The keys of a checkpoint decision's commit metrics that the job loop writes itself.
@@ -426,10 +427,10 @@ class JobLoop:
 
         The next job starts from ``checkpoint.path`` whether or not the
         evaluation selects it. The commit publishes the checkpoint's
-        ``release_path``: a selected checkpoint serves, and any other is a
-        pending release, held for a person to promote. The commit's metrics are the checkpoint's training
-        metrics with the evaluation's and the decision's own metrics, and
-        ``selected``, ``selection`` (the whole decision) and ``training_job``.
+        ``release_path`` by ``WEIGHT_RELEASES``: a selected checkpoint serves,
+        and any other is a pending release, held for a person to promote. The commit's metrics are the
+        checkpoint's training metrics with the evaluation's and the decision's own metrics, ``training_job``,
+        and the ``selected`` and ``selection`` that ``ReleaseRules.release`` adds.
         Raise ``ValueError`` when ``state`` has no running job, or when two of
         these share a key: a metric is never overwritten.
         """
@@ -475,8 +476,6 @@ class JobLoop:
             **parts[0],
             **parts[1],
             **parts[2],
-            "selected": decision.selected,
-            "selection": {"candidate_id": candidate.candidate_id, **decision.to_dict()},
             "training_job": {
                 "job_id": job.job_id,
                 "backend": self.component.name,
@@ -487,12 +486,13 @@ class JobLoop:
         if evaluation_event is not None:
             metrics["artifact_evaluation"] = evaluation_event
         return JobCommit(
-            TrainStepResult(
+            WEIGHT_RELEASES.release(
+                candidate.candidate_id,
+                decision,
                 state=handled.to_dict(),
                 metrics=metrics,
                 artifact=Artifact.local(Path(checkpoint.release_path)),
                 training_job_id=job.job_id,
-                pending=not decision.selected,
             )
         )
 

@@ -8,16 +8,16 @@ the module that owns it:
     evaluation tasks. The step's job data is its material: the traces of
     traffic, and on an offline step the train tasks, which the step rolls
     out on the head tree first. Then either the recheck's candidate
-    (``release.recheck_candidate``) or the method's
+    (``evolve.Evolution.recheck``) or the method's
     (``evolve.Evolution.propose``) in a fresh ``Workspace``.
 ``evaluate``
     Score the sides that the publication policy names with
     ``HarnessEpisodeEvaluator`` (``reef.evaluation.harness``), which reuses
     the scores the history holds.
 ``settle_step``
-    Turn the decision into the step's result (``release.settle``): the state,
-    the history's decision, and a selected tree as the artifact that the
-    scenario committer publishes.
+    Fold the decision into the state and the history, then make the step's
+    release by ``reef.train.release.ReleaseRules``, as a weight trainer does:
+    a selected tree is the artifact that the scenario committer publishes.
 
 Nothing is restored on a rejection or an abort: the candidate is a new value,
 and the head stays the committed release.
@@ -25,9 +25,11 @@ and the head stays the committed release.
 
 from __future__ import annotations
 
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
@@ -35,6 +37,7 @@ from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCand
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
+    DecisionRecord,
     EpisodeRecord,
     EvaluationTasks,
     HarnessCandidate,
@@ -44,15 +47,15 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
-from reef.harness.tree import HarnessTree
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.harness_backend.capabilities import StepProgress, StepProgressReader, StepRecords
 from reef.train.harness_backend.evolve import Evolution, skipped
 from reef.train.harness_backend.records import StepRecord, bounded
-from reef.train.harness_backend.release import ReleaseRules, patch_parts, recheck_candidate, settle
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import Workspace
+from reef.train.release import ReleaseRules
 from reef.train.types import JobData, TrainStepResult
 
 
@@ -89,7 +92,9 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
     Methods never subclass it. A method's behavior arrives in ``evolution``,
     and the scorer and the publication policy arrive in the evaluator and the
     trainer's evaluation plugin. ``evaluator`` is ``None`` when the
-    deployment configured no scorer; then no episode runs.
+    deployment configured no scorer; then no episode runs. ``rules`` make
+    each decision a release, and ``review_parts`` name the parts whose change
+    waits for a person besides the parts the adapter always reviews.
     """
 
     def __init__(
@@ -105,6 +110,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         model_resolver: ModelBindingsResolver | None = None,
         limits: StepLimits,
         rules: ReleaseRules,
+        review_parts: frozenset[str] = frozenset(),
         records: StepRecord,
     ) -> None:
         self.descriptor = descriptor
@@ -117,6 +123,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         self.model_resolver = model_resolver
         self.limits = limits
         self.rules = rules
+        self.review_parts = review_parts
         self.records = records
         # The selected tree of the step in flight, until the committer stored it.
         self.pending_artifact: Artifact | None = None
@@ -190,15 +197,13 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             step_record=str(step_dir),
         )
         # A recheck waits for a step without rollouts: the method reads every rolled-out chunk.
-        if automatic and not rollout_tasks and self.rules.recheck_due(state, step, self.context_key()):
-            return recheck_candidate(
+        if automatic and not rollout_tasks and self.evolution.recheck_due(state, step, self.context_key()):
+            return self.evolution.recheck(
                 releases=self.releases,
-                history=self.history,
-                descriptor=self.descriptor,
-                data=data,
-                state=state,
                 head=head_tree,
                 evaluation_tasks=step_tasks.tasks,
+                data=data,
+                state=state,
                 step=step,
                 context=self.context_key(),
                 metrics=metrics,
@@ -254,16 +259,76 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         return self.evaluator.evaluate(harness_candidate, sides=sides)
 
     def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
+        """Fold ``decision`` into the state and the history, then make the step's release by ``rules``.
+
+        The head the step prepared against is ``prepared.metrics["head_release_id"]``; no rollback, promote or
+        import moves it while a step runs. The commit keeps the evaluation's sums, not its score vectors: the
+        history holds every episode.
+        """
         self.progress = None
-        result = settle(
-            candidate=require_harness_candidate(prepared.candidate),
-            decision=decision,
-            prepared_state=prepared.state,
-            prepared_metrics=prepared.metrics,
-            rules=self.rules,
-            history=self.history,
-            descriptor=self.descriptor,
-            context=self.context_key(),
+        candidate = require_harness_candidate(prepared.candidate)
+        context = self.context_key()
+        state = HarnessState.from_json(prepared.state)
+        recheck = candidate.origin == "release"
+        # A publish keeps the tree it replaced as the recheck's target; a recheck that rolls back consumes it.
+        rollback_release_id, rollback_context = state.rollback_release_id, state.rollback_context
+        if recheck and decision.selected:
+            rollback_release_id, rollback_context = None, None
+        elif recheck:
+            # The head held in this context, so the next recheck waits for the cadence or another context change.
+            rollback_context = context
+        elif decision.selected and self.evolution.recheck_every and context is not None:
+            rollback_release_id, rollback_context = str(prepared.metrics["head_release_id"]), context
+        # A recheck is not a candidate the method made, so it leaves the failure streak alone.
+        if recheck:
+            failure_streak = state.failure_streak
+        elif decision.selected:
+            failure_streak = 0
+        else:
+            failure_streak = state.failure_streak + 1
+        state = replace(
+            state,
+            failure_streak=failure_streak,
+            rollback_release_id=rollback_release_id,
+            rollback_context=rollback_context,
+        )
+        self.history.add_decision(
+            DecisionRecord(
+                step=candidate.step,
+                tree=candidate.candidate_tree.checksum(),
+                head=candidate.current_tree.checksum(),
+                selected=decision.selected,
+                policy=decision.policy,
+                reason=decision.reason,
+            )
+        )
+        evaluation = {
+            key: value
+            for key, value in decision.evaluation.metrics.items()
+            if key not in ("candidate_scores", "current_scores")
+        }
+        metrics = {
+            **prepared.metrics,
+            **({"rolled_back": decision.selected} if recheck else {}),
+            **evaluation,
+            **decision.metrics,
+            "evaluation_context": context,
+            "patch": bounded(candidate.patch.to_json()),
+            "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
+        }
+        artifact = None
+        if self.rules.released(decision):
+            directory = Path(tempfile.mkdtemp(prefix="reef-harness-"))
+            candidate.candidate_tree.write(directory)
+            artifact = Artifact.local(directory)
+        result = self.rules.release(
+            candidate.candidate_id,
+            decision,
+            state=state.to_json(),
+            metrics=metrics,
+            artifact=artifact,
+            # A rollback serves a tree that was published before, so only publish: review holds it.
+            held=not recheck and self.reviewed(candidate.patch),
         )
         if result.artifact is not None:
             if self.pending_artifact is not None:
@@ -279,7 +344,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         self.failed_step = {
             "failed_stage": "evaluating",
             "patch": bounded(candidate.patch.to_json()),
-            "patch_parts": patch_parts(candidate.patch, self.descriptor),
+            "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
             **{
                 key: prepared.metrics[key]
                 for key in ("method_summary", "method_notes", "step_record")
@@ -309,6 +374,15 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         return replace(progress, activity=calls.activity())
 
     # -- helpers -------------------------------------------------------------------------------------------------------
+
+    def reviewed(self, patch: TreePatch) -> bool:
+        """Whether ``patch`` changes a part that waits for a person: one the adapter reviews, or one that
+        ``review_parts`` names."""
+        for path in patch.changes:
+            location = self.descriptor.layout.locate(path)
+            if location is not None and (location.part.review or location.part.name in self.review_parts):
+                return True
+        return False
 
     def context_key(self) -> str | None:
         """The key of the current evaluation context; ``None`` when no episode can run."""

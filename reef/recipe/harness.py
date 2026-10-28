@@ -71,8 +71,8 @@ from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.evolve import Evolution
 from reef.train.harness_backend.records import StepRecord
-from reef.train.harness_backend.release import ReleaseRules
 from reef.train.pipeline import PipelineSpec
+from reef.train.release import PUBLISH_MODES, ReleaseRules
 from reef.train.trainer import Trainer
 
 #: The directories of one component's state under ``<evolution.state_dir>/<scenario>/<component>``.
@@ -143,8 +143,8 @@ class EvolutionSettings(Settings):
         ):
             if value < 0:
                 raise ValueError(f"evolution.{label} must be at least 0 (0 turns the limit off)")
-        if self.publish not in ("auto", "review"):
-            raise ValueError("evolution.publish must be 'auto' or 'review'")
+        if self.publish not in PUBLISH_MODES:
+            raise ValueError(f"evolution.publish must be {' or '.join(map(repr, PUBLISH_MODES))}")
         if "served" in self.models:
             raise ValueError("evolution.models may not name a model 'served'; that is the model under test")
 
@@ -500,6 +500,7 @@ class HarnessEvolutionRecipe(Recipe):
                 # Only a method that runs the agent through its tools gets it bound here.
                 agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
                 max_episodes=self.evolution.max_episodes_per_step,
+                recheck_every=self.evaluation.recheck_every,
             ),
             evaluator=evaluator,
             tasks=EvaluationTasks(
@@ -520,11 +521,8 @@ class HarnessEvolutionRecipe(Recipe):
                 max_failure_streak=self.evolution.max_failure_streak,
                 max_model_calls_per_step=self.evolution.max_model_calls_per_step,
             ),
-            rules=ReleaseRules(
-                publish=self.evolution.publish,
-                review_parts=frozenset(self.evolution.review_parts),
-                recheck_every=self.evaluation.recheck_every,
-            ),
+            rules=ReleaseRules(publish=self.evolution.publish),
+            review_parts=frozenset(self.evolution.review_parts),
             records=records,
         )
 

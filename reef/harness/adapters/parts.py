@@ -16,7 +16,7 @@ them when a tree is rendered for an episode.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -190,6 +190,11 @@ class TreeLayout:
             if name is not None:
                 return TreeLocation(part, name)
         return None
+
+    def part_names(self, paths: Iterable[str]) -> dict[str, str]:
+        """The name of the part each of ``paths`` is, for each path a part takes; the step pages show it."""
+        located = {path: self.locate(path) for path in paths}
+        return {path: location.part.name for path, location in located.items() if location is not None}
 
     def locate_render(self, path: str) -> TreeLocation | None:
         """The part that renders to ``path`` and the name it holds, or ``None`` when no part renders there.

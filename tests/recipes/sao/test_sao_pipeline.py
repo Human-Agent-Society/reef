@@ -542,11 +542,10 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         assert selection["candidate_id"] == f"{job.job_id}:0"
         assert selection["selected"] is False
         assert selection["evaluation"]["evaluator"] == "external_checkpoint"
-        assert selection["evaluation"]["metrics"] == {
-            "score": 0.25,
-            "release_path": str(tmp_path / "checkpoints" / "1"),
-        }
         assert selection["evaluation"]["metadata"] == {"scenario": "math", "token_present": True}
+        # The evaluation's metrics are the commit's own, beside the checkpoint's training metrics.
+        assert record.metrics["score"] == 0.25
+        assert record.metrics["release_path"] == str(tmp_path / "checkpoints" / "1")
     finally:
         dispatcher.close()
 

@@ -194,6 +194,7 @@ tests/train/test_objectives.py
 tests/train/test_record_stage.py
 tests/train/test_record_stage_job_data_parity.py
 tests/train/test_reef_trainer_contracts.py
+tests/train/test_release.py
 tests/train/test_reported_feedback_processor.py
 tests/train/test_sample_task_metadata.py
 tests/train/test_step_schedule.py

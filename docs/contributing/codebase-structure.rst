@@ -338,26 +338,31 @@ The extension points those packages expose are in `Python API
   ``reef/inference/<integration>/``; put implementation tied to a concrete
   training stack in its own ``reef/train/<integration>/`` subtree.
   ``reef/train/slime_backend/`` trains weights.
-- Is it part of harness evolution? Each part has one owner.
-  ``reef/harness/tree/`` holds the tree that every part reads, and
-  ``reef/train/harness_backend/backend.py`` runs one step through evolve,
-  evaluation and release.
+- Is it part of harness evolution? Each part has one owner. Data,
+  evaluation and release are Reef's, shared with weight training; evolve and
+  sync are the harness's own. ``reef/harness/tree/`` holds the tree that
+  every part reads, and ``reef/train/harness_backend/backend.py`` runs one
+  step through evolve, evaluation and release.
 
   - Data: the training pipeline below turns the agent's recorded calls,
-    their reports and the uploaded tasks into a step's job data. Weight
-    training shares it; the harness backend only reads job data.
-  - Evolve: ``reef/train/harness_backend/evolve.py`` runs the method in the
-    step's workspace (``workspace.py``) and reads back the candidate tree.
+    their reports and the uploaded tasks into a step's job data. The harness
+    backend only reads job data.
+  - Evolve: ``reef/train/harness_backend/evolve.py`` makes the step's
+    candidate. It runs the method in the step's workspace
+    (``workspace.py``) and reads back the tree, or on a recheck takes the
+    release the head replaced.
     ``contract.py`` is the method contract. ``agent/`` runs the deployment's
     coding agent for a method (``evolution.agent``, ``AgentMethod``,
     ``protocol.md``), and ``reef/harness/gateway.py`` is the loopback
     gateway the agent reaches its model and tools through.
-  - Evaluation: ``reef/evaluation/harness/evaluator.py`` scores trees as
+  - Evaluation: ``reef/evaluation/`` holds the contract that every
+    candidate passes, weights and trees alike (``evaluate``, then
+    ``decide``). ``reef/evaluation/harness/evaluator.py`` scores trees as
     episodes, with the history as the score cache, and ``policy.py``
     decides.
-  - Release: ``reef/train/harness_backend/release.py`` turns the decision
-    into the artifact that the scenario committer publishes, with review and
-    recheck.
+  - Release: ``reef/train/release.py`` turns a decision into the step's
+    release for weights and trees alike: served, pending for review, or
+    none. The scenario committer publishes it.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
     machine, in both directions, through the adapter's ``tree.yaml`` and the
     ``roots`` of its ``descriptor.yaml`` (``reef/harness/adapters/``). The

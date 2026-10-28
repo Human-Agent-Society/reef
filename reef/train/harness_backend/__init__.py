@@ -4,18 +4,19 @@ A method imports this package's root and nothing below it::
 
     from reef.train.harness_backend import Method, StepContext
 
-One step goes from the head tree to a release in three modules:
+One step goes from the head tree to a release in two modules of this package:
 
 ``backend``
     ``HarnessBackend``, the step as the trainer runs it: prepare, evaluate,
     settle. The recipe ``reef.recipe.harness.HarnessEvolutionRecipe`` builds
     it; methods never subclass it.
 ``evolve``
-    The method edits the head tree in the step's workspace, and the tree it
-    leaves is the candidate.
-``release``
-    The evaluation's decision becomes the step's result: review, recheck,
-    and the artifact that the scenario committer publishes.
+    The step's candidate: the tree the method leaves in the step's
+    workspace, or on a recheck the release the head replaced.
+
+The evaluation and the release are Reef's, shared with weight training:
+``reef.evaluation`` decides whether a candidate is served, and
+``reef.train.release`` makes the decision a release.
 
 What a method sees: ``contract`` defines what a method implements
 (``Method``) and what a step gives it (``StepContext``: the ``Workspace`` and

@@ -38,7 +38,6 @@ from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, 
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.capabilities import StepProgressReader, StepRecords
 from reef.train.harness_backend.records import bounded
-from reef.train.harness_backend.release import patch_parts
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -709,7 +708,7 @@ class RequestService:
                 metrics={
                     "import": {"files": len(imported.tree.files), "ignored": list(imported.ignored)},
                     "patch": bounded(patch.to_json()),
-                    "patch_parts": patch_parts(patch, backend.descriptor),
+                    "patch_parts": backend.descriptor.layout.part_names(patch.changes),
                 },
             )
         finally:
