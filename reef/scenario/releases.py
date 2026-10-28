@@ -6,7 +6,7 @@ its operation lock, so long-running training preparation cannot block serving.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from threading import RLock
 from typing import Any
 
@@ -15,6 +15,7 @@ from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core.components import made_artifact_id
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
+from reef.surface.files import ENTRIES_FILE, read_entries
 
 
 class ScenarioReleases:
@@ -35,8 +36,6 @@ class ScenarioReleases:
         self.publication_lock = publication_lock
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
         self.recorded_creation_components: Mapping[str, str] | None = None
-        #: The harness entries that the creation's component manifest carries, from the base's metadata.
-        self.recorded_creation_entries: tuple[Mapping[str, Any], ...] | None = None
         self.creation_components_read = False
         self.creation_read_failed_at: int | None = None
 
@@ -64,13 +63,6 @@ class ScenarioReleases:
             self.creation_components_read = True
             if manifest is not None:
                 self.recorded_creation_components = manifest.artifact_ids(self._creation_artifact.release_id)
-                for entry in manifest.entries.values():
-                    # A base harness keeps its seed's entries in its component's metadata.
-                    entries = entry.metadata.get("entries")
-                    if isinstance(entries, Sequence) and not isinstance(entries, str):
-                        self.recorded_creation_entries = tuple(
-                            dict(item) for item in entries if isinstance(item, Mapping)
-                        )
         return self.recorded_creation_components
 
     def records(self) -> tuple[CommitRecord, ...]:
@@ -327,29 +319,19 @@ class ScenarioReleases:
                 return record.metrics
         return None
 
-    def entries_for_version(self, release_id: str, scenario_step: int) -> tuple[Mapping[str, Any], ...] | None:
-        """The composition entries of ``release_id``; ``None`` when nothing records them.
+    def entries_for_version(self, release_id: str, component: str | None) -> tuple[dict[str, Any], ...] | None:
+        """The composition entries that ``component``'s harness artifact in ``release_id`` holds (``read_entries``).
 
-        The record of a training step holds the entries of the release that
-        the step made. The creation holds the entries of the artifact that the
-        scenario started from, in its component manifest; ``scenario_step``
-        controls when a failed read of that manifest is tried again
-        (``creation_components``). The base artifact keeps its seed's entries
-        there.
+        ``component`` is ``None`` for the release root. Every harness artifact
+        holds its entries in its tree, the base artifact included; a release
+        whose tree holds none gives ``None``. Raise ``ArtifactNotFound`` as
+        ``artifact_for_version`` does.
         """
-        record = next(
-            (item for item in self.records() if item.made_artifact and item.artifact_ref.release_id == release_id),
-            None,
-        )
-        if record is None:
-            if release_id != self._creation_artifact.release_id:
-                return None
-            self.creation_components(scenario_step)
-            return self.recorded_creation_entries
-        entries = (record.algorithm_state or {}).get("entries")
-        if isinstance(entries, Sequence) and not isinstance(entries, str):
-            return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))
-        return None
+        release = self.artifact_for_version(release_id)
+        tree = (release if component is None else release.component(component)).local_path
+        if tree is None or not (tree / ENTRIES_FILE).is_file():
+            return None
+        return read_entries(tree)
 
     def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a scenario release for a read-only content serve.

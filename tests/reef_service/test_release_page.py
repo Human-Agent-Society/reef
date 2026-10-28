@@ -111,9 +111,7 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-    factory = InMemoryRepositoryBackend.factory(
-        bootstrap, root=tmp_path / "repository", base_metadata=recipe.base_artifact_source().metadata
-    )
+    factory = InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository")
     return Dispatcher(
         recipe,
         factory,

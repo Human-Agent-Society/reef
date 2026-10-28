@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,9 +53,7 @@ class _ComponentBackend(CandidateBackend):
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0}
 
-    def started_from(
-        self, state: Mapping[str, Any], artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None
-    ) -> Mapping[str, Any]:
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
         """The state whose next step starts from ``artifact``: it records the file the artifact holds."""
         assert artifact.local_path is not None
         return {**state, "start": (artifact.local_path / f"{self.component}.txt").read_text(encoding="utf-8")}

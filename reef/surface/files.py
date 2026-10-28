@@ -2,13 +2,38 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.surface.base import FileTree
 
 REPOSITORY_FILES = frozenset({"reef-artifact.json", ".gitattributes"})
+#: The file of every harness artifact that holds its composition entries, at the tree's root. A client's pull
+#: leaves it out: it describes the tree, and is no part of the harness.
+ENTRIES_FILE = "reef-entries.json"
+
+
+def entries_file(entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """``entries`` as the ``ENTRIES_FILE`` of a harness artifact."""
+    return {ENTRIES_FILE: json.dumps([dict(entry) for entry in entries], indent=2, sort_keys=True) + "\n"}
+
+
+def read_entries(tree: Path) -> tuple[dict[str, Any], ...]:
+    """The entries that the harness tree ``tree`` holds in its ``ENTRIES_FILE``.
+
+    Raise ``ValueError`` when the tree has no such file, or the file is not a JSON list of objects.
+    """
+    path = tree / ENTRIES_FILE
+    try:
+        listed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"the harness tree {tree} has no readable {ENTRIES_FILE}: {exc}") from exc
+    if not isinstance(listed, list) or not all(isinstance(entry, Mapping) for entry in listed):
+        raise ValueError(f"{path} is not a list of objects")
+    return tuple(dict(entry) for entry in listed)
 
 
 class TextFileTree(FileTree):
@@ -23,7 +48,7 @@ class TextFileTree(FileTree):
             if not path.is_file():
                 continue
             relative = str(path.relative_to(local_path))
-            if relative in REPOSITORY_FILES:
+            if relative in REPOSITORY_FILES or relative == ENTRIES_FILE:
                 continue
             try:
                 # Bytes-then-decode avoids universal-newline rewriting. The
@@ -34,4 +59,4 @@ class TextFileTree(FileTree):
         return files or None
 
 
-__all__ = ["REPOSITORY_FILES", "TextFileTree"]
+__all__ = ["ENTRIES_FILE", "REPOSITORY_FILES", "TextFileTree", "entries_file", "read_entries"]
