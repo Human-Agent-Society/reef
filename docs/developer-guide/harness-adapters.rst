@@ -511,8 +511,8 @@ Start the service with ``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY``
 set. For Modal, list ``REEF_TERMINUS_ENVIRONMENT``, ``MODAL_TOKEN_ID`` and
 ``MODAL_TOKEN_SECRET`` in ``env_from``, allow ``api.modal.com``, and start the
 service with ``REEF_TERMINUS_ENVIRONMENT=modal``. The runtime needs Linux,
-bubblewrap, Python 3.12+, and Harbor with the environment's extra
-(``harbor[e2b]``, or the ``modal`` package).
+bubblewrap, Python 3.12+, and Reef's extra of the environment
+(``reef-infra[e2b]`` or ``reef-infra[modal]``), which adds Harbor's.
 The interpreter and local task directories must be visible inside the
 sandbox, for example under ``/opt``. ``egress_hosts`` currently does not
 enforce a hostname firewall. The rollout root under ``~/.reef/rollouts`` and
