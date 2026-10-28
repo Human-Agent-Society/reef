@@ -15,7 +15,11 @@ import torch.distributed as dist
 
 from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA, METADATA_SCHEMA, file_sha256
 from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
-from reef.train.slime_backend.reef_adapters.megatron.lora import build_sglang_lora_config, is_lora_weight_name
+from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    build_sglang_lora_config,
+    is_lora_weight_name,
+    sglang_lora_target_modules,
+)
 
 ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
 #: Files that change when the tokenizer or chat template changes. They belong
@@ -96,6 +100,34 @@ def save_lora_adapter_to_path(
         raise RuntimeError(f"failed to save LoRA adapter checkpoint: {error}")
 
 
+def save_untrained_lora_adapter(args: Any, output_dir: Path) -> None:
+    """Write the actor's LoRA adapter before any training to ``output_dir``: every weight is zero.
+
+    A LoRA adapter adds ``B @ A`` to each target module, so zero weights leave
+    the model at its startup weights. The adapter has the names, shapes and
+    files of an adapter that training exports (``save_lora_adapter_to_path``),
+    so serving loads it as any release. The names and shapes come from the
+    Hugging Face model at ``args.hf_checkpoint``, built on the meta device, so
+    no weight is read. Its metadata records no rollout. Raise ``ValueError``
+    when the model has no linear module that the adapter targets.
+    """
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(args.hf_checkpoint))
+    targets = set(sglang_lora_target_modules(args))
+    rank = int(args.megatron_lora_rank)
+    tensors: dict[str, torch.Tensor] = {}
+    for name, module in model.named_modules():
+        if name.rsplit(".", 1)[-1] in targets and isinstance(module, torch.nn.Linear):
+            prefix = _peft_adapter_name(name)
+            tensors[f"{prefix}.lora_A.weight"] = torch.zeros(rank, module.in_features, dtype=torch.bfloat16)
+            tensors[f"{prefix}.lora_B.weight"] = torch.zeros(module.out_features, rank, dtype=torch.bfloat16)
+    if not tensors:
+        raise ValueError(f"the model at {args.hf_checkpoint} has no linear module named in {sorted(targets)}")
+    _write_adapter_checkpoint(args, output_dir, tensors, rollout_id=None)
+
+
 def _merge_adapter_tensors(per_rank_tensors) -> dict[str, torch.Tensor]:
     merged: dict[str, torch.Tensor] = {}
     for tensors in per_rank_tensors:
@@ -124,7 +156,7 @@ def _write_adapter_checkpoint(
     path: Path,
     tensors: dict[str, torch.Tensor],
     *,
-    rollout_id: int,
+    rollout_id: int | None,
 ) -> None:
     from safetensors.torch import save_file
 
@@ -222,4 +254,4 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-__all__ = ["export_lora_adapter_tensors", "save_lora_adapter_to_path"]
+__all__ = ["export_lora_adapter_tensors", "save_lora_adapter_to_path", "save_untrained_lora_adapter"]

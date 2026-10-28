@@ -89,7 +89,7 @@ Implementation
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published release as the start of the
   next job. Raise ``ValueError`` when the framework cannot do this; Reef then
-  refuses a rollback for the scenario.
+  refuses a ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
@@ -204,8 +204,8 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 - Test surface behavior in ``tests/surface/test_surfaces.py`` or the
   closest artifact-specific surface test. Test storage backends against the
   contracts in ``tests/artifact/test_reef_artifacts.py``.
-- Add scenario commit, rollback, and recovery tests whenever persistence or
-  activation ordering changes. Persisted-format changes require an RFC and a
+- Add scenario commit, activation, train-from, and recovery tests whenever
+  persistence or activation ordering changes. Persisted-format changes require an RFC and a
   compatibility contract.
 
 Add a service route

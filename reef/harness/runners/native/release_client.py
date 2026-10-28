@@ -93,15 +93,10 @@ class ReleaseClient:
         return [dict(row) for row in rows if isinstance(row, Mapping)]
 
     def poll(self) -> str | None:
-        """The head: the last catalog row that is not pending review and published a release, or None while the scenario has none."""
-        served = [row for row in self.releases() if not row.get("pending")]
-        for index in range(len(served) - 1, -1, -1):
-            release = served[index].get("release_id")
-            # A rejected or skipped step carries the head's own id: it published nothing and names no new head.
-            if index > 0 and release == served[index - 1].get("release_id"):
-                continue
-            return str(release) if release else None
-        return None
+        """The active release: the ``release_id`` of the catalog row marked ``active``, or None while no row is
+        active."""
+        release = next((row.get("release_id") for row in self.releases() if row.get("active")), None)
+        return str(release) if release else None
 
     def fetch(self, release_id: str) -> dict[str, Any]:
         """One release's manifest; its ``files`` carry ``native/tree.json`` and ``gate`` the verdict."""

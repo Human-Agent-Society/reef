@@ -82,7 +82,7 @@ Free disk space, change the limits, or move the extra files out of the checkpoin
 
 **After a restart, a job trains its data again.** Reef keeps each submitted job, and the training component resumes a job that did not end. Slime's workers load their latest saved checkpoint again. A job that stopped after Megatron saved its checkpoint records that checkpoint and does not train again. A job that stopped before the save trains its data again from the latest checkpoint. A Tinker job continues after its last saved checkpoint.
 
-**A rollback is refused on a Slime scenario.** Slime's workers continue from their own latest checkpoint and cannot load a published release, so Reef refuses the rollback. Tinker scenarios can roll back.
+**A train-from is refused on a Slime scenario.** Slime's workers continue from their own latest checkpoint and cannot load a published release, so Reef answers ``train-from`` with HTTP 400. ``activate`` still works: it changes what serves, not where training continues. Tinker scenarios accept both. `Train from an artifact <operate.rst#train-from-an-artifact>`__ describes how to train again from an earlier Slime checkpoint.
 
 Harness evolution
 -----------------

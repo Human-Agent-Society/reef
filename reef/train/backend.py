@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from reef.artifact.artifact import Artifact
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import JobData, TrainStepResult
 
@@ -95,11 +96,21 @@ class CandidateBackend(CandidateEvaluator, ABC):
         Content a backend ships with Reef itself (the harness backend's reef-owned
         entries) is fixed when a scenario is created and carried unchanged by every
         later step, so a scenario opened by an upgraded Reef compares it against
-        ``published_tree``, the served release's files. The result carries the
+        ``published_tree``, the active release's files. The result carries the
         refreshed ``state`` and a durable ``artifact``; it is committed without an
         evaluation. The default ships nothing.
         """
         return None
+
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step starts from ``artifact``, given the current ``state``.
+
+        Reef calls this when a person sets the training start (``train-from``).
+        ``artifact`` is the backend's component of a release, materialized.
+        Raise ``ValueError`` when the backend cannot start from ``artifact``.
+        The default refuses every artifact.
+        """
+        raise ValueError(f"the {type(self).__name__} backend cannot start from a published artifact")
 
     def experiment_config(self) -> Mapping[str, Any]:
         """Non-secret backend identity/config attached to experiment runs."""

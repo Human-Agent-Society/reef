@@ -14,7 +14,7 @@ session start reports what settled while pi was away. The result opens no
 dialog; /versions <step> install starts the install through the
 ``reef-pi`` wrapper (its update, then the setup loop that asks once for what
 the release needs). The versions command lists the chain, prints a step's
-page link and promotes a pending release after a confirmation, then offers its install;
+page link and activates an inactive release after a confirmation, then offers its install;
 session start says the commands exist.
 """
 
@@ -335,7 +335,7 @@ def test_the_extension_imports_node_only_and_the_ask_path_confirms_nothing() -> 
     assert re.findall(r'import\("([^"]+)"\)', text) == ["@earendil-works/pi-tui"]
     assert text.count("pi.registerTool(") == 2
     # Asking confirms nothing: from the first tool through the ask command no confirm runs. The confirms guard the
-    # next steps (the install, the promote, a setup check) in the helpers before the tools and in /versions.
+    # next steps (the install, the activation, a setup check) in the helpers before the tools and in /versions.
     helpers, _, rest = text.partition("pi.registerTool(")
     asking, found, versions = rest.partition('pi.registerCommand("versions"')
     assert helpers and found and "ui.confirm" not in asking
@@ -458,19 +458,29 @@ def test_the_command_falls_back_to_the_release_file_beside_the_agent_dir(tmp_pat
     assert _fetches(out)[0]["body"]["release_id"] == "v1"
 
 
-# The catalog /versions reads, oldest first: the creation row, a published win with a request, a rejected
-# candidate whose row carries the head's id, a pending extension win, and a step the method skipped.
+# The catalog /versions reads, oldest first: the creation row, an active win with a request, a rejected
+# candidate whose row carries the active release's id, an inactive extension win, and a step the method skipped.
 LONG_TEXT = "text me when you are blocked, and say what you tried before you stopped"
 RELEASES = {
     "scenario": "code-repair",
     "releases": [
-        {"release_id": "rel-0000-creation", "parent_release_id": None, "operation": "creation", "pending": False},
+        {
+            "release_id": "rel-0000-creation",
+            "artifact_id": "rel-0000-creation",
+            "parent_release_id": None,
+            "operation": "creation",
+            "checkpoint": True,
+            "active": False,
+            "activated": True,
+        },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
-            "pending": False,
-            "current": True,
+            "checkpoint": True,
+            "active": True,
+            "activated": True,
             "metrics": {
                 "steps": 1,
                 "selected": True,
@@ -483,33 +493,50 @@ RELEASES = {
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
-            "pending": False,
-            "current": False,
+            "checkpoint": False,
+            "active": False,
+            "activated": True,
             "metrics": {"steps": 2, "selected": False, "training_request": {"id": "q-2", "text": "answer with care"}},
         },
         {
-            "release_id": "rel-3333-pending",
+            "release_id": "rel-3333-inactive",
+            "artifact_id": "rel-3333-inactive",
             "parent_release_id": "rel-1111-selected",
             "operation": "training",
-            "pending": True,
-            "current": False,
+            "checkpoint": True,
+            "active": False,
+            "activated": False,
             "metrics": {"steps": 3, "selected": True, "training_request": {"id": "q-3", "text": "log when blocked"}},
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
-            "pending": False,
-            "current": False,
+            "checkpoint": False,
+            "active": False,
+            "activated": True,
             "metrics": {"steps": 4, "skipped": "no proposal"},
         },
     ],
 }
 RELEASES = _listed(RELEASES)
 CATALOG = {"GET /reef/harness/releases": {"status": 200, "body": RELEASES}}
-PROMOTED = {"POST /reef/scenarios/code-repair/promote": {"status": 200, "body": {"release_id": "rel-4444-promote"}}}
+# In a one-component scenario an activation mints no release: the release that made the artifact serves.
+ACTIVATED = {
+    "POST /reef/scenarios/code-repair/activate": {
+        "status": 200,
+        "body": {
+            "scenario": "code-repair",
+            "artifact_id": "rel-3333-inactive",
+            "release_id": "rel-3333-inactive",
+            "content_id": "c",
+        },
+    }
+}
 
 
 NO_WRAPPER = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup"
@@ -534,15 +561,15 @@ def test_versions_lists_aligned_columns_with_requests_below_each_row(tmp_path: P
         "Version  Release   Result    Status",
         "-----------------------------------",
         "v0       rel-0000  creation  -",
-        "v1       rel-1111  selected  current",
+        "v1       rel-1111  selected  active",
         f'  "{LONG_TEXT[:57]}..."',
         "v2       rel-1111  rejected  -",
         '  "answer with care"',
-        "v3       rel-3333  pending   -",
+        "v3       rel-3333  inactive  -",
         '  "log when blocked"',
         "v4       rel-1111  skipped   -",
         "",
-        "installed: running in this tree; current: served by Reef",
+        "installed: running in this tree; active: served by Reef",
         "Details: /versions <version>",
         "Install: /versions <version> install",
     ]
@@ -550,15 +577,25 @@ def test_versions_lists_aligned_columns_with_requests_below_each_row(tmp_path: P
 
 @pytest.mark.parametrize("headless", ["0", "1"])
 def test_versions_keeps_multiline_requests_out_of_columns(tmp_path: Path, headless: str) -> None:
-    rows = [{"release_id": f"release-{step}", "operation": "creation"} for step in range(11)]
+    rows = [
+        {
+            "release_id": f"release-{step}",
+            "artifact_id": f"release-{step}",
+            "operation": "creation",
+            "active": False,
+            "activated": True,
+        }
+        for step in range(11)
+    ]
     rows[9]["metrics"] = {"training_request": {"text": "  支持复制图片\n\n Clarification...\t完成  "}}
+    rows[10]["active"] = True
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": _listed({"releases": rows})}}
     out = _versions(tmp_path, _install_root(tmp_path), catalog, TEST_HEADLESS=headless)
     (notice,) = _notices(out)
     assert notice["message"].splitlines()[-7:-4] == [
         "v9       release-  creation  -",
         '  "支持复制图片 Clarification... 完成"',
-        "v10      release-  creation  current",
+        "v10      release-  creation  active",
     ]
     assert [event["kind"] for event in out["events"]] == ["fetch", "notify"]
 
@@ -572,7 +609,7 @@ def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> No
     assert [event["kind"] for event in opened["events"]] == ["fetch", "confirm", "exec"]
     prompt = opened["events"][1]
     assert prompt["title"] == "Open harness v3?"
-    assert prompt["message"] == "rel-3333-pending (pending)"
+    assert prompt["message"] == "rel-3333-inactive (inactive)"
     # The page a browser opens carries the scenario and the page key as query parameters, and is one argument.
     page = f"http://reef:8900/reef/harness/releases/3/page?scenario=code-repair{KEY}"
     assert opened["events"][2]["args"] == [page]
@@ -591,17 +628,17 @@ def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> No
     headless = _versions(tmp_path, agent_dir, CATALOG, args="1", TEST_HEADLESS="1")
     assert [event["kind"] for event in headless["events"]] == ["fetch", "notify"]
     assert headless["events"][1]["message"].splitlines() == [
-        "Harness v1: rel-1111-selected (selected, current)",
+        "Harness v1: rel-1111-selected (selected, active)",
         f"page: {page1}",
     ]
 
 
-def test_versions_install_serves_a_pending_release_before_installing_it(tmp_path: Path) -> None:
-    """A release held back from the served head installs like any other: the confirmation is the person saying it
-    may run, so the install moves the head to it first and then installs what the promote minted."""
+def test_versions_install_activates_an_inactive_release_before_installing_it(tmp_path: Path) -> None:
+    """An inactive release installs like any other: the confirmation is the person saying it may run, so the
+    install activates it first and then installs the active release that the activation names."""
     agent_dir = _install_root(tmp_path)
     confirmed = _versions(
-        tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="3 install", TEST_CONFIRM="1", REEF_TOKEN="tok"
+        tmp_path, agent_dir, {**CATALOG, **ACTIVATED}, args="3 install", TEST_CONFIRM="1", REEF_TOKEN="tok"
     )
     assert confirmed["error"] is None
     assert [event["kind"] for event in confirmed["events"]] == ["fetch", "confirm", "fetch", "notify"]
@@ -611,36 +648,54 @@ def test_versions_install_serves_a_pending_release_before_installing_it(tmp_path
     assert "runs in pi with your privileges" in prompt["message"]
     assert f"http://reef:8900/reef/harness/releases/3/page?scenario=code-repair{KEY}" in prompt["message"]
     assert "token=" not in prompt["message"]
-    promote = confirmed["events"][2]
-    assert promote["method"] == "POST" and promote["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
-    assert promote["headers"] == {
+    activation = confirmed["events"][2]
+    assert activation["method"] == "POST"
+    assert activation["url"] == "http://reef:8900/reef/scenarios/code-repair/activate"
+    assert activation["headers"] == {
         "x-reef-scenario": "code-repair",
         "authorization": "Bearer tok",
         "content-type": "application/json",
     }
-    assert promote["body"] == {"release_id": "rel-3333-pending"}
-    # Without a wrapper on disk the install names the commands; the head it installs is the promote's own.
+    assert activation["body"] == {"artifact_id": "rel-3333-inactive"}
+    # Without a wrapper on disk the install names the commands.
     assert confirmed["events"][3] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
 
-    # Declining installs nothing and promotes nothing: the head does not move behind a refusal.
-    declined = _versions(tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="3 install")
+    # Declining installs nothing and activates nothing: the active release does not change behind a refusal.
+    declined = _versions(tmp_path, agent_dir, {**CATALOG, **ACTIVATED}, args="3 install")
     assert [event["kind"] for event in declined["events"]] == ["fetch", "confirm", "notify"]
     assert declined["events"][2] == {"kind": "notify", "message": INSTALL_LATER, "type": "info"}
 
-    # A refused promote installs nothing and says why.
+    # A refused activation installs nothing and says why.
     refused = _versions(
         tmp_path,
         agent_dir,
-        {**CATALOG, "POST /reef/scenarios/code-repair/promote": {"status": 409, "body": {"error": "no"}}},
+        {**CATALOG, "POST /reef/scenarios/code-repair/activate": {"status": 409, "body": {"error": "no"}}},
         args="3 install",
         TEST_CONFIRM="1",
     )
     assert [event["kind"] for event in refused["events"]] == ["fetch", "confirm", "fetch", "notify"]
     assert refused["events"][3]["type"] == "error"
-    assert refused["events"][3]["message"].startswith("reef refused the promote (HTTP 409)")
+    assert refused["events"][3]["message"].startswith("reef refused the activation (HTTP 409)")
 
-    # A release already at the head needs no promote: the install runs straight through.
-    published = _versions(tmp_path, agent_dir, {**CATALOG, **PROMOTED}, args="1 install", TEST_CONFIRM="1")
+    # A composite row names its component; an answer that names another artifact installs nothing.
+    composite = {**RELEASES["releases"][3], "artifact_id": "rel-3333-inactive:harness", "component": "harness"}
+    composite_catalog = _listed({"scenario": "code-repair", "releases": [*RELEASES["releases"][:3], composite]})
+    mismatched = _versions(
+        tmp_path,
+        agent_dir,
+        {"GET /reef/harness/releases": {"status": 200, "body": composite_catalog}, **ACTIVATED},
+        args="3 install",
+        TEST_CONFIRM="1",
+    )
+    assert mismatched["events"][2]["body"] == {"artifact_id": "rel-3333-inactive:harness", "component": "harness"}
+    assert mismatched["events"][3] == {
+        "kind": "notify",
+        "message": "reef answered the activation without artifact rel-3333-inactive:harness",
+        "type": "error",
+    }
+
+    # An active release needs no activation: the install runs straight through.
+    published = _versions(tmp_path, agent_dir, {**CATALOG, **ACTIVATED}, args="1 install", TEST_CONFIRM="1")
     assert [event["kind"] for event in published["events"]] == ["fetch", "confirm", "notify"]
     assert published["events"][2] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
 
@@ -661,7 +716,7 @@ def test_versions_refuses_a_missing_step_and_bad_arguments_with_a_notice(tmp_pat
     agent_dir = _install_root(tmp_path)
     missing = _versions(tmp_path, agent_dir, CATALOG, args="9")
     assert _notices(missing) == [{"kind": "notify", "message": "no v9: the catalog holds v0 to v4", "type": "warning"}]
-    for args in ("three", "-1", "3 publish", "3 promote", "install", "3 install now"):
+    for args in ("three", "-1", "3 publish", "3 activate", "install", "3 install now"):
         out = _versions(tmp_path, agent_dir, CATALOG, args=args)
         assert _fetches(out) == []
         assert _notices(out) == [
@@ -676,140 +731,132 @@ def test_versions_refuses_a_missing_step_and_bad_arguments_with_a_notice(tmp_pat
     assert notice["type"] == "error" and notice["message"].startswith("reef refused the catalog read (HTTP 404)")
 
 
-# The catalog as the service reports it: its current flag sits on the newest row, here a pending win.
-NEWEST_PENDING = {
+# The catalog as the service reports it: the active flag sits on the release that serves, here not the newest win.
+NEWEST_INACTIVE = {
     "scenario": "code-repair",
     "releases": [
-        {"release_id": "rel-0000-creation", "parent_release_id": None, "operation": "creation", "pending": False},
+        {
+            "release_id": "rel-0000-creation",
+            "artifact_id": "rel-0000-creation",
+            "parent_release_id": None,
+            "operation": "creation",
+            "checkpoint": True,
+            "active": False,
+            "activated": True,
+        },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
-            "pending": False,
-            "current": False,
+            "checkpoint": True,
+            "active": True,
+            "activated": True,
             "metrics": {"steps": 1, "selected": True, "training_request": {"id": "q-1", "text": "say when blocked"}},
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
-            "pending": False,
-            "current": False,
+            "checkpoint": False,
+            "active": False,
+            "activated": True,
             "metrics": {"steps": 2, "selected": False},
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
-            "pending": False,
-            "current": False,
+            "checkpoint": False,
+            "active": False,
+            "activated": True,
             "metrics": {"steps": 3, "selected": False},
         },
         {
-            "release_id": "rel-4444-pending",
+            "release_id": "rel-4444-win",
+            "artifact_id": "rel-4444-win",
             "parent_release_id": "rel-1111-selected",
             "operation": "training",
-            "pending": True,
-            "current": True,
+            "checkpoint": True,
+            "active": False,
+            "activated": False,
             "metrics": {"steps": 4, "selected": True},
         },
     ],
 }
-NEWEST_PENDING = _listed(NEWEST_PENDING)
-# The same catalog after a person promoted the pending win: the promote row names it as its target.
-PROMOTE_ROW = {
-    "release_id": "rel-5555-promote",
-    "parent_release_id": "rel-1111-selected",
-    "operation": "promote",
-    "pending": False,
-    "current": True,
-    "rollback_target_release_id": "rel-4444-pending",
-}
-AFTER_PROMOTE = {
+NEWEST_INACTIVE = _listed(NEWEST_INACTIVE)
+# The same catalog after a person activated the newest win: the rows stay, only the active flag moves.
+AFTER_ACTIVATION = {
     "scenario": "code-repair",
-    "releases": [*NEWEST_PENDING["releases"][:4], {**NEWEST_PENDING["releases"][4], "current": False}, PROMOTE_ROW],
+    "releases": [
+        *NEWEST_INACTIVE["releases"][:1],
+        {**NEWEST_INACTIVE["releases"][1], "active": False},
+        *NEWEST_INACTIVE["releases"][2:4],
+        {**NEWEST_INACTIVE["releases"][4], "active": True, "activated": True},
+    ],
 }
-AFTER_PROMOTE = _listed(AFTER_PROMOTE)
 
 
-def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_path: Path) -> None:
+def test_versions_marks_the_active_release_and_never_the_inactive_row(tmp_path: Path) -> None:
     agent_dir = _install_root(tmp_path)
-    catalog = {"GET /reef/harness/releases": {"status": 200, "body": NEWEST_PENDING}}
+    catalog = {"GET /reef/harness/releases": {"status": 200, "body": NEWEST_INACTIVE}}
     listed = _versions(tmp_path, agent_dir, catalog)
     (notice,) = _notices(listed)
     assert notice["message"].splitlines()[4:-4] == [
         "v0       rel-0000  creation  -",
-        "v1       rel-1111  selected  current",
+        "v1       rel-1111  selected  active",
         '  "say when blocked"',
         "v2       rel-1111  rejected  -",
         "v3       rel-1111  rejected  -",
-        "v4       rel-4444  pending   -",
+        "v4       rel-4444  inactive  -",
     ]
     head = _versions(tmp_path, agent_dir, catalog, args="1")
-    assert _dialogs(head)[0]["message"] == "rel-1111-selected (selected, current)"
-    pending = _versions(tmp_path, agent_dir, catalog, args="4")
-    assert _dialogs(pending)[0]["message"] == "rel-4444-pending (pending)"
+    assert _dialogs(head)[0]["message"] == "rel-1111-selected (selected, active)"
+    inactive = _versions(tmp_path, agent_dir, catalog, args="4")
+    assert _dialogs(inactive)[0]["message"] == "rel-4444-win (inactive)"
 
 
-def test_versions_marks_the_installed_release_apart_from_the_head(tmp_path: Path) -> None:
-    # The tree runs rel-1111; its row is marked installed (and current, since it is the head). A row that is
-    # neither the installed release nor the newest stays unmarked, and the fallback release file.
+def test_versions_marks_the_installed_release_apart_from_the_active_release(tmp_path: Path) -> None:
+    # The tree runs rel-1111; its row is marked installed (and active, since it serves). A row that is
+    # neither the installed release nor the active one stays unmarked, and the fallback release file.
     installed = _install_root(tmp_path, with_release_file=False)
     (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-1111-selected"}), encoding="utf-8")
     listed = _versions(tmp_path, installed, CATALOG)
     (notice,) = _notices(listed)
     assert notice["message"].splitlines()[4:-4] == [
         "v0       rel-0000  creation  -",
-        "v1       rel-1111  selected  installed, current",
+        "v1       rel-1111  selected  installed, active",
         f'  "{LONG_TEXT[:57]}..."',
         "v2       rel-1111  rejected  -",
         '  "answer with care"',
-        "v3       rel-3333  pending   -",
+        "v3       rel-3333  inactive  -",
         '  "log when blocked"',
         "v4       rel-1111  skipped   -",
     ]
     shown = _versions(tmp_path, installed, CATALOG, args="1")
-    assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, installed (this tree), current)"
+    assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, installed (this tree), active)"
 
 
-def test_versions_distinguishes_an_installed_older_release_from_a_newer_head(tmp_path: Path) -> None:
-    # The tree runs rel-0000 (creation); a promoted rel-5555 is the head. The listing marks rel-0000 installed and
-    # rel-5555 current, the two apart.
+def test_versions_distinguishes_an_installed_older_release_from_the_active_one(tmp_path: Path) -> None:
+    # The tree runs rel-0000 (creation); an activated rel-4444 serves. The listing marks rel-0000 installed and
+    # rel-4444 active, the two apart.
     installed = _install_root(tmp_path, with_release_file=False)
     (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-0000-creation"}), encoding="utf-8")
-    listed = _versions(tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}})
+    catalog = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_ACTIVATION}}
+    listed = _versions(tmp_path, installed, catalog)
     (notice,) = _notices(listed)
     assert notice["message"].splitlines()[4:-4] == [
-        "v0       rel-0000  creation        installed",
-        "v1       rel-1111  selected        -",
+        "v0       rel-0000  creation  installed",
+        "v1       rel-1111  selected  -",
         '  "say when blocked"',
-        "v2       rel-1111  rejected        -",
-        "v3       rel-1111  rejected        -",
-        "v4       rel-4444  promoted at v5  -",
-        "v5       rel-5555  promote         current",
+        "v2       rel-1111  rejected  -",
+        "v3       rel-1111  rejected  -",
+        "v4       rel-4444  selected  active",
     ]
-    shown = _versions(
-        tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}, args="5"
-    )
-    assert _dialogs(shown)[0]["message"] == "rel-5555-promote (promote, current)"
-
-
-def test_versions_reads_a_promoted_row_as_promoted_and_installs_it_without_promoting_again(tmp_path: Path) -> None:
-    """A promote is a row of its own naming the release it promoted, so the row it names reads "promoted at
-    vN". It is already served, so installing it needs no second promote."""
-    agent_dir = _install_root(tmp_path)
-    catalog = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
-    listed = _versions(tmp_path, agent_dir, catalog)
-    (notice,) = _notices(listed)
-    assert notice["message"].splitlines()[-6:-4] == [
-        "v4       rel-4444  promoted at v5  -",
-        "v5       rel-5555  promote         current",
-    ]
-    shown = _versions(tmp_path, agent_dir, catalog, args="4")
-    assert _dialogs(shown)[0]["message"] == "rel-4444-pending (promoted at v5)"
-    installed = _versions(tmp_path, agent_dir, {**catalog, **PROMOTED}, args="4 install", TEST_CONFIRM="1")
-    assert [event["kind"] for event in installed["events"]] == ["fetch", "confirm", "notify"]
-    assert installed["events"][2] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
+    shown = _versions(tmp_path, installed, catalog, args="4")
+    assert _dialogs(shown)[0]["message"] == "rel-4444-win (selected, active)"
 
 
 def test_versions_takes_only_a_run_of_digits_as_the_step(tmp_path: Path) -> None:
@@ -822,7 +869,7 @@ def test_versions_takes_only_a_run_of_digits_as_the_step(tmp_path: Path) -> None
         ]
     for args in ("01", "v1"):
         named = _versions(tmp_path, agent_dir, CATALOG, args=args)
-        assert _dialogs(named)[0]["message"] == "rel-1111-selected (selected, current)"
+        assert _dialogs(named)[0]["message"] == "rel-1111-selected (selected, active)"
 
 
 # -- the clarify path, the two tools and the watch ---------------------------------------------------------------
@@ -1170,9 +1217,12 @@ REVIEW = {
 }
 SELECTED_ROW = {
     "release_id": "rel-1111-selected",
+    "artifact_id": "rel-1111-selected",
     "parent_release_id": "rel-0000-creation",
     "operation": "training",
-    "pending": False,
+    "checkpoint": True,
+    "active": True,
+    "activated": True,
     "metrics": {
         "selected": True,
         **REQUEST_ROW,
@@ -1182,15 +1232,21 @@ SELECTED_ROW = {
         },
     },
 }
-PENDING_ROW = {
+INACTIVE_ROW = {
     **SELECTED_ROW,
-    "release_id": "rel-3333-pending",
-    "pending": True,
+    "release_id": "rel-3333-inactive",
+    "artifact_id": "rel-3333-inactive",
+    "active": False,
+    "activated": False,
     "metrics": {"selected": True, **REQUEST_ROW},
 }
 REJECTED_ROW = {
     **SELECTED_ROW,
     "release_id": "rel-0000-creation",
+    "artifact_id": "rel-0000-creation",
+    "checkpoint": False,
+    "active": False,
+    "activated": True,
     "metrics": {
         "selected": False,
         "selection": {"policy": "floor", "reason": "candidate missed the floor on 1 of 1 tasks"},
@@ -1198,7 +1254,7 @@ REJECTED_ROW = {
         "proposal_notes": REVIEW,
     },
 }
-SKIPPED_ROW = {**SELECTED_ROW, "release_id": "rel-0000-creation", "metrics": {"skipped": "no proposal", **REQUEST_ROW}}
+SKIPPED_ROW = {**REJECTED_ROW, "metrics": {"skipped": "no proposal", **REQUEST_ROW}}
 # The proposer's own reason, as Reefine records it when its model call fails.
 FAILURE = (
     "model call failed after 58.2 s (max_tokens=16384): model endpoint returned non-text content; a thinking model "
@@ -1211,11 +1267,13 @@ CREATION_ROW = RELEASES["releases"][0]
 
 
 def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
+    """The catalog of the creation row and ``row``: the creation release is active while ``row`` is not."""
+    creation = {**CREATION_ROW, "active": not row["active"]}
     return {
         "POST /reef/train": {"status": 200, "body": ACCEPTED},
         "GET /reef/harness/releases": {
             "status": 200,
-            "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW, row]}),
+            "body": _listed({"scenario": "code-repair", "releases": [creation, row]}),
         },
     }
 
@@ -1386,9 +1444,9 @@ def test_a_headless_session_draws_no_spinner(tmp_path: Path) -> None:
             " Details: /versions v1.\nNot covered: two way replies; idle detection",
         ),
         (
-            PENDING_ROW,
+            INACTIVE_ROW,
             f"reef: '{ASK}' is ready as release rel-3333. This release changes an extension, so read it before "
-            "it runs: /versions v1 opens the page, /versions v1 install serves it.",
+            "it runs: /versions v1 opens the page, /versions v1 install activates it.",
         ),
         (
             REJECTED_ROW,
@@ -1404,7 +1462,7 @@ def test_a_headless_session_draws_no_spinner(tmp_path: Path) -> None:
             f"reef: '{ASK}' produced no change (no proposal: {FAILURE}). Nothing changed. Details: /versions v1.",
         ),
     ],
-    ids=["selected", "pending", "rejected", "skipped", "skipped-failure"],
+    ids=["selected", "inactive", "rejected", "skipped", "skipped-failure"],
 )
 def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     tmp_path: Path, row: dict[str, Any], expected: str
@@ -1566,8 +1624,8 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
     assert out["error"] is None
     review = "1 release(s) ready to install: /versions v3 (install with /versions v3 install)"
     assert _notices(out) == [{"kind": "notify", "message": f"{first}\n{review}", "type": "info"}]
-    # Two pending rows list both steps; a promoted pending row no longer waits.
-    two = {**RELEASES, "releases": [*RELEASES["releases"], {**PENDING_ROW, "release_id": "rel-5555-pending"}]}
+    # Two inactive rows list both steps; an activated row no longer waits.
+    two = {**RELEASES, "releases": [*RELEASES["releases"], {**INACTIVE_ROW, "release_id": "rel-5555-inactive"}]}
     out = _run(
         tmp_path,
         agent_dir,
@@ -1577,8 +1635,8 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
     assert _notices(out)[0]["message"].splitlines()[1] == (
         "2 release(s) ready to install: /versions v3, v5 (install with /versions <version> install)"
     )
-    promoted = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
-    out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(promoted))
+    activated = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_ACTIVATION}}
+    out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(activated))
     assert _notices(out) == [{"kind": "notify", "message": first, "type": "info"}]
     # The catalog read failing keeps the first line; without a UI nothing is said and nothing is read.
     out = _run(tmp_path, agent_dir, TEST_STEP="session_start")
@@ -1603,7 +1661,7 @@ def test_versions_keeps_design_and_review_on_the_detail_page(tmp_path: Path) -> 
     assert _notices(listed) == _notices(baseline)
     # The step's own dialog names the release and its result, not the notes.
     shown = _versions(tmp_path, _install_root(tmp_path / "one"), catalog, args="1")
-    assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, current)"
+    assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, active)"
 
 
 # -- the report that survives: the stored filings, the session start and the fetch deadline ---------------------
@@ -1713,7 +1771,7 @@ def test_a_hung_read_ends_at_the_fetch_deadline_so_the_watch_goes_on_and_a_filin
     assert _of_kind(hung, "status") == []
 
 
-# -- the next step after a result: the install through the wrapper, and for a pending release the promote first --
+# -- the next step after a result: the install through the wrapper, activating an inactive release first ------
 
 INSTALL_REASON = f"Read the change first: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair{KEY}"
 INSTALLED_LINE = "Installed release rel-1111. Type /reload to load it now."
@@ -1734,7 +1792,7 @@ LISTING = {
         {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID", "prompt": None, "met": True},
     ],
 }
-NOTHING_TO_SET_UP = {"release_id": "rel-4444-promote", "items": []}
+NOTHING_TO_SET_UP = {"release_id": "rel-3333-inactive", "items": []}
 
 
 def _wrapper(path: Path) -> str:
@@ -1756,7 +1814,7 @@ def _settle(
     out = _ask(
         tmp_path,
         agent_dir,
-        {**_catalog_with(row), **PROMOTED, **(answers or {})},
+        {**_catalog_with(row), **ACTIVATED, **(answers or {})},
         text=LONG_TEXT,
         REEF_HARNESS_WATCH_MS="10",
         TEST_WAIT_MS="200",
@@ -1781,8 +1839,8 @@ def install_step(tmp_path: Path, agent_dir: Path, row: dict[str, object], **env:
 
 @pytest.mark.parametrize("row", [REJECTED_ROW, SKIPPED_ROW], ids=["rejected", "skipped"])
 def test_versions_install_refuses_a_step_that_published_no_tree(tmp_path: Path, row: dict[str, object]) -> None:
-    """A rejected or skipped step commits no tree of its own: its row carries the head's id, so installing it
-    would install the version already there. A release merely held back from the head is not refused."""
+    """A rejected or skipped step commits no tree of its own: its row carries the active release's id, so
+    installing it would install the version already there. An inactive release is not refused."""
     events = install_step(tmp_path, _install_root(tmp_path), row, TEST_CONFIRM="1")
     assert len(events) == 1
     assert events[0]["kind"] == "notify" and events[0]["type"] == "warning"
@@ -2012,7 +2070,7 @@ def test_a_settle_offers_the_install_only_when_the_session_is_between_turns(
     dialog waits for a turn to end, so a busy session keeps the report's commands, and headless has no dialog."""
     agent_dir = _install_root(tmp_path)
     wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
-    for row in (SELECTED_ROW, PENDING_ROW):
+    for row in (SELECTED_ROW, INACTIVE_ROW):
         events = _settle(
             tmp_path,
             agent_dir,
@@ -2028,16 +2086,16 @@ def test_a_settle_offers_the_install_only_when_the_session_is_between_turns(
             continue
         assert events[0]["kind"] == "confirm"
         assert events[0]["title"] == f"Install release {str(row['release_id'])[:8]} now?"
-        # A pending release says what makes it different before the person answers.
-        pending = row is PENDING_ROW
-        assert ("runs in pi with your privileges" in events[0]["message"]) is pending
-        # A pending release is served before it is installed; a published one installs straight through.
+        # An inactive release says what makes it different before the person answers.
+        inactive = row is INACTIVE_ROW
+        assert ("runs in pi with your privileges" in events[0]["message"]) is inactive
+        # An inactive release is activated before it is installed; an active one installs straight through.
         assert [event["kind"] for event in events[1:]] == (
-            ["fetch", "exec", "exec", "notify"] if pending else ["exec", "exec", "notify"]
+            ["fetch", "exec", "exec", "notify"] if inactive else ["exec", "exec", "notify"]
         )
-        if pending:
-            assert events[1]["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
-            assert events[1]["body"] == {"release_id": row["release_id"]}
+        if inactive:
+            assert events[1]["url"] == "http://reef:8900/reef/scenarios/code-repair/activate"
+            assert events[1]["body"] == {"artifact_id": row["artifact_id"]}
         assert events[-1]["message"].endswith("Type /reload to load it now.")
 
 
@@ -2058,11 +2116,11 @@ def test_a_settle_that_published_no_tree_offers_no_install(tmp_path: Path) -> No
 
 
 def test_a_settle_whose_install_is_declined_runs_nothing(tmp_path: Path) -> None:
-    """The offer is a question: declining it installs nothing, promotes nothing and names the commands."""
+    """The offer is a question: declining it installs nothing, activates nothing and names the commands."""
     events = _settle(
         tmp_path,
         _install_root(tmp_path),
-        PENDING_ROW,
+        INACTIVE_ROW,
         TEST_EXEC=_exec_answers(),
         REEF_HARNESS_WRAPPER=_wrapper(tmp_path / "bin" / "reef-pi"),
     )

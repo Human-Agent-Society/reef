@@ -447,12 +447,18 @@ def test_recipe_rejects_a_selection_override_that_would_split_population_from_se
 
 
 @pytest.mark.parametrize(
-    "option,value",
-    [("publish", "review"), ("review_kinds", ["rules"]), ("recheck_every", 1), ("promote_failures", True)],
+    "overrides",
+    [
+        {"activation": {"module": "never"}},
+        {"activation": {"module": "always", "config": {"review_kinds": ["rules"]}}},
+        {"evolution": {"recheck_every": 1}},
+        {"evolution": {"promote_failures": True}},
+    ],
 )
-def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, option, value):
+def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, overrides):
     config = sections(tmp_path)
-    config["evolution"][option] = value
+    for section, values in overrides.items():
+        config.setdefault(section, {}).update(values)
 
     with pytest.raises((ValueError, RecipeConfigError), match="Meta-Harness requires"):
         build_recipe(config["implementation"], {}, config=config, runtime=runtime())

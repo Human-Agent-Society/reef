@@ -35,6 +35,7 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.evaluation.activation import AlwaysActivate
 from reef.harness.adapters import get_adapter
 from reef.harness.tree.mutations import Mutation
 from reef.observability import ExperimentLogger
@@ -87,8 +88,12 @@ class MetaHarnessRecipe(CordisRecipe):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.publish != "auto" or self.review_kinds:
-            raise ValueError("Meta-Harness requires automatic publication so selection and serving commit together")
+        rule = self.activation_rule()
+        if not isinstance(rule, AlwaysActivate) or rule.review_kinds:
+            raise ValueError(
+                "Meta-Harness requires the always activation rule without review_kinds, so selection and serving "
+                "commit together"
+            )
         if self.recheck_every or self.promote_failures or self.promote is not None:
             raise ValueError("Meta-Harness requires a fixed evaluation suite without rechecks or task promotion")
         if self.mode not in SEARCH_MODES:

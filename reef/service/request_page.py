@@ -238,13 +238,11 @@ def meaning(
         if not reef_installs(adapter):
             return f"Published as release {release}. GET /reef/harness serves it from now on."
         return f"Published as release {release}. Your current session keeps its installed harness until you choose to update."
-    if selection_result == "pending":
+    if selection_result == "inactive":
         return (
-            f"Release {release} is ready. This change includes an extension, "
-            "so it needs your review before installation."
+            f"Release {release} is ready but does not serve yet. This change includes an extension, "
+            "so it needs your review before you activate and install it."
         )
-    if selection_result.startswith("promoted"):
-        return f"passed the checks and was {selection_result}; the release that step published serves it"
     if selection_result == "rejected":
         return rejection_text(metrics)
     if selection_result == "skipped" and declined(metrics):
@@ -266,7 +264,7 @@ def result_html(
     row = rows[step]
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
-    selection_result = result_of(row, rows)
+    selection_result = result_of(row)
     parts = [
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
         f"<p>{escape(meaning(selection_result, row, metrics, adapter))}</p></div>",
@@ -410,7 +408,7 @@ def build_request_page(
     record_id = str(record["agent_record_id"])
     now = time.time() if now is None else now
     step = settled_step(rows, record_id)
-    state = result_of(rows[step], rows) if step is not None else request_state(record, progress, consumed)
+    state = result_of(rows[step]) if step is not None else request_state(record, progress, consumed)
     head = "" if step is not None else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
     if step is None:
         body = f'<section class="card outcome-card">\n<h2>Progress</h2>\n{progress_html(record, state, progress, now)}</section>\n'
@@ -423,7 +421,7 @@ def build_request_page(
     else:
         metrics = rows[step].get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
-        change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
+        change_label = "Proposed changes" if state in ("inactive", "rejected", "skipped", "failed") else "What changed"
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, adapter, record_id)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
@@ -460,7 +458,7 @@ def build_request_page(
         eyebrow="Harness evolution",
         heading="Request details",
         subtitle=escape(subtitle),
-        # The served head is this scenario's home, the version this request is asked against.
+        # The active release is this scenario's home, the version this request is asked against.
         home="" if served is None else step_href(served, link_query),
         head=head,
         body=(

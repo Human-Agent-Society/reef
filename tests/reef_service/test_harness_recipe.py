@@ -20,10 +20,12 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.evaluation.harness import RolloutEvaluationWorker, ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
@@ -2163,7 +2165,7 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch):
 
 
 def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:
-    """A real publish records the tree it replaced as the rollback target, so
+    """A real publish records the tree it replaced as the recheck target, so
     a later health recheck has somewhere to revert to."""
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -2179,15 +2181,15 @@ def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:
     )
     result = run_backend_step(b, batch(), b.initial_state())
     assert result.metrics["selected"] is True
-    # The rollback target is the pre-publish tree: the seed, without the rules
+    # The recheck target is the pre-publish tree: the seed, without the rules
     # node this step added.
-    target_ids = {entry["id"] for entry in result.state["rollback_entries"]}
+    target_ids = {entry["id"] for entry in result.state["recheck_entries"]}
     assert target_ids == {"models", "settings"}
 
 
 def test_healthy_recheck_keeps_the_published_tree(tmp_path: Path) -> None:
     """When the published tree still wins on the suite, the recheck publishes
-    nothing and keeps the rollback target on file for next time."""
+    nothing and keeps the recheck target on file for next time."""
     b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(
@@ -2208,7 +2210,7 @@ def test_healthy_recheck_keeps_the_published_tree(tmp_path: Path) -> None:
     assert second.metrics["selected"] is False
     # The marker tree is still live and the target is retained.
     assert any(entry.get("id") == "r1" for entry in second.state["entries"])
-    assert {entry["id"] for entry in second.state["rollback_entries"]} == {"models", "settings"}
+    assert {entry["id"] for entry in second.state["recheck_entries"]} == {"models", "settings"}
 
 
 def test_recheck_rolls_back_a_regression_the_grown_suite_reveals(tmp_path: Path) -> None:
@@ -2246,7 +2248,7 @@ def test_recheck_rolls_back_a_regression_the_grown_suite_reveals(tmp_path: Path)
     live_ids = {entry["id"] for entry in second.state["entries"]}
     assert "r1" not in live_ids and {"models", "settings"} <= live_ids
     # The target is consumed once used.
-    assert "rollback_entries" not in second.state
+    assert "recheck_entries" not in second.state
 
 
 def test_recipe_parses_recheck_config(tmp_path: Path, monkeypatch) -> None:
@@ -2305,12 +2307,12 @@ def test_recheck_fires_when_the_served_model_changes(tmp_path: Path) -> None:
     b = build(MODEL)
     first = run_backend_step(b, batch(), b.initial_state())
     assert first.metrics["selected"] is True
-    assert first.state["rollback_evaluation_context"]["model"] == MODEL.model
+    assert first.state["recheck_evaluation_context"]["model"] == MODEL.model
     # Same model, step 2 of a 100 step cadence: no recheck, and the stamp
     # rides through the skipped step.
     same = run_backend_step(b, batch(), first.state)
     assert "recheck" not in same.metrics
-    assert same.state["rollback_evaluation_context"]["model"] == MODEL.model
+    assert same.state["recheck_evaluation_context"]["model"] == MODEL.model
     # A different served model: the stamp differs, so the recheck fires now.
     moved = ModelBinding(base_url=MODEL.base_url, model="qwen3-32b", api_key=MODEL.api_key)
     drift = run_backend_step(build(moved), batch(), same.state)
@@ -2402,9 +2404,8 @@ def test_recipe_parses_search_quality_config(tmp_path: Path, monkeypatch) -> Non
         CordisRecipe.from_environment({}, config=config(max_rejected_history=-1))
 
 
-def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_path: Path) -> None:
-    """Under review a gate win is minted into the catalog but not served; promote
-    republishes it as the new head through the rollback path."""
+def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Path) -> None:
+    """The held tip's metadata names what served, so a restart that lost the history serves that, not the tip."""
     proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
     built = CordisRecipe(
         resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
@@ -2413,7 +2414,45 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         binary=str(make_binary(tmp_path)),
         seed=(SEED_MODELS, SEED_SETTINGS),
         runtime=runtime(),
-        publish="review",
+        activation=PluginReference(NeverActivate, {}),
+    )
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    try:
+        scenario = dispatcher.get_or_create_scenario("review")
+        served = scenario.current_artifact_ref()
+        _report_once(scenario, "review", "1")
+        result = scenario.prepare_training_step()
+        assert result is not None
+        scenario.commit(result)
+        tip = scenario.repository.require_checkpoint_artifact()
+        assert tip != served and scenario.current_artifact_ref() == served
+    finally:
+        dispatcher.close()
+
+    reopened = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    try:
+        recovered = reopened.get_or_create_scenario("review")
+        assert recovered.repository.require_checkpoint_artifact() == tip
+        assert recovered.current_artifact_ref() == served
+    finally:
+        reopened.close()
+
+
+def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path: Path) -> None:
+    """Under the never rule a kept tree is minted into the catalog but not served; an activation serves that release
+    itself."""
+    proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
+    built = CordisRecipe(
+        resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
+        resolve_rollout_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        runtime=runtime(),
+        activation=PluginReference(NeverActivate, {}),
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -2430,59 +2469,146 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         head_before = scenario.current_artifact_ref()
         _report_once(scenario, "review", "1")
         result = scenario.prepare_training_step()
-        assert result is not None and result.pending is True
+        assert result is not None and result.changed_kinds == {"rules"}
         scenario.commit(result)
 
         record = scenario.store.history()[-1]
-        assert record.operation == "training" and record.pending is True and record.checkpoint is True
+        assert record.operation == "training" and record.activated is False and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
-        row = scenario.releases()[0]
-        assert row["release_id"] == record.artifact_ref.release_id
-        assert row["pending"] is True and row["restorable"] is True
+        row = scenario.artifacts()[0]
+        assert row["release_id"] == row["artifact_id"] == record.artifact_ref.release_id
+        assert row["active"] is False
         tree = scenario.surface.files
         assert tree is not None
-        pending_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
-        assert pending_files is not None and any("marker" in text for text in pending_files.values())
+        held_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
+        assert held_files is not None and any("marker" in text for text in held_files.values())
         served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert not served_files or not any("marker" in text for text in served_files.values())
 
-        promoted = dispatcher.promote("review", row["release_id"])
-        assert promoted.release_id != row["release_id"]
-        assert scenario.current_artifact_ref() == promoted
+        activated = dispatcher.activate("review", row["artifact_id"])
+        assert activated.release_id == row["release_id"]
+        assert scenario.current_artifact_ref() == record.artifact_ref
         served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert served_files is not None and any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
-        assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
-        assert scenario.releases()[0]["pending"] is False
+        assert last.operation == "activate" and last.artifact_ref == record.artifact_ref
+        assert scenario.artifacts()[0]["active"] is True
     finally:
         dispatcher.close()
 
 
-def test_review_kinds_hold_only_wins_that_touch_a_listed_kind(tmp_path: Path) -> None:
-    def build(**options):
-        return CordisBackend(
-            descriptor=get_adapter("pi"),
-            propose=resolve_proposer(
-                lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
-            ),
-            score_rollout=resolve_rollout_scorer(evaluate),
-            tasks=("task one",),
-            models=MODEL,
+def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: Path) -> None:
+    """``train-from`` sets the composition the next step evolves; what serves stays, and a restart keeps the start."""
+
+    def markers(task: str, result: RolloutResult) -> float:
+        del task
+        return float(result.trajectory[-1]["rules"].count("marker"))
+
+    def recipe(*mutations: Mutation) -> CordisRecipe:
+        proposals = iter(mutations)
+        return CordisRecipe(
+            resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
+            resolve_rollout_scorer(markers),
+            ("task one",),
             binary=str(make_binary(tmp_path)),
-            **options,
+            seed=(SEED_MODELS, SEED_SETTINGS),
+            runtime=runtime(),
         )
 
-    held = build(review_kinds=("rules",))
-    assert run_backend_step(held, batch(), held.initial_state()).pending is True
-    free = build(review_kinds=("skill",))
-    assert run_backend_step(free, batch(), free.initial_state()).pending is False
-    reviewed = build(publish="review")
-    assert run_backend_step(reviewed, batch(), reviewed.initial_state()).pending is True
-    with pytest.raises(ValueError, match="publish must be 'auto' or 'review'"):
-        build(publish="staged")
+    def open_dispatcher(built: CordisRecipe) -> Dispatcher:
+        return Dispatcher(
+            built,
+            factory,
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+            hold_local_cycles=True,
+        )
+
+    def ids(entries) -> list[str]:
+        return [str(entry["id"]) for entry in entries]
+
+    (tmp_path / "initial").mkdir()
+    # One repository across the restart, as a durable backend keeps it.
+    factory = InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
+    dispatcher = open_dispatcher(
+        recipe(
+            Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),
+            Mutation("create", "r2", {"name": "rules", "config": {"text": "marker marker"}}),
+        )
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("start")
+        assert scenario is not None
+        for step in ("1", "2"):
+            _report_once(scenario, "start", step)
+            result = scenario.prepare_training_step()
+            assert result is not None and result.artifact is not None
+            scenario.commit(result)
+        second, first = scenario.artifacts()[:2]
+        assert second["active"] and "r2" in ids(
+            scenario.release_queries.entries_for_version(second["artifact_id"], scenario.surface.files_component)
+        )
+
+        started = dispatcher.train_from("start", first["artifact_id"])
+        assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
+        # The trainer evolves the first release's composition; the second release still serves.
+        assert "r1" in ids(scenario.trainer.state["entries"]) and "r2" not in ids(scenario.trainer.state["entries"])
+        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        record = scenario.store.history()[-1]
+        assert (record.operation, record.artifact_ref.release_id) == ("train_from", first["release_id"])
+    finally:
+        dispatcher.close()
+
+    # A restart before the trainer's next commit takes the start again from the train_from record.
+    restarted = open_dispatcher(recipe(Mutation("create", "r3", {"name": "rules", "config": {"text": "marker"}})))
+    try:
+        scenario = restarted.get_or_create_scenario("start")
+        assert scenario is not None
+        assert ids(scenario.trainer.state["entries"]) == ids(
+            scenario.release_queries.entries_for_version(first["artifact_id"], scenario.surface.files_component)
+        )
+        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
+        # chain tip, the second release.
+        _report_once(scenario, "start", "3")
+        result = scenario.prepare_training_step()
+        assert result is not None and result.artifact is not None
+        scenario.commit(result)
+        newest = scenario.store.history()[-1]
+        assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["release_id"]
+        evolved = ids(
+            scenario.release_queries.entries_for_version(
+                newest.artifact_ref.release_id, scenario.surface.files_component
+            )
+        )
+        assert "r1" in evolved and "r3" in evolved and "r2" not in evolved
+    finally:
+        restarted.close()
 
 
-def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
+def test_review_kinds_hold_only_kept_trees_that_touch_a_listed_kind(tmp_path: Path) -> None:
+    """A kept tree names the kinds it changes; the always rule holds it only when one of them is reviewed."""
+    backend = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_rollout=resolve_rollout_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+    )
+    result = run_backend_step(backend, batch(), backend.initial_state())
+    assert result.artifact is not None and result.changed_kinds == {"rules"}
+    made = MadeArtifact(None, result.changed_kinds)
+    assert AlwaysActivate().activates(made)
+    assert not AlwaysActivate(frozenset({"rules"})).activates(made)
+    assert AlwaysActivate(frozenset({"skill"})).activates(made)
+    assert not NeverActivate().activates(made)
+
+
+def test_recipe_parses_the_activation_section_and_refuses_the_retired_publish_options(
+    tmp_path: Path, monkeypatch
+) -> None:
     module = tmp_path / "demo_publish.py"
     module.write_text(
         "from reef.evaluation.harness import RolloutScorer\n"
@@ -2494,8 +2620,8 @@ def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
-    def config(**evolution):
-        return {
+    def config(activation=None, **evolution):
+        settings = {
             "evolution": {
                 "propose": "demo_publish:Propose",
                 "evaluate": "demo_publish:Evaluate",
@@ -2504,18 +2630,26 @@ def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
                 **evolution,
             }
         }
+        if activation is not None:
+            settings["activation"] = activation
+        return settings
 
-    on = CordisRecipe.from_environment({}, config=config(publish="review", review_kinds=["code_extension"]))
-    assert on.publish == "review" and on.review_kinds == ("code_extension",)
-    off = CordisRecipe.from_environment({}, config=config())
-    assert off.publish == "auto" and off.review_kinds == ()
-    with pytest.raises(RecipeConfigError, match="publish must be 'auto' or 'review'"):
-        CordisRecipe.from_environment({}, config=config(publish="staged"))
+    reviewed = CordisRecipe.from_environment(
+        {}, config=config({"module": "always", "config": {"review_kinds": ["code_extension"]}})
+    ).activation_rule()
+    assert isinstance(reviewed, AlwaysActivate) and reviewed.review_kinds == {"code_extension"}
+    default = CordisRecipe.from_environment({}, config=config()).activation_rule()
+    assert isinstance(default, AlwaysActivate) and default.review_kinds == frozenset()
+    never = CordisRecipe.from_environment({}, config=config({"module": "never"})).activation_rule()
+    assert isinstance(never, NeverActivate)
     with pytest.raises(RecipeConfigError, match="review_kinds must be a list"):
-        CordisRecipe.from_environment({}, config=config(review_kinds="rules"))
+        CordisRecipe.from_environment({}, config=config({"module": "always", "config": {"review_kinds": "rules"}}))
+    for retired in ({"publish": "review"}, {"review_kinds": ["code_extension"]}):
+        with pytest.raises(RecipeConfigError, match="is gone: the activation section"):
+            CordisRecipe.from_environment({}, config=config(**retired))
 
 
-def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
+def test_activate_http_route_serves_an_inactive_release(tmp_path: Path) -> None:
     proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
     built = CordisRecipe(
         resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
@@ -2524,7 +2658,7 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         binary=str(make_binary(tmp_path)),
         seed=(SEED_MODELS, SEED_SETTINGS),
         runtime=runtime(),
-        publish="review",
+        activation=PluginReference(NeverActivate, {}),
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -2543,18 +2677,22 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         result = scenario.prepare_training_step()
         assert result is not None
         scenario.commit(result)
-        pending_id = scenario.releases()[0]["release_id"]
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            listed = await client.get("/reef/scenarios/review-http/releases")
+            listed = await client.get("/reef/scenarios/review-http/artifacts")
             assert listed.status == 200
-            assert (await listed.json())["releases"][0]["pending"] is True
-            promoted = await client.post("/reef/scenarios/review-http/promote", json={"release_id": pending_id})
-            assert promoted.status == 200
-            assert (await promoted.json())["release_id"] != pending_id
-            missing = await client.post("/reef/scenarios/review-http/promote", json={"release_id": "missing"})
+            row = (await listed.json())["artifacts"][0]
+            assert row["active"] is False
+            activated = await client.post(
+                "/reef/scenarios/review-http/activate", json={"artifact_id": row["artifact_id"]}
+            )
+            assert activated.status == 200
+            assert (await activated.json())["release_id"] == row["release_id"]
+            missing = await client.post("/reef/scenarios/review-http/activate", json={"artifact_id": "missing"})
             assert missing.status == 404
+            listed = await client.get("/reef/scenarios/review-http/artifacts")
+            assert (await listed.json())["artifacts"][0]["active"] is True
         finally:
             await client.close()
 
@@ -2564,14 +2702,15 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_pending_requires_durable_bytes() -> None:
-    """Only a step with bytes to promote later can ask to be held back, so a
-    no-artifact step is refused where it is built."""
-    assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
-    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
-        TrainStepResult({}, {}, pending=True)
-    with pytest.raises(ValueError, match="pending must be a boolean"):
-        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
+def test_changed_kinds_describe_published_bytes() -> None:
+    """Only a step that publishes bytes changes node kinds, so a no-artifact step with kinds is refused where it is
+    built."""
+    published = TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds=frozenset({"rules"}))
+    assert published.changed_kinds == {"rules"}
+    with pytest.raises(ValueError, match="changed_kinds describe the artifact a step publishes"):
+        TrainStepResult({}, {}, changed_kinds=frozenset({"rules"}))
+    with pytest.raises(ValueError, match="changed_kinds must be a frozenset"):
+        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds={"rules"})
 
 
 def test_a_kind_the_adapter_does_not_render_refuses_the_seed_and_the_recovered_state(tmp_path: Path) -> None:

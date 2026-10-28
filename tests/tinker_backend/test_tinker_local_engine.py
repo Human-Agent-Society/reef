@@ -206,6 +206,7 @@ def train(component, inference, objective, scenario, sample, start=None):
     """Run one job to its end, then serve its checkpoint for ``scenario``; return the checkpoint and its version."""
     data = JobData("b", (item(sample),))
     parameters = {"method": TrainingMethod(objective.name).to_dict()}
+    start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, data, parameters))
     deadline = time.monotonic() + 10

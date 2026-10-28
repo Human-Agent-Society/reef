@@ -168,7 +168,7 @@ def post_week_reports(
     return posted
 
 
-#: How often the pacer re-reads the scenario's releases while it holds the game.
+#: How often the pacer re-reads the scenario's training steps while it holds the game.
 PACE_POLL_S = 10.0
 #: The weekly dashboard the engine returns: the header, then the week's
 #: opening cash, individual subscribers, and enterprise seats.
@@ -454,51 +454,56 @@ class WeekRecords:
         return rows
 
 
-class ReleaseCount(ABC):
-    """Where the pacer reads how many training releases the scenario has committed."""
+class TrainingStepCount(ABC):
+    """Where the pacer reads how many training steps the scenario has committed."""
 
     @abstractmethod
-    def training_releases(self) -> int | None:
+    def training_steps(self) -> int | None:
         """The count so far, or ``None`` when the service could not answer just now."""
 
 
-class ScenarioReleases(ReleaseCount):
-    """The scenario's release list on the Reef service."""
+class ScenarioStatus(TrainingStepCount):
+    """The scenario's step on the Reef service status.
+
+    The run activates nothing and sets no training start, so each commit of the scenario is a training step.
+    """
 
     def __init__(self, service_url: str, scenario: str, token: str) -> None:
-        self.url = f"{service_url}/reef/scenarios/{scenario}/releases"
+        self.url = f"{service_url}/reef/status"
+        self.scenario = scenario
         self.token = token
 
-    def training_releases(self) -> int | None:
+    def training_steps(self) -> int | None:
         request = urllib.request.Request(self.url, headers={"Authorization": f"Bearer {self.token}"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read())
         except (urllib.error.URLError, TimeoutError, ValueError):
             return None
-        return sum(1 for row in payload.get("releases", []) if row.get("operation") == "training")
+        scenario = payload["scenarios"].get(self.scenario)
+        return 0 if scenario is None else int(scenario["scenario_step"])
 
 
 class TrainingPacer:
     """Hold the game until the trainer has consumed the turns reported so far.
 
     The reported turns fill batches of ``batch_size``; each full batch must
-    have produced one training release. ``wait`` blocks until the scenario
-    has that many releases beyond the count at rollout start, or the timeout
+    have produced one training step. ``wait`` blocks until the scenario
+    has that many steps beyond the count at rollout start, or the timeout
     passes, in which case the shortfall is forgiven so later weeks do not
     wait for a batch the recipe declined.
     """
 
-    def __init__(self, batch_size: int, timeout_s: float, releases: ReleaseCount, logger: logging.Logger) -> None:
+    def __init__(self, batch_size: int, timeout_s: float, steps: TrainingStepCount, logger: logging.Logger) -> None:
         self.batch_size = int(batch_size)
         self.timeout_s = float(timeout_s)
-        self.releases = releases
+        self.steps = steps
         self.logger = logger
         self.base: int | None = None
         self.forgiven = 0
         self.lock = threading.Lock()
 
-    def expected_releases(self, posted_turns: int) -> int:
+    def expected_steps(self, posted_turns: int) -> int:
         return posted_turns // self.batch_size - self.forgiven
 
     def wait(self, week: int, posted_turns: int) -> float:
@@ -506,16 +511,16 @@ class TrainingPacer:
         started = time.time()
         with self.lock:
             if self.base is None:
-                self.base = self.releases.training_releases() or 0
-            expected = self.expected_releases(posted_turns)
+                self.base = self.steps.training_steps() or 0
+            expected = self.expected_steps(posted_turns)
             while True:
-                observed = (self.releases.training_releases() or 0) - self.base
+                observed = (self.steps.training_steps() or 0) - self.base
                 if observed >= expected:
                     break
                 if time.time() - started >= self.timeout_s:
                     self.forgiven += expected - observed
                     self.logger.warning(
-                        "week %d: trainer committed %d of %d expected releases after %.0fs; going on",
+                        "week %d: trainer committed %d of %d expected steps after %.0fs; going on",
                         week,
                         observed,
                         expected,
