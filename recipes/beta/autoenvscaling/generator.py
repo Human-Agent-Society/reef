@@ -401,8 +401,8 @@ class GenerationCursor:
     """Where the next generation starts: its number, the walk's position of its first session, and its first seed.
 
     The position counts every session taken so far. The walk takes ``sources[position % len(sources)]``, so it
-    cycles through the sources file. ``next_seed`` counts the seed tasks taken so far, in directory-name order; a
-    seed is taken once.
+    cycles through the sources file. ``next_seed`` counts the seed tasks taken so far, in directory-name order, by
+    generations that returned their tasks; a seed is taken once.
     """
 
     next_generation: int = 0
@@ -984,6 +984,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         error = ""
         tasks: list[HarborTask] = []
         variants = self.variants()
+        next_seed = self.cursor.next_seed
         for index in range(self.count):
             variant: TaskVariant | None = None
             source: SessionSource | None = None
@@ -1006,12 +1007,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     direction=parent.direction,
                     seed_task=parent.seed_task,
                 )
-            elif self.cursor.next_seed < len(self.seeds):
-                seeded, seed_proposal = self.seed_slot(self.seeds[self.cursor.next_seed], index)
+            elif next_seed < len(self.seeds):
+                seeded, seed_proposal = self.seed_slot(self.seeds[next_seed], index)
                 pending[seeded.name] = seed_proposal
                 tasks.append(seeded)
-                # The seed is taken; a restart continues with the next one.
-                self.save_cursor(replace(self.cursor, next_seed=self.cursor.next_seed + 1))
+                next_seed += 1
                 continue
             elif self.sources:
                 position = self.cursor.next_position
@@ -1049,20 +1049,31 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
                 break
         self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
+        # The seeds are taken once the open generation holds them, so a restart continues with the next one. An
+        # attempt that raised or was cancelled returned no task, so it takes no seed: the retry uses them again.
+        if next_seed != self.cursor.next_seed:
+            self.save_cursor(replace(self.cursor, next_seed=next_seed))
         return tuple(tasks)
 
     def seed_slot(self, seed: HarborTask, index: int) -> tuple[HarborTask, SessionProposal]:
         """A seed in slot ``index``: the seed as it is, under the generation's task name, and its proposal.
 
-        No author runs. The task's one source record is the seed's id (:func:`seed_record_id`), and its metadata
-        names the seed's directory in ``seed_task``; ``validate`` runs the seed checks on it.
+        No author runs. The task's source records are the seed's own, such as the session of a task from an earlier
+        run, then the seed's id (:func:`seed_record_id`), so the seed shares a split with each task of that session
+        and with its own variants. Its metadata names the seed's directory in ``seed_task`` and drops the
+        ``parent_task`` and ``variant`` of a seed that was a variant in an earlier run: they name that run's tasks.
+        ``validate`` runs the seed checks on it.
         """
         record_id = seed_record_id(seed)
+        metadata = {key: value for key, value in seed.metadata.items() if key not in ("parent_task", "variant")}
         task = replace(
             seed,
             name=f"harbor-{self.generation:05d}-{index:03d}-{TASK_NAME_SUFFIX}",
-            metadata={**seed.metadata, "seed_task": seed.name},
-            source_agent_record_ids=(record_id,),
+            metadata={**metadata, "seed_task": seed.name},
+            source_agent_record_ids=(
+                *(source for source in seed.source_agent_record_ids if source != record_id),
+                record_id,
+            ),
         )
         return task, SessionProposal(index, VARIANT_POSITION, record_id, task_name=task.name, seed_task=seed.name)
 

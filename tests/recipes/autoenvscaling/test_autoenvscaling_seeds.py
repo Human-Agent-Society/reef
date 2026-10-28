@@ -33,6 +33,7 @@ from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
 from recipes.beta.autoenvscaling import (
     AgentAuthor,
     AuthoredTask,
+    AuthorError,
     AutoEnvScalingGenerator,
     CalibrationCheck,
     CandidateChecks,
@@ -327,6 +328,98 @@ def test_the_split_puts_a_seed_variant_with_its_seed(tmp_path: Path) -> None:
         assert variant.name in (assigned.train if split == "train" else assigned.eval)
 
 
+def test_a_seed_from_an_earlier_runs_session_task_keeps_its_session_and_is_a_seed_here(tmp_path: Path) -> None:
+    # A task an earlier run varied from session-1, used as a seed; this run's sources hold session-1 too.
+    earlier = replace(
+        seed_task(0),
+        source_agent_record_ids=("designer-x0", "session-1"),
+        metadata={
+            "designer_record_id": "designer-x0",
+            "parent_task": "harbor-00000-000-autoenvscaling",
+            "variant": "harder",
+        },
+    )
+    write_harbor_task(earlier, tmp_path / "earlier-run")
+    # Its reference solution scores 0.25: the seed check admits it, the oracle check would not.
+    service = ScriptedOracle(tmp_path / "tasks", OracleResult(False, "the reference solution scored 0.25", 0.25))
+    generator = seeded(tmp_path, SeedAuthor(), service, source_count=1)
+    generator.seeds = seed_tasks(tmp_path / "earlier-run")
+    seed, session_task = asyncio.run(generator.generate(REQUEST))
+    seed_id = seed_record_id(generator.seeds[0])
+    assert seed.source_agent_record_ids == ("designer-x0", "session-1", seed_id)
+    assert split_source_ids(seed) == ("session-1", seed_id) and split_source_ids(session_task) == ("session-1",)
+    previous = TaskSplit(train=(), eval=(seed.name,), seed=0, eval_fraction=0.5)
+    assigned = extend_split_by_source(
+        previous=previous,
+        previous_sources={seed.name: split_source_ids(seed)},
+        sources={session_task.name: split_source_ids(session_task)},
+    )
+    assert session_task.name in assigned.eval, "the session's rebuild joins the eval seed of the same session"
+    # The earlier run's lineage names that run's tasks; here the task is a seed and runs the seed check.
+    assert "parent_task" not in seed.metadata and "variant" not in seed.metadata
+    assert asyncio.run(generator.validate(seed)).is_valid
+
+
+@pytest.mark.parametrize("is_cancelled", [False, True], ids=("raises", "cancelled"))
+def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is_cancelled: bool) -> None:
+    class FailingSessionAuthor(SeedAuthor):
+        """Its session slot raises an error the generator does not catch, or lasts until it is cancelled."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+
+        def author(
+            self,
+            source: SessionSource | None,
+            work_dir: Path,
+            checks: CandidateChecks,
+            *,
+            tags: Mapping[str, str],
+            stop: threading.Event,
+            variant: TaskVariant | None = None,
+        ) -> AuthoredTask:
+            self.started.set()
+            if not is_cancelled:
+                raise OSError("disk full while copying the snapshot")
+            stop.wait(10)
+            raise AuthorError("the agent's run was stopped")
+
+    failing = FailingSessionAuthor()
+    generator = seeded(tmp_path, failing, seed_count=1, source_count=1)
+
+    async def attempt() -> None:
+        generation = asyncio.ensure_future(generator.generate(REQUEST))
+        if is_cancelled:
+            await asyncio.to_thread(failing.started.wait, 10)
+            generation.cancel()
+        with pytest.raises(asyncio.CancelledError if is_cancelled else OSError):
+            await generation
+
+    asyncio.run(attempt())
+    assert failing.started.is_set(), "the seed's slot came first, then the session's failed"
+    assert cursor(tmp_path) == {"next_generation": 1, "next_position": 0, "next_seed": 0}
+    # The recipe's next attempt takes the seed again.
+    retried = asyncio.run(seeded(tmp_path, SeedAuthor(), seed_count=1, source_count=1).generate(REQUEST))
+    assert [task.metadata.get("seed_task") for task in retried] == ["tmax-0", None]
+    assert cursor(tmp_path) == {"next_generation": 2, "next_position": 1, "next_seed": 1}
+
+
+def test_a_seed_variant_runs_the_task_checks_not_the_seed_check(tmp_path: Path) -> None:
+    service = ScriptedOracle(tmp_path / "tasks", OracleResult(True, "", oracle_reward=1.0, nop_reward=0.0))
+    generator = seeded(tmp_path, SeedAuthor(), service)
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    [variant] = asyncio.run(generator.generate(REQUEST))
+    assert variant.metadata["seed_task"] == generator.seeds[0].name
+    # The variant's reference solution scores 0.25: the seed check would admit it, the oracle check refuses it.
+    service.result = OracleResult(False, "the reference solution scored 0.25, not 1", oracle_reward=0.25)
+    validation = asyncio.run(generator.validate(variant))
+    assert validation.errors == ("oracle check refused: the reference solution scored 0.25, not 1",)
+    asyncio.run(generator.record_results((RejectedTask(variant, validation.errors[0]),), generation=0))
+    [proposal] = report(tmp_path, 1)["proposals"]
+    assert [check["check"] for check in proposal["checks"]] == ["oracle"] and proposal["stage"] == "check"
+
+
 def test_an_eval_seed_is_held_out_and_never_varied(tmp_path: Path) -> None:
     author = SeedAuthor()
     generator = seeded(tmp_path, author)
@@ -425,7 +518,9 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         "inputs/variant.md",
         *(f"inputs/parent/{name}" for name in parent.files),
     }
-    assert session.seen["inputs/variant.md"].startswith("The solver passed the task in ../inputs/parent/ (tmax-0)")
+    assert session.seen["inputs/variant.md"].startswith(
+        "The solver's mean reward on the task in ../inputs/parent/ (tmax-0) is 0.00 over 2 rollouts;"
+    )
     assert {name: text for name, text in session.seen.items() if name.startswith("workspace/")} == {
         f"workspace/task/environment/{name}": text for name, text in parent.environment.items()
     }
@@ -436,6 +531,18 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
     if harness == "claude-code":
         assert CLAUDE_CHECK_TEXT in (run / "claude" / "CLAUDE.md").read_text()
     assert session.argv[session.argv.index("-p") + 1] == SEED_VARIANT_PROMPT.format(direction="simpler")
+
+
+@pytest.mark.parametrize("is_reviewing", [True, False])
+@pytest.mark.parametrize("has_behaviour_rule", [True, False])
+def test_the_seed_rules_name_no_session_with_the_review_on_or_off(
+    tmp_path: Path, is_reviewing: bool, has_behaviour_rule: bool
+) -> None:
+    variant = TaskVariant(parent="tmax-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
+    rules = agent_rules(NoChecks(6, is_reviewing=is_reviewing), has_behaviour_rule, variant, True)
+    assert "session" not in rules.lower() and "../inputs/repo" not in rules and "history" not in rules
+    assert ("the check also reviews the tests" in rules) is is_reviewing
+    assert "write a real one" in rules and "at most 6 checks" in rules
 
 
 def test_a_seed_variant_task_has_no_history_step(tmp_path: Path) -> None:

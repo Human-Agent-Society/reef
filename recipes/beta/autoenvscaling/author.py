@@ -159,7 +159,9 @@ VARIANT_PROMPT = (
     "../inputs/session.md, following your rules. Start with ../inputs/variant.md."
 )
 
-VARIANT_TEXT = """The solver passed the task in ../inputs/parent/ ({parent}) in {pass_rate:.0%} of {rollouts} rollouts.
+# The pass rate is the mean reward: a verifier may give part marks, so it is no count of the rollouts that passed.
+VARIANT_TEXT = """The solver's mean reward on the task in ../inputs/parent/ ({parent}) is {pass_rate:.2f} over {rollouts} \
+rollouts; a rollout that passes scores 1.
 Write a {direction} task: {why}"""
 
 VARIANT_HARDER = "harder"

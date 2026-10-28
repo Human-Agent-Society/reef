@@ -8,8 +8,9 @@ Reimplemented from AutoEnvScaling's ``baselines/tmax.py`` (Apache 2.0) on reef's
 extracted directory and downloads nothing. Each task directory with a ``task.json`` becomes one Harbor task:
 
 - ``container.def``, a Singularity definition bootstrapped from a Docker image, becomes ``environment/Dockerfile``:
-  ``From:`` becomes ``FROM``, each ``%environment`` export an ``ENV`` line, each ``%files`` entry a ``COPY`` of the
-  file of that name in the task directory, and ``%post`` the build script ``tmax_build.sh``, which one ``RUN`` runs.
+  ``From:`` becomes ``FROM``, each ``%environment`` export an ``ENV`` line, each ``%files`` entry a ``COPY`` of its
+  file in the task directory (:func:`fixture_file`), kept under ``fixtures/`` (:func:`fixture_name`), and ``%post``
+  the build script ``tmax_build.sh``, which one ``RUN`` runs.
   The Dockerfile then installs tmux, which the solver's agent needs, and pytest, which the verifier needs: neither
   has network.
 - ``task.json``'s ``description`` becomes ``instruction.md``, and ``test_final_state.py`` becomes
@@ -18,8 +19,9 @@ extracted directory and downloads nothing. Each task directory with a ``task.jso
 - TMax ships no reference solution, so ``solution/solve.sh`` does nothing: its oracle trial scores the untouched
   environment.
 
-A task with a binary fixture (a reef task holds text files only), no ``From:`` image, no description or no
-final-state tests is refused. ``test_initial_state.py`` is not used. ``conversion.json`` in the output directory
+A task with a binary fixture (a reef task holds text files only), a fixture that no file or several files of the
+task directory match, two fixtures with the same name under ``fixtures/``, no ``From:`` image, no description or no
+final-state tests is refused. So is a task whose environment a variant's reply could not hold. ``test_initial_state.py`` is not used. ``conversion.json`` in the output directory
 lists the converted tasks with the sections of ``container.def`` they leave out, and the refused tasks with the
 reason.
 """
@@ -32,10 +34,11 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
+from reef.record2sample.generator.designer import checked_harbor_files
 
 VERIFIER = Path(__file__).with_name("tmax_verifier.sh")
 CONVERSION_FILE = "conversion.json"
@@ -45,6 +48,12 @@ BUILD_SCRIPT = "tmax_build.sh"
 HANDLED_SECTIONS = ("files", "post", "environment")
 TASK_JSON_KEYS = ("domain", "tier", "skill_type")
 MAX_NAME_CHARS = 100
+# The most parts of a fixture's path in the task directory that its name under fixtures/ keeps: a reply's file name
+# has at most four parts.
+FIXTURE_PARTS = 3
+# A run of characters that a reply's file name cannot hold, and the start that each part of the name needs.
+FIXTURE_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+FIXTURE_START = re.compile(r"\.?[A-Za-z0-9_]")
 # Upstream's budgets: the build and the verifier stay inside the generator service's bound on one oracle trial.
 TASK_CONFIG: dict[str, dict[str, object]] = {
     "agent": {"timeout_sec": 1200},
@@ -129,6 +138,46 @@ def text_file(path: Path) -> str:
         raise ValueError(f"{path.name} is a binary file; a reef task holds text files only") from exc
 
 
+def fixture_file(task_dir: Path, source: str) -> Path:
+    """The file in ``task_dir`` that a ``%files`` source names.
+
+    The source is a path on the TMax authors' machine, and the file ships in the task directory: of the files with
+    the source's name, the one whose path in the task directory ends with the most parts of the source path. Raises
+    ``ValueError`` when no file has the name, or when several match equally well.
+    """
+    wanted = PurePosixPath(source).parts
+    best: list[Path] = []
+    best_shared = 0
+    for path in sorted(task_dir.rglob("*")):
+        if not wanted or path.name != wanted[-1] or not path.is_file():
+            continue
+        parts = path.relative_to(task_dir).parts
+        shared = 0
+        while shared < min(len(parts), len(wanted)) and parts[-1 - shared] == wanted[-1 - shared]:
+            shared += 1
+        if shared > best_shared:
+            best, best_shared = [path], shared
+        elif shared == best_shared:
+            best.append(path)
+    if not best:
+        raise ValueError(f"the fixture {source} is not in the task directory")
+    if len(best) > 1:
+        found = ", ".join(path.relative_to(task_dir).as_posix() for path in best)
+        raise ValueError(f"the fixture {source} matches several files in the task directory: {found}")
+    return best[0]
+
+
+def fixture_name(relative: Path) -> str:
+    """The environment file of a fixture at ``relative`` in the task directory: ``fixtures/`` and the last
+    :data:`FIXTURE_PARTS` parts of that path, each run of characters a reply's file name cannot hold made one
+    underscore, so that a variant's reply can keep the file."""
+    parts = []
+    for part in relative.parts[-FIXTURE_PARTS:]:
+        safe = FIXTURE_UNSAFE.sub("_", part)
+        parts.append(safe if FIXTURE_START.match(safe) else f"_{safe}")
+    return "/".join((FIXTURES_DIR, *parts))
+
+
 def converted_task(task_dir: Path, verifier: str) -> tuple[HarborTask, ContainerDefinition]:
     """The seed task of one extracted TMax task directory, with ``verifier`` as its ``tests/test.sh``, and its
     container definition. Raises ``ValueError`` for a task it refuses."""
@@ -144,14 +193,16 @@ def converted_task(task_dir: Path, verifier: str) -> tuple[HarborTask, Container
         raise ValueError("task.json has no description")
     environment: dict[str, str] = {}
     copies: list[str] = []
+    fixtures: dict[str, Path] = {}
     for source, destination in definition.files:
-        # A %files source is a path on the TMax authors' machine; the file itself ships in the task directory.
-        file_name = Path(source).name
-        local = next((path for path in sorted(task_dir.rglob(file_name)) if path.is_file()), None)
-        if local is None:
-            raise ValueError(f"the fixture {source} is not in the task directory")
-        environment[f"{FIXTURES_DIR}/{file_name}"] = text_file(local)
-        copies.append(f"COPY {FIXTURES_DIR}/{file_name} {destination}")
+        local = fixture_file(task_dir, source)
+        name = fixture_name(local.relative_to(task_dir))
+        # Two entries may copy one file; two files must not share a name.
+        if fixtures.setdefault(name, local) != local:
+            first, second = (path.relative_to(task_dir).as_posix() for path in (fixtures[name], local))
+            raise ValueError(f"the fixtures {first} and {second} share the name {name}")
+        environment[name] = text_file(local)
+        copies.append(f"COPY {name} {destination}")
     environment[BUILD_SCRIPT] = "#!/bin/bash\nset -e\n" + "".join(f"{line}\n" for line in definition.post)
     environment["Dockerfile"] = (
         "\n".join(
@@ -167,6 +218,11 @@ def converted_task(task_dir: Path, verifier: str) -> tuple[HarborTask, Container
         )
         + "\n"
     )
+    try:
+        # A variant's workspace starts with this environment, and its reply must hold every file of it.
+        checked_harbor_files(environment, "environment")
+    except ValueError as exc:
+        raise ValueError(f"a variant could not keep the environment: {exc}") from exc
     metadata: dict[str, object] = {"tmax_task": task_dir.name}
     metadata.update({key: task_json[key] for key in TASK_JSON_KEYS if isinstance(task_json.get(key), str)})
     try:
@@ -232,13 +288,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Convert extracted TMax tasks into AutoEnvScaling seed tasks.")
     parser.add_argument("--tasks", type=Path, required=True, help="the extracted TMax tasks, one directory each")
     parser.add_argument("--out", type=Path, required=True, help="the seed directory, for seed_tasks_path")
-    parser.add_argument("--select", type=Path, help="a JSON list of the task ids to convert; default: every task")
+    parser.add_argument(
+        "--select",
+        type=Path,
+        help="a JSON list of the task ids to convert, or upstream's list of {task_id, ...}; default: every task",
+    )
     arguments = parser.parse_args(argv)
-    task_ids = None
+    task_ids: list[str] | None = None
     if arguments.select is not None:
-        task_ids = json.loads(arguments.select.read_text(encoding="utf-8"))
-        if not isinstance(task_ids, list) or not all(isinstance(task_id, str) for task_id in task_ids):
+        selection = json.loads(arguments.select.read_text(encoding="utf-8"))
+        if not isinstance(selection, list):
             parser.error("--select must name a JSON list of task ids")
+        task_ids = []
+        for entry in selection:
+            # Upstream's selection file holds objects; their other keys come from each task's task.json here.
+            task_id = entry.get("task_id") if isinstance(entry, dict) else entry
+            if not isinstance(task_id, str):
+                parser.error("--select must name a JSON list of task ids or of objects with a task_id")
+            task_ids.append(task_id)
     result = convert(arguments.tasks, arguments.out, task_ids)
     for entry in result["refused"]:
         print(f"refused {entry['task_id']}: {entry['reason']}")

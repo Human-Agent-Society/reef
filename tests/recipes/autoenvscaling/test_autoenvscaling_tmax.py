@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from recipes.beta.autoenvscaling import tmax
+from recipes.beta.autoenvscaling import admitted_task, tmax, workspace_reply
 from recipes.beta.autoenvscaling.generator import seed_tasks
 from reef.core.tasks import read_harbor_task
 
@@ -61,13 +61,16 @@ def test_a_tmax_task_becomes_a_reef_harbor_task_that_reads_back(tmp_path: Path) 
         "FROM python:3.12-slim",
         "ENV APP_MODE=strict",
         "ENV PATH=/opt/tools:$PATH",
-        "COPY fixtures/config.ini /app/config.ini",
+        "COPY fixtures/data/config.ini /app/config.ini",
         "COPY tmax_build.sh /tmp/tmax_build.sh",
         "RUN bash /tmp/tmax_build.sh && rm -f /tmp/tmax_build.sh",
         *tmax.TOOL_STEPS,
         "WORKDIR /app",
     ]
-    assert task.environment["fixtures/config.ini"] == "mode = strict\n"
+    assert task.environment["fixtures/data/config.ini"] == "mode = strict\n"
+    # Neither the agent's container nor the verifier has network: the image installs tmux and pytest.
+    assert "apt-get install -y tmux" in task.environment["Dockerfile"]
+    assert "python3 -m pip install -q pytest" in task.environment["Dockerfile"]
     assert task.environment["tmax_build.sh"] == (
         "#!/bin/bash\nset -e\n    mkdir -p /app/out\n    echo ready > /app/out/state.txt\n\n"
     )
@@ -103,7 +106,20 @@ def test_a_tmax_task_with_a_binary_fixture_or_no_from_image_is_reported_not_conv
     tmax_task(tasks, "good")
     tmax_task(tasks, "binary", fixture=b"\x89PNG\r\n\x1a\n\xff\x00")
     tmax_task(tasks, "imageless", container_def=CONTAINER_DEF.replace("From: python:3.12-slim\n", ""))
-    (tmp_path / "ids.json").write_text(json.dumps(["binary", "good", "imageless", "absent"]))
+    ambiguous = tmax_task(tasks, "ambiguous", container_def=CONTAINER_DEF.replace("task-7/data/", ""))
+    (ambiguous / "other").mkdir()
+    (ambiguous / "other" / "config.ini").write_text("mode = loose\n")
+    fixture_entry = "/home/tmax/build/task-7/data/config.ini /app/config.ini"
+    entries = "/x/data/a+b.csv /app/1.csv\n    /x/data/a=b.csv /app/2.csv"
+    collision = tmax_task(tasks, "collision", container_def=CONTAINER_DEF.replace(fixture_entry, entries))
+    for name in ("a+b.csv", "a=b.csv"):
+        (collision / "data" / name).write_text(f"{name}\n")
+    # A file name longer than a reply's file name may be: the task writer takes it, a variant's reply would not.
+    long_name = "f" * 116 + ".txt"
+    long = tmax_task(tasks, "long", container_def=CONTAINER_DEF.replace("data/config.ini /", f"data/{long_name} /"))
+    (long / "data" / long_name).write_text("mode = strict\n")
+    task_ids = ["binary", "good", "imageless", "ambiguous", "collision", "long", "absent"]
+    (tmp_path / "ids.json").write_text(json.dumps(task_ids))
     exit_code = tmax.main(
         ["--tasks", str(tasks), "--out", str(tmp_path / "seeds"), "--select", str(tmp_path / "ids.json")]
     )
@@ -114,13 +130,63 @@ def test_a_tmax_task_with_a_binary_fixture_or_no_from_image_is_reported_not_conv
     assert reasons == {
         "binary": "config.ini is a binary file; a reef task holds text files only",
         "imageless": "container.def has no From: image",
+        "ambiguous": (
+            "the fixture /home/tmax/build/config.ini matches several files in the task directory: "
+            "data/config.ini, other/config.ini"
+        ),
+        "collision": "the fixtures data/a+b.csv and data/a=b.csv share the name fixtures/data/a_b.csv",
+        "long": (
+            "a variant could not keep the environment: the reply's environment names a file the task cannot hold: "
+            f"'fixtures/data/{long_name}'"
+        ),
         "absent": "no task directory has this id",
     }
     assert sorted(path.name for path in (tmp_path / "seeds").iterdir() if not path.name.startswith(".")) == [
         "conversion.json",
         "good",
     ]
-    assert "converted 1 of 4 tasks" in capsys.readouterr().out
+    assert "converted 1 of 7 tasks" in capsys.readouterr().out
+
+
+SHARED_NAMES_DEF = """Bootstrap: docker
+From: ubuntu:22.04
+
+%files
+    /x/a/config.json /etc/app/a.json
+    /x/b/config.json /etc/app/b.json
+    /x/sales+2024.csv /home/user/sales+2024.csv
+
+%post
+    true
+"""
+
+
+def test_each_fixture_keeps_its_own_file_under_a_name_a_variant_can_hold(tmp_path: Path) -> None:
+    task_dir = tmax_task(tmp_path / "tasks", "t1", container_def=SHARED_NAMES_DEF)
+    for folder, text in (("a", '{"a": 1}\n'), ("b", '{"b": 2}\n')):
+        (task_dir / folder).mkdir()
+        (task_dir / folder / "config.json").write_text(text)
+    (task_dir / "sales+2024.csv").write_text("month,total\n")
+    # Upstream's selection file: objects with a task_id.
+    (tmp_path / "selection.json").write_text(json.dumps([{"task_id": "t1", "domain": "data"}]))
+    arguments = ["--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]
+    assert tmax.main([*arguments, "--select", str(tmp_path / "selection.json")]) == 0
+
+    task = read_harbor_task(tmp_path / "seeds" / "t1")
+    assert [line for line in task.environment["Dockerfile"].splitlines() if line.startswith("COPY fixtures/")] == [
+        "COPY fixtures/a/config.json /etc/app/a.json",
+        "COPY fixtures/b/config.json /etc/app/b.json",
+        "COPY fixtures/sales_2024.csv /home/user/sales+2024.csv",
+    ]
+    assert (task.environment["fixtures/a/config.json"], task.environment["fixtures/b/config.json"]) == (
+        '{"a": 1}\n',
+        '{"b": 2}\n',
+    )
+    # A variant's workspace starts with the seed's environment, and admission takes every file of it.
+    admitted = admitted_task(
+        workspace_reply(tmp_path / "seeds" / "t1"), generation=0, index=0, record_id="seed-0", checkout_path=None
+    )
+    assert admitted.environment == task.environment
 
 
 def verifier_reward(tmp_path: Path, test_outputs: str | None, *, planted: bool = False) -> str:
