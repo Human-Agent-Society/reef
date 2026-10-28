@@ -58,7 +58,7 @@ def scenario_double(
         pipeline=pipeline,
         trains=True,
         job_running=job_running,
-        needs_polling=lambda: job_running or background_jobs_running,
+        needs_polling=lambda: job_running or job_data_ready or background_jobs_running,
         job_loop=job_loop,
         state={} if state is None else state,
         job_data_ready=lambda: job_data_ready,
@@ -305,12 +305,8 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         )
 
 
-def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_without_a_record(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # What POST /reef/scenarios does for a recipe that needs no record, such as generated tasks: no record or
-    # upload ever wakes the worker, so the worker must start with the scenario and poll while the step runs.
-    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundStepRecipe, StubTrainingComponent]:
+    """A dispatcher of ``BackgroundStepRecipe`` with no scenario yet, and the component that runs its jobs."""
     initial = tmp_path / "initial"
     initial.mkdir()
     component = StubTrainingComponent(tmp_path / "checkpoints")
@@ -321,13 +317,60 @@ def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_w
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
+    return dispatcher, recipe, component
+
+
+def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
+    """Wait up to two seconds for the one job, which trains the step's task."""
+    deadline = time.monotonic() + 2
+    while not component.submitted and time.monotonic() < deadline:
+        time.sleep(0.01)
+    [job] = component.submitted
+    assert [str(sample.task_path) for sample in job.data.samples] == ["generated-task"]
+
+
+def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_without_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What POST /reef/scenarios does for a recipe that needs no record, such as generated tasks: no record or
+    # upload ever wakes the worker, so the worker must start with the scenario and poll while the step runs.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    dispatcher, recipe, component = background_step_dispatcher(tmp_path)
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
         recipe.step_finished.set()
-        deadline = time.monotonic() + 2
-        while not component.submitted and time.monotonic() < deadline:
-            time.sleep(0.01)
-        [job] = component.submitted
-        assert [str(sample.task_path) for sample in job.data.samples] == ["generated-task"]
+        assert_trains_the_generated_task(component)
+    finally:
+        dispatcher.close()
+
+
+def test_a_worker_trains_the_job_data_that_a_status_read_collects_after_its_last_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A status read between the worker's last step and its wait ends the step and makes the job data. No
+    # background job runs then, and no record comes, so only the job data can keep the worker polling.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    wait = LocalTrainingWorkers.wait
+    waits = 0
+    read_ready: list[bool] = []
+
+    def wait_after_a_status_read(
+        self: LocalTrainingWorkers, scenario: str, component: str | None, ready: Event
+    ) -> bool:
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            # The worker ran its first step, which found the step running; no record wakes it again.
+            ready.clear()
+            recipe.step_finished.set()
+            read_ready.append(dispatcher.build_training_status()["scenarios"][scenario]["job_data_ready"])
+        return wait(self, scenario, component, ready)
+
+    monkeypatch.setattr(LocalTrainingWorkers, "wait", wait_after_a_status_read)
+    dispatcher, recipe, training_component = background_step_dispatcher(tmp_path)
+    try:
+        dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
+        assert_trains_the_generated_task(training_component)
+        assert read_ready == [True]
     finally:
         dispatcher.close()

@@ -4,8 +4,9 @@ A cycle prepares the trainer's next commit outside the scenario's registry
 lock, because the preparation can take minutes (a harness step's evaluation,
 a training job's checkpoint evaluation). Then it commits under that lock. A
 worker whose trainer has a training job or a pipeline background job (such
-as a judge call) running looks again every ``POLL_SECONDS``, since a job's
-checkpoints and a judgment arrive without a new record.
+as a judge call) running, or job data waiting, looks again every
+``POLL_SECONDS``, since a job's checkpoints, a judgment, and the job data
+that a status read collects arrive without a new record.
 The workers also close the instances that a reload replaced.
 """
 
@@ -25,7 +26,7 @@ from reef.scenario.scenario import Scenario
 
 logger = logging.getLogger(__name__)
 
-#: How soon a worker whose trainer has a training job or a pipeline background job running looks again.
+#: How soon a worker looks again while its trainer runs a training job or a pipeline background job, or holds job data.
 POLL_SECONDS = 2.0
 
 

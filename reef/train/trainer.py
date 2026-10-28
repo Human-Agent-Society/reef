@@ -332,8 +332,10 @@ class Trainer:
             return self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
 
     def needs_polling(self) -> bool:
-        """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
+        """Whether the trainer's worker polls at a fixed interval: a job runs, job data waits, or pipeline work runs.
 
+        A look from another thread, such as a status read, advances the pipeline too. It can end the pipeline's
+        own work after the worker's last step, so the job data it makes waits for the worker without a record.
         Otherwise the worker sleeps until the next accepted record.
         """
         with self._lock:
@@ -341,7 +343,8 @@ class Trainer:
                 state = JobLoopState.from_dict(self._state)
                 if state.job is not None:
                     return True
-            return self._pipeline.background_jobs_running()
+            # Look for job data before the background jobs, as holds_untrained_records does.
+            return self.pipeline_ready() or self._pipeline.background_jobs_running()
 
     def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded trajectory (``TrainingPipeline.uploaded_sample``), under the lock.
