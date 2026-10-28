@@ -4296,6 +4296,9 @@ opentelemetry = [
 postgres = [
     { name = "psycopg", extra = ["binary"] },
 ]
+s3 = [
+    { name = "boto3" },
+]
 sglang = [
     { name = "httpx" },
     { name = "psutil" },
@@ -4345,6 +4348,7 @@ runtime = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14" },
     { name = "alembic", specifier = ">=1.13,<2" },
+    { name = "boto3", marker = "extra == 's3'" },
     { name = "connectrpc", marker = "extra == 'e2b'", specifier = ">=0.11.1,<0.13" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
     { name = "e2b", marker = "extra == 'slime'" },
@@ -4396,7 +4400,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'slime'", specifier = ">=0.29.0" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.29.0" },
 ]
-provides-extras = ["sglang", "vllm", "tinker", "postgres", "e2b", "modal", "wandb", "opentelemetry", "slime", "dev"]
+provides-extras = ["sglang", "vllm", "tinker", "postgres", "s3", "e2b", "modal", "wandb", "opentelemetry", "slime", "dev"]
 
 [package.metadata.requires-dev]
 runtime = [{ name = "slime", git = "https://github.com/THUDM/slime.git?rev=41014d1f29e201137fdffce737bb8bac65bc5219" }]

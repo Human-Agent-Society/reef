@@ -80,19 +80,20 @@ def to_json_value(value: Any) -> Any:
 
 
 #: What a commit record does: a training step, the activation of an artifact, or a trainer's new training start.
-CommitOperation = Literal["training", "activate", "train_from"]
+CommitOperation = Literal["training", "activate", "train_from", "import"]
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
-    """One committed step of a scenario: a training step, an activation, or a new training start.
+    """One committed step of a scenario: a training step, an activation, a new training start, or an import.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
     ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
     ``CommitOperation``. ``operation_verified`` is false only for a commit
     read from release metadata that names no operation. ``component`` is
     ``None`` or a non-empty name, and ``components`` is ``None`` or a
-    mapping of non-empty component names to non-empty content ids.
+    mapping of non-empty component names to non-empty artifact ids
+    (``ReleaseComponents.artifact_ids``).
     ``high_water_sequence`` and ``high_water_offset`` are non-negative ints.
     Each operation adds its own conditions:
 
@@ -116,11 +117,21 @@ class CommitRecord:
       training start, as the row that made it records it. ``component``
       names the trainer as its training rows do (``None`` for a lone
       trainer), and ``components`` is ``None``.
+    - ``"import"``: ``artifact_ref`` is a release that the import published
+      beside the chain: it binds the imported artifact and the active
+      release's other components. ``checkpoint`` is true. ``component`` and
+      ``components`` are as for an ``"activate"`` record: ``None`` in a
+      scenario of one component, else the imported component and the
+      release's manifest. ``metrics`` is ``{"source": {"uri", "version"}}``,
+      where the content was read from; it is no part of the artifact's
+      identity.
 
-    An ``"activate"`` or ``"train_from"`` record makes no artifact and
-    carries no trainer state: ``checkpoint`` and ``activated`` are false,
-    ``algorithm_state``, ``metrics`` and ``training_job_id`` are ``None``,
-    both high-water values are 0 and ``consumed_ids`` is empty.
+    An ``"activate"``, ``"train_from"`` or ``"import"`` record carries no
+    trainer state and is not ``activated``: ``algorithm_state`` and
+    ``training_job_id`` are ``None``, ``metrics`` is ``None`` except for an
+    import's source, both high-water values are 0 and
+    ``consumed_ids`` is empty. Only an ``"import"`` record among them has
+    ``checkpoint`` set.
 
     ``algorithm_state`` and ``metrics`` hold JSON values: the constructor
     converts them as a JSON round trip does, so a record equals itself after
@@ -175,8 +186,10 @@ class CommitRecord:
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise CommitHistoryError(f"commit record {name} must be a non-negative integer")
-        if self.operation not in ("training", "activate", "train_from"):
-            raise CommitHistoryError("commit record operation must be 'training', 'activate' or 'train_from'")
+        if self.operation not in ("training", "activate", "train_from", "import"):
+            raise CommitHistoryError(
+                "commit record operation must be 'training', 'activate', 'train_from' or 'import'"
+            )
         if not isinstance(self.operation_verified, bool):
             raise CommitHistoryError("commit record operation_verified must be a boolean")
         if not isinstance(self.checkpoint, bool) or not isinstance(self.activated, bool):
@@ -190,12 +203,15 @@ class CommitRecord:
         ):
             raise CommitHistoryError("commit record training_job_id must be a non-empty string or null")
         if self.operation != "training":
+            imports = self.operation == "import"
+            if self.checkpoint != imports:
+                made = "makes an artifact" if imports else "makes no artifact"
+                raise CommitHistoryError(f"a {self.operation} commit {made}: its checkpoint is {imports}")
             carried = [
                 name
                 for name, value in (
-                    ("checkpoint", self.checkpoint),
                     ("algorithm_state", self.algorithm_state is not None),
-                    ("metrics", self.metrics is not None),
+                    ("metrics", self.metrics is not None and self.operation != "import"),
                     ("training_job_id", self.training_job_id is not None),
                     ("high_water_sequence", self.high_water_sequence != 0),
                     ("high_water_offset", self.high_water_offset != 0),
@@ -204,15 +220,28 @@ class CommitRecord:
                 if value
             ]
             if carried:
-                raise CommitHistoryError(f"a {self.operation} commit makes no artifact and must not carry {carried}")
+                raise CommitHistoryError(
+                    f"a {self.operation} commit carries no trainer state and must not carry {carried}"
+                )
+        if self.operation == "import":
+            source = None if self.metrics is None else self.metrics.get("source")
+            if (
+                self.metrics is None
+                or set(self.metrics) != {"source"}
+                or not isinstance(source, Mapping)
+                or set(source) != {"uri", "version"}
+                or not all(isinstance(value, str) for value in source.values())
+                or not source["uri"]
+            ):
+                raise CommitHistoryError('an import commit\'s metrics are {"source": {"uri", "version"}}')
         if self.operation == "train_from" and self.components is not None:
             raise CommitHistoryError("a train_from commit publishes no release and carries no components")
-        if self.operation == "activate" and (
+        if self.operation in ("activate", "import") and (
             (self.component is None) != (self.components is None)
             or (self.components is not None and self.component not in self.components)
         ):
             raise CommitHistoryError(
-                "an activate commit names a component exactly when it carries the manifest that binds it"
+                f"an {self.operation} commit names a component exactly when it carries the manifest that binds it"
             )
         # Hold state and metrics as a stored record reads them back, so a record
         # equals itself after storage, and a caller mutating its values
@@ -228,7 +257,13 @@ class CommitRecord:
 
     @property
     def made_artifact(self) -> bool:
-        """Whether this record made its artifact: a training step that saved a checkpoint."""
+        """Whether ``artifact_ref`` made a new artifact: a training step that saved a checkpoint, or an import."""
+        return self.checkpoint
+
+    @property
+    def trained_artifact(self) -> bool:
+        """Whether a training step saved this record's artifact: its release is the new chain tip, and the
+        training start moves to it."""
         return self.operation == "training" and self.checkpoint
 
     @property

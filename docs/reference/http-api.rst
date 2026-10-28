@@ -82,6 +82,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/artifacts``                                     | ``{scenario, artifacts}``, newest first           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/artifacts``                                    | import a directory as a new artifact              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/activate``                                     | make an existing artifact the one that serves     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/train-from``                                   | set the artifact a trainer starts its next job or |
@@ -1187,7 +1189,7 @@ names an artifact:
 - In a scenario of one component, it is the ``release_id`` of the release
   that made the artifact. Every shipped recipe serves one component, so there
   ``artifact_id`` and ``release_id`` are equal for every artifact that a
-  training step made.
+  training step or an import made.
 - In a scenario of several components, it is ``<release_id>:<component>``.
 - A release that carries a component forward keeps that component's
   ``artifact_id``. The creation makes no artifact, so the creation artifact
@@ -1212,9 +1214,9 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 |                       | ``null`` in a scenario of several components         |
 +-----------------------+------------------------------------------------------+
 | ``operation``         | ``creation`` for the creation artifact,              |
-|                       | ``training``, or ``recovery`` for the artifact that  |
-|                       | a store without a durable commit log served at a     |
-|                       | restart                                              |
+|                       | ``training``, ``import``, or ``recovery`` for the    |
+|                       | artifact that a store without a durable commit log   |
+|                       | served at a restart                                  |
 +-----------------------+------------------------------------------------------+
 | ``recorded_at``       | the commit time, ``null`` for the creation artifact  |
 +-----------------------+------------------------------------------------------+
@@ -1225,11 +1227,98 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 | ``metrics``,          | training rows only: the step's metrics and the       |
 | ``record_progress``   | record high-water mark that the step consumed        |
 +-----------------------+------------------------------------------------------+
+| ``source``            | import rows only: ``{uri, version}`` that the import |
+|                       | read                                                 |
++-----------------------+------------------------------------------------------+
 
 The list holds artifacts only. A training step that made no artifact, such
 as a rejected or skipped step, a job submission or a job's end, has no row;
 ``GET /reef/scenarios/{scenario}/commits`` holds its record (see `Record and
 commit history`_). Activations and train-from operations have no rows either.
+
+Import an artifact
+~~~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
+artifact from the directory that a URI names. Leave out ``component`` when
+the scenario has one component. The body is ``{"source": "<uri>"}``. A source
+reader copies the directory from one of these URIs:
+
+- ``hf://org/model@revision``: a Hugging Face snapshot.
+- ``s3://bucket/prefix/``: every object under the prefix.
+- ``file:///absolute/path``: a directory on the service's file system.
+- A scheme that ``storage.artifact-sources`` adds.
+
+To import a directory from your own machine, put it in one of these places
+first, for example an S3 prefix.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"source": "s3://my-bucket/adapters/run-7/"}' \
+     "$REEF_URL/reef/scenarios/code-repair/artifacts"
+
+The answer is HTTP 201 with ``{scenario, component, artifact_id, release_id,
+content_id}``. ``content_id`` comes from the files: the SHA-256 of each file's
+path and SHA-256. The same files from two sources have the same
+``content_id``, and each import is a new artifact.
+
+The directory must have the layout of the releases that the scenario's
+component makes. The training backend and its configuration decide it:
+
++-----------------------------+------------------------------------------------+------------------+
+| Component                   | The directory holds                            | Other files      |
++=============================+================================================+==================+
+| Full weights (Slime)        | ``config.json`` and ``*.safetensors`` or       | allowed          |
+|                             | ``*.bin`` at the root                          |                  |
++-----------------------------+------------------------------------------------+------------------+
+| LoRA adapter (Slime)        | ``adapter/adapter_config.json`` and            | allowed          |
+|                             | ``adapter/adapter_model.safetensors`` or       |                  |
+|                             | ``.bin``; ``r`` is at most the configured      |                  |
+|                             | rank, and ``target_modules`` is a list within  |                  |
+|                             | the configured modules                         |                  |
++-----------------------------+------------------------------------------------+------------------+
+| Tinker                      | ``tinker-checkpoint.json`` of the configured   | allowed          |
+|                             | model, rank and service; its ``state_path``    |                  |
+|                             | resolves on that service as a LoRA of that     |                  |
+|                             | model and rank. With ``export_adapter``, also  |                  |
+|                             | the LoRA adapter above                         |                  |
++-----------------------------+------------------------------------------------+------------------+
+| Harness                     | ``reef-entries.json`` with entries that a seed | refused: the     |
+|                             | may hold                                       | other files are  |
+|                             |                                                | exactly the      |
+|                             |                                                | render of the    |
+|                             |                                                | entries          |
++-----------------------------+------------------------------------------------+------------------+
+
+A component without a layout, such as the records of a trainer that serves
+nothing, takes no import.
+
+Reef publishes a release beside the chain. It binds the new artifact and the
+other components as the active release binds them. It appends an ``import``
+record. The active release, the chain tip and every training start stay, and
+the activation rule does not run. Activate the artifact or train from it as
+from any other artifact. The answer comes after the release is published, so
+give a large import a long client timeout.
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 201    | the artifact is imported                                           |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
+|        | to read; an unknown ``component``, or ``component`` is missing in  |
+|        | a scenario with several components; the component takes no         |
+|        | import; the directory does not have the component's layout, or its |
+|        | admission check refuses it                                         |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario; Reef reads nothing then                          |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
++--------+--------------------------------------------------------------------+
+| 503    | the source failed, for example S3 refused the read                 |
++--------+--------------------------------------------------------------------+
 
 Activate an artifact
 ~~~~~~~~~~~~~~~~~~~~

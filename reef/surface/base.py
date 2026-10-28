@@ -12,6 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -142,6 +143,19 @@ class HarnessInfo:
     served_metadata: ModelMetadata | None = None
 
 
+class ArtifactLayout(ABC):
+    """The directory layout of one component's artifacts, which an artifact import must meet (RFC #980).
+
+    ``check(directory)`` returns when ``directory`` holds an artifact of the component, in the layout of the
+    component's releases, and every remote path it names resolves on the component's service. Otherwise it raises
+    ``ValueError`` naming what does not hold. Purpose: a recipe binds it on ``ComponentSurface.layout``; the
+    committer checks an import's directory with it.
+    """
+
+    @abstractmethod
+    def check(self, directory: Path) -> None: ...
+
+
 @dataclass(frozen=True)
 class ComponentSurface:
     """How one named component of a release is admitted, loaded, injected, and read, and what kind it is.
@@ -151,6 +165,8 @@ class ComponentSurface:
     ``kind`` is the ``ArtifactKind`` of every artifact of the component, or
     ``None`` when the component is no side of a policy, such as the records
     of a trainer that serves nothing, or when the surface declares no kind.
+    ``layout`` checks an imported directory; ``None`` means the component
+    takes no import.
     """
 
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
@@ -158,6 +174,7 @@ class ComponentSurface:
     inference: InferenceHooks | None = None
     files: FileTree | None = None
     kind: ArtifactKind | None = None
+    layout: ArtifactLayout | None = None
 
     def __post_init__(self) -> None:
         if self.kind is not None and self.kind not in ARTIFACT_KINDS:
