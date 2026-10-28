@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.core.evaluation import RolloutScores, mean_score
+from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
@@ -44,9 +44,7 @@ from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, 
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
 #: The parameters of a Tinker job besides ``method`` and ``scheduling``.
-JOB_PARAMETER_NAMES = frozenset(
-    {"batch_size", "kl_coef", "learning_rate", "save_interval", "rollout", "evaluation_of"}
-)
+JOB_PARAMETER_NAMES = frozenset({"batch_size", "kl_coef", "learning_rate", "save_interval", "rollout"})
 
 
 @dataclass(frozen=True)
@@ -56,9 +54,8 @@ class TinkerJobParameters:
     Values: ``method`` and ``scheduling`` as ``job_training`` reads them; ``batch_size`` a positive int, the
     rollouts of one optimizer step; ``learning_rate`` finite and positive; ``kl_coef`` finite and non-negative;
     ``save_interval`` a positive int, the optimizer steps between two saved checkpoints, or None for one
-    checkpoint when the job ends; ``rollout`` the rollouts of a task job, or None for a job of trajectories;
-    ``evaluation_of`` a non-empty string, the name of what an evaluation job scores, or None for a job that
-    trains. An evaluation job is a task job. Purpose: ``TinkerTrainingComponent.job_parameters`` makes it when it checks and when it runs a job; the run
+    checkpoint when the job ends; ``rollout`` the rollouts of a task job, or None for a job of trajectories.
+    Purpose: ``TinkerTrainingComponent.job_parameters`` makes it when it checks and when it runs a job; the run
     reads it.
     """
 
@@ -69,11 +66,8 @@ class TinkerJobParameters:
     kl_coef: float
     save_interval: int | None
     rollout: RolloutSettings | None
-    evaluation_of: str | None = None
 
     def __post_init__(self) -> None:
-        if self.evaluation_of is not None and (not isinstance(self.evaluation_of, str) or not self.evaluation_of):
-            raise ValueError("evaluation_of must be a non-empty string")
         counts = {
             "batch_size": self.batch_size,
             "save_interval": 1 if self.save_interval is None else self.save_interval,
@@ -93,7 +87,7 @@ class TinkerTrainingComponent(LocalJobComponent):
 
     A job's parameters are ``TinkerJobParameters``: ``method``, optionally
     ``scheduling``, and ``batch_size``, ``kl_coef``, ``learning_rate``,
-    ``save_interval``, ``rollout`` and ``evaluation_of``, where ``batch_size``, ``kl_coef`` and
+    ``save_interval`` and ``rollout``, where ``batch_size``, ``kl_coef`` and
     ``learning_rate`` default to the component's ``TinkerConfig``. ``submit``
     refuses any other parameter or a malformed value. Jobs of several
     scenarios can share the component, since each job trains from its own
@@ -109,11 +103,6 @@ class TinkerTrainingComponent(LocalJobComponent):
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
     samples, and reports in the job's metrics each task's rewards of the
     rollouts that ran (``rollout_rewards``, by task name).
-
-    A task job with ``evaluation_of`` is an evaluation job: it rolls its tasks out on the sampler of its start
-    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of``, the score
-    of each rollout by task (``evaluation_scores``, ``RolloutScores.to_json``), and their ``mean_score``
-    (``evaluation_mean_score``, None when no rollout ran).
 
     A job's last checkpoint carries the objective's state after the job's
     data; an intermediate checkpoint (``save_interval``) carries the state of
@@ -207,7 +196,6 @@ class TinkerTrainingComponent(LocalJobComponent):
             parameters.get("kl_coef", self._config.kl_coef),
             parameters.get("save_interval"),
             None if parameters.get("rollout") is None else RolloutSettings.from_parameters(parameters),
-            parameters.get("evaluation_of"),
         )
 
     def check_job(self, job: TrainingJob) -> None:
@@ -226,8 +214,6 @@ class TinkerTrainingComponent(LocalJobComponent):
                 raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
         elif parameters.rollout is not None:
             raise ValueError("the rollout parameter applies only to a job of tasks")
-        if parameters.evaluation_of is not None and not tasks:
-            raise ValueError("an evaluation job (evaluation_of) rolls tasks out: its data must be tasks")
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """A task job rolls its tasks out on this component's sampler, as the ``rollout`` parameter says."""
@@ -289,14 +275,6 @@ class TinkerTrainingComponent(LocalJobComponent):
                 "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
                 "rollout_samples": len(rollouts.samples),
             }
-            if parameters.evaluation_of is not None:
-                # An evaluation job scores its start: it trains nothing and saves no checkpoint.
-                return {
-                    **rollout_metrics,
-                    "evaluation_of": parameters.evaluation_of,
-                    "evaluation_scores": rollouts.scores.to_json(),
-                    "evaluation_mean_score": mean_score(rollouts.scores.rollouts()),
-                }
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics

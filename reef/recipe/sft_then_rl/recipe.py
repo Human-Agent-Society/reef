@@ -11,10 +11,9 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.sft.processor import SFTRecord2Record, SFTSamples
 from reef.recipe.sft.recipe import SFTRecipe
-from reef.recipe.sft_then_rl.processor import ImportedTaskEvaluation, SFTThenRLJobData, SFTThenRLJobPlan
+from reef.recipe.sft_then_rl.processor import SFTThenRLJobData, SFTThenRLJobPlan
 from reef.runtime.interfaces import TrainingMethod
-from reef.storage.tasks import TaskStorage
-from reef.train.jobs import ArtifactEvaluation, JobPlan, JobRequest
+from reef.train.jobs import JobPlan, JobRequest
 from reef.train.pipeline import PipelineSpec
 
 
@@ -34,10 +33,8 @@ class SFTThenRLRecipe(SFTRecipe):
       the tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
 
     Held samples train first. Each job starts from the last checkpoint of the job before it, so RL starts from
-    the SFT weights. Each train task trains in one task job; eval tasks never train. Every artifact that the
-    trainer publishes is evaluated on the eval tasks (``ImportedTaskEvaluation``), with the RL task job
-    parameters, by an evaluation job from the artifact's checkpoint. The evaluation decides nothing: the
-    ``evaluation`` section decides which artifact serves. The training component must
+    the SFT weights. Each train task trains in one task job; eval tasks never train: a client evaluates an
+    artifact on them (``POST /reef/scenarios/{scenario}/evaluations``). The training component must
     run task jobs (``TrainingComponent.check_task_jobs``), such as Tinker with a sampler.
     """
 
@@ -64,10 +61,6 @@ class SFTThenRLRecipe(SFTRecipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2record=SFTRecord2Record, record2sample=SFTSamples, sample2job=SFTThenRLJobData)
-
-    def artifact_evaluation(self, task_storage: TaskStorage | None) -> ArtifactEvaluation | None:
-        rl = {**(self.task_job_parameters or {}), "method": TrainingMethod(TaskGroupObjective.name).to_dict()}
-        return ImportedTaskEvaluation.for_storage(task_storage, rl)
 
     def job_plan(self) -> JobPlan:
         sft = {**(self.job_parameters or {}), "method": TrainingMethod(type(self).training_spec().objective).to_dict()}

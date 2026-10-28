@@ -106,7 +106,7 @@ Built-in surfaces
 +========================================+=============+====================+=========================+==================================+==================+
 | ``Surface()``                          | none        | none               | none                    | none                             | none             |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
-| ``create_weight_surface()``            | ``weights`` | optional, accepts  | ``WeightLoader``        | ``WeightInferenceHooks``         | none             |
+| ``create_weight_surface(kind=...)``    | ``weights`` | optional, accepts  | ``WeightLoader``        | ``WeightInferenceHooks``         | none             |
 |                                        |             | any by default     |                         |                                  |                  |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 | ``create_weight_surface(scenario=...)``| ``weights`` | as above           | ``WeightLoader``        | ``WeightInferenceHooks``         | none             |
@@ -119,6 +119,14 @@ Built-in surfaces
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 | ``create_config_surface()``            | ``config``  | ``ConfigValidator``| none                    | ``ConfigInferenceHooks``         | none             |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
+
+**Kinds.** Each built-in surface declares the ``ArtifactKind`` of its
+component in ``ComponentSurface.kind``. The harness, skill and config
+surfaces declare ``harness_plugin``. The weight surface declares the ``kind``
+that it is built with: ``model`` for full weights, or ``model_adapter`` for a
+LoRA adapter. A weight recipe passes its runtime's
+``InferenceRuntime.served_weight_kind``. A surface built from the ``loader``,
+``inference`` and ``files`` keywords declares no kind (``None``).
 
 **Weights.** ``WeightLoader`` makes the inference runtime serve a release.
 ``activate`` calls the runtime's ``activate_checkpoint`` at startup recovery,

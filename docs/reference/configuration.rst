@@ -1491,18 +1491,8 @@ so the RL jobs start from the SFT weights. Each train task trains in one task
 job; eval tasks never train. The training component must run task jobs, so the
 recipe requires the ``tinker`` training backend with a sampler.
 
-The recipe evaluates every artifact on the eval tasks. When the trainer
-decides a checkpoint, it also submits an evaluation job that starts from that
-checkpoint, rolls out every eval task with ``task_job_parameters``, and trains
-nothing (the Tinker job parameter ``evaluation_of``). The component runs it
-after the jobs before it. When it ends, the trainer commits its result in the
-commit metric ``artifact_evaluation``: the ``candidate_id`` of the checkpoint
-(``<training job>:<step>``, the ``selection.candidate_id`` of the release's
-commit), the job's ``event``, and its ``metrics``: ``evaluation_scores``, the
-score of each rollout by task (``RolloutScores`` in JSON), and
-``evaluation_mean_score``, the mean of the rollouts that did not fail. The
-evaluation decides nothing: the ``evaluation`` section decides which release
-serves.
+The eval tasks never train. The recipe does not evaluate the artifacts that
+its trainer publishes; the ``evaluation`` section decides which release serves.
 
 .. code:: yaml
 

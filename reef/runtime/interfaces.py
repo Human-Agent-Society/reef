@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
+from reef.core.evaluation import ArtifactKind
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
@@ -533,6 +534,15 @@ class InferenceRuntime(AdapterWeightRuntime):
         self._inference_admission.close()
 
     # -- Scenarios
+
+    @property
+    def served_weight_kind(self) -> ArtifactKind:
+        """The kind of the weights that this runtime serves from a release.
+
+        ``model_adapter`` is a LoRA adapter on the runtime's base model, and ``model`` is a whole model's weights,
+        which is the default.
+        """
+        return "model"
 
     @property
     def per_scenario_adapters(self) -> bool:

@@ -1522,17 +1522,9 @@ Without an ``evaluation`` section, a weight recipe uses
 every saved checkpoint and adds no metrics. ``ManualPromotionPlugin`` selects
 none, so a person promotes each release. The commit already records the
 checkpoint's ``training_metrics``, and it refuses an evaluation or decision
-metric whose key is a training metric or ``selected``, ``selection``,
-``training_job`` or ``artifact_evaluation``.
-
-A weight recipe can also evaluate every artifact asynchronously: its
-``artifact_evaluation(task_storage)`` returns an ``ArtifactEvaluation``
-(``reef.train.jobs``), whose ``evaluation_job(candidate)`` gives the data and
-parameters of an evaluation job, or ``None``. The job loop submits that job from
-the candidate's checkpoint when it decides the candidate, keeps it in
-``JobLoopState.evaluations``, and commits its result as
-``artifact_evaluation`` when it ends. The parameters must ask the component to
-score its start without training, such as Tinker's ``evaluation_of``.
+metric whose key is a training metric or ``selected``, ``selection`` or
+``training_job``. A training component only trains: it runs no evaluation of
+an artifact.
 
 A configured plugin inherits ``ConfiguredEvaluationPlugin``. It implements the
 class method ``from_config(config, *, runtime, scenario, environ)``, which
@@ -1560,7 +1552,8 @@ Surface
 
 A surface binds one frozen release to its consumers.
 ``WeightTrainingRecipe.build_surface()`` already calls
-``create_weight_surface()``, and ``CordisRecipe`` calls
+``create_weight_surface(kind=...)`` with its runtime's ``served_weight_kind``,
+and ``CordisRecipe`` calls
 ``create_harness_surface()``, so most methods never touch this.
 
 ``Surface`` is a frozen dataclass mapping each named release component to a
@@ -1621,7 +1614,10 @@ Neither inherits from the other, and no trainer holds a serving engine.
   Its ``model_path`` property supplies the default model name for harness
   bindings; the base implementation returns an empty string for runtimes whose
   requests select the model. ``per_scenario_adapters`` is true for a runtime
-  that serves each scenario its own adapter.
+  that serves each scenario its own adapter. ``served_weight_kind`` is the
+  kind of the weights that the runtime serves from a release: ``model``, the
+  default, for full weights, or ``model_adapter`` for a LoRA adapter on its
+  base model. A runtime that serves adapters must override it.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` orders both around each commit. It publishes a
@@ -1823,11 +1819,7 @@ the optional ``scheduling``, optional ``batch_size``, ``kl_coef`` and
 ``learning_rate`` overrides, and ``save_interval``, the optimizer steps between saved
 checkpoints (by default, one checkpoint when the job ends). A saved checkpoint
 is both the start of a later job and the release Reef publishes. A job of
-Harbor tasks also takes ``rollout``, the rollouts of each task, and
-``evaluation_of``, a non-empty name: such an evaluation job rolls its tasks out
-from its start, saves no checkpoint, and reports ``evaluation_of``,
-``evaluation_scores`` (``RolloutScores`` in JSON) and ``evaluation_mean_score``
-with ``rollout_rewards``.
+Harbor tasks also takes ``rollout``, the rollouts of each task.
 
 ``TinkerDeployment.default_serving`` is ``trainer``: its
 ``trainer_serving_config`` selects ``reef.inference.tinker.TinkerInferenceRuntime``

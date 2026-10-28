@@ -181,6 +181,16 @@ class PolicyHarness:
     def kind(self) -> ArtifactKind:
         return "harness_plugin" if self.plugin else "harness"
 
+    def to_json(self) -> dict[str, Any]:
+        return {"base": self.base, "plugin": dict(self.plugin)}
+
+    @classmethod
+    def from_json(cls, value: object) -> PolicyHarness:
+        """The harness that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        if not isinstance(value, Mapping) or set(value) != {"base", "plugin"}:
+            raise ValueError("a policy harness is an object of base and plugin")
+        return cls(value["base"], value["plugin"])
+
 
 @dataclass(frozen=True)
 class PolicyModel:
@@ -205,6 +215,54 @@ class PolicyModel:
     @property
     def kind(self) -> ArtifactKind:
         return "model" if self.adapter is None else "model_adapter"
+
+    def to_json(self) -> dict[str, Any]:
+        return {"name": self.name, "adapter": self.adapter}
+
+    @classmethod
+    def from_json(cls, value: object) -> PolicyModel:
+        """The model that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        if not isinstance(value, Mapping) or set(value) != {"name", "adapter"}:
+            raise ValueError("a policy model is an object of name and adapter")
+        return cls(value["name"], value["adapter"])
+
+
+@dataclass(frozen=True)
+class PolicyEvaluation:
+    """One evaluation of a policy: the policy, and the score of each of its rollouts.
+
+    Values: ``harness`` and ``model`` are the policy that every rollout ran. ``scores`` holds the score of each
+    rollout, by task, in run order. ``mean_score`` is ``mean_score(scores.rollouts())``.
+    Purpose: an evaluation of an artifact gives it; ``to_json`` and ``from_json`` keep it with the evaluation.
+    """
+
+    harness: PolicyHarness
+    model: PolicyModel
+    scores: RolloutScores
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.harness, PolicyHarness) or not isinstance(self.model, PolicyModel):
+            raise TypeError("a policy evaluation holds a PolicyHarness and a PolicyModel")
+        if not isinstance(self.scores, RolloutScores):
+            raise TypeError("a policy evaluation holds RolloutScores")
+
+    @property
+    def mean_score(self) -> float | None:
+        return mean_score(self.scores.rollouts())
+
+    def to_json(self) -> dict[str, Any]:
+        return {"harness": self.harness.to_json(), "model": self.model.to_json(), "scores": self.scores.to_json()}
+
+    @classmethod
+    def from_json(cls, value: object) -> PolicyEvaluation:
+        """The evaluation that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        if not isinstance(value, Mapping) or set(value) != {"harness", "model", "scores"}:
+            raise ValueError("a policy evaluation is an object of harness, model and scores")
+        return cls(
+            PolicyHarness.from_json(value["harness"]),
+            PolicyModel.from_json(value["model"]),
+            RolloutScores.from_json(value["scores"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -394,6 +452,7 @@ __all__ = [
     "CandidateSelector",
     "CheckpointCandidate",
     "EvaluationResult",
+    "PolicyEvaluation",
     "PolicyHarness",
     "PolicyModel",
     "RolloutRequest",

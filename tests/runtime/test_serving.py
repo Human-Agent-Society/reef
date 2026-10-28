@@ -136,6 +136,7 @@ def test_the_engines_start_serving_the_base_model_under_a_fresh_version(serving,
     assert serving.serving_adapter_runtime_load_id("math") is None
     assert serving.base_url == "http://component.example"
     assert serving.per_scenario_adapters and serving.shared_by_training_scenarios
+    assert serving.served_weight_kind == "model_adapter"
 
 
 def test_each_release_loads_under_a_new_version_and_the_same_content_loads_nothing(serving, engines, tmp_path):
@@ -260,6 +261,7 @@ def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothin
     serving = FullWeightServingRuntime(engines, Handler(), model_path="Qwen/Qwen3-8B")
     initial = serving.current_runtime_load_id()
     assert not serving.per_scenario_adapters and not serving.shared_by_training_scenarios
+    assert serving.served_weight_kind == "model"
     # Before any load, a release without weights is the base model that the engines already serve.
     assert serving.activate_checkpoint(release(base_release(tmp_path / "base"), "base")) == initial
     weights = saved_full_weights(tmp_path / "step-1")
