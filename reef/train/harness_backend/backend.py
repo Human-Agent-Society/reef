@@ -50,9 +50,8 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
-from reef.harness.tree import HarnessTree, TreeKind, TreePatch, ValidationResult, locate, validate_patch, validate_tree
+from reef.harness.tree import HarnessTree, TreePatch, ValidationResult, validate_patch, validate_tree
 from reef.harness.tree.checks import clip_record_text, directive_shaped, secret_shaped
-from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
@@ -79,8 +78,8 @@ class StepLimits:
     re-evaluates the latest publish against the tree it replaced every that
     many steps. ``publish`` is ``"auto"``, which serves a selected tree at
     once, or ``"review"``, which holds every selected tree for a person.
-    ``review_kinds`` are the tree kinds whose change waits for a person even
-    under ``"auto"``.
+    ``review_parts`` name the parts of the adapter's tree whose change waits
+    for a person even under ``"auto"``, besides the parts that always do.
     Purpose: ``HarnessEvolutionRecipe`` builds it from ``evolution``; the
     backend reads it in every step.
     """
@@ -91,7 +90,7 @@ class StepLimits:
     max_episodes_per_step: int = 0
     recheck_every: int = 0
     publish: str = "auto"
-    review_kinds: frozenset[TreeKind] = frozenset()
+    review_parts: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -450,6 +449,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                     "metrics": dict(decision.metrics),
                 },
                 "patch": bounded(candidate.patch.to_json()),
+                "patch_parts": self.patch_parts(candidate.patch),
             }
         )
         if candidate.proposal_id is not None and self.inbox is not None:
@@ -474,6 +474,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         self.failed_step = {
             "failed_stage": "evaluating",
             "patch": bounded(candidate.patch.to_json()),
+            "patch_parts": self.patch_parts(candidate.patch),
             **{
                 key: prepared.metrics[key]
                 for key in ("method_summary", "method_notes", "step_record")
@@ -524,11 +525,20 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         return state.steps % self.limits.recheck_every == 0 or state.rollback_context != self.context_key()
 
     def held_for_review(self, patch: TreePatch) -> bool:
-        """Whether a selected patch waits for a person: under ``publish: review``, or when it changes a reviewed kind."""
+        """Whether a selected patch waits for a person: under ``publish: review``, or when it changes a part that the
+        deployment's ``review_parts`` name or that the adapter always reviews."""
         if self.limits.publish == "review":
             return True
-        reviewed = self.limits.review_kinds | ALWAYS_REVIEWED_KINDS
-        return any((location := locate(path)) is not None and location.kind in reviewed for path in patch.changes)
+        for path in patch.changes:
+            location = self.descriptor.layout.locate(path)
+            if location is not None and (location.part.review or location.part.name in self.limits.review_parts):
+                return True
+        return False
+
+    def patch_parts(self, patch: TreePatch) -> dict[str, str]:
+        """The part of the adapter's tree each path of ``patch`` is, for the step pages."""
+        located = {path: self.descriptor.layout.locate(path) for path in patch.changes}
+        return {path: location.part.name for path, location in located.items() if location is not None}
 
     def inbox_refuse(self, proposal_id: str, reason: str) -> None:
         if self.inbox is not None:

@@ -13,7 +13,7 @@ profile's module. The ``env`` config target becomes ``.env``, the lowest
 trust layer of dsh's launch environment, which is how the model binding's
 key reaches its ``apiKeyEnv`` route. dsh ignores a SKILL.md without YAML
 frontmatter, so a skill node whose text has none gets ``name`` and
-``description`` synthesized, and an agent_command renders under the second
+``description`` synthesized, and a command renders under the second
 skill root as a user invocable skill (``/name``), the only command surface
 dsh has. A command is always ``disable-model-invocation: true``, with no
 ``user-invocable`` key and none of the camelCase keys dsh refuses

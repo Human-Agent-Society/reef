@@ -8,23 +8,15 @@ argv: ["-p", "{prompt}"]
 env:
   REEF_NATIVE_DIR: "{root}/native"
   REEF_NATIVE_SESSION_DIR: "{root}/native/sessions"
-files:
-  config:
-    primary:
-      path: "native/config.json"
-      defaults: {}
-    models:
-      path: "native/models.json"
-      defaults: {}
-  rules: "native/RULES.md"
-  skill: "native/skills/{name}/SKILL.md"
-  # agent_command and code_extension are absent on purpose: the loop never reads them, so a
-  # tree that holds either kind fails validation and render here instead of installing nothing.
-  native_tool: "native/tools/{name}.py"
-  native_hook: "native/hooks/{name}.py"
-  native_graph: "native/graphs/{name}.json"
-  native_agent: "native/agents/{name}.json"
-  native_loop: "native/loops/{name}.py"
+# The config files the harness reads: the defaults Reef merges first, and the checks the merged
+# file must pass. A tree's config part (tree.yaml) merges into one of them.
+config:
+  primary:
+    path: "native/config.json"
+    defaults: {}
+  models:
+    path: "native/models.json"
+    defaults: {}
 trajectory:
   format: native-jsonl
   path: "native/sessions"

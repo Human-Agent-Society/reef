@@ -107,7 +107,7 @@ def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer
     assert result.metrics["method_notes"] == {**notes, "changes": "revise the general instruction"}
     state = search_state(chat.prompts[0])
     assert state["served_candidate_id"] == SEED.checksum() and state["evaluation_tasks"] == {"t1": TASK}
-    assert state["instruction"] == "Prefer short answers." and "rules" in state["file_guide"]
+    assert state["instruction"] == "Prefer short answers." and state["parts"]["rules"]["path"] == "rules.md"
     [seed] = state["population"]
     assert (seed["outcome"], seed["files"], seed["scores"], seed["mean_score"]) == (
         "served",
@@ -172,7 +172,7 @@ def test_incumbent_only_branches_from_the_served_tree_and_shows_the_refused_repl
     assert third.metrics["selected"] is True
 
 
-def test_a_proposal_keeps_the_parent_files_of_the_kinds_it_may_not_change(tmp_path: Path) -> None:
+def test_a_proposal_keeps_the_parent_files_of_the_parts_it_may_not_change(tmp_path: Path) -> None:
     seed = HarnessTree({**SEED.files, "config/primary.json": json.dumps({"defaultThinkingLevel": "off"}) + "\n"})
     changed = HarnessTree(
         {**IMPROVED.files, "config/primary.json": json.dumps({"defaultThinkingLevel": "high"}) + "\n"}
@@ -184,7 +184,7 @@ def test_a_proposal_keeps_the_parent_files_of_the_kinds_it_may_not_change(tmp_pa
 
     assert result.metrics["method_notes"] == {
         "status": "invalid",
-        "error": "a proposal may change only the files of kinds ['rules']",
+        "error": "a proposal may change only the files of the parts ['rules']",
     }
 
 
@@ -262,7 +262,7 @@ def test_the_reply_is_one_object_of_the_four_proposal_fields() -> None:
     [
         ({"mode": "greedy"}, "mode must be one of"),
         ({"model": "served"}, "the served model never proposes"),
-        ({"components": ["prompts"]}, "components must be tree kinds"),
+        ({"components": ["rules", "rules"]}, "components must not repeat a part"),
         ({"max_files": 0}, "max_files must be at least 1"),
         ({"archive": "population"}, "unknown config fields: archive"),
     ],

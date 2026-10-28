@@ -1,14 +1,10 @@
-"""Codex adapter quirks: the model catalog, skill metadata, and code extensions.
+"""Codex adapter quirks: the model catalog and skill metadata.
 
 ``process_config`` turns the model metadata in ``models.json`` into
 Codex's model catalog. Codex skills require ``name`` and ``description``
-frontmatter. ``process_skill`` adds it when an evolved skill omits it. An
-agent_command renders as a skill in the same root, so it gets the same
+frontmatter. ``process_skill`` adds it when an evolved skill omits it. A
+command is a skill in the same root (``tree.yaml``), so it gets the same
 frontmatter.
-
-Codex can run lifecycle hooks, but hook subprocesses do not share Codex's
-inner command sandbox. ``finalize_render`` therefore rejects ``code_extension``
-nodes until Reef can run them behind a separate isolation boundary.
 """
 
 from __future__ import annotations
@@ -29,7 +25,6 @@ from reef.harness.tree.render import RenderError
 
 CONFIG = "codex/config.toml"
 MODELS = "codex/models.json"
-EXTENSIONS = "codex/extensions/"
 
 
 def bundled_model_catalog() -> dict[str, dict[str, object]]:
@@ -117,15 +112,10 @@ class CodexAdapterRenderer(AdapterRenderer):
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:
-        # An agent_command renders to the same path template, so it is processed here too.
         return with_skill_frontmatter(path, text)
 
     @staticmethod
     def finalize_render(files: dict[str, str]) -> dict[str, str]:
-        if any(path.startswith(EXTENSIONS) for path in files):
-            raise RenderError(
-                "codex code_extension is not supported safely because native hooks run outside the command sandbox"
-            )
         if json.loads(files[MODELS])["models"]:
             # Codex resolves this relative to config.toml, including in a relocated client session.
             files[CONFIG] = tomli_w.dumps({**tomllib.loads(files[CONFIG]), "model_catalog_json": "models.json"})

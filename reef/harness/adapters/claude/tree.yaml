@@ -1,0 +1,32 @@
+# The harness tree Claude Code takes. A method writes each part at its path;
+# Reef checks the file as its format and renders it to its renders path,
+# inside the Claude Code configuration directory of an episode or of an
+# install. A tree file that no part takes is refused.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    renders: claude/CLAUDE.md
+    holds: the instructions Claude Code reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: claude/skills/{name}/SKILL.md
+    holds: an Agent Skill, which Claude Code loads when its description fits the task
+  command:
+    path: commands/{name}.md
+    format: command
+    renders: claude/commands/{name}.md
+    holds: a prompt template that a person runs as /name
+  # Claude Code's code surface is a plugin: a directory with an entry file.
+  # The part renders that entry file; activating it still needs a marketplace
+  # or settings reference, so skills, commands and rules carry the harness.
+  extension:
+    path: extensions/{name}.js
+    format: code
+    renders: claude/plugins/{name}/index.js
+    holds: the entry file of a Claude Code plugin
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into claude/settings.json (primary)

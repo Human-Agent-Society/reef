@@ -237,7 +237,7 @@ def test_native_adapter_is_bundled_and_renders_tool_files_as_written() -> None:
 
 
 def test_native_tool_is_optional_per_adapter_and_validated() -> None:
-    with pytest.raises(RenderError, match="does not render native_tool"):
+    with pytest.raises(RenderError, match="is not a path of the pi harness tree"):
         render_tree(HarnessTree(TOOL), get_adapter("pi"))
     assert problems(TOOL) == ()
     (inline,) = problems(native_tool("shout", f"KEY = 'sk-476-TOOL-KEY-0123456789abcdef'\n{SHOUT_CODE}"))
@@ -247,7 +247,7 @@ def test_native_tool_is_optional_per_adapter_and_validated() -> None:
 
 
 def test_native_hook_is_optional_per_adapter_and_validated() -> None:
-    with pytest.raises(RenderError, match="does not render native_hook"):
+    with pytest.raises(RenderError, match="is not a path of the pi harness tree"):
         render_tree(HarnessTree(HOOK), get_adapter("pi"))
     assert problems(HOOK) == ()
     (broken,) = problems(native_hook("echo", "pre_step", "def listen(:\n"))
@@ -939,7 +939,7 @@ def test_a_native_graph_renders_as_written_and_validation_checks_its_allow_list(
     )
     assert problems({**allowed, **TOOL}) == ()
     assert problems(allowed) == ("native graph 'main' stage 'act' allows missing tools: ['shout']",)
-    with pytest.raises(RenderError, match="does not render native_graph"):
+    with pytest.raises(RenderError, match="is not a path of the pi harness tree"):
         render_tree(HarnessTree(native_json("graphs", SEED_GRAPH)), get_adapter("pi"))
 
 
@@ -1586,7 +1586,7 @@ def test_native_agent_checks_and_validation_name_what_is_missing() -> None:
             validate_native_agent(config)
     files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **CHECKER}), NATIVE)
     assert json.loads(files["native/agents/checker.json"]) == CHECKER_AGENT
-    with pytest.raises(RenderError, match="does not render native_agent"):
+    with pytest.raises(RenderError, match="is not a path of the pi harness tree"):
         render_tree(HarnessTree(CHECKER), get_adapter("pi"))
     assert problems(CHECKER) == ("native agent 'checker' names missing tools: ['read_file']",)
     assert problems({**NATIVE_SEED_TOOLS, **native_json("agents", {**CHECKER_AGENT, "skills": ["nope"]})}) == (

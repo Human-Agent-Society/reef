@@ -37,10 +37,12 @@ from tests.support._trajectories import recorded_trajectory
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import answer as reefine_answer
 from reef.core.training_request import TrainingRequest
+from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.train.types import JobData
 
 #: An extension pi's validation refuses: it writes to the session's stdout while it has a UI.
+PI_LAYOUT = get_adapter("pi").layout
 LOUD = extension("loud", 'export default function (pi) { console.log("hi"); }\n')
 
 #: The starter skill retired, as the prompt asks the model to remove a file.
@@ -61,8 +63,8 @@ def test_a_request_that_retires_a_held_file_removes_it() -> None:
     assert 'map its path to null, as in {"skills/old/SKILL.md": null}' in model.prompts[1]
 
 
-def test_a_removal_that_changes_nothing_and_a_path_off_the_layout_are_named_in_the_retry() -> None:
-    """A removal of a file the tree does not hold changes nothing, and a path off the layout is dropped: either
+def test_a_removal_that_changes_nothing_and_a_path_off_the_tree_are_named_in_the_retry() -> None:
+    """A removal of a file the tree does not hold changes nothing, and a path no part takes is dropped: either
     leaves the answer with nothing to apply, and the retry names why, so the model can write it again."""
     model = Model(designed({"skills/no-such-skill/SKILL.md": None}), designed(RETIRE), json.dumps(REVIEW))
     outcome = answer(model)
@@ -74,7 +76,7 @@ def test_a_removal_that_changes_nothing_and_a_path_off_the_layout_are_named_in_t
     (dropped,) = outcome.notes["dropped_attempts"]
     assert dropped == (
         "answer 1: the reply holds no usable file: rules/no such rule.md was dropped: "
-        "it is not a path of the harness layout"
+        "a request may write skills/{name}/SKILL.md, rules.md, commands/{name}.md, extensions/{name}.ts"
     )
     assert "rules/no such rule.md was dropped" in model.prompts[2]
 
@@ -320,5 +322,8 @@ def test_an_automatic_step_without_traces_or_a_usable_skill_changes_nothing(tmp_
     assert result.metrics["skipped"] == "the method left the head tree unchanged" and served.prompts == []
     traces = step_workspace(tmp_path / "failing", request=None, samples=(FAILING,)).traces()
     for reply in (json.dumps({"files": {"rules.md": "Answer in one line.\n"}}), "no json at all"):
-        assert reefine_answer.learn_from_failures(TREE, traces, Model(reply)) is None
-    assert reefine_answer.learn_from_failures(TREE, traces, Model(failure=OSError("connection refused"))) is None
+        assert reefine_answer.learn_from_failures(TREE, traces, Model(reply), PI_LAYOUT) is None
+    assert (
+        reefine_answer.learn_from_failures(TREE, traces, Model(failure=OSError("connection refused")), PI_LAYOUT)
+        is None
+    )

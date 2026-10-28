@@ -11,7 +11,7 @@ problems. Reef runs that search over a whole harness tree rather than over a
 single string, so what improves over time is the tree the deployment serves.
 
 +-------------+--------------------------------------------------------------+
-| Evolves     | the harness tree: rules, skills, agent commands              |
+| Evolves     | the text files of the harness tree: rules, skills, commands  |
 +-------------+--------------------------------------------------------------+
 | Signal      | one report per served request, batched into a minibatch      |
 +-------------+--------------------------------------------------------------+
@@ -134,12 +134,15 @@ Four of these deserve a note. ``feedback`` names a ``Feedback`` class whose
 sentence the reflection model reads about each example, and it is the entire
 signal the reflection gets, so a benchmark that can explain why an answer was
 wrong should say so here rather than leaving the default, which only restates
-the score. ``components`` lists the kinds of tree file the search is allowed
-to rewrite, which is how you keep it away from parts of the tree that should
-stay fixed. ``trainset_size`` makes each iteration draw its parent from the
-seeded generator that also orders the training problems, in GEPA's own order:
-a driver that draws the same plan from the committed archive sends the
-problems the plan names, and the method reads them as the step's traffic.
+the score. ``components`` names the parts of the adapter's tree whose files
+the search may rewrite, ``[rules, skill]`` by default; the files of every
+other part stay fixed. Each name must be a part whose format is ``text``,
+``skill`` or ``command``, such as ``rules``, ``skill`` and ``command``: GEPA
+never rewrites config, code or native files. ``trainset_size`` makes each
+iteration draw its parent from the seeded generator that also orders the
+training problems, in GEPA's own order: a driver that draws the same plan
+from the committed archive sends the problems the plan names, and the method
+reads them as the step's traffic.
 ``statistic: mean`` is what makes the evaluation GEPA's: the default,
 ``wins``, counts task pairings instead. If no reflection model is declared,
 the method reflects using the model under test; ``reflection_model`` names

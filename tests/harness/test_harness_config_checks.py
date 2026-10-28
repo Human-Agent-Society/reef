@@ -7,7 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
+
+from tests.support.harness_render import descriptor_data, write_descriptor
 
 import reef.harness.adapters
 from reef.harness.adapters import BUILTIN_ADAPTERS, builtin_descriptor_path, get_adapter
@@ -123,14 +124,12 @@ def checked(
 ) -> AdapterDescriptor:
     """The opencode descriptor with these checks and defaults on its primary target, loaded from YAML; with the
     base renderer unless ``renderer``, so only the checks act."""
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "opencode" / "descriptor.yaml").read_text())
-    primary = data["files"]["config"]["primary"]
+    data = descriptor_data("opencode")
+    primary = data["config"]["primary"]
     primary["checks"] = checks
     if defaults is not None:
         primary["defaults"] = defaults
-    path = tmp_path / "descriptor.yaml"
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    descriptor = load_descriptor(path)
+    descriptor = load_descriptor(write_descriptor(tmp_path, "opencode", data))
     return descriptor if renderer else replace(descriptor, renderer=AdapterRenderer)
 
 

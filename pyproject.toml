@@ -132,6 +132,7 @@ include = ["reef", "reef.*"]
 [tool.setuptools.package-data]
 reef = [
     "harness/adapters/*/descriptor.yaml",
+    "harness/adapters/*/tree.yaml",
     "harness/adapters/codex/default_instructions.md",
     "harness/adapters/codex/bundled_models.json",
     "train/harness_backend/agent/protocol.md",

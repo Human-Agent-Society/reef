@@ -3,8 +3,6 @@
 ``tree``
     ``HarnessTree``, the immutable path-to-text value a release stores, and
     ``TreePatch``, a change to a tree.
-``layout``
-    The paths a tree may hold and the kind of each (``TreeKind``, ``locate``).
 ``checks``
     Content checks for single files, shared with the native loop's loader.
 ``validate``
@@ -13,9 +11,12 @@
 ``render``
     ``render_tree``: a tree and an optional model binding to the files an
     adapter's binary reads, for an episode or for a client.
+
+The paths a tree may hold for one adapter, and what each one is, are the
+adapter's parts (``reef.harness.adapters.parts``), declared in its
+``tree.yaml``.
 """
 
-from reef.harness.tree.layout import TreeKind, TreeLocation, locate, source_path
 from reef.harness.tree.render import RenderError, render_tree
 from reef.harness.tree.tree import HarnessTree, TreePatch
 from reef.harness.tree.validate import ValidationResult, validate_patch, validate_tree
@@ -23,13 +24,9 @@ from reef.harness.tree.validate import ValidationResult, validate_patch, validat
 __all__ = [
     "HarnessTree",
     "RenderError",
-    "TreeKind",
-    "TreeLocation",
     "TreePatch",
     "ValidationResult",
-    "locate",
     "render_tree",
-    "source_path",
     "validate_patch",
     "validate_tree",
 ]

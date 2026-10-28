@@ -67,7 +67,7 @@ def train_request(text: str, *, session: str = "3f1c2a9d0b7e", release_id: str =
 
 
 def _dispatcher(tmp_path: Path) -> Dispatcher:
-    recipe = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, review_kinds=("code_extension",))
+    recipe = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, review_parts=("extension",))
     return harness_dispatcher(tmp_path, replace(recipe, training_mode="hybrid"))
 
 

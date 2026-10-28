@@ -2,11 +2,11 @@
 
 Skills carry the ``name`` and ``description`` frontmatter the instruction
 builder reads. ``process_skill`` and ``process_command`` add it
-when an evolved node ships bare text, under both skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
+when an evolved file ships bare text, under both skill roots. Terminus 2 has no slash-command surface, so a command
 renders under the second root, and Harbor lists those skills beside the
 others, with nothing that marks them as commands.
 
-One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
+One extension can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around
 the runner and a remote Harbor environment for the terminal task
 (``REMOTE_TASK_ENVIRONMENTS``): the task container alone does not isolate
@@ -67,7 +67,7 @@ class TerminusExecutionValidator(ExecutionValidator):
                 )
         elif extension is not None:
             raise EpisodeLaunchError(
-                f"terminus code_extension requires evolution.executor: sandbox with remote tasks ({remote})"
+                f"terminus extension requires evolution.executor: sandbox with remote tasks ({remote})"
             )
 
 

@@ -78,7 +78,7 @@ class EpisodeScore(EpisodeScorer):
 | --- | --- | --- |
 | `mode` | `full_history` | `full_history` lets the proposer branch from any candidate; `incumbent_only`, the greedy control, from the served one only |
 | `model` | `proposer` | the `evolution.models` binding that proposes; `served` is refused |
-| `components` | every kind the adapter renders | the tree kinds a proposal may change |
+| `components` | every part of the adapter's tree | the parts of the adapter's tree (its `tree.yaml`) whose files a proposal may change; the method refuses a name the tree does not have |
 | `max_candidates` | `0` (no limit) | the candidates the method proposes |
 | `max_target_episodes` | `0` (no limit) | the evaluation episodes after which the method proposes nothing |
 | `max_files` | `32` | the files of one proposed tree |
@@ -104,11 +104,12 @@ these items, as data:
   scores first. A long record keeps its beginning and its end.
 - The latest replies that proposed no candidate, and why.
 - The person's instruction, on a step that answers a training request.
-- A guide to the files the adapter takes.
+- The parts of the adapter's tree: each part's path, format and render path,
+  and what its file holds, with the parts a proposal may change.
 
 The reply names one parent and returns one complete tree as `files`, path to
 text. The step refuses the reply when the parent is not a candidate it
-showed, when the tree changes a file of a kind outside `components` (such
+showed, when the tree changes a file of a part outside `components` (such
 files must stay byte for byte equal to the parent's), when the tree holds
 more than `max_files` files, or when the tree fails the adapter's
 validation. It also refuses a tree that the history already holds. A refused
@@ -155,7 +156,7 @@ could not run are run again.
 
 ## Terminus 2 code evolution
 
-Use Reef's `terminus` adapter and its `code_extension` kind to evolve Python
+Use Reef's `terminus` adapter and its `extension` part to evolve Python
 behavior. It accepts one self-contained module defining `Agent(Terminus2)`,
 at `extensions/<name>.py` in the tree. Start from a no-op subclass so the
 proposer sees the adapter contract: a seed directory holding
@@ -184,7 +185,7 @@ recipe:
       method:
         module: recipes.meta_harness:MetaHarness
         config:
-          components: [code_extension]
+          components: [extension]
 ```
 
 Combine this with the tasks, scorer, model, and proposer settings above. Export

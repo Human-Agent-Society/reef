@@ -51,7 +51,7 @@ from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.delivery import create_harness_surface
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.harness.tree import HarnessTree, TreeKind, validate_tree
+from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint
@@ -92,7 +92,8 @@ class EvolutionSettings(Settings):
     metadata. ``state_dir`` is the directory of every scenario's proposals,
     history and step records. ``batch_size`` ≥ 1 is the traces of one
     automatic step. Every other count is ≥ 0, where 0 turns its limit off.
-    ``publish`` is ``auto`` or ``review``; ``review_kinds`` name tree kinds.
+    ``publish`` is ``auto`` or ``review``; ``review_parts`` name parts of the
+    adapter's tree.
     ``executor`` and ``sandbox`` choose where episodes run
     (``reef.sandbox.config.build_executor``), and ``agent`` which coding
     agent a method runs and where (``reef.train.harness_backend.agent.settings``),
@@ -119,7 +120,9 @@ class EvolutionSettings(Settings):
     max_episodes_per_step: int = config_option(0, help="The most episodes a method runs in one step. 0 sets no limit.")
     max_pending_proposals: int = config_option(8, help="The most client proposals that wait for a step.")
     publish: str = config_option("auto", help="auto serves a selected tree at once; review holds it for a person.")
-    review_kinds: tuple[str, ...] = config_option((), help="Tree kinds whose change always waits for a person.")
+    review_parts: tuple[str, ...] = config_option(
+        (), help="Parts of the adapter's tree whose change always waits for a person."
+    )
     executor: str = config_option("local", help="Where episodes run: local, sandbox or e2b.")
     sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the episode executor.")
     agent: Mapping[str, Any] | None = config_option(
@@ -145,9 +148,6 @@ class EvolutionSettings(Settings):
             raise ValueError("evolution.max_pending_proposals must be at least 1")
         if self.publish not in ("auto", "review"):
             raise ValueError("evolution.publish must be 'auto' or 'review'")
-        kinds = tuple(TreeKind)
-        if any(kind not in kinds for kind in self.review_kinds):
-            raise ValueError(f"evolution.review_kinds must name tree kinds: {', '.join(kinds)}")
         if "served" in self.models:
             raise ValueError("evolution.models may not name a model 'served'; that is the model under test")
 
@@ -240,6 +240,12 @@ class HarnessEvolutionRecipe(Recipe):
             descriptor = get_adapter(self.evolution.adapter)
         except DescriptorError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        unknown = sorted(set(self.evolution.review_parts) - set(descriptor.layout.parts))
+        if unknown:
+            raise RecipeConfigError(
+                f"evolution.review_parts names {', '.join(unknown)}, which are not parts of the "
+                f"{descriptor.name} harness tree: {', '.join(descriptor.layout.parts)}"
+            )
         seed_problems = validate_tree(self.seed, descriptor).problems
         if seed_problems:
             raise RecipeConfigError(f"evolution.seed fails validation: {'; '.join(seed_problems)}")
@@ -510,7 +516,7 @@ class HarnessEvolutionRecipe(Recipe):
                 max_episodes_per_step=self.evolution.max_episodes_per_step,
                 recheck_every=self.evaluation.recheck_every,
                 publish=self.evolution.publish,
-                review_kinds=frozenset(TreeKind(kind) for kind in self.evolution.review_kinds),
+                review_parts=frozenset(self.evolution.review_parts),
             ),
             records=StepRecord(root / STEPS_DIR),
             inbox=ProposalInbox(root / PROPOSALS_DIR, self.evolution.max_pending_proposals),

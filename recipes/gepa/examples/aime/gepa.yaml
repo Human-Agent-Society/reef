@@ -51,7 +51,7 @@ recipe:
           skip_perfect_score: true
           perfect_score: 1.0
           max_metric_calls: 150
-          # The evolvable kinds. run.py appends "skill" under REEF_GEPA_MULTI=1.
+          # The evolvable parts of the tree. run.py appends "skill" under REEF_GEPA_MULTI=1.
           components: [rules]
           # The wording GEPA's own default evaluator writes into the reflective
           # records, in the harness/ package.

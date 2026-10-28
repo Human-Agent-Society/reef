@@ -16,6 +16,7 @@ from typing import Any
 
 from recipes.beta.reefine.agent import ReefineAgent, answer_with_agent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, answer_request, learn_from_failures
+from reef.harness.adapters import get_adapter
 from reef.train.harness_backend import Method, StepContext, StepResult
 
 
@@ -37,14 +38,15 @@ class ReefineMethod(Method):
         head = workspace.tree()
         traces = workspace.traces()
         request = workspace.request()
+        adapter = str(workspace.host()["adapter"])
         if request is None:
-            patch = None if not traces else learn_from_failures(head, traces, tools.models)
+            layout = get_adapter(adapter).layout
+            patch = None if not traces else learn_from_failures(head, traces, tools.models, layout)
             if patch is None:
                 return StepResult()
             workspace.write_tree(head.apply(patch))
             plural = "" if len(traces) == 1 else "s"
             return StepResult(summary=f"Learned {', '.join(patch.changes)} from {len(traces)} failing trace{plural}.")
-        adapter = str(workspace.host()["adapter"])
         # The agent answers requests on pi alone: its rules and its trials are pi's.
         if self.agent is not None and adapter == EXTENSION_ADAPTER:
             answer = answer_with_agent(workspace, tools, head, request, self.agent)

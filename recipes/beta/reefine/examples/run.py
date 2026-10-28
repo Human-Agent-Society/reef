@@ -49,7 +49,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.harness.tree import HarnessTree, locate, render_tree
+from reef.harness.tree import HarnessTree, render_tree
 from reef.sandbox.process import EpisodeTimeout, LocalExecutor
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
@@ -192,11 +192,10 @@ def changes_of(metrics):
     return [f"{'remove' if text is None else 'write'} {path}" for path, text in sorted(patch.items())]
 
 
-def kinds_of(metrics):
-    """The tree kinds the step's patch touches."""
-    return sorted(
-        {"?" if (location := locate(path)) is None else location.kind.value for path in metrics.get("patch") or {}}
-    )
+def parts_of(metrics):
+    """The parts of the tree the step's patch touches."""
+    parts = metrics.get("patch_parts") or {}
+    return sorted({parts.get(path, "?") for path in metrics.get("patch") or {}})
 
 
 def tally_parts(metrics):
@@ -444,7 +443,7 @@ def totals_of(results):
     return {
         "filed": sum(1 for r in results if r.get("filed")),
         # A patch came back: a step that skipped on a refusal or on a failed step carries none.
-        "answered": sum(1 for r in results if r.get("filed") and r.get("kinds") not in (None, "-")),
+        "answered": sum(1 for r in results if r.get("filed") and r.get("parts") not in (None, "-")),
         "admitted": sum(1 for r in results if was_evaluated(r)),
         "won": sum(1 for r in results if _won(r)),
         "published": sum(1 for r in results if r.get("result") == "selected"),
@@ -483,7 +482,7 @@ def demo(mode):
         "request": text,
         "result": selection_result,
         "evaluation": tally(metrics),
-        "kinds": ", ".join(kinds_of(metrics)) or "-",
+        "parts": ", ".join(parts_of(metrics)) or "-",
         "pending": bool(row.get("pending")),
         "promoted": promoted or "-",
         "requires": _requires_of(requires),
@@ -544,7 +543,7 @@ def measure(n):
                 "request": text,
                 "id": request_id,
                 "filed": True,
-                "kinds": ", ".join(kinds_of(metrics)) or "-",
+                "parts": ", ".join(parts_of(metrics)) or "-",
                 "result": result_of(row),
                 **evaluation_counts(metrics),
                 "evaluation": tally(metrics),
@@ -560,11 +559,11 @@ def measure(n):
     _write_record(record_path, record)
     print()
     _print_table(
-        ("Request", "Kind proposed", "Result", "Evaluation", "Seconds"),
+        ("Request", "Parts proposed", "Result", "Evaluation", "Seconds"),
         [
             (
                 r["request"],
-                r.get("kinds", "-"),
+                r.get("parts", "-"),
                 r.get("result", "-"),
                 r.get("evaluation", r.get("gate", "-")),
                 r.get("seconds", "-"),

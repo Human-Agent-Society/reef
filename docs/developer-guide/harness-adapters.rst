@@ -1,72 +1,252 @@
 Harness adapters
 ================
 
-An adapter connects a harness tree to one agent. It says where each tree file
-lands for that agent, how to run the agent on the rendered files and the
-served model, and how to read its trajectory. The tree holds layout paths
-such as ``rules.md`` and ``skills/<name>/SKILL.md`` (see `The harness tree
-<../user-guide/evolve-your-harness.rst#the-harness-tree>`__); the adapter
-chooses the agent's own paths.
+An adapter connects a harness tree to one agent. Its ``tree.yaml`` declares
+the parts of the tree: the tree paths a method writes, such as ``rules.md``
+and ``skills/<name>/SKILL.md`` (see `The harness tree
+<../user-guide/evolve-your-harness.rst#the-harness-tree>`__), and the agent's
+own path for each. Its ``descriptor.yaml`` declares the rest: the config
+targets, how to run the agent on the rendered files and the served model,
+and how to read its trajectory.
 
-This page is for developers. It describes the descriptor schema, the
-rendering rules every adapter shares, what differs for each bundled agent,
-the contract of the native runner, and how to connect a new agent.
+This page is for developers. It describes the two files, the rendering rules
+every adapter shares, what differs for each bundled agent, the contract of
+the native runner, and how to connect a new agent.
 
 Reef bundles six adapters for third-party coding-agent CLIs. It also bundles
 ``native``, Reef's own agent, and ``terminus``, which runs the Harbor
 Terminus 2 agent through a Reef runner. For each adapter, the list gives the
-install pin, the headless command, and the rendered paths in this order:
-config targets, ``rules``, ``skill``, ``agent_command``, and
-``code_extension``.
+install pin, the headless command, and the config targets. `Render paths`_
+gives where the other parts land.
 
 - ``pi`` (npm ``@earendil-works/pi-coding-agent`` 0.84.2):
-  ``pi --mode json -p``. Under ``pi-agent/``: ``settings.json``
-  (``primary``), ``models.json`` (``models``), ``AGENTS.md``,
-  ``skills/<name>/SKILL.md``, ``prompts/<name>.md``,
-  ``extensions/<name>.ts``.
+  ``pi --mode json -p``. ``pi-agent/settings.json`` (``primary``),
+  ``pi-agent/models.json`` (``models``).
 - ``opencode`` (npm ``opencode-ai`` 1.18.18):
-  ``opencode run --format json --auto``. Under ``opencode/``:
-  ``opencode.json`` (``primary``), ``AGENTS.md``,
-  ``skill/<name>/SKILL.md``, ``command/<name>.md``, ``plugin/<name>.ts``.
+  ``opencode run --format json --auto``. ``opencode/opencode.json``
+  (``primary``).
 - ``claude`` (npm ``@anthropic-ai/claude-code`` 2.1.257):
-  ``claude -p --output-format json --permission-mode auto``. Under
-  ``claude/``: ``settings.json`` (``primary``), ``CLAUDE.md``,
-  ``skills/<name>/SKILL.md``, ``commands/<name>.md``,
-  ``plugins/<name>/index.js``.
-- ``codex`` (npm ``@openai/codex`` 0.153.4): ``codex exec --json``. Under
-  ``codex/``: ``config.toml`` (``primary``), ``models.json`` (``models``),
-  ``AGENTS.md``, and ``skills/<name>/SKILL.md`` for both skills and
-  commands. ``code_extension`` is refused.
+  ``claude -p --output-format json --permission-mode auto``.
+  ``claude/settings.json`` (``primary``).
+- ``codex`` (npm ``@openai/codex`` 0.153.4): ``codex exec --json``.
+  ``codex/config.toml`` (``primary``), ``codex/models.json`` (``models``).
 - ``dsh`` (npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5):
   ``dsh --profile headless``. Under ``dsh/``:
   ``profiles/headless/cordis.patch.yml`` (``primary``), ``.env``
-  (``env``), ``profiles/web/cordis.patch.yml`` (``web``),
-  ``profiles/web/package.json`` (``web_manifest``), ``AGENTS.md``,
-  ``skills/<name>/SKILL.md``, then
-  ``dsh-agents/skills/<name>/SKILL.md`` and
-  ``dsh/profiles/headless/extensions/<name>.mjs``.
+  (``env``), ``profiles/web/cordis.patch.yml`` (``web``), and
+  ``profiles/web/package.json`` (``web_manifest``).
 - ``hermes`` (git ``NousResearch/hermes-agent`` at ``v2026.8.31``, 0.21.0):
-  ``hermes chat -Q --oneshot -q``. Under ``hermes/``: ``config.yaml``
-  (``primary``), ``.env`` (``env``), ``SOUL.md``,
-  ``skills/<name>/SKILL.md``, then ``hermes-commands/<name>/SKILL.md`` and
-  ``hermes/plugins/<name>/__init__.py``.
-- ``terminus`` (ships with reef): ``reef-terminus --task``. Under
-  ``terminus/``: ``config.json`` (``primary``), ``AGENTS.md``,
-  ``skills/<name>/SKILL.md``, then ``terminus-commands/<name>/SKILL.md``
-  and ``terminus/context/<name>.py``.
-- ``native`` (ships with reef): ``reef-native -p``. Under ``native/``:
-  ``config.json`` (``primary``), ``models.json`` (``models``),
-  ``RULES.md``, ``skills/<name>/SKILL.md``, and the five native kinds (see
-  `Native runner`_). It renders no ``agent_command`` or ``code_extension``.
+  ``hermes chat -Q --oneshot -q``. ``hermes/config.yaml`` (``primary``),
+  ``hermes/.env`` (``env``).
+- ``terminus`` (ships with reef): ``reef-terminus --task``.
+  ``terminus/config.json`` (``primary``).
+- ``native`` (ships with reef): ``reef-native -p``. ``native/config.json``
+  (``primary``), ``native/models.json`` (``models``).
 
-A tree file of a kind the adapter does not render fails validation. At
-deployment startup, Reef installs the pinned binary for the evaluation
+At deployment startup, Reef installs the pinned binary for the evaluation
 episodes, unless ``evolution.binary`` names one.
+
+Tree parts
+~~~~~~~~~~
+
+The adapter decides which parts a harness tree may hold. Its ``tree.yaml``,
+beside ``descriptor.yaml``, declares them under one key, ``parts``.
+`reef/harness/adapters/parts.py <../../reef/harness/adapters/parts.py>`__
+checks it when ``load_descriptor`` loads the descriptor beside it. This is
+pi's ``tree.yaml``:
+
+.. code-block:: yaml
+
+   parts:
+     rules:
+       path: rules.md
+       format: text
+       renders: pi-agent/AGENTS.md
+       holds: the instructions pi reads at the start of every session
+     skill:
+       path: skills/{name}/SKILL.md
+       format: skill
+       renders: pi-agent/skills/{name}/SKILL.md
+       holds: an Agent Skill, which pi loads when its description fits the task
+     command:
+       path: commands/{name}.md
+       format: command
+       renders: pi-agent/prompts/{name}.md
+       holds: a prompt template that a person runs as /name
+     extension:
+       path: extensions/{name}.ts
+       format: code
+       renders: pi-agent/extensions/{name}.ts
+       holds: a TypeScript extension that pi loads in its process
+     config:
+       path: config/{name}.json
+       format: config
+       holds: a JSON object merged into pi-agent/settings.json (primary) or pi-agent/models.json (models)
+
+Each entry under ``parts`` maps a part name to these fields:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Field
+     - Value
+   * - ``path``
+     - Required. The tree path that a method writes, relative to the tree
+       root. ``{name}`` stands for one name, such as a skill's name: a letter
+       or digit, then letters, digits, ``.``, ``_`` or ``-``. A path holds
+       ``{name}`` at most once, inside one path segment.
+   * - ``format``
+     - Required. What Reef checks the file as, and which render step
+       processes it (see `Formats`_).
+   * - ``renders``
+     - Where the agent reads the file, relative to the episode or install
+       root. It holds ``{name}`` exactly when ``path`` does. Every part
+       except the ``config`` part requires it. The ``config`` part has no
+       ``renders``: its ``{name}`` names a config target of the descriptor,
+       and its file merges into that target.
+   * - ``holds``
+     - Required. One line that says what the file holds. A method reads it
+       in ``material/host.json``.
+   * - ``review``
+     - Optional, ``false`` by default. With ``true``, every selected change
+       to the part waits for a person, whatever ``evolution.review_parts``
+       names, and ``harness_try`` refuses to mount it. Native's
+       ``native_loop`` part sets it.
+
+``load_descriptor`` refuses a ``tree.yaml`` that breaks one of these rules:
+
+- A part name is a lowercase letter, then lowercase letters, digits or
+  ``_``.
+- A part has no field that the table does not list.
+- A tree has at most one ``config`` part, and its path holds ``{name}``.
+- No tree path is a path of two parts.
+
+Validation refuses a tree file at a path that no part takes. Its message
+names the file and lists the paths the adapter's tree takes. Other settings
+and records refer to parts by name: ``evolution.review_parts``, the
+``components`` of GEPA and Meta-Harness, the ``parts`` of a method's
+``material/host.json``, and the ``patch_parts`` of a step's commit metrics.
+
+Formats
+^^^^^^^
+
+A part's format decides which checks its files must pass in validation and
+which render step processes them. In every format except ``config``,
+validation refuses an empty file and a credential-shaped literal.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Format
+     - Validation also checks
+     - Render
+   * - ``text``
+     - nothing more
+     - written to the ``renders`` path
+   * - ``skill``
+     - nothing more
+     - written to the ``renders`` path, then given to ``process_skill``
+       (see `Adapter steps`_)
+   * - ``command``
+     - nothing more
+     - written to the ``renders`` path, then given to ``process_command``
+   * - ``code``
+     - no write to stdout or stderr (``console.log``,
+       ``process.stdout.write``) without a ``ctx.hasUI`` guard on that line
+       or the line above, because a raw write breaks a terminal session
+     - written to the ``renders`` path
+   * - ``config``
+     - a JSON object without an inline credential, whose ``{name}`` is a
+       config target of the descriptor
+     - deep-merged into that config target
+   * - ``native_tool``, ``native_hook``
+     - the module compiles, binds ``run`` or ``listen``, and declares its
+       constants as literals; ``NAME``, when set, is the file name (see
+       `Tools`_ and `Hooks`_)
+     - written to the ``renders`` path
+   * - ``native_graph``, ``native_agent``
+     - a JSON object that is a valid graph or agent, whose ``name`` is the
+       file name (see `Graphs`_ and `Subagents`_)
+     - written to the ``renders`` path
+   * - ``native_loop``
+     - the module compiles and defines ``run_turn(ctx)`` (see
+       `Loop code`_)
+     - written to the ``renders`` path
+
+A part's format, not its name, chooses the render step. Codex's ``command``
+part has the ``skill`` format, because a Codex command is a skill that a
+person runs as ``$name``: its files go through ``process_skill``.
+
+Render paths
+^^^^^^^^^^^^
+
+Every bundled adapter takes ``rules.md`` (``rules``),
+``skills/<name>/SKILL.md`` (``skill``) and ``config/<target>.json``
+(``config``). Every one except ``native`` takes ``commands/<name>.md``
+(``command``). Every one except ``codex`` and ``native`` takes
+``extensions/<name>.<ext>`` (``extension``), with the suffix the adapter
+declares. The parts render to these paths, relative to the episode or
+install root. The ``extension`` column gives the tree path's suffix, then the
+render path:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Adapter
+     - ``rules``
+     - ``skill``
+     - ``command``
+     - ``extension``
+   * - ``pi``
+     - ``pi-agent/AGENTS.md``
+     - ``pi-agent/skills/<name>/SKILL.md``
+     - ``pi-agent/prompts/<name>.md``
+     - ``.ts``: ``pi-agent/extensions/<name>.ts``
+   * - ``opencode``
+     - ``opencode/AGENTS.md``
+     - ``opencode/skill/<name>/SKILL.md``
+     - ``opencode/command/<name>.md``
+     - ``.ts``: ``opencode/plugin/<name>.ts``
+   * - ``claude``
+     - ``claude/CLAUDE.md``
+     - ``claude/skills/<name>/SKILL.md``
+     - ``claude/commands/<name>.md``
+     - ``.js``: ``claude/plugins/<name>/index.js``
+   * - ``codex``
+     - ``codex/AGENTS.md``
+     - ``codex/skills/<name>/SKILL.md``
+     - ``codex/skills/<name>/SKILL.md``, as a skill
+     - none
+   * - ``dsh``
+     - ``dsh/AGENTS.md``
+     - ``dsh/skills/<name>/SKILL.md``
+     - ``dsh-agents/skills/<name>/SKILL.md``
+     - ``.mjs``: ``dsh/profiles/headless/extensions/<name>.mjs``
+   * - ``hermes``
+     - ``hermes/SOUL.md``
+     - ``hermes/skills/<name>/SKILL.md``
+     - ``hermes-commands/<name>/SKILL.md``
+     - ``.py``: ``hermes/plugins/<name>/__init__.py``
+   * - ``terminus``
+     - ``terminus/AGENTS.md``
+     - ``terminus/skills/<name>/SKILL.md``
+     - ``terminus-commands/<name>/SKILL.md``
+     - ``.py``: ``terminus/context/<name>.py``
+   * - ``native``
+     - ``native/RULES.md``
+     - ``native/skills/<name>/SKILL.md``
+     - none
+     - none
+
+The five ``native_*`` parts of ``native`` render to their own tree paths,
+such as ``native/tools/<name>.py`` (see `Native runner`_). On ``claude``, an
+extension is the entry file of a Claude Code plugin; the plugin still needs a
+marketplace or settings reference before Claude Code activates it.
 
 Descriptor fields
 ~~~~~~~~~~~~~~~~~
 
-Each adapter is a ``descriptor.yaml``.
+``descriptor.yaml`` describes how Reef renders, starts, and reads an agent.
 `reef/harness/adapters/descriptor.py
 <../../reef/harness/adapters/descriptor.py>`__ validates it at load. The
 fields are:
@@ -74,15 +254,10 @@ fields are:
 - ``name`` identifies the adapter. ``binary`` is the executable, and
   ``argv`` runs one headless prompt. Reef substitutes ``{prompt}`` in
   ``argv``.
-- ``files`` maps tree kinds to root-relative output paths:
-
-  - ``files.config.<target>`` gives a config file's ``path``, its
-    ``defaults``, and its ``checks`` (see `Config checks`_). A ``primary``
-    target is required.
-  - ``files.rules`` and ``files.skill`` are required. The other kinds are
-    optional.
-  - Every template of a named kind must contain ``{name}``.
-
+- ``config`` maps each config target's name to the file's root-relative
+  ``path``, its ``defaults``, and its ``checks`` (see `Config checks`_). A
+  ``primary`` target is required. A file of the tree's ``config`` part
+  merges into the target its name names.
 - ``trajectory`` gives the session log's ``path`` and reader ``format``.
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. It also turns off what would make an episode
@@ -133,22 +308,21 @@ defaults it protects.
 
 .. code-block:: yaml
 
-   files:
-     config:
-       primary:
-         path: "claude/settings.json"
-         defaults:
-           includeCoAuthoredBy: false
-         checks:
-           - key: includeCoAuthoredBy
-             match: IsDefault()
-           - key: [model, fallbackModel]
-             match: IsAbsent()
-             reason: Reef's model binding chooses the model
-           - key: env.DISABLE_TELEMETRY
-             match: |-
-               Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
-             reason: benchmark episodes keep telemetry off
+   config:
+     primary:
+       path: "claude/settings.json"
+       defaults:
+         includeCoAuthoredBy: false
+       checks:
+         - key: includeCoAuthoredBy
+           match: IsDefault()
+         - key: [model, fallbackModel]
+           match: IsAbsent()
+           reason: Reef's model binding chooses the model
+         - key: env.DISABLE_TELEMETRY
+           match: |-
+             Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
+           reason: benchmark episodes keep telemetry off
 
 A check reads the merged target: the defaults, the tree's
 ``config/<target>.json``, and the model binding when one is applied. The
@@ -224,20 +398,22 @@ These rules apply to every adapter, including one registered through the
 ``reef.harness_adapters`` entry-point group. No adapter replaces them.
 
 - Each config target is a JSON object: the descriptor's ``defaults``, then
-  the tree's ``config/<target>.json`` deep-merged over them, then the
-  overlays. The merge recurses into objects and replaces every other value,
-  lists included. Every target is written even when the tree has no file
-  for it, so the defaults always reach the agent.
-- ``rules.md`` renders to the rules path; a tree without it renders no rules
-  file. Every other file renders through its kind's template, with the name
-  from its tree path as ``{name}``.
+  the tree's file of the ``config`` part for that target deep-merged over
+  them, then the overlays. The merge recurses into objects and replaces
+  every other value, lists included. Every target is written even when the
+  tree has no file for it, so the defaults always reach the agent.
+- Every other file renders to its part's ``renders`` path, with the name
+  from its tree path as ``{name}``: ``skills/review/SKILL.md`` is the skill
+  ``review``. A part without ``{name}``, such as ``rules``, renders one file
+  when the tree holds it, and none otherwise.
 - Each config file is written in the format its suffix names: ``.toml`` as
   TOML, ``.yaml`` or ``.yml`` as YAML, ``.env`` as ``KEY=value`` lines, and
   any other suffix as JSON.
 
 The render refuses a tree, before any agent runs, when:
 
-- a path is off the layout, or a file's kind has no template;
+- a path is one that no part of the adapter's tree takes, such as
+  ``extensions/notes.ts`` under ``native``;
 - a ``config/<target>.json`` names an undeclared target or does not hold a
   JSON object;
 - two files render to the same path;
@@ -245,15 +421,10 @@ The render refuses a tree, before any agent runs, when:
 - the tree sets a key that the binding writes (see `Model binding checks`_).
 
 Validation (``reef.harness.tree.validate_tree``) runs before an episode. It
-adds content checks, and a tree that passes them also renders:
-
-- No file may be empty or hold a credential-shaped literal, and no config
-  file may hold an inline credential.
-- A ``code_extension`` must have the suffix of the adapter's template. It
-  must not write to stdout or stderr (``console.log``,
-  ``process.stdout.write``) without a ``ctx.hasUI`` guard on that line or
-  the line above, because a raw write breaks a terminal session.
-- The native kinds must pass the checks in `Native runner`_.
+adds the checks of each file's format (see `Formats`_), and a tree that
+passes them also renders. A ``native_graph`` or ``native_agent`` must also
+not name a tool, skill, agent, or graph the tree does not hold, agents must
+not delegate in a cycle, and a tree holds at most one ``native_loop``.
 
 Model binding checks
 ^^^^^^^^^^^^^^^^^^^^
@@ -284,8 +455,9 @@ calls its steps in this order:
 
 #. ``process_config`` gets one merged config file as a JSON object. It
    adjusts the config, or refuses one that a check cannot describe.
-#. ``process_skill`` and ``process_command`` get the text of one ``skill``
-   or ``agent_command`` file, to add or check frontmatter.
+#. ``process_skill`` and ``process_command`` get the text of one file of a
+   part whose format is ``skill`` or ``command``, to add or check
+   frontmatter.
 #. ``check_model_route`` reads the processed config, skill, and command
    files, and refuses a route that no check can describe, such as a model
    in frontmatter.
@@ -413,10 +585,12 @@ check, analytics, feedback, telemetry, hooks, plugins, and apps, and give
 the ``workspace-write`` sandbox no network. Rendering refuses a change to
 them, and ``config.toml`` admits only a fixed set of top-level keys.
 
-- An ``agent_command`` is a skill that a person types as ``$name``. A skill
-  and a command with one name render to one path, so Reef refuses them.
-- ``code_extension`` is refused, because Codex hooks run outside its
-  command sandbox.
+- A command is a skill that a person types as ``$name``: the ``command``
+  part has the ``skill`` format, so it gets the same frontmatter as a skill.
+  A skill and a command with one name render to one path, so Reef refuses
+  them.
+- Codex takes no ``extension`` part, because Codex hooks run outside its
+  command sandbox. Validation refuses a file under ``extensions/``.
 - The tree may set ``web_search`` (``disabled``, ``cached``, ``indexed``,
   or ``live``) but not ``approval_policy``. The episode ``argv`` pins
   ``approval_policy="never"`` and ``web_search="disabled"``. A person's
@@ -460,8 +634,8 @@ starts with ``!!js `` becomes a JavaScript expression.
 - The ``web`` target is the patch layer of the profile that ``dsh web``
   boots for a person's session, with the same defaults, checks, and binding
   as the headless one. ``web_manifest`` keeps ``patchReload: startup``,
-  because with ``live`` the web profile exits at start. Both profiles load a
-  ``code_extension`` from its one rendered path.
+  because with ``live`` the web profile exits at start. Both profiles load
+  an extension from its one rendered path.
 - Routes refused: ``llm-pi-ai`` routes other than ``reef`` and fields on it
   that the binding does not write; ``agent-default-model``, ``llm-deepseek``,
   and web-search endpoint or model overrides; provider or model choices for
@@ -487,10 +661,10 @@ reads).
   skills.
 - A command is a skill under ``hermes-commands``, which the quirks add to
   ``skills.external_dirs``. Hermes runs it as ``/name``.
-- A ``code_extension`` is a plugin that defines ``register(ctx)``. The
-  quirks write its manifest, its ``plugins.enabled`` entry, and its
-  ``tools.override`` permission, because Hermes loads no plugin without
-  that consent.
+- An extension (``extensions/<name>.py``) is a plugin that defines
+  ``register(ctx)``. The quirks write its manifest, its ``plugins.enabled``
+  entry, and its ``tools.override`` permission, because Hermes loads no
+  plugin without that consent.
 - The tree's own entries in ``skills.external_dirs``, ``plugins.enabled``,
   and a plugin's ``granted_capabilities`` stay ahead of the added ones. Any
   value there other than a list of strings is refused, except one string
@@ -522,11 +696,11 @@ registry id) that ``--task`` names. It writes the verifier reward and the
 ATIF trajectory under ``REEF_TERMINUS_SESSION_DIR``.
 
 - ``config`` supplies constructor arguments; unknown keys are refused.
-  ``rules`` supplies an ``extra_instruction_paths`` entry. Skills and
-  commands are two ``AgentConfig.skills`` roots, and Harbor does not mark
+  ``rules`` supplies an ``extra_instruction_paths`` entry. ``skill`` and
+  ``command`` are two ``AgentConfig.skills`` roots, and Harbor does not mark
   commands as commands.
-- One ``code_extension`` may define ``Agent(Terminus2)``. Rendering checks
-  its syntax without running it.
+- One extension file, ``extensions/<name>.py``, may define
+  ``Agent(Terminus2)``. Rendering checks its syntax without running it.
 - The binding keeps the served name in ``model_name`` and sets
   ``llm_kwargs.custom_llm_provider`` to ``litellm_proxy``, so litellm sends
   the name unchanged, whatever its vendor prefix, and passes
@@ -601,18 +775,22 @@ does not yet enforce a hostname firewall.
 
 Reef refuses before launch: local Docker under the sandbox executor, a
 remote environment without ``egress_hosts`` or its credentials in
-``env_from``, and a ``code_extension`` under any executor other than
-``sandbox``.
+``env_from``, and an ``extension`` file under any executor other than
+``sandbox``. Such a tree still renders; the refusal depends on how the
+episode runs, not on what the tree holds.
 
 Native runner
 ~~~~~~~~~~~~~
 
 ``reef-native`` is Reef's own agent loop. It reads ``native/`` from the
 rendered tree: ``RULES.md``, ``skills/``, ``models.json``, and the five
-native kinds below. Its binding fields in ``models.json`` (``api``,
-``base_url``, ``api_key``, and ``model``) come from the model binding. The
-starter tree, ``tutorials/evolve-your-harness/seeds/native/``, holds four
-tools, the hook ``loop_guard``, and a ``main`` graph.
+native parts below. Native's ``tree.yaml`` has no ``command`` or
+``extension`` part, because the loop does not read them; validation refuses
+a file under ``commands/`` or ``extensions/`` as not a path of the native
+harness tree. Its binding fields in ``models.json`` (``api``, ``base_url``,
+``api_key``, and ``model``) come from the model binding. The starter tree,
+``tutorials/evolve-your-harness/seeds/native/``, holds four tools, the hook
+``loop_guard``, and a ``main`` graph.
 
 Tools
 ^^^^^
@@ -682,7 +860,7 @@ ends the episode with ``LOAD_ERROR``.
 Hooks run in the loop process under both executors: the episode jail under
 ``sandbox``, which can reach the model endpoint and write the workspace,
 and the host under ``local``. To require review before publishing hook
-changes, add ``native_hook`` to ``evolution.review_kinds``; under
+changes, add ``native_hook`` to ``evolution.review_parts``; under
 ``local``, add ``native_tool`` too.
 
 Graphs
@@ -693,8 +871,8 @@ outcome. ``main`` is the root turn's graph, and an agent may name another.
 Without ``main``, the loop uses a built-in ``seed`` graph: ask the model,
 run its tool calls, and end.
 
-Validation refuses unknown kinds or keys, an outcome without exactly one
-edge, a stage unreachable from ``start`` or without a path to an end, a
+Validation refuses unknown stage kinds or keys, an outcome without exactly
+one edge, a stage unreachable from ``start`` or without a path to an end, a
 cycle without a model stage, and a ``tools`` allow list that names a
 missing tool. ``max_steps`` is 1 to 32, so the step budget bounds every
 run.
@@ -775,9 +953,10 @@ from ``run_turn`` (``SystemExit`` included), ends the turn with
 unable to run. Code that never calls ``ctx`` is bounded only by the
 episode wall clock.
 
-Loop code runs with the loop process's privileges. A change that creates,
-changes, or removes a loop therefore always waits for review, whatever
-``evolution.review_kinds`` says, and ``harness_try`` refuses to mount it.
+Loop code runs with the loop process's privileges. Native's ``tree.yaml``
+therefore marks the ``native_loop`` part ``review: true``: a change that
+creates, changes, or removes a loop always waits for review, whatever
+``evolution.review_parts`` says, and ``harness_try`` refuses to mount it.
 
 Trajectory
 ^^^^^^^^^^
@@ -862,14 +1041,17 @@ run one at a time:
 Connect a new agent
 ~~~~~~~~~~~~~~~~~~~
 
-To connect an agent that has no adapter yet, write a ``descriptor.yaml``
-(see `Descriptor fields`_):
+To connect an agent that has no adapter yet, write a ``tree.yaml`` (see
+`Tree parts`_) and a ``descriptor.yaml`` (see `Descriptor fields`_):
 
 .. steps::
 
-   #. The file it reads configuration from becomes a ``files.config``
-      target, with defaults and checks that keep an episode self-contained
-      and the model on Reef.
+   #. The files it reads rules, skills, commands and extensions from become
+      parts in ``tree.yaml``: each part's tree path, format, render path,
+      and what it holds.
+   #. The file it reads configuration from becomes a ``config`` target in
+      ``descriptor.yaml``, with defaults and checks that keep an episode
+      self-contained and the model on Reef.
    #. The command line that runs one prompt headless becomes ``binary`` and
       ``argv``, and ``env`` relocates its state into the episode root.
    #. The path and format of its session log become ``trajectory``. A new
@@ -886,4 +1068,5 @@ Add a ``quirks`` module only for what the declaration cannot state. The
 bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. External adapters
 register through the ``reef.harness_adapters`` entry-point group, as an
-``AdapterDescriptor`` or a function that returns one.
+``AdapterDescriptor`` or a function that returns one; ``load_descriptor``
+builds one from a ``descriptor.yaml`` and the ``tree.yaml`` beside it.

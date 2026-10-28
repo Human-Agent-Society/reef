@@ -269,10 +269,10 @@ def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path
 
 
 @pytest.mark.unit
-def test_code_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
+def test_an_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
     descriptor = get_adapter("terminus")
     files = render({**TREE, "extensions/agent.py": "class Agent: pass\n"})
-    with pytest.raises(EpisodeError, match=r"code_extension requires evolution\.executor: sandbox"):
+    with pytest.raises(EpisodeError, match=r"extension requires evolution\.executor: sandbox"):
         run_episode(descriptor, files, "hello-world", binary="must-never-be-launched")
 
 

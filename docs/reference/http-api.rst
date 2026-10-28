@@ -845,9 +845,10 @@ does a scenario whose recipe serves no harness tree.
   adapter. These are the paths the agent reads, with the adapter's enforced
   config defaults merged in (see `Rendering
   <../developer-guide/harness-adapters.rst#rendering>`__).
-- ``source``: the source tree the release stores. These are the paths of the
-  harness layout, the ones a patch names. A client that renders the tree
-  itself, or proposes a patch, reads this form.
+- ``source``: the source tree the release stores. These are the tree paths
+  that the adapter's parts take, the ones a patch names (see `Tree parts
+  <../developer-guide/harness-adapters.rst#tree-parts>`__). A client that
+  renders the tree itself, or proposes a patch, reads this form.
 
 Another value is HTTP 400. Neither form carries an endpoint or a
 credential: the client writes its own model binding where its agent reads
@@ -907,8 +908,8 @@ until paired episodes settle it.
 
 The service validates the patched head tree for the scenario's adapter, the
 same validation an evolve step runs on a method's patch. Every path must be
-on the harness layout and of a kind the adapter renders, each file must pass
-its kind's checks (no credential-shaped literal, for one), and the tree must
+a path of one of the adapter's parts, each file must pass the checks of its
+part's format (no credential-shaped literal, for one), and the tree must
 render. A patch that changes no file's text is refused too. The answer is
 ``{proposal_id, admitted, reason, release_id}``: ``reason`` lists every
 problem that refused the patch, separated by ``;``, else ``null``;
@@ -977,7 +978,8 @@ Review before serving
 ~~~~~~~~~~~~~~~~~~~~~
 
 With ``evolution.publish: review``, or when a selected patch changes a file
-of a kind listed in ``evolution.review_kinds`` or a ``native_loop`` file, the
+of a part listed in ``evolution.review_parts`` or of a part that the
+adapter's ``tree.yaml`` marks ``review: true`` (native's ``native_loop``), the
 winning tree is committed to the catalog but not served: its row carries
 ``pending: true``, the manifest keeps serving the previous head, and
 ``?release_id=`` pulls the pending tree for a trial run.
@@ -1039,8 +1041,9 @@ request's state and the step's activity (its latest 80 lines). The catalog row
 whose ``metrics.training_request.id`` is the record id settles the page: it
 then shows the result, the next action (``GET /reef/harness`` for a published
 release, the promote request for a pending one), ``method_summary``, the
-patch and ``method_notes``. An unknown id, or one that is not a training
-instruction, is HTTP 404.
+patch with each file's part of the harness tree (from the row's
+``patch_parts``), and ``method_notes``. An unknown id, or one that is not a
+training instruction, is HTTP 404.
 
 ``GET /reef/harness/requests/{record_id}/progress`` answers the same state as
 JSON (``Cache-Control: no-store``) for a client that polls:

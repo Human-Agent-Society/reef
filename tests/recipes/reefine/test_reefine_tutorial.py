@@ -73,7 +73,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     path = TUTORIAL / "configs" / "deployment.yaml"
     config = load_config(path)
     section = config["evolution"]
-    assert section["review_kinds"] == ["code_extension"] and section["agent"] is None
+    assert section["review_parts"] == ["extension"] and section["agent"] is None
     assert section["evaluation"]["policy"] == "floor"
     assert config["data"]["training_mode"] == "manual"
     # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
@@ -103,7 +103,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, ReefineRecipe) and built.evolution.adapter == "pi"
-    assert built.evolution.review_kinds == ("code_extension",)
+    assert built.evolution.review_parts == ("extension",)
     # No agent: the method answers each request in text.
     assert isinstance(built.method, ReefineMethod) and built.agent is None and built.training_mode == "manual"
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
@@ -160,7 +160,8 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
 
 def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> None:
     patch = {"rules.md": None, "extensions/speak.ts": "export default function (pi) {}", "notes.txt": "x"}
-    pending = {"pending": True, "metrics": {"selected": True, "patch": patch}}
+    parts = {"rules.md": "rules", "extensions/speak.ts": "extension"}
+    pending = {"pending": True, "metrics": {"selected": True, "patch": patch, "patch_parts": parts}}
     rejected = {"metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
     skipped = {"metrics": {"skipped": "the method left the head tree unchanged"}}
     assert run_module.result_of(pending) == "pending"
@@ -172,9 +173,9 @@ def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> No
         "write notes.txt",
         "remove rules.md",
     ]
-    # A path off the layout has no kind: the page shows it as "?".
-    assert run_module.kinds_of(pending["metrics"]) == ["?", "code_extension", "rules"]
-    assert run_module.kinds_of(rejected["metrics"]) == []
+    # A path that no part takes has no part: the page shows it as "?".
+    assert run_module.parts_of(pending["metrics"]) == ["?", "extension", "rules"]
+    assert run_module.parts_of(rejected["metrics"]) == []
     assert run_module.tally(rejected["metrics"]) == "0 / 1 / 2"
     assert run_module.tally(skipped["metrics"]) == "-"
     # The floor records how many tasks the candidate passed and failed, and runs no current side.
@@ -195,25 +196,25 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
         {"request": "a", "filed": False, "result": "the request was not filed"},
         {"request": "b", "filed": True, "result": "no step"},
         {"request": "c", "filed": True, "result": "skipped: the method left the head tree unchanged"},
-        {"request": "d", "filed": True, "kinds": "rules", "result": "selected", "wins": 1, "losses": 0, "ties": 2},
-        {"request": "e", "filed": True, "kinds": "skill", "result": "selected", "wins": 0, "losses": 0, "ties": 3},
-        {"request": "f", "filed": True, "kinds": "rules", "result": "rejected", "wins": 0, "losses": 1, "ties": 2},
+        {"request": "d", "filed": True, "parts": "rules", "result": "selected", "wins": 1, "losses": 0, "ties": 2},
+        {"request": "e", "filed": True, "parts": "skill", "result": "selected", "wins": 0, "losses": 0, "ties": 3},
+        {"request": "f", "filed": True, "parts": "rules", "result": "rejected", "wins": 0, "losses": 1, "ties": 2},
         {
             "request": "g",
             "filed": True,
-            "kinds": "code_extension",
+            "parts": "extension",
             "result": "pending",
             "wins": 0,
             "losses": 0,
             "ties": 3,
         },
         # A refused patch or a skip after three failed steps carries no patch: filed, not answered.
-        {"request": "h", "filed": True, "kinds": "-", "result": "skipped: the patch changes nothing"},
-        {"request": "i", "filed": True, "kinds": "-", "result": "skipped: instruction failed"},
+        {"request": "h", "filed": True, "parts": "-", "result": "skipped: the patch changes nothing"},
+        {"request": "i", "filed": True, "parts": "-", "result": "skipped: instruction failed"},
         # Under the floor a row carries passed and failed: met the floor is won, missed is evaluated and lost.
-        {"request": "j", "filed": True, "kinds": "rules", "result": "selected", "passed": 1, "failed": 0},
-        {"request": "k", "filed": True, "kinds": "skill", "result": "rejected", "passed": 0, "failed": 1},
-        {"request": "l", "filed": True, "kinds": "code_extension", "result": "pending", "passed": 1, "failed": 0},
+        {"request": "j", "filed": True, "parts": "rules", "result": "selected", "passed": 1, "failed": 0},
+        {"request": "k", "filed": True, "parts": "skill", "result": "rejected", "passed": 0, "failed": 1},
+        {"request": "l", "filed": True, "parts": "extension", "result": "pending", "passed": 1, "failed": 0},
     ]
     assert run_module.totals_of(results) == {
         "filed": 11,

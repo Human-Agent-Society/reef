@@ -88,7 +88,7 @@ def agent_spec(root: str, tree: dict[str, str]) -> dict[str, Any]:
     extension = extension_source(tree)
     if extension is not None:
         if os.environ.get(ISOLATION_ENV) != "bwrap" or os.environ.get(ENVIRONMENT_ENV) not in REMOTE_TASK_ENVIRONMENTS:
-            raise TerminusTreeError("terminus code_extension must run inside Reef's sandbox with remote tasks")
+            raise TerminusTreeError("terminus extension must run inside Reef's sandbox with remote tasks")
         path, code = extension
         # Harbor imports this class in the same runner process. A content name
         # prevents two candidates with the same node name from sharing a module.
@@ -102,7 +102,7 @@ def agent_spec(root: str, tree: dict[str, str]) -> dict[str, Any]:
             exec(compile(code, module.__file__, "exec"), module.__dict__)
             agent = getattr(module, "Agent", None)
             if not isinstance(agent, type) or not issubclass(agent, Terminus2):
-                raise TerminusTreeError("terminus code_extension Agent must inherit Harbor's Terminus2")
+                raise TerminusTreeError("terminus extension Agent must inherit Harbor's Terminus2")
         except BaseException:
             sys.modules.pop(name, None)
             raise

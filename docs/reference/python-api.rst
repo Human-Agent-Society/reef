@@ -1419,6 +1419,8 @@ skipped or fails.
 .. code:: python
 
    from reef.evaluation.harness import EpisodeScorer, History, TaskCollector
+   from reef.harness.adapters import get_adapter
+   from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import (
        AgentMethod, AgentOutcome, Method, ModelCalls, StepContext, StepResult, Tools, Trace, Workspace,
@@ -1458,10 +1460,19 @@ skipped or fails.
        ``tree()``, ``write_tree(tree)``, ``traces()``, ``request()`` (a
        ``TrainingRequest`` or ``None``), ``tasks()``,
        ``evaluation_repeats()`` (the episodes per task and tree, 0 when the
-       deployment configured no scorer), ``host()``, ``history()`` and
-       ``state_files()`` (every file of ``state/`` as a path mapped to its
-       text; ``ValueError`` past 16 MiB or for a file that is not UTF-8
-       text)
+       deployment configured no scorer), ``host()`` (the host facts of
+       ``material/host.json``: ``adapter``, ``parts``, ``config_targets`` and
+       ``tasks_are_directories``), ``history()`` and ``state_files()`` (every
+       file of ``state/`` as a path mapped to its text; ``ValueError`` past
+       16 MiB or for a file that is not UTF-8 text)
+   * - ``TreeLayout``
+     - the parts of an adapter's tree, from its ``tree.yaml``; a method gets
+       its adapter's as ``get_adapter(workspace.host()["adapter"]).layout``.
+       ``parts`` maps each part name to a ``Part`` (``name``, ``path``,
+       ``format``, a ``Format``, ``renders``, ``holds`` and ``review``);
+       ``locate(path)`` returns the ``TreeLocation`` of a tree path
+       (``part``, and ``name``, the name in the part's ``{name}``, ``""`` for
+       a part without one), or ``None`` when no part takes the path
    * - ``Trace``
      - ``directory``, ``source`` (``traffic`` or ``rollout``), ``task``,
        ``reply``, ``score``, ``feedback``, ``failure``, ``record`` and

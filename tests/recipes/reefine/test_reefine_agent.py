@@ -222,7 +222,7 @@ def test_the_agent_changes_the_steps_tree_tries_it_and_the_step_publishes_it_rev
     assert notes["design"] == "Speak each answer with a TTS model." and notes["review"]["result"] == "complete"
     assert notes["agent"]["trials"] == 1 and notes["agent"]["exit_code"] == 0
     # A file the agent left off the layout is not the candidate's: the notes say so and the record keeps it.
-    assert notes["unread"] == ["harness/notes.txt is not a path of the harness layout, so it is not read"]
+    assert notes["unread"] == ["harness/notes.txt is not a path of the harness tree, so it is not read"]
     assert metrics["method_summary"].startswith("Design:\nSpeak each answer with a TTS model.\n\nReview: complete")
     assert [item["name"] for item in metrics["training_request"]["requires"]] == ["afplay"]
     step_dir = Path(metrics["step_record"])
@@ -322,7 +322,7 @@ def test_the_tree_reads_back_only_the_changes_a_request_may_make(tmp_path) -> No
     }
     assert unread == [
         "harness/config/primary.json is a file a request may not change, so it is not read",
-        "harness/notes.txt is not a path of the harness layout, so it is not read",
+        "harness/notes.txt is not a path of the harness tree, so it is not read",
     ]
     # A link could point outside the tree: a file a request may write that is a link fails the check.
     (harness / "commands" / "linked.md").symlink_to(harness / "notes.txt")
@@ -346,8 +346,8 @@ def test_a_binary_scratch_file_and_the_links_of_an_install_leave_the_change_read
     checked = run.check()
     assert checked["valid"] is True and checked["files"] == {"rules.md": "written"}
     assert checked["unread"] == [
-        "harness/node_modules/ holds no file of the harness layout, so nothing in it is read",
-        "harness/out.mp3 is not a path of the harness layout, so it is not read",
+        "harness/node_modules/ holds no file of the harness tree, so nothing in it is read",
+        "harness/out.mp3 is not a path of the harness tree, so it is not read",
     ]
     (harness / "extensions").mkdir()
     (harness / "extensions" / "speak.ts").write_bytes(b"\xff\xfe")

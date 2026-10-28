@@ -44,9 +44,8 @@ from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_ST
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.release_client import ReleaseClient
 from reef.harness.runners.native.selftools import SelfTools, ServeState
-from reef.harness.tree import HarnessTree, RenderError, TreeKind, TreePatch, render_tree, validate_tree
+from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
-from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
 from reef.sandbox.process import LocalExecutor
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.types import JobData
@@ -93,7 +92,6 @@ def test_native_loop_validation_reads_the_code_and_never_runs_it() -> None:
     # Top level code that would end the process if it ran: validation is a static read of the syntax tree.
     validate_native_loop({**LOOP, "code": f"raise SystemExit(3)\n{LOOP_CODE}"})
     assert validate_tree(HarnessTree(native_loop("main", f"raise SystemExit(3)\n{LOOP_CODE}")), NATIVE).passed
-    assert frozenset({TreeKind.NATIVE_LOOP}) == ALWAYS_REVIEWED_KINDS
 
 
 def test_native_loop_validation_refuses_what_could_not_take_a_turn() -> None:
@@ -192,13 +190,13 @@ def test_a_coding_cookie_reads_the_same_at_validation_and_at_boot(tmp_path: Path
 
 
 def test_a_native_loop_renders_at_the_descriptor_path_and_a_tree_holds_one() -> None:
-    assert NATIVE.kind_paths["native_loop"] == "native/loops/{name}.py"
+    assert NATIVE.layout.parts["native_loop"].renders == "native/loops/{name}.py"
     module = render_tree(HarnessTree(LOOP_FILE), NATIVE)["native/loops/main.py"]
     # The code byte for byte, then the name and budget as the constants the file form reads back.
     assert module == LOOP_CODE.rstrip() + "\n\nNAME = 'main'\nMAX_STEPS = 12\n"
     budgeted = render_tree(HarnessTree(native_loop("main", LOOP_CODE, max_steps=3)), NATIVE)
     assert budgeted["native/loops/main.py"].endswith("MAX_STEPS = 3\n")
-    with pytest.raises(RenderError, match="does not render native_loop files"):
+    with pytest.raises(RenderError, match=r"native/loops/main\.py is not a path of the pi harness tree"):
         render_tree(HarnessTree(LOOP_FILE), get_adapter("pi"))
     two = HarnessTree({**LOOP_FILE, **native_loop("other", LOOP_CODE)})
     assert validate_tree(two, NATIVE).problems == (
@@ -389,7 +387,7 @@ def batch() -> JobData:
     return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
-def test_a_win_that_touches_a_loop_is_pending_whatever_review_kinds_lists(tmp_path: Path) -> None:
+def test_a_win_that_touches_a_loop_is_pending_whatever_review_parts_lists(tmp_path: Path) -> None:
     loop = TreePatch(LOOP_FILE)
     skill = TreePatch({"skills/marker/SKILL.md": "# marker"})
     held = loop_backend(tmp_path, "held", lambda workspace, tools: loop)
@@ -398,10 +396,10 @@ def test_a_win_that_touches_a_loop_is_pending_whatever_review_kinds_lists(tmp_pa
     free = loop_backend(tmp_path, "free", lambda workspace, tools: skill)
     result = backend_step(free, batch(), free.initial_state())
     assert result.metrics["selected"] is True and result.pending is False
-    listed = loop_backend(tmp_path, "listed", lambda workspace, tools: skill, review_kinds=(TreeKind.SKILL,))
+    listed = loop_backend(tmp_path, "listed", lambda workspace, tools: skill, review_parts=("skill",))
     assert backend_step(listed, batch(), listed.initial_state()).pending is True
-    # A list that names another kind holds the loop just the same, and so does the step that takes the loop out.
-    unlisted = loop_backend(tmp_path, "unlisted", lambda workspace, tools: loop, review_kinds=(TreeKind.SKILL,))
+    # A list that names another part holds the loop just the same, and so does the step that takes the loop out.
+    unlisted = loop_backend(tmp_path, "unlisted", lambda workspace, tools: loop, review_parts=("skill",))
     with_loop = backend_step(unlisted, batch(), unlisted.initial_state())
     assert with_loop.metrics["selected"] is True and with_loop.pending is True
     without = loop_backend(

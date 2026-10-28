@@ -17,12 +17,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.parts import Format
 from reef.harness.runners.native import ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import SEED_GRAPH
 from reef.harness.runners.native.release_client import ReleaseClient
-from reef.harness.tree import HarnessTree, TreeKind, TreePatch, locate
-from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
+from reef.harness.tree import HarnessTree, TreePatch
 
 #: How many catalog rows ``harness_inspect("results")`` returns, newest first.
 RESULT_ROWS = 20
@@ -130,8 +131,8 @@ class SelfTools(ToolRunner):
         if what == "graph":
             graphs = {}
             for path, text in tree.files.items():
-                location = locate(path)
-                if location is not None and location.kind is TreeKind.NATIVE_GRAPH:
+                location = get_adapter("native").layout.locate(path)
+                if location is not None and location.part.format is Format.NATIVE_GRAPH:
                     graphs[location.name] = json.loads(text)
             return {"main": graphs.get("main", SEED_GRAPH), "graphs": graphs}
         if what == "results":
@@ -177,8 +178,8 @@ class SelfTools(ToolRunner):
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
         patch = patch_argument(args.get("patch"))
         for path in patch.changes:
-            location = locate(path)
-            if location is not None and location.kind in ALWAYS_REVIEWED_KINDS:
+            location = get_adapter("native").layout.locate(path)
+            if location is not None and location.part.review:
                 raise ToolFailed(f"{path} is reviewed code: propose it, a person promotes it")
         return self._state.try_patch(patch, secrets.token_hex(4))
 

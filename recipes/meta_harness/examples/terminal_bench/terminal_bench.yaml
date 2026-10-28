@@ -10,7 +10,7 @@ recipe:
         module: recipes.meta_harness:MetaHarness
         config:
           mode: full_history
-          components: [code_extension]
+          components: [extension]
           max_candidates: 4
           max_target_episodes: 890  # The seed and four candidates, 89 tasks, two repeats.
       batch_size: 1  # Each report is one trace batch.

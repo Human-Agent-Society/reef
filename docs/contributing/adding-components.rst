@@ -272,9 +272,10 @@ Use this playbook when Reef must render and run the same composition tree for
 another agent harness. Benchmark, grader, and environment orchestration stays
 under ``recipes/<name>/examples/`` or in the external harness.
 
-- For a bundled adapter, add ``reef/harness/adapters/<name>/descriptor.yaml``
+- For a bundled adapter, add ``reef/harness/adapters/<name>/descriptor.yaml``,
+  the ``tree.yaml`` beside it that declares the parts of the agent's tree,
   and its package initializer. Use a ``quirks.py`` module only for behavior
-  the declarative descriptor cannot express.
+  the declarative files cannot express.
 - Add an asset, such as Codex's ``bundled_models.json``, only when the
   adapter needs it, then include the asset in the package-data rules in
   ``pyproject.toml``.

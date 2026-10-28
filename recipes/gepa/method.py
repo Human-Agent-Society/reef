@@ -37,11 +37,12 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.plugins import ConfiguredPlugin, PluginSettings
 from reef.evaluation.harness import History
-from reef.harness.tree import HarnessTree, TreeKind
+from reef.harness.adapters import get_adapter
+from reef.harness.tree import HarnessTree
 from reef.train.harness_backend import Method, StepContext, StepResult, Tools, Trace, Workspace
 
 from .archive import Archive
-from .components import EVOLVABLE_KINDS, candidate_tree, texts_of
+from .components import candidate_tree, texts_of
 from .reflection import extract_new_text, render_prompt
 
 #: GEPA's reflective dataset keys. The names are load bearing: the copied
@@ -105,8 +106,9 @@ class GEPASettings(PluginSettings):
     child are compared on. ``seed`` seeds the archive's random generator.
     ``skip_perfect_score`` skips an iteration whose parent scored at least
     ``perfect_score`` on every example. ``max_metric_calls`` > 0 is the
-    metric-call budget, ``None`` for none. ``components`` names the tree
-    kinds GEPA may rewrite, a non-empty subset of ``EVOLVABLE_KINDS``.
+    metric-call budget, ``None`` for none. ``components`` names the parts
+    of the adapter's tree GEPA may rewrite, distinct, each of a free text
+    format (``EVOLVABLE_FORMATS``).
     ``trainset_size`` > 0, when set, plans each iteration over a training set
     of that size in GEPA's epoch-shuffled order (``Archive.plan``), so a
     driver that sends the planned problems as traffic walks GEPA's own order.
@@ -125,7 +127,7 @@ class GEPASettings(PluginSettings):
     )
     perfect_score: float = config_option(1.0, help="The score that counts as perfect.")
     max_metric_calls: int | None = config_option(None, help="The metric-call budget. None sets no budget.")
-    components: tuple[str, ...] = config_option(("rules", "skill"), help="The tree kinds GEPA may rewrite.")
+    components: tuple[str, ...] = config_option(("rules", "skill"), help="The parts of the tree GEPA may rewrite.")
     trainset_size: int | None = config_option(
         None, help="Plan each iteration over a training set of this size, in GEPA's order."
     )
@@ -139,18 +141,12 @@ class GEPASettings(PluginSettings):
     def __post_init__(self) -> None:
         if self.minibatch_size <= 0:
             raise ValueError("minibatch_size must be positive")
-        evolvable = [kind.value for kind in EVOLVABLE_KINDS]
-        if not self.components or any(component not in evolvable for component in self.components):
-            raise ValueError(f"components must name kinds from {', '.join(evolvable)}")
+        if not self.components or len(set(self.components)) != len(self.components):
+            raise ValueError("components must name one or more distinct parts of the tree")
         if self.max_metric_calls is not None and self.max_metric_calls <= 0:
             raise ValueError("max_metric_calls must be positive when set")
         if self.trainset_size is not None and self.trainset_size <= 0:
             raise ValueError("trainset_size must be positive when set")
-
-    @property
-    def kinds(self) -> tuple[TreeKind, ...]:
-        """``components`` as tree kinds."""
-        return tuple(TreeKind(component) for component in self.components)
 
 
 class GEPA(Method):
@@ -186,7 +182,7 @@ class GEPA(Method):
             path.read_text(encoding="utf-8") if path.is_file() else None,
             workspace.history(),
             tasks,
-            texts_of(head, self.settings.kinds),
+            texts_of(head, get_adapter(str(workspace.host()["adapter"])).layout, self.settings.components),
             # The evaluation's episodes per task and tree: 0 without a scorer, and GEPA's count needs at least 1.
             repeats=max(1, workspace.evaluation_repeats()),
             rng_seed=self.settings.seed,

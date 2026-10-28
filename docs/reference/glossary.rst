@@ -176,8 +176,10 @@ Harness tree
 Reef's versioned representation of the mutable files in a harness: config,
 rules, prompt templates, skills, extension code, and, for the ``native``
 adapter, the loop's own tools, hook listeners, control flow graphs, delegate
-agents and loop code. A tree is one directory of text files at fixed paths
-(the layout), and each release stores one as its source tree. Reef serves it
+agents and loop code. A tree is one directory of text files, and each release
+stores one as its source tree. The adapter decides which parts a tree may
+hold: its ``tree.yaml`` declares each part's tree path, format and render
+path, and a path that no part takes is refused. Reef serves the tree
 over ``GET /reef/harness``, rendered for the adapter or as source. An adapter
 combines the rendered tree with a harness executable; that harness and its
 configured model form the running agent.

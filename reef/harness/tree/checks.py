@@ -14,7 +14,7 @@ import re
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-from reef.harness.tree.layout import NAME_PATTERN
+from reef.harness.adapters.parts import NAME_PATTERN
 
 NAME = re.compile(rf"^{NAME_PATTERN}$")
 #: A loop's model step budget when its file names none; the seed graph's.
@@ -185,7 +185,7 @@ def reject_secret_shaped_text(text: str, where: str) -> None:
     """Refuse a file text carrying a credential-shaped literal.
 
     The same boundary as :func:`reject_inline_secret`, for the free-text
-    kinds: a tree persists verbatim, so a pasted key in a rule, skill,
+    formats: a tree persists verbatim, so a pasted key in a rule, skill,
     command, or extension would outlive rotation in every git release that
     holds it. The message names the field, never the value.
     """
@@ -605,7 +605,7 @@ def validate_native_loop(config: Any) -> Mapping[str, Any]:
     The loop is code, so admission checks what a static read can: the module
     compiles, carries no credential, and defines a top level ``run_turn``
     taking the context. Whether it runs is the evaluation's to find out, and a
-    person promotes it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
+    person promotes it: the native adapter's ``native_loop`` part is always reviewed."""
     options = require_mapping(config)
     require_name_field(options)
     extra = sorted(set(options) - {"name", "code", "max_steps"})

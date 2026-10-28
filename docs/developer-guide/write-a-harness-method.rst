@@ -3,7 +3,7 @@ Write a harness method
 
 .. page::
    :for: authors of a harness evolution method
-   :needs: the loop and the tree layout from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
+   :needs: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
    :outcome: a method that runs in Reef's steps, the scorer it needs, and a deployment that names it
 
 A harness method decides how the harness tree changes. It is one class with
@@ -155,9 +155,12 @@ after the step as the step record.
   (0 when the deployment configured no scorer).
 - ``failures.json``: the failure manifest of the head tree, after the first
   evaluation.
-- ``host.json`` (``host()``): the ``adapter``, its ``kinds`` with each kind's
-  path pattern and description, its ``config_targets``, and
-  ``tasks_are_directories``.
+- ``host.json`` (``host()``): the ``adapter``; the ``parts`` of its tree,
+  each with its tree ``path``, its ``format``, the path it ``renders`` to and
+  what it ``holds``; its ``config_targets``; and ``tasks_are_directories``. A
+  file at a path that no part takes fails validation.
+  ``get_adapter(host()["adapter"]).layout.locate(path)`` returns the part of a
+  tree path, or ``None``.
 
 ``Workspace`` also has the directory paths (``harness``, ``material``,
 ``state``, ``scratch``, ``output``), the step number ``step`` (1 or more),
@@ -510,9 +513,9 @@ close the block and pose as the prompt's author.
 A client can set its own tag. Trust ``trace.client`` as an identity only when
 a gateway sets the tag.
 
-Client text can shape code-bearing kinds (``code_extension``, ``native_tool``
-and ``native_hook``). Name them in ``evolution.review_kinds`` so that a person
-reviews them before publication. A ``native_loop`` change always waits for a
+Client text can shape the parts that hold code (``extension``,
+``native_tool`` and ``native_hook``). Name them in ``evolution.review_parts``
+so that a person reviews them before publication. A ``native_loop`` change always waits for a
 person. `Evaluation: the publication policy
 <../user-guide/evolve-your-harness.rst#evaluation-the-publication-policy>`__
 describes review and how Reef screens collected prompts.
