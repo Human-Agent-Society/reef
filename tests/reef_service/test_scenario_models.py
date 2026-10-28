@@ -278,9 +278,7 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
         output.write_text(content)
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(
-            initial, root=tmp_path / "repo", base_metadata=recipe.base_artifact_source().metadata
-        ),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
         scenario_storage=SQLiteScenarioStorage(),
     )
 

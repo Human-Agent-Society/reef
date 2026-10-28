@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -102,17 +102,13 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """
         return None
 
-    def started_from(
-        self, state: Mapping[str, Any], artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None
-    ) -> Mapping[str, Any]:
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
         """The state whose next step starts from ``artifact``, given the current ``state``.
 
         Reef calls this when a person sets the training start (``train-from``).
         ``artifact`` is the backend's component of a release, materialized.
-        ``entries`` is the composition that the commit which made the release
-        recorded, or ``None`` when no commit recorded one (the creation
-        artifact). Raise ``ValueError`` when the backend cannot start from
-        ``artifact``. The default refuses every artifact.
+        Raise ``ValueError`` when the backend cannot start from ``artifact``.
+        The default refuses every artifact.
         """
         raise ValueError(f"the {type(self).__name__} backend cannot start from a published artifact")
 

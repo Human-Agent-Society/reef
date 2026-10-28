@@ -110,7 +110,6 @@ class BaseArtifactSource:
     - ``model_directory`` is a directory of model files, or ``None``.
     - ``model_component`` is the component directory that the model files go into. ``None`` is the release root.
       It is ``None`` when ``model_directory`` is ``None``.
-    - ``metadata`` is the metadata of the base release.
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
@@ -122,7 +121,6 @@ class BaseArtifactSource:
     files: Mapping[str, str] = field(default_factory=dict)
     model_directory: Path | None = None
     model_component: str | None = None
-    metadata: Mapping[str, object] = field(default_factory=dict)
     inputs: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

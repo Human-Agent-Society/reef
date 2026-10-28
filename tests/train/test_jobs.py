@@ -336,7 +336,7 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
 @pytest.mark.unit
 def test_start_from_imports_the_release_cancels_the_running_job_and_restarts_from_it(component):
     trainer = job_trainer(JobLoopState("/start", RunningJob("job-1"), 1, FINISHED), component)
-    trainer.start_from(Artifact.local(Path("/releases/old")), None)
+    trainer.start_from(Artifact.local(Path("/releases/old")))
     assert component.imported == [Path("/releases/old")]
     assert component.cancelled == ["job-1"]
     # The jobs that ended stay counted.
@@ -352,13 +352,13 @@ def test_start_from_is_refused_without_a_change_when_the_trainer_cannot_start(co
 
     monkeypatch.setattr(component, "import_start", refuse)
     with pytest.raises(TrainingStartRefused, match="these weights cannot train"):
-        trainer.start_from(Artifact.local(Path("/releases/old")), None)
+        trainer.start_from(Artifact.local(Path("/releases/old")))
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("/start", RunningJob("job-1"))
     # A trainer that trains nothing has no start to set.
     observer = Trainer.build("math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline)
     with pytest.raises(TrainingStartRefused, match="trains nothing"):
-        observer.start_from(Artifact.local(Path("/releases/old")), None)
+        observer.start_from(Artifact.local(Path("/releases/old")))
 
 
 @pytest.mark.unit
@@ -369,7 +369,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
     assert pending.run_once() is not None
     assert pending.has_pending_commit
     with pytest.raises(CommitPending, match="waits for its commit"):
-        pending.start_from(Artifact.local(Path("/releases/old")), None)
+        pending.start_from(Artifact.local(Path("/releases/old")))
     assert component.imported == []
 
 
@@ -382,7 +382,7 @@ def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tm
 
         def status(self, job_id: str) -> JobStatus:
             # A new training start lands while the trainer waits on the component.
-            self.trainer.start_from(Artifact.local(Path("/releases/old")), None)
+            self.trainer.start_from(Artifact.local(Path("/releases/old")))
             return JobStatus(job_id, "running", (saved,))
 
     component = StartDuringStatus()

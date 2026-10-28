@@ -760,10 +760,12 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
                 (base, False),
                 (inactive["release_id"], True),
             ]
-            entries = scenario.release_queries.entries_for_version(inactive["release_id"], scenario.scenario_step)
+            entries = scenario.release_queries.entries_for_version(
+                inactive["release_id"], scenario.surface.files_component
+            )
             assert entries is not None and any(entry["id"] == "r1" for entry in entries)
             # The creation carries the base artifact's entries: the seed's, without the evolved one.
-            base_entries = scenario.release_queries.entries_for_version(base, scenario.scenario_step)
+            base_entries = scenario.release_queries.entries_for_version(base, scenario.surface.files_component)
             assert base_entries is not None and not any(entry["id"] == "r1" for entry in base_entries)
             # Installing the activated release rebinds the model endpoint without losing evolved settings.
             service = RequestService(dispatcher)
