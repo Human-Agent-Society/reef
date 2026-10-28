@@ -23,6 +23,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.deployment import InferenceService
 from reef.runtime.interfaces import (
     AdapterEngine,
@@ -39,8 +40,6 @@ from reef.surface.adapter import parse_adapter_name
 
 logger = logging.getLogger(__name__)
 
-#: The directory of a published release that holds its PEFT adapter.
-ADAPTER_DIR = "adapter"
 #: Seconds between two health checks of the serving engines' service.
 HEALTH_INTERVAL_S = 30.0
 

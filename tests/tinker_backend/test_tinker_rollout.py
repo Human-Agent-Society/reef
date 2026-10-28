@@ -170,6 +170,9 @@ class Client(TinkerClient):
     def download(self, checkpoint, directory):
         raise AssertionError("no adapter export")
 
+    def check_remote(self, checkpoint):
+        raise AssertionError("no import")
+
     def close(self):
         return
 
