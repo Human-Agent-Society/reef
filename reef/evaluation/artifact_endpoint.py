@@ -1,9 +1,9 @@
-"""A loopback endpoint that answers model calls from one release, for the rollouts that evaluate it.
+"""A loopback endpoint that answers model calls from one artifact, for the rollouts that evaluate it.
 
-An artifact evaluation runs its rollouts against a release that the scenario may not serve. A runtime that
-answers each call from the release that the call names (``InferenceRuntime.release_model`` is not None) can
-answer them without loading the release: ``ReleaseEndpoint`` hands each call to the runtime's handler with that
-release, under the runtime's inference admission. Reef's serving takes no part, and no call is a record.
+An artifact evaluation runs its rollouts against an artifact that the scenario may not serve. A runtime that
+answers each call from the artifact that the call names (``InferenceRuntime.artifact_model`` is not None) can
+answer them without loading the artifact: ``ArtifactEndpoint`` hands each call to the runtime's handler with that
+artifact, under the runtime's inference admission. Reef's serving takes no part, and no call is a record.
 """
 
 from __future__ import annotations
@@ -23,23 +23,23 @@ from reef.runtime.interfaces import InferenceRuntime, UpstreamStatusError
 MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
 
 
-class ReleaseEndpoint:
-    """An OpenAI endpoint on loopback that answers every call from ``release`` with ``runtime``'s handler.
+class ArtifactEndpoint:
+    """An OpenAI endpoint on loopback that answers every call from ``artifact`` with ``runtime``'s handler.
 
-    Values: ``runtime`` is an ``InferenceRuntime`` whose ``release_model(release)`` is not None, and ``release``
-    the materialized release that every call samples. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
+    Values: ``runtime`` is an ``InferenceRuntime`` whose ``artifact_model(artifact)`` is not None, and ``artifact``
+    the materialized artifact that every call samples. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
     body that is not a JSON object 400, a runtime that admits no call 503, a handler refusal its own status, and
     any other handler failure 502 with the reason. Purpose: the artifact evaluation service points its rollouts
     at ``url``. Use it as a context manager: it binds its loopback port and sets ``url`` when it is entered, and
     closes the port when it exits. Raise ``ValueError`` at construction when the runtime cannot serve
-    ``release`` on request.
+    ``artifact`` on request.
     """
 
-    def __init__(self, runtime: InferenceRuntime, release: Artifact) -> None:
-        if runtime.release_model(release) is None:
-            raise ValueError(f"the runtime serves only its current release, not {release.ref.release_id!r}")
+    def __init__(self, runtime: InferenceRuntime, artifact: Artifact) -> None:
+        if runtime.artifact_model(artifact) is None:
+            raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.release_id!r}")
         self.runtime = runtime
-        self.release = release
+        self.artifact = artifact
         self.server: ThreadingHTTPServer | None = None
         self.url = ""
 
@@ -50,15 +50,15 @@ class ReleaseEndpoint:
         except InferenceUnavailable as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
-            return 200, await self.runtime.inference_handler.inference(self.release, path, payload)
+            return 200, await self.runtime.inference_handler.inference(self.artifact, path, payload)
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}
         except (ValueError, TimeoutError, OSError) as exc:
-            return 502, {"error": {"message": f"the runtime could not answer from the release: {exc}"}}
+            return 502, {"error": {"message": f"the runtime could not answer from the artifact: {exc}"}}
         finally:
             admission.release()
 
-    def __enter__(self) -> ReleaseEndpoint:
+    def __enter__(self) -> ArtifactEndpoint:
         endpoint = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -90,7 +90,7 @@ class ReleaseEndpoint:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, name="reef-release-endpoint", daemon=True).start()
+        threading.Thread(target=self.server.serve_forever, name="reef-artifact-endpoint", daemon=True).start()
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -100,4 +100,4 @@ class ReleaseEndpoint:
             self.server = None
 
 
-__all__ = ["ReleaseEndpoint"]
+__all__ = ["ArtifactEndpoint"]

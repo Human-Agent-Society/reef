@@ -544,13 +544,13 @@ class InferenceRuntime(AdapterWeightRuntime):
         """
         return "model"
 
-    def release_model(self, artifact: Artifact) -> PolicyModel | None:
-        """The model that this runtime serves for the release ``artifact`` on request, without serving it.
+    def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
+        """The model that this runtime serves for ``artifact`` on request, without loading it.
 
-        ``None``, the default, means the runtime serves only the release it has loaded, so it cannot answer a call
-        for another release. A runtime whose handler answers each call from the release that the call names, such
-        as a sampler for each checkpoint, returns that release's model. Raise ``ValueError`` when ``artifact`` is
-        not a release that this runtime can serve.
+        ``None``, the default, means the runtime serves only the artifact it has loaded, so it cannot answer a call
+        for another artifact. A runtime whose handler answers each call from the artifact that the call names, such
+        as a sampler for each checkpoint, returns that artifact's model. Raise ``ValueError`` when ``artifact`` is
+        not one that this runtime can serve.
         """
         return None
 

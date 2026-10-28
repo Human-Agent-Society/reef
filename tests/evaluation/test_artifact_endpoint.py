@@ -9,7 +9,7 @@ import pytest
 from reef.artifact.artifact import Artifact
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.evaluation import PolicyModel
-from reef.evaluation.release_endpoint import ReleaseEndpoint
+from reef.evaluation.artifact_endpoint import ArtifactEndpoint
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, UpstreamStatusError
 
 
@@ -35,7 +35,7 @@ class Runtime(InferenceRuntime):
     def inference_handler(self):
         return self.handler
 
-    def release_model(self, artifact):
+    def artifact_model(self, artifact):
         return PolicyModel("base", artifact.ref.release_id) if self.serves_any_release else None
 
     def activate_checkpoint(self, artifact, *, scenario=None):
@@ -58,7 +58,7 @@ def call(url: str, path: str, body: object) -> tuple[int, dict]:
 def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_to_a_status() -> None:
     release = Artifact(ArtifactRef(content_id="c7", release_id="r7", parent_release_id=None), None)
     runtime = Runtime(serves_any_release=True)
-    with ReleaseEndpoint(runtime, release) as endpoint:
+    with ArtifactEndpoint(runtime, release) as endpoint:
         chat = {"messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (
             200,
@@ -72,5 +72,5 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
         assert runtime.inference_admission_status == {"open": True, "active": 0}, "every call releases admission"
         runtime.close_admission()
         assert call(endpoint.url, "/v1/chat/completions", chat)[0] == 503
-    with pytest.raises(ValueError, match="serves only its current release"):
-        ReleaseEndpoint(Runtime(serves_any_release=False), release)
+    with pytest.raises(ValueError, match="serves only its current artifact"):
+        ArtifactEndpoint(Runtime(serves_any_release=False), release)

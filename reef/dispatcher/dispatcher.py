@@ -433,6 +433,14 @@ class Dispatcher(ScenarioLifecycle):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             yield current
 
+    def set_artifact_evaluation(self, scenario: str, settings: Mapping[str, object] | None) -> None:
+        """Store the settings that Reef evaluates each new artifact of ``scenario`` with; ``None`` stops it."""
+        self.registry.set_artifact_evaluation(scenario, settings)
+
+    def artifact_evaluation(self, scenario: str) -> Mapping[str, object] | None:
+        """The stored settings that Reef evaluates each new artifact of ``scenario`` with, or ``None``."""
+        return self.registry.artifact_evaluation(scenario)
+
     def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
         """The scenario's imported tasks in publication order, each with whether it trained."""
         with self.registry.lock_for(scenario):

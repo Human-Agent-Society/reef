@@ -6,11 +6,14 @@ from aiohttp import web
 
 from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
+from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 
 
-def register_scenario_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_scenario_routes(
+    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
+) -> None:
     async def list_scenarios(request: web.Request) -> web.Response:
         return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
 
@@ -58,8 +61,8 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "model"}:
-            raise ValueError("expected training_mode or model settings")
+        if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation"}:
+            raise ValueError("expected training_mode, model or artifact_evaluation settings")
         if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual", "hybrid"):
             raise ValueError("expected training_mode 'auto', 'manual' or 'hybrid'")
         name = request.match_info["scenario"]
@@ -72,6 +75,10 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         if "training_mode" in payload:
             result.update(
                 await asyncio.to_thread(request_service.dispatcher.set_training_mode, name, payload["training_mode"])
+            )
+        if "artifact_evaluation" in payload:
+            result["artifact_evaluation"] = await asyncio.to_thread(
+                evaluations.configure, name, payload["artifact_evaluation"]
             )
         return web.json_response(result)
 

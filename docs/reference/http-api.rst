@@ -182,7 +182,8 @@ Scenario model settings
 scenario. Existing scenarios retain their settings on repeated creation.
 The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
-existing ``training_mode`` field. Send ``model: null`` to restore deployment
+existing ``training_mode`` field, and ``artifact_evaluation`` (`Automatic
+evaluation`_). Send ``model: null`` to restore deployment
 defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
@@ -415,18 +416,19 @@ added. ``trained`` is true once a task job trained the task.
 Evaluate an artifact
 --------------------
 
-Use these routes to score one artifact of a scenario's release on the
-scenario's eval tasks. An artifact is one component of a release, such as the
-``weights`` of a model release. A policy is a harness and a model, and the
-artifact is one side of it, so the request configures the other side. Reef
-runs the rollouts itself and stores the result with the scenario. The
+Use these routes to score one artifact of a scenario on the scenario's eval
+tasks. An artifact is one component of one of the scenario's artifacts, such
+as the ``weights`` of a model checkpoint. A policy is a harness and a model,
+and the artifact is one side of it, so the request configures the other side.
+Reef runs the rollouts itself and stores the result with the scenario. The
 evaluation never changes what the scenario serves, and its model calls are not
-records.
+records. A scenario can also hold settings that Reef evaluates each new
+artifact with (`Automatic evaluation`_).
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter``
-component) with a Harbor agent, on a runtime that serves any release on
+component) with a Harbor agent, on a runtime that serves any artifact on
 request: the Tinker runtime. Reef refuses a harness artifact, a model artifact
-on another runtime, and a scenario whose releases also hold a harness, with
+on another runtime, and a scenario whose artifacts also hold a harness, with
 400.
 
 First upload the tasks to the ``eval`` split (`Upload Harbor tasks
@@ -437,14 +439,14 @@ First upload the tasks to the ``eval`` split (`Upload Harbor tasks
    curl -f http://127.0.0.1:8900/reef/scenarios/my-agent/evaluations \
      -H "Authorization: Bearer $REEF_TOKEN" \
      -H 'Content-Type: application/json' \
-     -d '{"release_id": "8f3c...", "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}'
+     -d '{"artifact_id": "8f3c...", "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}'
 
 The body takes these fields:
 
-- ``release_id`` (required): a release of the scenario, as
-  ``GET /reef/scenarios/{scenario}/releases`` lists it.
-- ``component``: the component to evaluate. Leave it out when the releases
-  hold one component.
+- ``artifact_id`` (required): one of the scenario's artifacts, by the
+  ``release_id`` that ``GET /reef/scenarios/{scenario}/releases`` lists.
+- ``component``: the component to evaluate. Leave it out when the artifacts
+  hold one component with a kind.
 - ``harness``: the Harbor agent that runs a model artifact. ``{"name":
   "terminus-2"}`` runs Reef's default terminus-2 configuration. Any other
   agent is its whole Harbor configuration, with ``{model}``, ``{base_url}``
@@ -463,7 +465,7 @@ it runs and after it ends:
 .. code:: json
 
    {"evaluation_id": "1d0e...", "state": "finished",
-    "request": {"release_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
+    "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
                 "model": null, "task_names": [], "rollouts_per_task": 2, "environment": "docker"},
     "created_at": 1793169552.2, "finished_at": 1793169840.7,
     "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
@@ -471,13 +473,13 @@ it runs and after it ends:
                           "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
     "mean_score": 0.5, "error": null}
 
-``state`` is ``running``, ``finished`` or ``failed``. A finished evaluation
-holds its ``policy_evaluation``: the harness and the model that its rollouts
-ran, and each rollout's score by task (see `Rollout <glossary.rst#rollout>`__).
-A failed one holds its ``error``. An evaluation that was running when the
-service stopped reads as ``failed``; Reef does not resume it. ``GET
-/reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first,
-at most ``limit`` (50 by default).
+``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
+evaluation holds its ``policy_evaluation``: the harness and the model that its
+rollouts ran, and each rollout's score by task (see `Rollout
+<glossary.rst#rollout>`__). A failed one holds its ``error``. An evaluation
+that was queued or running when the service stopped reads as ``failed``; Reef
+does not resume it. ``GET /reef/scenarios/{scenario}/evaluations`` lists the
+evaluations, newest first, at most ``limit`` (50 by default).
 
 Reef returns:
 
@@ -485,8 +487,33 @@ Reef returns:
   unknown field or task, the wrong side configured, a component that is no
   side of a policy, an artifact or a runtime that this version refuses, or no
   eval task;
-- 404 for an unknown scenario, release or evaluation;
+- 404 for an unknown scenario, artifact or evaluation;
 - 429 when the service runs two evaluations already.
+
+Automatic evaluation
+~~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/update`` with ``artifact_evaluation`` stores
+the settings that Reef evaluates each new artifact of the scenario with. The
+settings are the body of an evaluation request without ``artifact_id``:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/scenarios/my-agent/update \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2}}'
+
+Reef checks the settings against the scenario's current artifact, as it checks
+a request, but the eval tasks may still be missing. The answer holds the
+stored settings, or 400 for settings that the scenario cannot run. Send
+``"artifact_evaluation": null`` to stop the automatic evaluations.
+
+Each training step that publishes a checkpoint is a new artifact. Reef then
+stores an evaluation of it in the ``queued`` state and runs it when fewer than
+two evaluations run. The evaluations routes list it like any other. An
+automatic evaluation that cannot run, for example because the eval split holds
+no task, is not stored; the service logs why.
 
 Manual training
 ---------------

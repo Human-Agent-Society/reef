@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import (
     BigInteger,
@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.evaluations import EvaluationNotRunning, EvaluationStore, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 
 
@@ -78,9 +78,17 @@ class SQLEvaluationStore(EvaluationStore):
         self.table = table
 
     def create(
-        self, *, evaluation_id: str, owner: str, request: ArtifactEvaluationRequest, created_at: float
+        self,
+        *,
+        evaluation_id: str,
+        owner: str,
+        request: ArtifactEvaluationRequest,
+        created_at: float,
+        state: Literal["queued", "running"] = "running",
     ) -> StoredEvaluation:
-        stored = StoredEvaluation(evaluation_id, owner, request, "running", created_at)
+        if state not in ("queued", "running"):
+            raise ValueError(f"an evaluation is created queued or running, not {state!r}")
+        stored = StoredEvaluation(evaluation_id, owner, request, state, created_at)
         table = self.table.table
         with self.records._transaction(write=True) as connection:
             held = connection.execute(
@@ -94,17 +102,21 @@ class SQLEvaluationStore(EvaluationStore):
                     evaluation_id=evaluation_id,
                     owner=owner,
                     request_json=json.dumps(request.to_json(), ensure_ascii=False, sort_keys=True),
-                    state="running",
+                    state=state,
                     created_at=created_at,
                 )
             )
         return stored
 
+    def begin(self, evaluation_id: str) -> StoredEvaluation:
+        return self.move(evaluation_id, ("queued",), state="running", finished_at=None, result_json=None, error=None)
+
     def finish(self, evaluation_id: str, *, result: PolicyEvaluation, finished_at: float) -> StoredEvaluation:
         if not isinstance(result, PolicyEvaluation):
             raise TypeError("an evaluation finishes with a PolicyEvaluation")
-        return self.end(
+        return self.move(
             evaluation_id,
+            ("running",),
             state="finished",
             finished_at=finished_at,
             result_json=json.dumps(result.to_json(), ensure_ascii=False, sort_keys=True),
@@ -114,12 +126,26 @@ class SQLEvaluationStore(EvaluationStore):
     def fail(self, evaluation_id: str, *, error: str, finished_at: float) -> StoredEvaluation:
         if not isinstance(error, str) or not error:
             raise ValueError("an evaluation fails with a non-empty error")
-        return self.end(evaluation_id, state="failed", finished_at=finished_at, result_json=None, error=error)
+        return self.move(
+            evaluation_id,
+            ("queued", "running"),
+            state="failed",
+            finished_at=finished_at,
+            result_json=None,
+            error=error,
+        )
 
-    def end(
-        self, evaluation_id: str, *, state: str, finished_at: float, result_json: str | None, error: str | None
+    def move(
+        self,
+        evaluation_id: str,
+        sources: tuple[str, ...],
+        *,
+        state: str,
+        finished_at: float | None,
+        result_json: str | None,
+        error: str | None,
     ) -> StoredEvaluation:
-        """Move a running evaluation to ``state`` in one transaction, and return it as stored."""
+        """Move an evaluation in one of ``sources`` to ``state`` in one transaction, and return it as stored."""
         table = self.table.table
         with self.records._transaction(write=True) as connection:
             row = (
@@ -127,13 +153,13 @@ class SQLEvaluationStore(EvaluationStore):
                 .mappings()
                 .one_or_none()
             )
-            if row is None or row["state"] != "running":
-                raise EvaluationNotRunning(f"evaluation {evaluation_id!r} is not running")
-            ended = {"state": state, "finished_at": finished_at, "result_json": result_json, "error": error}
-            # Check the ended row before it is written, so the table never holds an invalid evaluation.
-            stored = stored_evaluation({**row, **ended})
+            if row is None or row["state"] not in sources:
+                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} is not {' or '.join(sources)}")
+            moved = {"state": state, "finished_at": finished_at, "result_json": result_json, "error": error}
+            # Check the moved row before it is written, so the table never holds an invalid evaluation.
+            stored = stored_evaluation({**row, **moved})
             connection.execute(
-                table.update().where(self.table.condition(), table.c.evaluation_id == evaluation_id).values(**ended)
+                table.update().where(self.table.condition(), table.c.evaluation_id == evaluation_id).values(**moved)
             )
         return stored
 

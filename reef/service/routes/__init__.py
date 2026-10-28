@@ -27,7 +27,7 @@ def register_routes(
         request_service=request_service,
         inference_handler=inference_handler,
     )
-    register_scenario_routes(app, request_service=request_service)
+    register_scenario_routes(app, request_service=request_service, evaluations=evaluations)
     register_system_routes(app, request_service=request_service)
     register_record_routes(app, request_service=request_service)
     register_trajectory_routes(app, request_service=request_service)

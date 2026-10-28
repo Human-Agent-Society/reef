@@ -12,7 +12,7 @@ evaluators, selectors, and configuration machinery.
 ``harness`` measures harness candidates by running evaluation rollouts. It
 holds ``HarnessCandidate``, its evaluator ``HarnessRolloutEvaluator``, the
 ``RolloutScorer`` contract that a method supplies, and the ``score_comparison``
-and ``floor`` selection policies. ``release_endpoint`` answers the model calls
+and ``floor`` selection policies. ``artifact_endpoint`` answers the model calls
 of an artifact evaluation's rollouts from the release that it evaluates.
 """
 

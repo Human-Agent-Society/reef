@@ -627,8 +627,8 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     assert inference.snapshot(base) == (None, first)
     assert inference.snapshot(published) == ("tinker://update-1/sampler", selected)
     # Each release's model is the base with that release's sampler, whichever release is served.
-    assert inference.release_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
-    assert inference.release_model(base) == PolicyModel(MODEL, None)
+    assert inference.artifact_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
+    assert inference.artifact_model(base) == PolicyModel(MODEL, None)
     rollback = Artifact.local(base.local_path)
     latest = inference.activate_checkpoint(rollback)
     assert int(first.split(":")[-1]) < int(selected.split(":")[-1]) < int(latest.split(":")[-1])

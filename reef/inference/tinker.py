@@ -93,8 +93,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
         """A Tinker sampler serves a LoRA adapter on the base model."""
         return "model_adapter"
 
-    def release_model(self, artifact: Artifact) -> PolicyModel:
-        """The base model with the sampler that the release's manifest names: each call samples its own release."""
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        """The base model with the sampler that the artifact's manifest names: each call samples its own artifact."""
         return PolicyModel(self._model, checkpoint_sampler_path(artifact, self._model, self._service))
 
     @property

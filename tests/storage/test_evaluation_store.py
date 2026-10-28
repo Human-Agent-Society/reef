@@ -12,7 +12,7 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
 )
-from reef.storage.evaluations import EvaluationNotRunning, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflict, StoredEvaluation
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -56,12 +56,23 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
         assert [item.evaluation_id for item in evaluations.newest()] == ["e2", "e1"]
         assert [item.evaluation_id for item in evaluations.newest(limit=1)] == ["e2"]
         assert evaluations.get("missing") is None and other.evaluations.newest() == ()
-        with pytest.raises(EvaluationNotRunning):
+        with pytest.raises(EvaluationStateConflict):
             evaluations.fail("e1", error="again", finished_at=30.0)
-        with pytest.raises(EvaluationNotRunning):
+        with pytest.raises(EvaluationStateConflict):
             evaluations.finish("missing", result=RESULT, finished_at=30.0)
         with pytest.raises(ValueError, match="stored already"):
             evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=40.0)
+        queued = evaluations.create(
+            evaluation_id="q1", owner="service-a", request=REQUEST, created_at=30.0, state="queued"
+        )
+        assert queued.state == "queued" and queued.finished_at is None
+        with pytest.raises(EvaluationStateConflict):
+            evaluations.finish("q1", result=RESULT, finished_at=31.0)
+        assert evaluations.begin("q1").state == "running"
+        with pytest.raises(EvaluationStateConflict):
+            evaluations.begin("q1")
+        evaluations.create(evaluation_id="q2", owner="service-a", request=REQUEST, created_at=32.0, state="queued")
+        assert evaluations.fail("q2", error="the service stopped", finished_at=33.0).state == "failed"
         with pytest.raises(ValueError, match="finished_at"):
             evaluations.create(evaluation_id="e3", owner="service-a", request=REQUEST, created_at=50.0)
             evaluations.fail("e3", error="too early", finished_at=1.0)
@@ -92,4 +103,4 @@ def test_a_request_configures_exactly_one_side_of_the_policy():
         with pytest.raises(ValueError, match=message):
             ArtifactEvaluationRequest("r1", "weights", **fields)
     with pytest.raises(ValueError, match="request is an object"):
-        ArtifactEvaluationRequest.from_json({"release_id": "r1"})
+        ArtifactEvaluationRequest.from_json({"artifact_id": "r1"})

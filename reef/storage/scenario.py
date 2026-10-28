@@ -32,17 +32,22 @@ class ScenarioSettings:
 
     ``model_config`` is the validated model override as JSON (``None`` selects
     the recipe's model). ``training_mode`` is the selected mode (``None``
-    selects the recipe's default).
+    selects the recipe's default). ``artifact_evaluation`` is the
+    ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
+    artifact with (``None`` evaluates none).
     """
 
     model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
+    artifact_evaluation: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.model_config is not None and not isinstance(self.model_config, Mapping):
             raise ValueError("scenario settings model_config must be an object or null")
         if self.training_mode is not None and not isinstance(self.training_mode, str):
             raise ValueError("scenario settings training_mode must be a string or null")
+        if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
+            raise ValueError("scenario settings artifact_evaluation must be an object or null")
 
 
 class ScenarioStore(ABC):

@@ -68,8 +68,9 @@ def create_app(
     a connection, the dispatcher's held local cycles open (see
     ``Dispatcher(hold_local_cycles=True)``). ``evaluation_tokens`` open the
     evaluation routes only (see ``create_authentication_middleware``).
-    ``evaluations`` runs the artifact evaluations of the evaluation routes;
-    None runs them with reef-eval's Harbor lab.
+    ``evaluations`` runs the artifact evaluations of the evaluation routes, and
+    the automatic ones while the app runs; None runs the routes' evaluations
+    with reef-eval's Harbor lab and evaluates no new artifact.
     """
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     app = web.Application(
@@ -78,12 +79,22 @@ def create_app(
     )
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
+    artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
     register_routes(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
-        evaluations=ArtifactEvaluations(dispatcher) if evaluations is None else evaluations,
+        evaluations=artifact_evaluations,
     )
+
+    async def evaluate_new_artifacts(app: web.Application):
+        artifact_evaluations.open()
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(artifact_evaluations.close)
+
+    app.cleanup_ctx.append(evaluate_new_artifacts)
     if record_retention is not None:
 
         async def maintain_records(app: web.Application):

@@ -1,11 +1,12 @@
 """Storage contract for the artifact evaluations that clients ask a scenario for.
 
-A client asks Reef to evaluate one artifact of a scenario's release
-(``POST /reef/scenarios/{scenario}/evaluations``). The evaluation store keeps
-each request, its state and its result, so a client reads them after the
-evaluation ends and after a restart. Reef does not resume an evaluation that
-was running when its service stopped: a later read reports it failed. Archiving
-the scenario retires its evaluations with its records.
+A client asks Reef to evaluate one artifact of a scenario
+(``POST /reef/scenarios/{scenario}/evaluations``), or Reef evaluates each new
+artifact with the scenario's settings. The evaluation store keeps each request,
+its state and its result, so a client reads them after the evaluation ends and
+after a restart. Reef does not resume an evaluation that was queued or running
+when its service stopped: a later read reports it failed. Archiving the
+scenario retires its evaluations with its records.
 """
 
 from __future__ import annotations
@@ -18,13 +19,13 @@ from typing import Literal
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
 
-#: The state of an evaluation: it runs, it finished with a result, or it failed with an error.
-EvaluationState = Literal["running", "finished", "failed"]
-EVALUATION_STATES: tuple[EvaluationState, ...] = ("running", "finished", "failed")
+#: The state of an evaluation: it waits for its turn, it runs, it finished with a result, or it failed with an error.
+EvaluationState = Literal["queued", "running", "finished", "failed"]
+EVALUATION_STATES: tuple[EvaluationState, ...] = ("queued", "running", "finished", "failed")
 
 
-class EvaluationNotRunning(ReefError):
-    """An evaluation that has ended, or that does not exist, cannot end again."""
+class EvaluationStateConflict(ReefError):
+    """An evaluation is not in the state that a change of state needs, or does not exist."""
 
 
 @dataclass(frozen=True)
@@ -34,8 +35,8 @@ class StoredEvaluation:
     Values: ``evaluation_id`` and ``owner`` are non-empty strings: ``owner``
     names the service instance that runs the evaluation. ``request`` is the
     ``ArtifactEvaluationRequest``. ``created_at`` is a finite time in seconds,
-    and ``finished_at`` is None exactly when ``state`` is ``running``, else a
-    finite time not before ``created_at``. ``result`` is set exactly when
+    and ``finished_at`` is None exactly when ``state`` is ``queued`` or
+    ``running``, else a finite time not before ``created_at``. ``result`` is set exactly when
     ``state`` is ``finished``, and ``error``, a non-empty string, exactly when
     ``state`` is ``failed``.
 
@@ -63,8 +64,8 @@ class StoredEvaluation:
             raise ValueError(f"a stored evaluation's state is one of {EVALUATION_STATES}, not {self.state!r}")
         if not math.isfinite(self.created_at):
             raise ValueError("a stored evaluation's created_at is a finite time")
-        if (self.finished_at is None) != (self.state == "running"):
-            raise ValueError("a stored evaluation has finished_at exactly when it is not running")
+        if (self.finished_at is None) != (self.state in ("queued", "running")):
+            raise ValueError("a stored evaluation has finished_at exactly when it has ended")
         if self.finished_at is not None and (
             not math.isfinite(self.finished_at) or self.finished_at < self.created_at
         ):
@@ -96,30 +97,44 @@ class EvaluationStore(ABC):
     """The artifact evaluations of one scenario.
 
     Values: the state of a store is a finite set of stored evaluations with
-    distinct IDs. An evaluation is created ``running`` and ends once, as
-    ``finished`` or ``failed``; an ended evaluation does not change.
+    distinct IDs. An evaluation is created ``queued`` or ``running``; a queued
+    one starts running once (``begin``). It ends once, as ``finished`` from
+    ``running``, or as ``failed`` from either; an ended evaluation does not
+    change.
 
     Purpose: the evaluation service creates an evaluation when it accepts a
-    request (``create``), ends it when its rollouts end (``finish``, ``fail``),
-    and reads the store for the evaluation routes (``get``, ``newest``).
+    request (``create``), starts a queued one when a run is free (``begin``),
+    ends it when its rollouts end (``finish``, ``fail``), and reads the store
+    for the evaluation routes (``get``, ``newest``).
     """
 
     @abstractmethod
     def create(
-        self, *, evaluation_id: str, owner: str, request: ArtifactEvaluationRequest, created_at: float
+        self,
+        *,
+        evaluation_id: str,
+        owner: str,
+        request: ArtifactEvaluationRequest,
+        created_at: float,
+        state: Literal["queued", "running"] = "running",
     ) -> StoredEvaluation:
-        """Save a new ``running`` evaluation and return it.
+        """Save a new evaluation in ``state`` and return it.
 
         Raises ``ValueError`` when the store holds ``evaluation_id`` already.
         """
 
     @abstractmethod
+    def begin(self, evaluation_id: str) -> StoredEvaluation:
+        """Start a queued evaluation and return it, ``running``; ``EvaluationStateConflict`` for any other."""
+
+    @abstractmethod
     def finish(self, evaluation_id: str, *, result: PolicyEvaluation, finished_at: float) -> StoredEvaluation:
-        """End a running evaluation with ``result`` and return it; ``EvaluationNotRunning`` for any other."""
+        """End a running evaluation with ``result`` and return it; ``EvaluationStateConflict`` for any other."""
 
     @abstractmethod
     def fail(self, evaluation_id: str, *, error: str, finished_at: float) -> StoredEvaluation:
-        """End a running evaluation with ``error`` and return it; ``EvaluationNotRunning`` for any other."""
+        """End a queued or running evaluation with ``error`` and return it; ``EvaluationStateConflict`` for any
+        other."""
 
     @abstractmethod
     def get(self, evaluation_id: str) -> StoredEvaluation | None:
@@ -130,4 +145,4 @@ class EvaluationStore(ABC):
         """At most ``limit`` evaluations, newest ``created_at`` first; ``ValueError`` unless ``limit`` is positive."""
 
 
-__all__ = ["EVALUATION_STATES", "EvaluationNotRunning", "EvaluationState", "EvaluationStore", "StoredEvaluation"]
+__all__ = ["EVALUATION_STATES", "EvaluationState", "EvaluationStateConflict", "EvaluationStore", "StoredEvaluation"]
