@@ -19,7 +19,6 @@ from reef.artifact.artifact import Artifact
 from reef.cli import main
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
-from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.tinker import TinkerInferenceRuntime
 from reef.recipe.sft import SftObjective
 from reef.runtime.deployment import RuntimeConfigError
@@ -29,7 +28,7 @@ from reef.runtime.interfaces import (
     TrainingMethod,
     UpstreamStatusError,
 )
-from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
+from reef.runtime.jobs import TrainingJob, job_id_for
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
@@ -41,7 +40,7 @@ from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.schedule import StepScheduling
 from reef.train.jobs import JobLoopState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
-from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
+from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, component_factory
@@ -59,8 +58,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.calls = []
         self.learning_rates = []
         self.sampled = []
-        self.downloads = []
-        self.training_options = []
+        self.kl_coefs = []
         self.closed = False
         self.fail = False
         #: The paths that resolve on no service.
@@ -70,10 +68,10 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.initializations += 1
         return UNTRAINED
 
-    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef, export_adapter):
+    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef):
         self.calls.append((checkpoint, batches, loss))
         self.learning_rates.append(tuple(learning_rates))
-        self.training_options.append((kl_coef, export_adapter))
+        self.kl_coefs.append(kl_coef)
         if self.fail:
             raise TimeoutError("uncertain remote optimizer result")
         number = len(self.calls)
@@ -91,13 +89,6 @@ class RemoteClient(TinkerClient, TinkerSampler):
     def sample(self, sampler_path, prompt, params):
         self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
-
-    def download(self, checkpoint, release):
-        self.downloads.append((checkpoint, release))
-        for name in (ADAPTER_DIR, TINKER_ADAPTER_DIR):
-            (release / name).mkdir(parents=True)
-            (release / name / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 32}))
-            (release / name / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def check_remote(self, checkpoint):
         if checkpoint.state_path in self.missing:
@@ -262,15 +253,12 @@ def test_a_job_saves_one_checkpoint_and_the_next_job_continues_from_it(component
     assert TinkerCheckpoint.read(Path(second.checkpoints[0].path)).algorithm_state == {"steps": 2}
 
 
-def test_releases_hold_an_adapter_that_engines_load_only_with_export_adapter(component, client, tmp_path):
-    # Without the export, a release is the manifest that only Tinker's sampler serves.
+def test_a_release_holds_its_manifest_alone(component, objective):
+    # The weights stay on the service: engines that serve a release download its adapter (TinkerSamplerWeights).
     assert component.release_format is None
-    settings = TinkerConfig(state_dir=str(tmp_path / "exporting"), export_adapter=True)
-    exporting = TinkerTrainingComponent(MODEL, settings, client)
-    try:
-        assert exporting.release_format == ReleaseFormat("adapter", settings.lora_rank, ("all",))
-    finally:
-        exporting.close()
+    status = train(component, batch(), objective.name)
+    release = Path(status.checkpoints[0].release_path)
+    assert [path.name for path in release.iterdir()] == [MANIFEST]
 
 
 def test_a_failed_job_reports_its_error_and_saves_no_checkpoint(component, client, objective):
@@ -316,7 +304,7 @@ def test_the_jobs_kl_coefficient_and_the_adapter_export_reach_training(component
     # The job's coefficient, not the component's default of 0, weighs the TTTD loss's KL term.
     status = train(component, batch(), second_objective.name, kl_coef=0.2)
     assert status.state == "finished", status.error
-    assert client.training_options == [(0.2, False)]
+    assert client.kl_coefs == [0.2]
 
 
 def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenarios_share_the_component(
