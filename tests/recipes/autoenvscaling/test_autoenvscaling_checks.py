@@ -1,9 +1,10 @@
-"""AutoEnvScaling's task checks: the test review, the agent's check and the report."""
+"""AutoEnvScaling's task checks: the test review, the agent's check, the solver calibration and the report."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +16,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
     NoChecks,
+    ScriptedEpisodes,
     StandInAuthor,
     agent_files,
     autoenvscaling,
@@ -31,6 +33,7 @@ from recipes.beta.autoenvscaling.author import REVIEW_TEXT
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks.generator import RejectedTask, RolledOutTask
+from reef.record2sample.generator import GeneratorError
 
 
 @pytest.fixture(autouse=True)
@@ -265,3 +268,225 @@ def test_the_review_reads_capped_files_and_takes_a_fenced_reply() -> None:
         replace(task, tests={**task.tests, "data.txt": "x" * (checks.REVIEW_FILE_CHARS + 10)})
     )
     assert "[... 10 characters cut]" in prompt and "x" * (checks.REVIEW_FILE_CHARS + 1) not in prompt
+
+
+def calibration(service: StandInGenerator, **settings: Any) -> checks.CalibrationCheck:
+    """A calibration check on ``service`` with the default rule and band, changed by ``settings``."""
+    rule: dict[str, Any] = {
+        "rollouts": 4,
+        "max_rollouts": 8,
+        "margin": 0.15,
+        "min_std": 0.1,
+        "band_low": 0.25,
+        "band_high": 0.75,
+    }
+    return checks.CalibrationCheck(service, scenario="autoenvscaling", **{**rule, **settings})
+
+
+def calibrated(
+    tmp_path: Path, outcomes: Sequence[float | None], **settings: Any
+) -> tuple[ScriptedEpisodes, tuple[str, ...], dict[str, Any]]:
+    """Generate one task, calibrate it on ``outcomes`` as its last check, and close the generation.
+
+    Returns the generator service, the validation errors and the generation report.
+    """
+    service = ScriptedEpisodes(tmp_path / "tasks", outcomes)
+    generator = autoenvscaling(
+        tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service, **settings),)
+    )
+    task, errors = validated(generator)
+    return service, errors, closed_with(generator, task, errors)
+
+
+def calibration_details(document: dict[str, Any]) -> dict[str, Any]:
+    [proposal] = document["proposals"]
+    assert proposal["checks"][-1]["check"] == "calibration"
+    return proposal["checks"][-1]["details"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "is_solvable", "counts"),
+    [
+        (json.dumps({"findings": []}), True, [4]),
+        (json.dumps({"findings": [FINDING]}), True, []),
+        (json.dumps({"findings": []}), False, []),
+    ],
+)
+def test_calibration_runs_only_after_the_other_checks_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str, is_solvable: bool, counts: list[int]
+) -> None:
+    reef, _ = serving_reef(reply)
+    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], is_solvable=is_solvable)
+    monkeypatch.setattr(generator_module, "HttpGenerator", lambda url: service)
+    try:
+        generator = AutoEnvScalingGenerator.from_config(
+            generating_config(tmp_path, count=1, agent_reef_url=reef_url(reef), calibration="refuse"),
+            scenario="autoenvscaling",
+            environ={"E2B_API_KEY": "e2b-test"},
+        )
+        monkeypatch.setattr(generator, "author", StandInAuthor())
+        _, errors = validated(generator)
+    finally:
+        reef.shutdown()
+        reef.server_close()
+    assert [check.name for check in generator.task_checks] == ["oracle", "review", "calibration"]
+    assert service.requested_counts == counts
+    assert (errors == ()) is (counts == [4])
+
+
+def test_a_task_inside_the_band_with_variance_is_kept_after_the_first_episodes(tmp_path: Path) -> None:
+    service, errors, document = calibrated(tmp_path, [0.0, 1.0, 1.0, 0.0])
+    assert errors == ()
+    # The episodes run on the written copy, on the calibration arm, with the model the generator service serves.
+    assert service.episode_requests == [
+        {"task": NAMES[0], "arm": "calibration", "count": 4, "tags": {"role": "calibration"}, "model": None}
+    ]
+    [proposal] = document["proposals"]
+    assert proposal["stage"] == ""
+    assert proposal["checks"][-1] == {
+        "check": "calibration",
+        "errors": [],
+        "could_not_run": "",
+        "details": {
+            "rewards": [0.0, 1.0, 1.0, 0.0],
+            "mean": 0.5,
+            "std": 0.5,
+            "episodes_asked": 4,
+            "unscored": 0,
+            "expanded": False,
+            "place": "inside",
+            "result": "kept",
+            "episode_errors": [],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "settings", "counts"),
+    [
+        # A mean of 0.25 and 0.75: on each edge of the default band.
+        ([0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0], {}, [4, 4]),
+        ([1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0], {}, [4, 4]),
+        # Every episode the rule allows has scored already.
+        ([0.0, 0.0, 0.0, 1.0], {"max_rollouts": 4}, [4]),
+    ],
+)
+def test_a_mean_near_either_edge_adds_episodes_up_to_the_most(
+    tmp_path: Path, outcomes: list[float], settings: dict[str, int], counts: list[int]
+) -> None:
+    service, errors, document = calibrated(tmp_path, outcomes, **settings)
+    details = calibration_details(document)
+    assert service.requested_counts == counts and errors == ()
+    assert details["expanded"] is (len(counts) == 2) and details["episodes_asked"] == len(outcomes)
+    assert details["rewards"] == outcomes and details["result"] == "kept"
+
+
+def test_a_mean_exactly_the_margin_from_an_edge_adds_episodes(tmp_path: Path) -> None:
+    # A mean of 0.4 is 0.15 from 0.25, though 0.4 - 0.25 is 0.15000000000000002 in floats.
+    service, errors, document = calibrated(tmp_path, [0.0, 0.5, 0.5, 0.6, 0.5, 0.5, 0.0, 0.6])
+    assert service.requested_counts == [4, 4] and errors == ()
+    assert calibration_details(document)["expanded"] is True
+    # The same mean with the margin at 0 adds none.
+    service, _, _ = calibrated(tmp_path / "no-margin", [0.0, 0.5, 0.5, 0.6], margin=0.0)
+    assert service.requested_counts == [4]
+
+
+def test_a_null_bound_is_no_edge(tmp_path: Path) -> None:
+    # A mean of 0.75: on the upper edge of the default band, and far from the lower one.
+    service, errors, document = calibrated(tmp_path, [1.0, 1.0, 0.0, 1.0], band_high=None)
+    assert service.requested_counts == [4] and errors == ()
+    assert calibration_details(document)["place"] == "inside"
+    service, _, _ = calibrated(tmp_path / "bounded", [1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0])
+    assert service.requested_counts == [4, 4]
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "place", "error"),
+    [
+        ([0.0] * 4, "below", "the solver's mean reward over 4 calibration episodes, 0.00, is below band_low 0.25"),
+        ([1.0] * 4, "above", "the solver's mean reward over 4 calibration episodes, 1.00, is above band_high 0.75"),
+    ],
+)
+def test_tasks_below_and_above_the_band_are_refused_at_the_calibration_stage(
+    tmp_path: Path, outcomes: list[float], place: str, error: str
+) -> None:
+    service, errors, document = calibrated(tmp_path, outcomes)
+    assert errors == (error,) and service.requested_counts == [4]
+    [proposal] = document["proposals"]
+    assert (proposal["stage"], proposal["refusal"]) == ("calibration", error)
+    assert proposal["checks"][-1]["errors"] == [error]
+    assert calibration_details(document)["place"] == place and calibration_details(document)["result"] == place
+
+
+def test_rewards_with_too_little_population_std_are_refused(tmp_path: Path) -> None:
+    # The population std is 0.095 and the sample std 0.11: only the population std is below 0.1.
+    _, errors, document = calibrated(tmp_path, [0.4, 0.4, 0.4, 0.62])
+    error = "the population std of the solver's rewards over 4 calibration episodes, 0.095, is below 0.1"
+    assert errors == (error,)
+    details = calibration_details(document)
+    assert (details["place"], details["result"]) == ("inside", "no_variance")
+    assert document["proposals"][0]["stage"] == "calibration"
+
+
+def test_unscored_episodes_are_left_out_and_asked_for_once_more(tmp_path: Path) -> None:
+    service, errors, document = calibrated(tmp_path, [0.0, None, 1.0, None, 1.0, 0.0])
+    assert service.requested_counts == [4, 2] and errors == ()
+    details = calibration_details(document)
+    assert details["rewards"] == [0.0, 1.0, 1.0, 0.0] and details["mean"] == 0.5
+    assert (details["episodes_asked"], details["unscored"]) == (6, 2)
+    assert details["episode_errors"] == ["sandbox failed"] * 2 and details["result"] == "kept"
+
+
+def test_no_scored_episode_stops_the_round_and_names_the_outage(tmp_path: Path) -> None:
+    service = ScriptedEpisodes(tmp_path / "tasks", [None] * 8)
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
+    (task,) = asyncio.run(generator.generate(REQUEST))
+    outage = f"none of 8 calibration episodes of {NAMES[0]} scored, so its difficulty is unknown: sandbox failed"
+    with pytest.raises(GeneratorError, match=outage):
+        asyncio.run(generator.validate(task))
+    # The episodes that could not run are asked for once more, and no more than once.
+    assert service.requested_counts == [4, 4]
+    assert not (tmp_path / "tasks" / NAMES[0]).exists(), "no copy is left"
+    asyncio.run(generator.record_results((), generation=0))
+    document = json.loads((generator.state_dir / "generation-00000.json").read_text())
+    assert document["error"] == f"the check of {NAMES[0]} could not run: {outage}"
+    [proposal] = document["proposals"]
+    assert proposal["stage"] == "unreached" and [check["check"] for check in proposal["checks"]] == ["oracle"]
+    # The next attempt calibrates the task again from the start.
+    service.outcomes = [0.0, 1.0, 1.0, 0.0]
+    assert asyncio.run(generator.validate(task)).is_valid
+    assert service.requested_counts == [4, 4, 4]
+    # An episode request that the generator service fails stops the round too.
+    service.error = "job 9 failed: the episode job did not finish"
+    with pytest.raises(GeneratorError, match="job 9 failed"):
+        asyncio.run(generator.validate(task))
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "error", "result"),
+    [
+        ([0.0] * 4, "", "below"),
+        ([None] * 8, "", "outage"),
+        ([], "job 9 failed: the episode job did not finish", "outage"),
+    ],
+)
+def test_measure_mode_records_calibration_and_never_refuses(
+    tmp_path: Path, outcomes: list[float | None], error: str, result: str
+) -> None:
+    service = ScriptedEpisodes(tmp_path / "tasks", outcomes, error=error)
+    check = calibration(service, is_refusing=False)
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(check,))
+    task, errors = validated(generator)
+    assert errors == ()
+    document = closed_with(generator, task, errors)
+    assert document["calibration"]["mode"] == "measure"
+    [proposal] = document["proposals"]
+    record = proposal["checks"][-1]
+    assert proposal["stage"] == "" and record["details"]["result"] == result
+    assert document["tasks"][0]["checks"][-1] == record
+    if result == "below":
+        assert record["errors"] and record["could_not_run"] == ""
+    elif error:
+        assert record["could_not_run"] == f"the calibration episodes of {NAMES[0]} could not run: {error}"
+    else:
+        assert record["could_not_run"].startswith(f"none of 8 calibration episodes of {NAMES[0]} scored")

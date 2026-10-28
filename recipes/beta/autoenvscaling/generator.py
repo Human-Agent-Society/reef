@@ -3,13 +3,14 @@
 ``generate`` has the author rebuild the next ``count`` sessions of the sources file. Admission
 (:func:`admitted_task`) holds each reply to the generator service's parser and authoring checks and appends a
 Dockerfile step that keeps the repository's history up to the base commit only. ``validate`` runs the task checks
-on a copy under the generator service's tasks root. ``generate`` keeps the open generation in
+on a copy under the generator service's tasks root. With ``calibration`` on, the last check runs the current
+solver's episodes on the task and holds their mean reward to the band. ``generate`` keeps the open generation in
 ``open-<generation>.json`` under the state directory, named by the recipe's generation number, and ``validate``
 adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
 a restart: it places each task that ran against the band ``[band_low, band_high]`` and writes the generation report.
 A second call for a closed generation does nothing.
-Eval tasks run no episodes and receive no band measurement. A task that could not run is an outage, not a band
-measurement. The generator reports nothing to the Designer, which is not trained here. A cursor under the state
+Eval tasks run no training episodes and receive no band measurement. A task that could not run is an outage, not a
+band measurement. The generator reports nothing to the Designer, which is not trained here. A cursor under the state
 directory lets a restart continue with the next session.
 """
 
@@ -38,7 +39,17 @@ from recipes.beta.autoenvscaling.author import (
     TaskAuthor,
     workspace_reply,
 )
-from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewCheck, TaskCheck, check_mode
+from recipes.beta.autoenvscaling.checks import (
+    BAND_INSIDE,
+    CalibrationCheck,
+    CheckResult,
+    OracleCheck,
+    ReviewCheck,
+    TaskCheck,
+    band_place,
+    check_mode,
+    validate_band,
+)
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError
@@ -84,6 +95,11 @@ DEFAULT_AGENT_SANDBOX = "e2b"
 AUTHORS = ("agent", "prompt")
 DEFAULT_AUTHOR = "agent"
 DEFAULT_REVIEW = "refuse"
+DEFAULT_CALIBRATION = "off"
+DEFAULT_CALIBRATION_ROLLOUTS = 4
+DEFAULT_CALIBRATION_MAX_ROLLOUTS = 8
+DEFAULT_CALIBRATION_MARGIN = 0.15
+DEFAULT_CALIBRATION_MIN_STD = 0.1
 # A repository task builds a toolchain and the repository: more room and time than a generated shell task gets. The
 # build (1200 s) and the verifier (450 s) stay inside the service's 1800 s bound on one oracle or nop trial
 # (ORACLE_TIMEOUT_S), so a slow build or verifier refuses the task instead of stopping the round.
@@ -125,14 +141,11 @@ STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission 
 STAGE_OUTAGE = "outage"  # the author could not run; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
+STAGE_CALIBRATION = "calibration"  # the solver's calibration episodes put the task outside the band, or barely vary
 STAGE_RUN = "run"  # the recipe could not run the task
 STAGE_BAND = "band"  # the task ran, and its pass rate is outside the band
 STAGE_UNREACHED = "unreached"  # the round ended before it ran the task
 STAGE_HELD_OUT = "held_out"  # the task is in the eval split, so the recipe did not run it
-# Where a pass rate falls against the band.
-BAND_BELOW = "below"
-BAND_INSIDE = "inside"
-BAND_ABOVE = "above"
 CONFIG_KEYS = frozenset(
     {
         "generator_url",
@@ -154,6 +167,11 @@ CONFIG_KEYS = frozenset(
         "behaviour_rule",
         "review",
         "review_model",
+        "calibration",
+        "calibration_rollouts",
+        "calibration_max_rollouts",
+        "calibration_margin",
+        "calibration_min_std",
     }
 )
 
@@ -465,13 +483,63 @@ def review_check(config: Mapping[str, Any], environ: Mapping[str, str], *, scena
     )
 
 
+def calibration_check(
+    config: Mapping[str, Any],
+    service: Generator,
+    *,
+    scenario: str,
+    band_low: float | None,
+    band_high: float | None,
+) -> CalibrationCheck | None:
+    """The solver calibration the config's ``calibration`` mode asks for, on ``service`` and the band; none when off.
+
+    Raises ``ValueError`` for a key of the wrong type, or a value that :class:`CalibrationCheck` refuses.
+    """
+    mode = check_mode(config.get("calibration", DEFAULT_CALIBRATION), "calibration")
+    if mode == "off":
+        return None
+    counts = {
+        "calibration_rollouts": config.get("calibration_rollouts", DEFAULT_CALIBRATION_ROLLOUTS),
+        "calibration_max_rollouts": config.get("calibration_max_rollouts", DEFAULT_CALIBRATION_MAX_ROLLOUTS),
+    }
+    for label, value in counts.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{label} must be an integer")
+    numbers = {
+        "calibration_margin": config.get("calibration_margin", DEFAULT_CALIBRATION_MARGIN),
+        "calibration_min_std": config.get("calibration_min_std", DEFAULT_CALIBRATION_MIN_STD),
+    }
+    for label, value in numbers.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{label} must be a number")
+    return CalibrationCheck(
+        service,
+        scenario=scenario,
+        rollouts=counts["calibration_rollouts"],
+        max_rollouts=counts["calibration_max_rollouts"],
+        margin=float(numbers["calibration_margin"]),
+        min_std=float(numbers["calibration_min_std"]),
+        band_low=band_low,
+        band_high=band_high,
+        is_refusing=mode == "refuse",
+    )
+
+
 class AutoEnvScalingGenerator(TaskGenerator):
     """Recorded sessions rebuilt as Harbor tasks by the author, checked through the generator service, and banded
     by the solver's pass rate.
 
     ``task_checks`` run in ``validate`` after Harbor's oracle and nop check, in order. The first refusing check
     that finds a defect, or cannot run, ends the validation. When the test review refuses, the agent's own check
-    also reviews the tests. A review that only measures records its result in ``validate`` and nowhere else.
+    also reviews the tests. A review that only measures records its result in ``validate`` and nowhere else. A
+    refusing calibration that finds the task outside the band gives it the stage ``calibration``.
+
+    Values: ``count`` and ``max_checks`` are positive. ``band_low`` and ``band_high`` are each in [0, 1] or null,
+    and ``band_low`` does not exceed ``band_high``. ``task_checks`` is the oracle check, then the given checks in
+    order. ``calibration`` is the first :class:`CalibrationCheck` among them, or None. ``cursor`` is the cursor
+    saved under ``state_dir``, and ``generation`` is the generation that ``generate`` makes now.
+    Purpose: the generated-task recipe builds it with ``from_config`` and calls ``generate``, ``validate`` and
+    ``record_results`` in each round.
     """
 
     def __init__(
@@ -490,11 +558,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
     ) -> None:
         if count < 1 or max_checks < 1:
             raise ValueError("count and max_checks must be positive")
-        for label, bound in (("band_low", band_low), ("band_high", band_high)):
-            if bound is not None and not 0 <= bound <= 1:
-                raise ValueError(f"{label} must be in [0, 1] or null")
-        if band_low is not None and band_high is not None and band_low > band_high:
-            raise ValueError("band_low must not exceed band_high")
+        validate_band(band_low, band_high)
         self.scenario = scenario
         self.service = service
         self.author = author
@@ -509,6 +573,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.tool_reviewer = next(
             (check for check in task_checks if isinstance(check, ReviewCheck) and check.is_refusing), None
         )
+        self.calibration = next((check for check in task_checks if isinstance(check, CalibrationCheck)), None)
         cursor_path = state_dir / CURSOR_FILE
         self.cursor = (
             GenerationCursor(**json.loads(cursor_path.read_text(encoding="utf-8")))
@@ -537,18 +602,23 @@ class AutoEnvScalingGenerator(TaskGenerator):
         scenario_dir = Path(state_dir) / scenario
         try:
             author = task_author(config, environ, scenario=scenario, cache_dir=scenario_dir / "repositories")
+            service = HttpGenerator(generator_url)
+            band_low = band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low")
+            band_high = band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high")
             review = review_check(config, environ, scenario=scenario)
+            # The calibration runs last: its episodes are the costliest check.
+            calibration = calibration_check(config, service, scenario=scenario, band_low=band_low, band_high=band_high)
             return cls(
                 scenario=scenario,
-                service=HttpGenerator(generator_url),
+                service=service,
                 author=author,
                 sources=load_sources(Path(sources_path)),
                 state_dir=scenario_dir,
                 count=int(config.get("count", DEFAULT_COUNT)),
-                band_low=band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low"),
-                band_high=band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high"),
+                band_low=band_low,
+                band_high=band_high,
                 max_checks=int(config.get("max_checks", DEFAULT_MAX_CHECKS)),
-                task_checks=() if review is None else (review,),
+                task_checks=tuple(check for check in (review, calibration) if check is not None),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
@@ -693,7 +763,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """The task checks on a written copy, which is removed again; a duplicate or a taken name is invalid.
 
         A refusing check that finds a defect, or cannot run, makes the task invalid, and the report keeps the two
-        apart. An oracle check that cannot run raises: the generator service is not usable for the round.
+        apart. An oracle check that cannot run raises: the generator service is not usable for the round. So does
+        a refusing calibration in which no episode scored or the generator service failed an episode request.
         """
         try:
             written = await self.service.write_task(task)
@@ -710,7 +781,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 if not check.is_refusing:
                     continue
                 if result.errors:
-                    errors, stage = result.errors, STAGE_CHECK
+                    errors = result.errors
+                    stage = STAGE_CALIBRATION if isinstance(check, CalibrationCheck) else STAGE_CHECK
                     break
                 if result.could_not_run:
                     errors, stage = (f"the {check.name} check could not run: {result.could_not_run}",), STAGE_UNCHECKED
@@ -762,13 +834,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 proposals.append(replace(proposal, stage=stage, refusal=result.error))
                 continue
             pass_rate = statistics.fmean(result.rollout_rewards)
-            # Where the pass rate falls against the band; a null bound is no bound.
-            if self.band_low is not None and pass_rate < self.band_low:
-                band = BAND_BELOW
-            elif self.band_high is not None and pass_rate > self.band_high:
-                band = BAND_ABOVE
-            else:
-                band = BAND_INSIDE
+            band = band_place(pass_rate, self.band_low, self.band_high)
             outcome = TaskOutcome(
                 name=result.task.name,
                 digest=result.task.digest,
@@ -794,6 +860,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             "generation": state.number,
             "error": state.error,
             "band": {"low": self.band_low, "high": self.band_high},
+            # A calibration that is off leaves no trace in the report.
+            **({} if self.calibration is None else {"calibration": self.calibration.settings()}),
             "next_position": self.cursor.next_position,
             "proposals": [
                 {**asdict(proposal), "checks": checks_document(state, proposal.task_name)} for proposal in proposals
