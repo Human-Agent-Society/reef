@@ -38,14 +38,6 @@ class TinkerConfig:
             "deployment; unset is Thinking Machines' hosted Tinker."
         ),
     )
-    export_adapter: bool = config_option(
-        False,
-        help=(
-            "Save each checkpoint's PEFT adapter in its release, so inference engines can serve it, and Tinker's "
-            "adapter as Tinker saved it, which tinker-cookbook merges into full weights. "
-            "Without it, a release holds only the manifest that Tinker's sampler serves."
-        ),
-    )
     project_id: str | None = config_option(None, help="Optional Tinker project ID.")
     inference_timeout_s: float = config_option(
         300.0, help="Seconds that one sample may take: a request's, and a task job's rollout sampling."
