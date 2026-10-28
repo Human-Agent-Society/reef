@@ -1668,12 +1668,12 @@ Neither inherits from the other, and no trainer holds a serving engine.
   artifact repository keeps.
 
 ``WeightRuntime.activate_checkpoint(artifact, *, scenario, base)`` gets
-``base=True`` exactly when ``artifact`` is the repository's base artifact:
-the component's ``artifact_id`` is the base release's ID, or
+``base=True`` exactly when ``artifact`` is the repository's base artifact.
+Then the component's ``artifact_id`` is the base release's ID, or
 ``<base>:<component>`` in a release of several components. The adapter
-runtime serves the base artifact by unloading the scenario's adapter, without
-reading its files. The Tinker runtime reads the base artifact's
-``tinker-base-model.json`` manifest instead, so it does not need ``base``.
+runtime serves the base artifact: it unloads the scenario's adapter and does
+not read the files. The Tinker runtime does not need ``base``. It reads the
+``tinker-base-model.json`` manifest of the base artifact.
 
 Two training scenarios can share a deployment only if its training component
 allows it (``shares_scenarios``) and its runtime serves each scenario its own

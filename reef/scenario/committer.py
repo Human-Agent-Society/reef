@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
-from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
@@ -237,8 +237,7 @@ class ScenarioCommitter:
                 elif latest.operation == "train_from":
                     start = bound(latest.artifact_ref.release_id, name)
                 else:
-                    release_id = latest.artifact_ref.release_id
-                    start = release_id if len(names) == 1 else f"{release_id}:{name}"
+                    start = made_artifact_id(latest.artifact_ref.release_id, name, single=len(names) == 1)
             status[name] = {"active": bound(active_release, name), "training_start": start}
         return status
 
@@ -438,7 +437,7 @@ class ScenarioCommitter:
         """Start ``component_trainer`` from its component of ``release``, with the entries its commit recorded."""
         artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
         component_trainer.trainer.start_from(
-            artifact, self.release_queries.entries_for_version(release.ref.release_id)
+            artifact, self.release_queries.entries_for_version(release.ref.release_id, self._step)
         )
 
     def publish_shipped_content(self) -> ArtifactRef | None:

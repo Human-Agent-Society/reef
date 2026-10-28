@@ -682,26 +682,24 @@ class CordisRecipe(Recipe):
         )
 
     def base_artifact_source(self) -> BaseArtifactSource:
-        """The seed as the base harness: a fresh scenario serves it before any step publishes.
+        """The seed as the base harness, which a new scenario serves before any step publishes.
 
         The files are the seed rendered for the adapter, with the entries list
-        where the adapter keeps one; the metadata holds the entries for every
-        adapter. The input is the checksum of the seed without Reef's own
-        entries (``RESERVED_ENTRY_IDS``): each Reef version ships its own copy
-        of those, and a step publishes the new copy
-        (``CordisBackend.shipped_content_update``), so a Reef upgrade keeps
-        the base. No seed is the empty harness.
+        where the adapter keeps one. The metadata holds the entries for every
+        adapter. Without a seed, the base harness is empty. The input is the
+        checksum of the seed without Reef's own entries
+        (``RESERVED_ENTRY_IDS``). Each Reef version ships its own copy of
+        those entries, and a step publishes the new copy
+        (``CordisBackend.shipped_content_update``). Thus a Reef upgrade keeps
+        the base.
         """
         configured = [dict(entry) for entry in self.seed if entry.get("id") not in RESERVED_ENTRY_IDS]
-        inputs = {"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()}
-        if not self.seed:
-            return BaseArtifactSource(metadata={"entries": []}, inputs=inputs)
         descriptor = get_adapter(self.adapter)
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
         return BaseArtifactSource(
-            files={**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)},
+            files={**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)} if self.seed else {},
             metadata={"entries": [dict(entry) for entry in self.seed]},
-            inputs=inputs,
+            inputs={"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()},
         )
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:

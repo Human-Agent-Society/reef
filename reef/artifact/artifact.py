@@ -117,12 +117,13 @@ class Artifact:
 
     @property
     def artifact_id(self) -> str:
-        """The artifact this value holds: a component view's own, or the only component of a release.
+        """The artifact that this value holds: the artifact of a component view, or the only component of a release.
 
-        A release without a manifest is one artifact that the release made,
-        named by its ``release_id``; a manifest of one component names it
-        (``ReleaseComponents.artifact_ids``). Raise ``ArtifactNotFound`` for a
-        release of several components, whose artifacts are its component views.
+        A release without a manifest is one artifact. The release made it, so
+        its ``release_id`` names it. A manifest of one component names the
+        artifact (``ReleaseComponents.artifact_ids``). For a release of several
+        components, raise ``ArtifactNotFound``: each component view holds one
+        of its artifacts.
         """
         if self._artifact_id is not None:
             return self._artifact_id

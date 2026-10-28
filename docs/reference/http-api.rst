@@ -1123,8 +1123,8 @@ names an artifact:
 - In a scenario of several components, it is ``<release_id>:<component>``.
 - A release that carries a component forward keeps that component's
   ``artifact_id``. The creation makes no artifact, so the creation artifact
-  keeps the ``artifact_id`` of the release that made it: the base artifact's
-  is the ID of the repository's base release.
+  keeps the ``artifact_id`` of the release that made it. For the base
+  artifact, that is the ID of the repository's base release.
 
 ``GET /reef/scenarios/{scenario}/artifacts`` answers ``{scenario,
 artifacts}``, **newest first**. Each row is one artifact of one component:
@@ -1505,9 +1505,11 @@ a training job runs or an update is being published.
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 ``job_data_ready`` says whether the processor has a job's data waiting.
-``artifacts`` names, for each component, the ``artifact_id`` of its active
-artifact and of its trainer's training start, or ``null`` where Reef knows
-none. Both start at the creation artifact. ``processor`` includes ``ready_samples``, the samples of the held record sets
+``artifacts`` gives two ``artifact_id`` values for each component: its
+active artifact and its trainer's training start. A value is ``null`` when
+Reef does not know it. Both values start at the creation artifact.
+
+``processor`` includes ``ready_samples``, the samples of the held record sets
 and uploaded trajectories; ``job_samples``, the samples that automatic job
 data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
 the most samples the held record sets keep.

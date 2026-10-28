@@ -27,11 +27,13 @@ BASE_MANIFEST = "tinker-base-model.json"
 class TinkerBaseModel:
     """The base model on a Tinker-compatible service: the content of a Tinker component's base artifact.
 
-    Values: ``base_model`` is a non-empty model name and ``service`` the service's base URL, or ``None`` for
-    Thinking Machines' hosted Tinker. Tinker keeps checkpoints on the service, so the base artifact keeps the base
-    model there too and holds only this manifest (``BASE_MANIFEST``). The Tinker training component makes it for
-    the base artifact; the component and the Tinker inference runtime read it, sample the base model for it and
-    start a job from the base model for it. ``check_compatible`` refuses one of another model or service.
+    Values: ``base_model`` is a non-empty model name. ``service`` is the non-empty base URL of the service, or
+    ``None`` for the hosted Tinker of Thinking Machines.
+
+    Purpose: Tinker keeps checkpoints on the service, so the base model stays there too. The base artifact holds
+    only this manifest (``BASE_MANIFEST``). The Tinker training component makes the manifest. The component starts
+    a job from the base model for it, and the Tinker inference runtime samples the base model for it.
+    ``check_compatible`` refuses a manifest of another model or service.
     """
 
     base_model: str
@@ -40,6 +42,8 @@ class TinkerBaseModel:
     def __post_init__(self) -> None:
         if not isinstance(self.base_model, str) or not self.base_model:
             raise ValueError("a Tinker base model needs a non-empty model name")
+        if self.service is not None and (not isinstance(self.service, str) or not self.service):
+            raise ValueError("a Tinker service is a non-empty base URL, or None for hosted Tinker")
 
     def check_compatible(self, base_model: str, *, service: str | None) -> None:
         """Raise ``ValueError`` unless this is ``base_model`` on ``service``."""

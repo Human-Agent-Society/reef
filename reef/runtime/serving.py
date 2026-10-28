@@ -239,11 +239,11 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         """Serve the release ``artifact`` of ``scenario``; return the version that serves it.
 
         A release whose content the engines already serve for the scenario
-        loads nothing. The base artifact (``base``) is the model the engines
-        hold: it unloads the scenario's adapter and returns
-        ``base_version``, without materializing the base. Any other release
-        loads its adapter under a new version. Raise ``ReefError`` without
-        ``scenario``.
+        loads nothing. When ``base`` is true, the release is the base artifact,
+        which is the model that the engines hold. The runtime then unloads the
+        scenario's adapter and returns ``base_version``. It does not
+        materialize the base. Any other release loads its adapter under a new
+        version. Raise ``ReefError`` without ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
         adapter took the slot of its own previous one; the residency manager
         records that, so requests then sample the base model.
@@ -325,9 +325,9 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     requests that follow. The runtime serves one scenario, so it ignores
     ``scenario``; the registry refuses a second training scenario on it
     (``shared_by_training_scenarios`` is False). The engines start with the
-    base model, which is the base artifact (``base``). Activating
-    the base artifact before any other release loads nothing; after another
-    release, it loads the base artifact's files like any release.
+    base model, which is the base artifact (``base``). Before any other
+    release, the activation of the base artifact loads nothing. After another
+    release, it loads the files of the base artifact, as for any release.
     """
 
     def __init__(

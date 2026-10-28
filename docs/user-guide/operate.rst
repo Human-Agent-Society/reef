@@ -44,7 +44,7 @@ Read the artifacts
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one. The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_); its ``artifact_id`` is the ``release_id`` of the release that made it.
+An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one. The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations and train-from operations. ``GET /reef/scenarios/{scenario}/commits`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
@@ -100,13 +100,13 @@ The base artifact
 
 Every scenario starts from the deployment's base artifact. Reef imports it once, when the artifact repository is new, from the configuration:
 
-- A weight recipe imports the model that ``inference.model-path`` names. The ``slime`` backend and the serving engines keep checkpoints as weight files, so the artifact repository keeps a full copy of the model's files, about 2 bytes per parameter in bf16. The ``tinker`` backend keeps checkpoints on the Tinker service, so the base artifact holds only a manifest that names the base model.
+- A weight recipe imports the model that ``inference.model-path`` names. The ``slime`` backend and the serving engines keep checkpoints as weight files. Thus the artifact repository keeps a full copy of the model's files, about 2 bytes per parameter in bf16. The ``tinker`` backend keeps checkpoints on the Tinker service. Thus its base artifact holds only a manifest that names the base model.
 - A harness recipe imports ``evolution.seed``, rendered for the adapter. Without a seed, the base harness is empty.
 - A recipe of several components imports each component's base under its name.
 
-The base artifact's ``artifact_id`` is the ID of the repository's base release. Activate it to serve the base model or the base harness again. Train from it to start training again from the base weights or the seed.
+The base artifact's ``artifact_id`` is the ID of the repository's base release. Activate it to serve the base model or the base harness again. Train from it to start training again from the base weights or the seed. The ``slime`` backend refuses this, as it refuses every artifact (`Train from an artifact`_).
 
-Reef reads the model and the seed only to make the base artifact. When a restart configures another model path or another seed, Reef refuses to start and names both values. To change the base, restore the configuration, or start a new deployment with a new artifact repository. The entries that Reef ships itself, such as ``reef-version-check``, do not count: after a Reef upgrade, the harness trainer publishes their new copy as a training step. Reef also refuses an artifact repository that an older Reef made, because its base was not imported. Start such a deployment with a new artifact repository.
+Reef reads the model and the seed only to make the base artifact. When a restart configures another model path or another seed, Reef refuses to start and names both values. To change the base, restore the configuration, or start a new deployment with a new artifact repository. The entries that Reef ships itself, such as ``reef-version-check``, do not count. After a Reef upgrade, the harness trainer publishes their new copy as a training step. Reef also refuses an artifact repository that an older Reef made, because its base was not imported. Start such a deployment with a new artifact repository.
 
 Choose a starting release
 -------------------------

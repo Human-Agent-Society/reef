@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
-from reef.core.components import validate_component_name
+from reef.core.components import made_artifact_id, validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
 
@@ -425,9 +425,9 @@ class Surface:
     ) -> None:
         """Make the runtime-loaded component servable when its loader activates.
 
-        ``base`` is the repository's base release, which made every component
-        it holds: the component is the base artifact when its ``artifact_id``
-        is ``base``'s (with one component) or ``<base>:<component>``.
+        ``base`` is the repository's base release. It made every component that
+        it holds, so the component is the base artifact when its ``artifact_id``
+        is the one that ``base`` gives it (``made_artifact_id``).
         ``previous`` is the release served before this one: a component whose
         content it already served is not activated again.
         """
@@ -440,11 +440,10 @@ class Surface:
         if previous is not None and not self.component_changed(artifact, previous, name):
             return
         component = self.component_artifact(artifact, name)
-        base_artifact_id = base.release_id if self.single else f"{base.release_id}:{name}"
         loader.activate(
             component,
             runtime,
-            base=component.artifact_id == base_artifact_id,
+            base=component.artifact_id == made_artifact_id(base.release_id, name, single=self.single),
             source=None if source is None else self.component_artifact(source, name),
         )
 

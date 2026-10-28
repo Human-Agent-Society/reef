@@ -46,6 +46,15 @@ def validate_component_name(name: object) -> str:
     return name
 
 
+def made_artifact_id(release_id: str, component: str, *, single: bool) -> str:
+    """The ``artifact_id`` that the release ``release_id`` gives the artifact of ``component`` that it makes.
+
+    It is ``release_id`` when the release holds one component (``single``), and ``<release_id>:<component>`` when
+    it holds several.
+    """
+    return release_id if single else f"{release_id}:{component}"
+
+
 @dataclass(frozen=True)
 class ComponentEntry:
     """One component's artifact in a release manifest: its content, its identity and its metadata.
@@ -108,7 +117,7 @@ class ReleaseComponents:
         ``<release_id>:<name>`` in a manifest of several.
         """
         return {
-            name: entry.artifact_id or (release_id if self.single else f"{release_id}:{name}")
+            name: entry.artifact_id or made_artifact_id(release_id, name, single=self.single)
             for name, entry in self.entries.items()
         }
 
@@ -186,6 +195,7 @@ __all__ = [
     "RECORDS_COMPONENT",
     "ComponentEntry",
     "ReleaseComponents",
+    "made_artifact_id",
     "release_components",
     "validate_component_name",
 ]

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
+from reef.core.components import made_artifact_id
 from reef.core.errors import ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
@@ -112,10 +113,10 @@ class NewArtifacts(RecordObserver):
         if commit.components is None:
             self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
             return
-        # With several components the release made the artifact of each component whose artifact_id it minted.
+        # With several components, the release made the artifact of each component that it gave a new artifact_id.
         release_id = commit.artifact_ref.release_id
         for name, artifact_id in commit.components.items():
-            if artifact_id == f"{release_id}:{name}":
+            if artifact_id == made_artifact_id(release_id, name, single=False):
                 self.queue.put(NewArtifact(commit.scenario, artifact_id, name))
 
     def close(self) -> None:

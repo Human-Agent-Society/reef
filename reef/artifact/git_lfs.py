@@ -31,7 +31,6 @@ from reef.artifact.repository import (
     RepositoryBackendContext,
     StagedReleaseRepositoryBackend,
 )
-from reef.core.components import validate_component_name
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 
@@ -402,13 +401,15 @@ class _ArtifactManifest:
 
 
 class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
-    """One scenario's releases in a Git LFS repository, whose base artifact every scenario of it forks from.
+    """The releases of one scenario in a Git LFS repository.
 
-    The repository's base artifact is imported from ``base`` (``None``: an
-    empty base) when the repository has none (``refs/reef/base``). Construction raises
-    ``ArtifactSourceError`` when the repository's base was not imported, as
-    an older Reef's empty or seeded tree was not, or was imported from other
-    inputs than ``base.inputs``.
+    Every scenario of the repository forks from the repository's base
+    artifact (``refs/reef/base``). When the repository has no base, the
+    constructor imports ``base`` as the base. ``None`` is an empty base. The
+    constructor raises ``ArtifactSourceError`` when the base was not imported,
+    as the base of an older Reef was not. It also raises
+    ``ArtifactSourceError`` when the base came from inputs other than
+    ``base.inputs``.
     """
 
     def __init__(
@@ -422,9 +423,6 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
     ) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
-        base = BaseArtifactSource() if base is None else base
-        if base.model_component is not None:
-            validate_component_name(base.model_component)
         _check_tools()
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         self.ref_name = f"refs/reef/scenarios/{encoded}"
@@ -444,7 +442,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         )
         self._manifest = _ArtifactManifest(self._workspace)
         self._open_repository()
-        self._import_base(base)
+        self._import_base(BaseArtifactSource() if base is None else base)
 
     @classmethod
     def factory(
@@ -680,11 +678,10 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 raise
 
     def _import_base(self, source: BaseArtifactSource) -> None:
-        """Import ``source`` as the repository's base artifact when it has none, then check the base's inputs.
+        """Import ``source`` as the repository's base artifact when the repository has none, then check its inputs.
 
-        Two processes that import at once push to one ref, and the second
-        reads the first one's base. The base's tree also fills its cache
-        entry, so a first materialize links its files instead of pulling them.
+        When two processes import at the same time, both push to one ref.
+        The second process then reads the base of the first.
         """
         base = self._workspace.ls_remote("refs/reef/base")
         if base is None:
@@ -709,7 +706,10 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         self._restore_head(base)
 
     def _push_base(self, source: BaseArtifactSource) -> str:
-        """Commit the content of ``source`` with no parent and push it to ``refs/reef/base``; return the base."""
+        """Commit the content of ``source`` with no parent, push it to ``refs/reef/base``, and return the base.
+
+        The import also fills the base's cache entry. Thus the first materialize links the files and pulls nothing.
+        """
         with self._workspace.lock:
             self._workspace.orphan_checkout()
             if source.model_directory is not None:

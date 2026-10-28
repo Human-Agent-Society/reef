@@ -12,6 +12,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef, is_local_release
 from reef.artifact.release_chain import ArtifactReleaseChain
+from reef.core.components import made_artifact_id
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
 
@@ -63,13 +64,13 @@ class ScenarioReleases:
             self.creation_components_read = True
             if manifest is not None:
                 self.recorded_creation_components = manifest.artifact_ids(self._creation_artifact.release_id)
-                carried = [
-                    entry.metadata["entries"] for entry in manifest.entries.values() if "entries" in entry.metadata
-                ]
-                if carried and isinstance(carried[0], Sequence) and not isinstance(carried[0], str):
-                    self.recorded_creation_entries = tuple(
-                        dict(item) for item in carried[0] if isinstance(item, Mapping)
-                    )
+                for entry in manifest.entries.values():
+                    # A base harness keeps its seed's entries in its component's metadata.
+                    entries = entry.metadata.get("entries")
+                    if isinstance(entries, Sequence) and not isinstance(entries, str):
+                        self.recorded_creation_entries = tuple(
+                            dict(item) for item in entries if isinstance(item, Mapping)
+                        )
         return self.recorded_creation_components
 
     def records(self) -> tuple[CommitRecord, ...]:
@@ -161,19 +162,22 @@ class ScenarioReleases:
     def artifacts(self, scenario_step: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
         """List the artifacts of each component in ``components``, newest first, with each component's active one.
 
-        An artifact is one component's content, listed under the release
-        that made it. In a scenario of one component each release a training
-        step made is one artifact, whose ``artifact_id`` is its
-        ``release_id``. In a scenario of several components a release made
-        the artifact of a component when its manifest names
-        ``<release_id>:<component>`` for it (``ReleaseComponents.artifact_ids``);
-        such a row's ``content_id`` is ``None``, since the records name the
-        artifact, not its content. The creation makes no artifact: its row
-        lists the artifact that the scenario started from, such as the base
-        artifact, under that artifact's own ``artifact_id``. When a release's
-        manifest is unknown, it is listed as the artifact of the component
-        its trainer named. ``activated`` marks an artifact that has been
-        active at some point.
+        An artifact is the content of one component. Each row lists an
+        artifact under the release that made it.
+
+        - With one component, each release that a training step made is one
+          artifact. Its ``artifact_id`` is its ``release_id``.
+        - With several components, a release made the artifact of a component
+          when its manifest gives the component the ``artifact_id`` that the
+          release makes (``made_artifact_id``). The row's ``content_id`` is
+          ``None``, because the records name the artifact, not its content.
+        - The creation makes no artifact. Its row lists the artifact that the
+          scenario started from, such as the base artifact, under the
+          ``artifact_id`` of that artifact.
+        - When the manifest of a release is unknown, the row lists the
+          artifact of the component that the release's trainer named.
+
+        ``activated`` marks an artifact that has been active at some time.
         """
         with self.publication_lock:
             made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
@@ -202,7 +206,7 @@ class ScenarioReleases:
             for row in reversed(made):
                 manifest = manifests.get(row["release_id"])
                 for component in components:
-                    made_here = f"{row['release_id']}:{component}"
+                    made_here = made_artifact_id(row["release_id"], component, single=False)
                     if manifest is None or component not in manifest:
                         if row["operation"] != "creation" and row.get("component") not in (None, component):
                             continue
@@ -323,12 +327,15 @@ class ScenarioReleases:
                 return record.metrics
         return None
 
-    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
+    def entries_for_version(self, release_id: str, scenario_step: int) -> tuple[Mapping[str, Any], ...] | None:
         """The composition entries of ``release_id``; ``None`` when nothing records them.
 
-        A training step's record logs the entries of the release it made. The
-        creation carries the entries of the artifact it started from in its
-        component manifest: the base artifact keeps its seed's entries there.
+        The record of a training step holds the entries of the release that
+        the step made. The creation holds the entries of the artifact that the
+        scenario started from, in its component manifest; ``scenario_step``
+        controls when a failed read of that manifest is tried again
+        (``creation_components``). The base artifact keeps its seed's entries
+        there.
         """
         record = next(
             (item for item in self.records() if item.made_artifact and item.artifact_ref.release_id == release_id),
@@ -337,7 +344,7 @@ class ScenarioReleases:
         if record is None:
             if release_id != self._creation_artifact.release_id:
                 return None
-            self.creation_components(0)
+            self.creation_components(scenario_step)
             return self.recorded_creation_entries
         entries = (record.algorithm_state or {}).get("entries")
         if isinstance(entries, Sequence) and not isinstance(entries, str):

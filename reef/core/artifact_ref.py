@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-
-
-def base_content_id(inputs: Mapping[str, str]) -> str:
-    """The content ID of the base artifact imported from ``inputs``: equal inputs give equal IDs."""
-    digest = hashlib.sha256(json.dumps(dict(inputs), sort_keys=True).encode()).hexdigest()
-    return f"content:{digest}"
 
 
 @dataclass(frozen=True)

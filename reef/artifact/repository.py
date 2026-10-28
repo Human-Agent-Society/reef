@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import shutil
 import tempfile
 import uuid
@@ -9,7 +11,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from time import monotonic
 from typing import Any, Self
@@ -23,7 +25,7 @@ from reef.artifact.artifact import (
     ArtifactRepository,
 )
 from reef.artifact.composite import compose_release
-from reef.core.artifact_ref import base_content_id
+from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 
 
@@ -103,15 +105,19 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
 class BaseArtifactSource:
     """The content of a repository's base artifact, and the configuration that the content comes from.
 
-    Values: ``files`` maps relative POSIX paths to the text of each file. ``model_directory`` is a directory of
-    model files, or ``None``. ``model_component`` is the release component whose directory the model files go
-    under, ``None`` for the release root; it is ``None`` whenever ``model_directory`` is. ``metadata`` is the base
-    manifest's metadata. ``inputs`` maps non-empty names to non-empty strings: the configuration that the content
-    comes from, such as the configured model and the checksum of the configured seed.
+    Values:
 
-    A recipe makes it (``Recipe.base_artifact_source``). A repository backend imports it as the base artifact of a
-    repository that has none. A repository that has one refuses to open unless the base was imported from equal
-    ``inputs``: the configuration is read once, to make the base.
+    - ``files`` maps relative POSIX paths inside the release to the text of each file.
+    - ``model_directory`` is a directory of model files, or ``None``.
+    - ``model_component`` is the component directory that the model files go into. ``None`` is the release root.
+      It is ``None`` when ``model_directory`` is ``None``.
+    - ``metadata`` is the metadata of the base release.
+    - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
+      configured model and the checksum of the configured seed.
+
+    Purpose: a recipe makes the value (``Recipe.base_artifact_source``). A repository backend imports it as the
+    base artifact of a repository that has none. A repository that has a base opens only when its base came from
+    equal ``inputs``. Thus Reef reads the configuration once, to make the base.
     """
 
     files: Mapping[str, str] = field(default_factory=dict)
@@ -121,18 +127,25 @@ class BaseArtifactSource:
     inputs: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        for relative in self.files:
+            path = PurePosixPath(relative)
+            if not relative or path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"base artifact file {relative!r} must be a relative path inside the release")
         if self.model_directory is None and self.model_component is not None:
             raise ValueError("model_component names where model files go, so it requires model_directory")
         if self.model_directory is not None and not self.model_directory.is_dir():
             raise ValueError(f"model directory {self.model_directory} does not exist")
+        if self.model_component is not None:
+            validate_component_name(self.model_component)
         for name, value in self.inputs.items():
             if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
                 raise ValueError(f"base artifact input {name!r} must map a non-empty name to a non-empty string")
 
     @property
     def content_id(self) -> str:
-        """The content ID of the base artifact imported from this source (``base_content_id`` of ``inputs``)."""
-        return base_content_id(self.inputs)
+        """The content ID of the base artifact that this source makes. Equal ``inputs`` give equal content IDs."""
+        digest = hashlib.sha256(json.dumps(dict(self.inputs), sort_keys=True).encode()).hexdigest()
+        return f"content:{digest}"
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ from reef.core.components import (
     RECORDS_COMPONENT,
     ComponentEntry,
     ReleaseComponents,
+    made_artifact_id,
     release_components,
 )
 from reef.core.errors import ReefError
@@ -215,7 +216,11 @@ class ScenarioFactory:
             metadata = {key: value for key, value in base.metadata.items() if key != COMPONENTS_METADATA_KEY}
             return ReleaseComponents(
                 {
-                    name: ComponentEntry(selected.content_id, metadata=metadata, artifact_id=selected.release_id)
+                    name: ComponentEntry(
+                        selected.content_id,
+                        metadata=metadata,
+                        artifact_id=made_artifact_id(selected.release_id, name, single=True),
+                    )
                     for name in surface.names
                 }
             )
@@ -250,7 +255,7 @@ class ScenarioFactory:
             entries[name] = ComponentEntry(
                 f"{selected.content_id}:{name}",
                 metadata=carried if isinstance(carried, Mapping) else {},
-                artifact_id=f"{selected.release_id}:{name}",
+                artifact_id=made_artifact_id(selected.release_id, name, single=False),
             )
         return ReleaseComponents(entries)
 
