@@ -209,10 +209,7 @@ class Recipe:
                     pipeline, spec=cls.pipeline_spec(), environ=values
                 )
             if activation is not None:
-                reference = activation_reference(activation)
-                # Build it once here, so a bad rule config fails the deployment, not the first scenario.
-                build_activation_rule(reference)
-                kwargs["activation"] = reference
+                kwargs["activation"] = activation_reference(activation)
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
         return kwargs

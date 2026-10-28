@@ -1,10 +1,10 @@
 """The activation rule: whether Reef activates an artifact that training made (RFC #965).
 
-Training makes artifacts and never activates one. A scenario's ``ActivationRule`` reacts to each new artifact:
-it activates the artifact at once, or after the artifact's evaluation, or never. The committer asks the rule
-when a training step publishes an artifact, and records an activation after the training record when the rule
-says so. The artifact evaluation service asks it when an evaluation of an artifact finishes. A deployment names
-the rule in its ``activation`` section.
+Training makes artifacts and never activates one. A scenario's ``ActivationRule`` decides for each new
+artifact: activate it at once, after its evaluation, or never. The committer asks the rule when a training step
+publishes an artifact, and the training record keeps the result (``CommitRecord.activated``). The artifact
+evaluation service asks the rule when an evaluation of an artifact finishes. A deployment names the rule in its
+``activation`` section.
 """
 
 from __future__ import annotations

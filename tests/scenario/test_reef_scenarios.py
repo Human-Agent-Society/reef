@@ -338,7 +338,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     activated = scenario_metadata_for(name="math", base_artifact=base, scenario_step=2, record_progress=progress)
     assert served_artifact_ref(activated, checkpoint_head=head) == head
     with pytest.raises(ValueError, match="active_artifact must be an object"):
-        parse_scenario_metadata({**held, "active_artifact": "served-release"}, checkpoint_head=head)
+        served_artifact_ref({**held, "active_artifact": "served-release"}, checkpoint_head=head)
     with pytest.raises(ValueError, match="names no active_artifact"):
         scenario_metadata_for(name="math", base_artifact=base, active_artifact=served)
 

@@ -1254,10 +1254,9 @@ explains how to go back to an older one for good.
 Inactive artifacts
 ~~~~~~~~~~~~~~~~~~
 
-When the deployment's activation rule does not activate a new tree, for
-example a tree that touches a node kind in the ``always`` rule's
-``review_kinds``, the step makes the tree as a release but does not activate
-it. Its row carries ``active: false`` and ``activated: false``. The manifest
+The deployment's activation rule can leave a new tree inactive, for example
+a tree that touches a node kind in the ``always`` rule's ``review_kinds``.
+The step then makes the tree as a release but does not activate it. Its row carries ``active: false`` and ``activated: false``. The manifest
 and install routes keep serving the active release, and ``?release_id=`` can
 pull the inactive tree for a trial install. To make it serve, send the row's
 ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.

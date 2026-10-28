@@ -161,7 +161,7 @@ naming each component's ``content_id``.
 Candidate selection
 -------------------
 
-The decision of a harness trainer which candidate tree its search keeps. A
+A harness trainer's decision about which candidate tree its search keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
 both. A harness recipe names it in ``evolution.selection``. Selection does

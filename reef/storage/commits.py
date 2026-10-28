@@ -98,10 +98,11 @@ class CommitRecord:
 
     - ``"training"``: one trainer's step. ``artifact_ref`` is the release
       the step made when ``checkpoint`` is true, and the active release when
-      the step made none. ``activated`` is true exactly when the
-      scenario's activation rule activated the release that the step made,
-      as the step committed; a later activation is an ``"activate"`` record. ``algorithm_state``, the high-water values,
-      ``consumed_ids``, ``metrics`` and ``training_job_id`` are the
+      the step made none. ``activated`` is true exactly when the scenario's
+      activation rule activated the release that the step made. A later
+      activation is an ``"activate"`` record. ``algorithm_state``, the
+      high-water values, ``consumed_ids``, ``metrics`` and
+      ``training_job_id`` are the
       trainer's state and the step's outcome. ``component`` names the
       trainer in a scenario of several components.
     - ``"activate"``: ``artifact_ref`` is the release that is active after
@@ -367,9 +368,9 @@ def scenario_metadata_for(
 ) -> dict[str, object]:
     """The scenario metadata of a registration (step zero) or of the artifact a training step made.
 
-    ``active_artifact`` is None when the step's own artifact serves after the step, because the activation
-    rule activated it. Otherwise it names the artifact that serves after the step, so a recovery without the
-    commit history can tell which artifact serves.
+    ``active_artifact`` is None when the activation rule activated the step's own artifact. Otherwise it names
+    the artifact that serves after the step. A recovery without the commit history reads it to find the active
+    artifact.
     """
     if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
@@ -448,7 +449,6 @@ def parse_scenario_metadata(
     component = value.get("component")
     if component is not None and (not isinstance(component, str) or not component):
         raise ValueError("scenario metadata component must be a non-empty string or null")
-    served_artifact_ref(value, checkpoint_head=checkpoint_head)
     if scenario_step == 0:
         return scenario, base_artifact, None
     if record_progress is None:
@@ -467,7 +467,7 @@ def parse_scenario_metadata(
         operation_verified=operation is not None,
         component=component,
         components=components,
-        activated="active_artifact" not in value,
+        activated=value.get("active_artifact") is None,
     )
     return scenario, base_artifact, commit
 
@@ -477,7 +477,7 @@ def served_artifact_ref(value: Mapping[str, Any], *, checkpoint_head: ArtifactRe
 
     ``checkpoint_head`` is the release that carries ``value``. It serves when ``value`` names no
     ``active_artifact``: a registration, or a step whose artifact the activation rule activated. Otherwise the
-    named artifact serves. Raise ``ValueError`` for an ``active_artifact`` that is not an artifact reference.
+    named artifact serves. Raise ``ValueError`` when ``active_artifact`` is not an artifact reference.
     """
     raw = value.get("active_artifact")
     if raw is None:

@@ -314,8 +314,7 @@ class ScenarioCommitter:
                     self._step + 1, served, selected.component, release.component(selected.component)
                 )
                 manifest = self.release_manifest(staged)
-                # Published beside the chain, as an artifact that is not activated is: the chain tip and the backend
-                # head stay.
+                # Published beside the chain: the chain tip and the backend head stay.
                 published_ref = self._artifacts.publish(
                     staged,
                     expected_parent=self._artifacts.checkpoint,
@@ -448,8 +447,7 @@ class ScenarioCommitter:
                 result = self.prepare_experiment(result, trainer, next_step, component)
             with self._publication_lock:
                 prepared = trainer.prepare_commit(result)
-                # The activation rule decides whether the artifact that the step publishes serves; the training
-                # record says whether it did.
+                # The activation rule decides whether the step's artifact serves. The training record keeps the result.
                 activated = not isinstance(result.publication, NoArtifactPublication) and (
                     self._binding.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
                 )
@@ -537,10 +535,10 @@ class ScenarioCommitter:
         *,
         activated: bool,
     ) -> None:
-        """Publish a training step's artifact on the chain and record it; when ``activated``, serve it too.
+        """Publish a training step's artifact on the chain and record it. When ``activated`` is true, serve it too.
 
         Every artifact that training makes becomes the chain tip, the parent of the next publication. Only an
-        ``activated`` one becomes the active artifact; any other waits for an activation.
+        ``activated`` artifact becomes the active artifact. Any other artifact stays inactive until an activation.
         """
         artifacts = self._artifacts
         next_step = self._step + 1
@@ -720,8 +718,8 @@ class ScenarioCommitter:
         Install heads and settle the trainer before advancing the scenario step.
         Failed completion retries the same record. A step that made no
         artifact records the active one and moves no head. A made artifact
-        becomes the chain tip, and the active artifact when the record says
-        that the activation rule ``activated`` it.
+        becomes the chain tip. It also becomes the active artifact when the
+        record is ``activated``.
         """
         if record.made_artifact:
             if self._artifacts.checkpoint == record.artifact_ref:
@@ -765,7 +763,7 @@ class ScenarioCommitter:
             return None
         record = records[-1]
         if (
-            record.activated != (activated and record.made_artifact)
+            record.activated != activated
             or not self.own_record(record, self.component_on_record(component))
             or not self._record_matches_prepared(record, prepared)
         ):

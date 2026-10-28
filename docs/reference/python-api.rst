@@ -1549,15 +1549,15 @@ Training makes artifacts and never activates one. A scenario's
 |                                              | default                                        |
 +----------------------------------------------+------------------------------------------------+
 
-The committer asks ``activates`` when a training step publishes an artifact;
-the commit record's ``activated`` says what the rule decided. The artifact
+The committer asks ``activates`` when a training step publishes an artifact.
+The commit record's ``activated`` keeps what the rule decided. The artifact
 evaluation service asks ``activates_evaluated`` when an evaluation finishes,
 and then activates the artifact. The built-in rules are
 ``reef.evaluation.activation``'s ``AlwaysActivate``, ``NeverActivate`` and
 ``EvaluatedActivation``. The deployment names a rule in its ``activation``
 section (`Configuration <configuration.rst#the-activation-section>`__). A rule
-of your own inherits ``ActivationRule`` and builds from its config with the
-class method ``from_config(config)``.
+of your own inherits ``ActivationRule``. Reef builds it from its config with
+the class method ``from_config(config)``.
 
 Surface
 -------

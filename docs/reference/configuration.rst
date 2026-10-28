@@ -1181,11 +1181,13 @@ The ``activation`` section
 
 Training makes artifacts: every checkpoint that a weight training job saves,
 and every tree that a harness trainer keeps. Training never decides whether an
-artifact serves. The activation rule that this section names decides that,
-for every recipe, a composite included. Without the section, the rule is
-``always``. An artifact that the rule does not activate stays inactive, and a
-person can activate it with ``POST /reef/scenarios/{scenario}/activate``.
-Neither changes where training continues. `Activate an artifact
+artifact serves. The activation rule that this section names decides that.
+The section applies to every recipe, a composite included. Without the
+section, the rule is ``always``.
+
+An artifact that the rule does not activate stays inactive. A person can
+activate it with ``POST /reef/scenarios/{scenario}/activate``. Activation does
+not change where training continues. `Activate an artifact
 <../user-guide/operate.rst#activate-an-artifact>`__ describes activation, and
 `Go back to an older artifact
 <../user-guide/operate.rst#go-back-to-an-older-artifact>`__ describes how to
@@ -1215,13 +1217,16 @@ The built-in rules:
   ``artifact_evaluation`` (`Automatic evaluation
   <http-api.rst#automatic-evaluation>`__) so Reef evaluates each new artifact.
 
-A rule of your own subclasses ``ActivationRule``. ``activates(made)``
-decides at the moment training publishes an artifact; ``made`` names the
-component and the harness node kinds that the artifact changes.
-``activates_evaluated(artifact_id, evaluation)`` decides when an evaluation of
-the artifact finishes. Reef checks the class and builds the rule when it loads
-the recipe config, so a bad rule fails at startup. Reef rejects functions,
-abstract classes and structural lookalikes.
+A rule of your own subclasses ``ActivationRule``:
+
+- ``activates(made)`` decides when training publishes an artifact. ``made``
+  names the component and the harness node kinds that the artifact changes.
+- ``activates_evaluated(artifact_id, evaluation)`` decides when an evaluation
+  of the artifact finishes.
+
+Reef checks the class and builds the rule when it loads the deployment
+config, so a bad rule fails at startup. Reef rejects functions, abstract
+classes and structural lookalikes.
 
 The ``pipeline`` section
 ------------------------

@@ -44,11 +44,10 @@ class TrainStepResult:
     commit that publishes nothing, such as a job submission or a job's end.
     ``training_job_id`` names the training job the commit is about, if any.
 
-    A published artifact is not activated by its commit: the scenario's
-    activation rule decides that. ``changed_kinds`` holds the harness node
-    kinds that ``artifact`` changes from the tree it was trained from, which
-    the rule reads; it is empty for weights, and for a commit that publishes
-    nothing.
+    The commit does not decide whether ``artifact`` serves; the scenario's
+    activation rule does. ``changed_kinds`` holds the harness node kinds that
+    ``artifact`` changes from the tree it was trained from, and the rule reads
+    it. It is empty for weights and for a commit that publishes nothing.
 
     ``component`` names the release component ``artifact`` replaces. A scenario
     serving several components requires it; the committer carries the other

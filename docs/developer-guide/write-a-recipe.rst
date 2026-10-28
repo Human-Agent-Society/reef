@@ -254,7 +254,7 @@ Activate an artifact
 ~~~~~~~~~~~~~~~~~~~~
 
 A recipe trains; it does not decide what serves. Each artifact that a
-training job saves goes onto the scenario's release chain, and the next job
+training job saves goes onto the scenario's release chain. The next job
 starts from it. The deployment's activation rule decides whether the
 artifact also serves: at once, after an evaluation of it, or only when a
 person activates it. The rule applies to every recipe, so a recipe class
@@ -271,8 +271,9 @@ has no evaluation or selection code. Name it in the top-level
 The built-in rules are ``always`` (the default), ``never`` and
 ``evaluated``. A rule of your own is an ``ActivationRule`` subclass
 (``reef.core.activation``) named by ``package.module:ClassName``. Reef
-imports and checks the class when it loads the deployment config, and
-calls the class method ``from_config`` once with the opaque ``config``:
+imports and checks the class when it loads the deployment config. It builds
+the rule with the class method ``from_config``, which receives the opaque
+``config``:
 
 .. code:: python
 

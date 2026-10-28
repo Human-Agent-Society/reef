@@ -32,8 +32,10 @@ from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS
 class AlwaysActivate(ActivationRule):
     """Activate every new artifact, except a harness tree that changes a reviewed kind.
 
-    Values: ``review_kinds`` is a frozenset of non-empty node kind names. A tree that changes one of them, or one
-    of ``ALWAYS_REVIEWED_KINDS``, waits for a person to activate it.
+    Values: ``review_kinds`` is a frozenset of non-empty node kind names. Operations: ``activates(made)`` is true
+    exactly when ``made.changed_kinds`` has no kind in ``review_kinds`` or in ``ALWAYS_REVIEWED_KINDS``;
+    ``activates_evaluated`` is false. Purpose: the ``always`` activation section, and the rule when there is no
+    section.
     """
 
     def __init__(self, review_kinds: frozenset[str] = frozenset()) -> None:
@@ -61,7 +63,10 @@ class AlwaysActivate(ActivationRule):
 
 
 class NeverActivate(ActivationRule):
-    """Activate no artifact: a person activates each one."""
+    """Activate no artifact: a person activates each one.
+
+    Operations: ``activates`` and ``activates_evaluated`` are false. Purpose: the ``never`` activation section.
+    """
 
     def activates(self, made: MadeArtifact) -> bool:
         return False
@@ -70,8 +75,10 @@ class NeverActivate(ActivationRule):
 class EvaluatedActivation(ActivationRule):
     """Activate an artifact once an evaluation of it finishes with a ``mean_score`` of at least ``min_mean_score``.
 
-    Values: ``min_mean_score`` is a finite number. An evaluation whose rollouts all failed has no mean score and
-    activates nothing.
+    Values: ``min_mean_score`` is a finite number. Operations: ``activates`` is false.
+    ``activates_evaluated(artifact_id, evaluation)`` is true exactly when ``evaluation.mean_score`` is not None
+    and at least ``min_mean_score``. An evaluation whose rollouts all failed has no mean score, so it activates
+    nothing. Purpose: the ``evaluated`` activation section.
     """
 
     def __init__(self, min_mean_score: float) -> None:
@@ -110,7 +117,11 @@ BUILT_IN_RULES: dict[str, type[ActivationRule]] = {
 
 def activation_reference(value: object) -> PluginReference:
     """The rule that an ``activation`` section names: a built-in name, or a ``package.module:ClassName``, with its
-    config. Raise ``PluginConfigError`` for any other value."""
+    config.
+
+    The rule is built once from its config, so a bad config fails when the deployment loads. Raise
+    ``PluginConfigError`` for any other value, and for a config that the rule refuses.
+    """
     if isinstance(value, Mapping) and isinstance(value.get("module"), str) and value["module"] in BUILT_IN_RULES:
         unknown = sorted(str(key) for key in value if key not in ("module", "config"))
         if unknown:
@@ -118,10 +129,13 @@ def activation_reference(value: object) -> PluginReference:
         config = value.get("config", {})
         if not isinstance(config, Mapping):
             raise PluginConfigError("activation.config must be a mapping")
-        return PluginReference(BUILT_IN_RULES[value["module"]], dict(config))
-    if isinstance(value, str) and value in BUILT_IN_RULES:
-        return PluginReference(BUILT_IN_RULES[value], {})
-    return ActivationRule.reference(value, setting="activation")
+        reference = PluginReference(BUILT_IN_RULES[value["module"]], dict(config))
+    elif isinstance(value, str) and value in BUILT_IN_RULES:
+        reference = PluginReference(BUILT_IN_RULES[value], {})
+    else:
+        reference = ActivationRule.reference(value, setting="activation")
+    build_activation_rule(reference)
+    return reference
 
 
 def build_activation_rule(reference: PluginReference | None) -> ActivationRule:

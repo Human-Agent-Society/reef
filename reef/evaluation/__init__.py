@@ -1,12 +1,12 @@
 """Candidate evaluation and the activation rules: contracts, built-ins, and plugin loading.
 
-A harness recipe builds a :class:`SelectionPlugin` from ``evolution.selection``,
-and :class:`reef.train.Trainer` runs it between prepare and settle to decide
-which candidate tree the search keeps. Whether an artifact that training makes
-serves is the activation rule's decision (``activation``): the always, never
-and evaluated rules, which the ``activation`` section names. The shared
-contracts live in ``reef.core.evaluation`` and ``reef.core.activation``;
-this package owns the built-in evaluators, selectors and rules.
+A harness recipe builds a :class:`SelectionPlugin` from ``evolution.selection``.
+:class:`reef.train.Trainer` runs it between prepare and settle to decide which
+candidate tree the search keeps. The activation rule decides whether an
+artifact that training makes serves; ``activation`` holds the built-in rules
+(``always``, ``never`` and ``evaluated``). The shared contracts live in
+``reef.core.evaluation`` and ``reef.core.activation``. This package owns the
+built-in evaluators, selectors and rules.
 
 ``harness`` measures harness candidates by running evaluation rollouts. It
 holds ``HarnessCandidate``, its evaluator ``HarnessRolloutEvaluator``, the

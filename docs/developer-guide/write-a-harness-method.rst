@@ -91,8 +91,9 @@ empty. These samples are
 scored traces, or unscored records with the inference stages that "Two
 trace sources" below describes.
 
-Reef evaluates request mutations, and the deployment's activation rule
-treats their releases as it treats those of other steps. Pending agent proposals and periodic
+Reef evaluates request mutations as it evaluates other mutations. The
+deployment's activation rule decides whether their releases serve, as for
+other steps. Pending agent proposals and periodic
 rechecks cannot take over the step assigned to a request.
 
 Score a rollout

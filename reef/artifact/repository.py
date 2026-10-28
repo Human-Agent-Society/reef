@@ -290,10 +290,10 @@ class Repository(ArtifactRepository):
             self._current_artifact = ref
 
     def install_checkpoint(
-        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool = True
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
     ) -> None:
-        """Install an already-committed release as the checkpoint, the chain tip, without storage I/O; ``activate``
-        also makes it the active artifact (``current``)."""
+        """Install an already-committed release as the checkpoint, the chain tip, without storage I/O. When
+        ``activate`` is true, also make it the active artifact (``current``)."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
                 raise ArtifactConflict("repository heads changed before the committed release was installed")

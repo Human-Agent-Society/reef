@@ -58,7 +58,7 @@ becomes an artifact. Reef activates a checkpoint when the deployment's
 activation rule says so. Any other checkpoint stays an inactive artifact,
 and the active release keeps serving. The next job starts from the newest
 saved checkpoint whether or not it was activated: the rule decides only what
-is served. A
+serves. A
 restart resumes from the committed state. The step counter, the weight
 trainer's state, and record progress survive.
 

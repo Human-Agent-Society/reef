@@ -17,7 +17,6 @@ from reef.service.wire import ReportPayload, RequestHeaders, parse_request_heade
 from reef.storage.records import RecordStore
 from reef.evaluation import (
     ActivationRule,
-    MadeArtifact,
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
@@ -25,6 +24,7 @@ from reef.evaluation import (
     CandidateEvaluator,
     CandidateSelector,
     EvaluationResult,
+    MadeArtifact,
     RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,

@@ -153,10 +153,10 @@ tools, budgets, the session log and the sandbox stay Reef's; a loop that
 raises, or calls the context past its budget of transitions, ends the turn
 with ``LOOP_ERROR`` and fails the checks, and the first end of a turn is final
 whatever the loop code catches. Loop code runs inside the loop's own
-process, so a win that creates, changes or removes a ``native_loop`` is always
+process. So a win that creates, changes or removes a ``native_loop`` is always
 an inactive release that a person activates, whether or not the activation
-rule's ``review_kinds`` names the kind, and ``harness_try`` refuses to mount one on a serving process:
-the model proposes a loop, a person serves it.
+rule's ``review_kinds`` names the kind. ``harness_try`` also refuses to mount
+one on a serving process: the model proposes a loop, a person serves it.
 
 Rendered paths
 ~~~~~~~~~~~~~~
@@ -443,9 +443,10 @@ The deployment's top-level ``activation`` section changes that
 (`Configuration <../reference/configuration.rst#the-activation-section>`__).
 ``module: never`` makes every win an inactive release instead. The
 ``always`` rule's ``review_kinds`` (a list of node kinds, empty by default)
-does so only for the wins that touch those kinds, so ``[code_extension]``
-lets rules and config serve at once while code waits for a person; a win
-that touches a ``native_loop`` waits whether or not the list names it. An inactive release sits in the catalog with its evaluation
+does so only for the wins that touch those kinds. For example,
+``[code_extension]`` lets rules and config serve at once, and code waits for
+a person. A win that touches a ``native_loop`` waits whether or not the list
+names it. An inactive release sits in the catalog with its evaluation
 metrics and is never served until ``POST /reef/scenarios/{scenario}/activate``
 names it. The loop keeps evolving from it in the meantime, so activating the
 latest inactive release serves everything accumulated since the active one.

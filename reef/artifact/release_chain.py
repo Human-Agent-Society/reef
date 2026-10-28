@@ -53,7 +53,7 @@ class ArtifactReleaseChain:
         self._repository.activate(ref, expected=expected)
 
     def install_checkpoint(
-        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool = True
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
     ) -> None:
         self._repository.install_checkpoint(
             ref, expected=expected, expected_checkpoint=expected_checkpoint, activate=activate
