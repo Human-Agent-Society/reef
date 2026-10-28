@@ -195,13 +195,17 @@ def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_p
     assert "--setenv REEF_NATIVE_ENFORCE bwrap" in joined
 
 
-def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monkeypatch, tmp_path: Path) -> None:
+def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_only(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A read-only input stays read-only inside a writable directory, the workspace too, as a remote jail keeps it."""
     monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     root = tmp_path / "root"
     workspace = root / "workspace"
+    material = workspace / "material"
     state = root / "codex"
     config = state / "config.toml"
-    workspace.mkdir(parents=True)
+    material.mkdir(parents=True)
     state.mkdir()
     config.write_text("model = 'm'\n")
 
@@ -211,16 +215,17 @@ def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monke
         workspace=workspace,
         env={},
         writable_paths=(state,),
-        readonly_paths=(config,),
+        readonly_paths=(config, material),
     )
 
-    root_mount = argv.index("--ro-bind", argv.index(str(root)) - 1)
-    state_mount = argv.index("--bind", root_mount + 1)
-    config_mount = argv.index("--ro-bind", root_mount + 1)
-    workspace_mount = argv.index("--bind", state_mount + 1)
-    assert root_mount < state_mount < config_mount < workspace_mount
-    assert argv[state_mount + 1 : state_mount + 3] == [str(state), str(state)]
-    assert argv[config_mount + 1 : config_mount + 3] == [str(config), str(config)]
+    def mount(flag: str, path: Path) -> int:
+        return next(i for i in range(len(argv) - 2) if argv[i : i + 3] == [flag, str(path), str(path)])
+
+    root_mount = mount("--ro-bind", root)
+    assert root_mount < mount("--bind", workspace) < mount("--bind", state)
+    assert mount("--bind", state) < mount("--ro-bind", config) and mount("--bind", workspace) < mount(
+        "--ro-bind", material
+    )
 
 
 def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:

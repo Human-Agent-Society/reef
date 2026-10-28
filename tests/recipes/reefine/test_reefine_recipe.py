@@ -1,4 +1,4 @@
-"""Reefine configuration: its defaults, the agent's isolation, and the agent each scenario's backend gets."""
+"""Reefine configuration: its defaults, and the agent each scenario's backend gets."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from tests.support.harness_steps import COMPONENT, TreeReleases
 
 from recipes.beta.reefine import ReefineMethod, ReefineRecipe
-from recipes.beta.reefine.recipe import SEED_DIRECTORY, agent_settings
+from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.core.config import config_arguments
 from reef.harness.episodes.run import EpisodeResult
@@ -18,10 +18,7 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.sandbox.e2b import E2BExecutor
-from reef.sandbox.modal import ModalExecutor
-from reef.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
-from reef.sandbox.remote import deployment_owner
+from reef.sandbox.process import LocalExecutor
 from reef.train.backend import ComponentReleases
 
 HEALTH = "[health] Run `echo reef-ok` and reply with its output."
@@ -156,56 +153,6 @@ def test_the_packaged_seed_is_the_first_tree_on_every_adapter(adapter: str) -> N
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 
 
-def test_agent_settings_choose_the_isolation(monkeypatch, tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    assert agent_settings(None, {}, state_dir=state_dir) is None
-    settings = agent_settings({"sandbox": "none", "timeout_s": 60}, {}, state_dir=state_dir)
-    assert settings is not None and isinstance(settings.executor, LocalExecutor)
-    assert (settings.timeout_s, settings.trial_timeout_s) == (60.0, 300.0)
-    unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
-    assert unset is not None and isinstance(unset.executor, LocalExecutor)
-    # The variable's old name would be ignored, and the agent run with another isolation: it is refused.
-    with pytest.raises(RecipeConfigError, match="set REEF_AGENT_SANDBOX instead"):
-        agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"}, state_dir=state_dir)
-    with pytest.raises(RecipeConfigError, match="one of 'bwrap', 'e2b', 'modal', 'none'"):
-        agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
-    with pytest.raises(RecipeConfigError, match="positive number"):
-        agent_settings({"timeout_s": 0}, {}, state_dir=state_dir)
-    # E2B: the key from the section, else the environment; none at all is refused at startup.
-    with pytest.raises(RecipeConfigError, match=r"sandbox is e2b, but .*E2B_API_KEY"):
-        agent_settings({"sandbox": "e2b"}, {}, state_dir=state_dir)
-    monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)  # the e2b package is an extra
-    remote = agent_settings({"sandbox": "e2b", "timeout_s": 900}, {"E2B_API_KEY": "e2b-env"}, state_dir=state_dir)
-    assert remote is not None and isinstance(remote.executor, E2BExecutor)
-    assert (remote.executor.api_key, remote.executor.timeout_s, remote.executor.template) == ("e2b-env", 900.0, "")
-    assert "e2b-env" not in repr(remote)
-    # The deployment's state directory names its sandboxes, so a later start can stop the ones a stopped run left.
-    assert remote.executor.owner == deployment_owner(state_dir)
-    configured = agent_settings(
-        {"sandbox": "e2b", "e2b_api_key": "e2b-cfg", "e2b_template": "mine"},
-        {"E2B_API_KEY": "e2b-env"},
-        state_dir=state_dir,
-    )
-    assert configured is not None and isinstance(configured.executor, E2BExecutor)
-    assert (configured.executor.api_key, configured.executor.template) == ("e2b-cfg", "mine")
-    # Modal: the provider's options from the section, the deployment that names its sandboxes, and the timeout.
-    monkeypatch.setattr(ModalExecutor, "preflight", lambda self: None)
-    modal = agent_settings({"sandbox": "modal", "modal_app": "reef-agents", "timeout_s": 90}, {}, state_dir=state_dir)
-    assert modal is not None and isinstance(modal.executor, ModalExecutor)
-    assert (modal.executor.app_name, modal.executor.timeout_s) == ("reef-agents", 90.0)
-    assert modal.executor.owner == deployment_owner(state_dir)
-    monkeypatch.undo()
-
-    def unavailable(self) -> None:
-        raise SandboxUnavailable("no bwrap here")
-
-    monkeypatch.setattr(SandboxExecutor, "preflight", unavailable)
-    # Unset on a host that cannot isolate: the agent is off and the served model answers in text.
-    assert agent_settings({}, {}, state_dir=state_dir) is None
-    with pytest.raises(RecipeConfigError, match="no bwrap here"):
-        agent_settings({"sandbox": "bwrap"}, {}, state_dir=state_dir)
-
-
 def test_each_scenarios_backend_runs_the_agent_on_the_bound_binary_with_the_gateway(tmp_path: Path) -> None:
     """The recipe binds the agent to pi once per scenario, with the deployment's binary and its multimodal gateway,
     and leaves its own method without one."""
@@ -225,8 +172,9 @@ def test_each_scenarios_backend_runs_the_agent_on_the_bound_binary_with_the_gate
     backend = built.build_backend("demo", ComponentReleases(TreeReleases(built.seed), COMPONENT), None)
     method = backend.method
     assert isinstance(method, ReefineMethod) and method.agent is not None
-    assert isinstance(method.agent.executor, LocalExecutor) and method.agent.binary == str(binary)
-    assert (method.agent.timeout_s, method.agent.trial_timeout_s) == (120.0, 30.0)
+    execution = method.agent.execution
+    assert isinstance(execution.executor, LocalExecutor) and execution.binary == str(binary)
+    assert (execution.timeout_s, method.agent.trial_timeout_s) == (120.0, 30.0)
     assert method.agent.provider == built.multimodal_provider and method.agent.provider.api_key == "sk-upstream"
     backend.close()
 

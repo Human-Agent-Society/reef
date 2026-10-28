@@ -294,9 +294,9 @@ adapter, Reef builds the cloud image with the agent. Any other adapter needs
 installed, and ``evolution.binary`` then names a path inside that image.
 Startup checks provider access, the image, the binary, and namespace
 support. `Sandbox environments <../developer-guide/sandboxes.rst>`__
-describes the shared execution layer. The beta Reefine recipe sets where its
-own coding agent runs with ``evolution.agent.sandbox``, apart from
-``evolution.executor``.
+describes the shared execution layer. A method that runs a coding agent,
+such as ``AgentMethod`` or the beta Reefine recipe, sets where the agent runs
+with ``evolution.agent.sandbox``, apart from ``evolution.executor``.
 
 Collection: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

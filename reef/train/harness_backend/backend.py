@@ -54,6 +54,7 @@ from reef.harness.tree import HarnessTree, TreeKind, TreePatch, ValidationResult
 from reef.harness.tree.checks import clip_record_text, directive_shaped, secret_shaped
 from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
+from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.capabilities import PatchAdmission, StepProgress, StepProgressReader, StepRecords
 from reef.train.harness_backend.contract import Method, StepContext, StepResult
@@ -112,7 +113,9 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
     Methods never subclass it. A method's behavior arrives as ``method``, and
     the scorer and the publication policy arrive in the evaluator and the
     trainer's evaluation plugin. ``evaluator`` is ``None`` when the
-    deployment configured no scorer; then no episode runs.
+    deployment configured no scorer; then no episode runs. ``agent`` is the
+    deployment's coding agent, which ``Tools.run_agent`` runs, ``None`` when
+    it configured none.
     """
 
     def __init__(
@@ -129,6 +132,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         limits: StepLimits,
         records: StepRecord,
         inbox: ProposalInbox | None = None,
+        agent: AgentExecution | None = None,
     ) -> None:
         self.descriptor = descriptor
         self.releases = releases
@@ -141,6 +145,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         self.limits = limits
         self.records = records
         self.inbox = inbox
+        self.agent = agent
         #: The source trees of selected candidates, by step, until their commit is durable.
         self.local_artifacts: dict[int, Artifact] = {}
         #: Written by the training thread, read by the request page: each write is one assignment of a frozen value.
@@ -330,14 +335,15 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         """Run the method's step in ``workspace`` with ``calls`` as its call meter, and record its calls and its
         result with the step."""
         tools = StepTools(
+            workspace=workspace,
             descriptor=self.descriptor,
             evaluator=self.evaluator,
             history=self.history,
             head=head,
-            step=workspace.step,
             models=self.models,
             step_calls=calls,
             max_episodes=self.limits.max_episodes_per_step,
+            agent=self.agent,
         )
         try:
             result = self.method.step(StepContext(workspace, tools))

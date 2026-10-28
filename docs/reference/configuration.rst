@@ -1115,6 +1115,11 @@ traces. Startup refuses it without an adapter that plays task directories
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
    execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
    evolution.sandbox | | for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
+   evolution.agent | | the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its steps (``tools.run_agent``); unset, no agent runs, and such a method is refused at startup
+   evolution.agent.adapter | pi | the agent's harness: any adapter whose prompt is text
+   evolution.agent.binary | | the agent's binary; unset, backend construction installs the adapter's pinned version, as for ``evolution.binary``
+   evolution.agent.sandbox | ``REEF_AGENT_SANDBOX`` | ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed where the host can run bwrap and pasta, and off where it cannot
+   evolution.agent.timeout_s | 1800 | seconds one agent run may take
 
 ``evolution.evaluation`` decides how Reef evaluates a candidate and when it
 publishes one: the tasks, the scorer, and the publication policy. It takes
@@ -1147,7 +1152,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
    evolution.evaluation.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
    evolution.evaluation.recheck_every | 0 | on each automatic step whose number is a multiple of this, and at once when the evaluation context changed since the last publish, re-evaluate the last published tree against the tree it replaced, with fresh episodes, instead of running the method; when the older tree wins, the step publishes it, which rolls back; needs ``policy: compare``; 0 disables
    evolution.evaluation.collect_failures | false | when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused with an adapter whose prompt is a task directory
-   evolution.evaluation.collector | | optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is promoted, and the caps and the credential and directive screens still apply
+   evolution.evaluation.collector | | optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is collected, and the caps and the credential and directive screens still apply
    evolution.evaluation.max_collected_tasks | 50 | the cap on collected tasks; admission stops there so the suite is bounded; 0 collects none
    evolution.evaluation.max_collected_per_client | 5 | the cap on collected tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_collected_tasks``; 0 disables the cap
 
@@ -1159,9 +1164,9 @@ executor, ``evolution.executor`` and ``evolution.sandbox``. The history
 reuses a scored episode only in the context it ran in, and never reuses an
 episode that could not run.
 
-The beta Reefine recipe reads two keys of its own, ``evolution.agent``
-and ``evolution.multimodal``. Its `README
-<../../recipes/beta/reefine/README.md>`__ documents them.
+The beta Reefine recipe runs its agent on pi with ``evolution.agent``, adds
+``evolution.agent.trial_timeout_s``, and reads ``evolution.multimodal``. Its
+`README <../../recipes/beta/reefine/README.md>`__ documents them.
 
 The served model's binding is merged in when an episode renders the tree; it
 never enters a published tree. The seed is the baseline the first candidate

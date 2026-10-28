@@ -30,6 +30,7 @@ from tests.support.harness_methods import (
 from tests.support.harness_service import backend_step, harness_dispatcher, report_once
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
+import recipes.meta_harness
 from recipes.meta_harness import MetaHarness, MetaHarnessSettings
 from recipes.meta_harness.method import parse_proposal
 from reef.core.plugins import PluginConfigError
@@ -40,6 +41,7 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
+from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
@@ -376,3 +378,10 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     assert len(agents) == len(launches) == 2
     assert sum(bool(agent.import_path) for agent in agents) == 1
     assert all(not root.exists() for root in launches)
+
+
+def test_the_agent_folder_is_the_upstream_proposer_as_a_method_made_of_prompts() -> None:
+    """agent/ holds a prompt for the deployment's coding agent and no tree of its own: the search is the history."""
+    folder = Path(recipes.meta_harness.__file__).with_name("agent")
+    method = AgentMethod.from_config({"prompts": str(folder), "model": "proposer"})
+    assert "{history}" in method.start and method.resume is None and method.tree == HarnessTree({})

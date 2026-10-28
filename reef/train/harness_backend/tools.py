@@ -1,8 +1,9 @@
 """The tools of one harness step, as the backend implements them.
 
 ``StepTools`` checks trees against the adapter, scores trees through the
-step's evaluator and the history's score cache, and hands out the step's
-budgeted model bindings and call meter.
+step's evaluator and the history's score cache, runs the deployment's coding
+agent in the step's workspace, and hands out the step's budgeted model
+bindings and call meter.
 """
 
 from __future__ import annotations
@@ -12,47 +13,54 @@ from collections.abc import Sequence
 from reef.evaluation.harness import EpisodeRecord, HarnessEpisodeEvaluator, History
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.gateway import ModelCalls
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
+from reef.train.harness_backend.agent.run import AgentExecution, run_agent
 from reef.train.harness_backend.calls import StepCalls, budgeted_bindings
-from reef.train.harness_backend.contract import ModelCalls, Tools
+from reef.train.harness_backend.contract import AgentOutcome, Tools
+from reef.train.harness_backend.workspace import Workspace
 
 
 class StepTools(Tools):
     """The tools of one step.
 
-    Values: ``descriptor`` is the adapter the trees render for. ``evaluator``
-    scores trees, ``None`` when the deployment configured no scorer.
-    ``history`` is the scenario's history; a tree the method evaluates joins
-    it as a ``method`` candidate whose parent is ``head``, the checksum of the
-    head tree. ``step`` ≥ 1 is the step's number. ``step_calls`` is the
-    step's call meter. ``max_episodes`` ≥ 0 bounds the episodes ``evaluate``
-    starts in the step, 0 for no bound. ``episodes_run`` counts the episodes
-    started so far, also those of a call whose scorer raised, so a method
-    that retries after an error stays within the bound.
+    Values: ``workspace`` is the step's workspace. ``descriptor`` is the
+    adapter the trees render for. ``evaluator`` scores trees, ``None`` when
+    the deployment configured no scorer. ``agent`` is the deployment's
+    coding agent, ``None`` when it configured none or the method does not
+    run it. ``history`` is the scenario's history; a tree the method
+    evaluates joins it as a ``method`` candidate of the workspace's step
+    whose parent is ``head``, the checksum of the head tree. ``step_calls``
+    is the step's call meter. ``max_episodes`` ≥ 0 bounds the episodes
+    ``evaluate`` starts in the step, 0 for no bound. ``episodes_run`` counts
+    the episodes started so far, also those of a call whose scorer raised,
+    so a method that retries after an error stays within the bound.
     Purpose: the backend makes one per step and passes it to ``Method.step``.
     """
 
     def __init__(
         self,
         *,
+        workspace: Workspace,
         descriptor: AdapterDescriptor,
         evaluator: HarnessEpisodeEvaluator | None,
         history: History,
         head: str,
-        step: int,
         models: ModelBindings,
         step_calls: StepCalls,
         max_episodes: int = 0,
+        agent: AgentExecution | None = None,
     ) -> None:
+        self.workspace = workspace
         self.descriptor = descriptor
         self.evaluator = evaluator
         self.history = history
         self.head = head
-        self.step = step
         self.step_calls = step_calls
         self.budgeted = budgeted_bindings(models, step_calls)
         self.max_episodes = max_episodes
         self.episodes_run = 0
+        self.agent = agent
 
     @property
     def models(self) -> ModelBindings:
@@ -78,14 +86,19 @@ class StepTools(Tools):
         left = self.max_episodes - self.episodes_run
         if self.max_episodes and needed > left:
             raise RuntimeError(f"{needed} episodes must run, and the step's episode budget has {left} left")
-        self.history.add_candidate(tree, step=self.step, origin="method", parent=self.head)
+        self.history.add_candidate(tree, step=self.workspace.step, origin="method", parent=self.head)
         self.step_calls.note("evaluate", f"scoring a tree on {len(tasks)} task(s), {repeats} repeat(s) each")
         started = self.history.next_episode
         try:
-            return self.evaluator.episodes(tree, tasks, repeats=repeats, step=self.step)
+            return self.evaluator.episodes(tree, tasks, repeats=repeats, step=self.workspace.step)
         finally:
             # Each episode that started counts, also in a batch that raised: a retry spends the same budget.
             self.episodes_run += self.history.next_episode - started
+
+    def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
+        if self.agent is None:
+            raise RuntimeError("no coding agent runs for this method: it needs runs_agent and evolution.agent")
+        return run_agent(self.agent, self.workspace, self, prompt, tree=tree, model=model)
 
 
 __all__ = ["StepTools"]

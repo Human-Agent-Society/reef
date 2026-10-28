@@ -16,10 +16,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.gateway import ModelCalls
 from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend.contract import ModelCalls
 from reef.train.harness_backend.records import bounded
-
 
 #: The most activity lines a step keeps; the oldest go first.
 MAX_ACTIVITY = 300

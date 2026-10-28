@@ -18,17 +18,20 @@ from tests.support.harness_steps import step_tools
 
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import agent as reefine_agent
-from recipes.beta.reefine.agent import AgentExecution, AgentRun, agent_rules, answer_with_agent
-from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
+from recipes.beta.reefine.agent import AgentRun, CheckTool, ReefineAgent, TrialTool, agent_rules, answer_with_agent
+from recipes.beta.reefine.agent_gateway import ReefineGateway
 from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
+from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.gateway import reply_tool_calls, tool_summary
 from reef.harness.tree import TreePatch
 from reef.sandbox.e2b import E2BSession
 from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome, SandboxExecutor
 from reef.sandbox.remote import pack
 from reef.train.harness_backend import StepContext, Tools, Workspace
+from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.types import JobData
 
@@ -121,12 +124,19 @@ def post(url: str, body: dict) -> tuple[int, bytes]:
         return error.code, error.read()
 
 
-class NoTools(WorkspaceTools):
+class NoRun:
+    """An agent run whose check and trial answer what they were asked, for the gateway's routes."""
+
     def check(self) -> dict:
         return {"admitted": True}
 
     def trial(self, task: str, script: dict[str, object] | None = None) -> dict:
         return {"task": task} if script is None else {"script": script}
+
+
+def no_tools() -> tuple[CheckTool, TrialTool]:
+    run = NoRun()
+    return CheckTool(run), TrialTool(run)
 
 
 FAKE_PI = textwrap.dedent(
@@ -192,8 +202,8 @@ def fake_pi(tmp_path: Path, mode: str = "") -> Path:
     return binary
 
 
-def agent_of(binary: Path, provider: MultimodalProvider | None = None, *, timeout_s: float = 60.0) -> AgentExecution:
-    return AgentExecution(LocalExecutor(), str(binary), timeout_s, 30.0, provider)
+def agent_of(binary: Path, provider: MultimodalProvider | None = None, *, timeout_s: float = 60.0) -> ReefineAgent:
+    return ReefineAgent(AgentExecution(get_adapter("pi"), LocalExecutor(), str(binary), timeout_s), 30.0, provider)
 
 
 def agent_step(tmp_path: Path, models: ModelBindings) -> tuple[Workspace, Tools]:
@@ -396,11 +406,11 @@ def test_concurrent_tool_calls_pull_the_sandbox_tree_one_at_a_time(tmp_path) -> 
     assert len(results) == 6 and sandbox.most_at_once == 1
 
 
-def gateway_run(tmp_path: Path, *, timeout_s: float = 60.0) -> tuple[AgentRun, AgentGateway]:
+def gateway_run(tmp_path: Path, *, timeout_s: float = 60.0) -> tuple[AgentRun, ReefineGateway]:
     """An agent run on a fresh step whose gateway is up; the caller stops the gateway."""
     workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
     run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi", timeout_s=timeout_s))
-    gateway = AgentGateway(run.served, tools.calls, run, None)
+    gateway = ReefineGateway(run.served, tools.calls, (CheckTool(run), TrialTool(run)), None)
     run.gateway = gateway
     gateway.start()
     return run, gateway
@@ -464,7 +474,7 @@ def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(u
     record: list[dict] = []
     calls = StepCalls(3, record)
     served = ModelBinding(base_url=upstream.url, model="served-model", api_key="served-key")
-    gateway = AgentGateway(served, calls, NoTools(), provider_of(upstream))
+    gateway = ReefineGateway(served, calls, no_tools(), provider_of(upstream))
     gateway.start()
     try:
         base = gateway.base_url
@@ -500,7 +510,7 @@ def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(u
 
 @pytest.mark.unit
 def test_without_a_provider_a_provider_call_is_501(upstream) -> None:
-    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), StepCalls(0, []), NoTools(), None)
+    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), StepCalls(0, []), no_tools(), None)
     gateway.start()
     try:
         assert post(f"{gateway.base_url}/v1/images", {"model": "x", "prompt": "reef"})[0] == 501
@@ -511,7 +521,7 @@ def test_without_a_provider_a_provider_call_is_501(upstream) -> None:
 @pytest.mark.unit
 def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) -> None:
     calls = StepCalls(0, [])
-    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), calls, NoTools(), None)
+    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), calls, no_tools(), None)
     gateway.start()
     try:
         upstream.answer = {
@@ -645,7 +655,7 @@ def test_script_rejects_ambiguous_or_unobservable_checks(script) -> None:
 
 @pytest.mark.unit
 def test_gateway_validates_scripted_trials_and_preserves_online_tasks(upstream) -> None:
-    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), StepCalls(0, []), NoTools(), None)
+    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), StepCalls(0, []), no_tools(), None)
     gateway.start()
     try:
         script = {"steps": [{"prompt": "hello", "expect": {"model_called": True}}]}

@@ -7,6 +7,8 @@ A method imports this package's root and nothing below it::
 ``contract`` defines what a method implements (``Method``, ``StepResult``)
 and what a step gives it (``StepContext``: the ``Workspace`` and the
 ``Tools``); ``workspace`` is the step's directory (``Workspace``, ``Trace``).
+``agent`` runs the deployment's coding agent for a method (``evolution.agent``)
+and holds ``AgentMethod``, a method that is a folder of prompts.
 ``backend`` holds ``HarnessBackend``, which the recipe
 ``reef.recipe.harness.HarnessEvolutionRecipe`` builds; methods never
 subclass it. ``tools`` implements the tools of a step, ``calls`` its model
@@ -17,11 +19,15 @@ The tree itself is ``reef.harness.tree``; the evaluation, the history and the
 publication policies are ``reef.evaluation.harness``.
 """
 
-from reef.train.harness_backend.contract import Method, ModelCalls, StepContext, StepResult, Tools
+from reef.harness.gateway import ModelCalls
+from reef.train.harness_backend.agent.method import AgentMethod
+from reef.train.harness_backend.contract import AgentOutcome, Method, StepContext, StepResult, Tools
 from reef.train.harness_backend.manifest import FailureManifest, FailureRecord
 from reef.train.harness_backend.workspace import Trace, Workspace
 
 __all__ = [
+    "AgentMethod",
+    "AgentOutcome",
     "FailureManifest",
     "FailureRecord",
     "Method",

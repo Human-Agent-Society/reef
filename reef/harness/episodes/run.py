@@ -113,6 +113,20 @@ def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+def headless_env(descriptor: AdapterDescriptor, root: Path) -> dict[str, str]:
+    """The descriptor's relocation environment pointed at ``root``, and ``root`` as ``HOME`` unless the descriptor
+    relocates it itself: config discovery that ignores the relocation variables still lands inside ``root``, not in
+    the operator's real home."""
+    env = {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
+    env.setdefault("HOME", str(root))
+    return env
+
+
+def headless_argv(descriptor: AdapterDescriptor, binary: str, prompt: str) -> list[str]:
+    """The descriptor's headless invocation of ``binary``, with ``prompt`` in its ``{prompt}`` slots."""
+    return [binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
+
+
 def run_episode(
     descriptor: AdapterDescriptor,
     files: Mapping[str, str],
@@ -186,11 +200,7 @@ def run_episode(
                 path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise EpisodeError(f"cannot prepare writable episode state: {exc}") from exc
-        env = {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
-        # Point HOME at the root unless the descriptor relocates it itself:
-        # config discovery that ignores the relocation vars still lands inside
-        # the episode instead of in the operator's real home.
-        env.setdefault("HOME", str(root))
+        env = headless_env(descriptor, root)
         if executor.runs_on_host:
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
             # its explicit env_from.
@@ -198,7 +208,7 @@ def run_episode(
                 value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
                 if value:
                     env[key] = value
-        argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
+        argv = headless_argv(descriptor, binary or descriptor.binary, prompt)
         try:
             outcome = execute(
                 executor,

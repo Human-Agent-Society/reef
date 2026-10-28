@@ -66,6 +66,7 @@ from reef.storage.records import RecordStore
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
 from reef.surface.base import Surface
 from reef.train.backend import ComponentReleases
+from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.inbox import ProposalInbox
@@ -93,7 +94,9 @@ class EvolutionSettings(Settings):
     automatic step. Every other count is ≥ 0, where 0 turns its limit off.
     ``publish`` is ``auto`` or ``review``; ``review_kinds`` name tree kinds.
     ``executor`` and ``sandbox`` choose where episodes run
-    (``reef.sandbox.config.build_executor``).
+    (``reef.sandbox.config.build_executor``), and ``agent`` which coding
+    agent a method runs and where (``reef.train.harness_backend.agent.settings``),
+    ``None`` for none.
     Purpose: ``HarnessEvolutionRecipe`` parses it from the deployment and
     builds the backend from it.
     """
@@ -119,6 +122,9 @@ class EvolutionSettings(Settings):
     review_kinds: tuple[str, ...] = config_option((), help="Tree kinds whose change always waits for a person.")
     executor: str = config_option("local", help="Where episodes run: local, sandbox or e2b.")
     sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the episode executor.")
+    agent: Mapping[str, Any] | None = config_option(
+        None, help="The coding agent a method runs: adapter, binary, sandbox and timeout_s."
+    )
 
     def __post_init__(self) -> None:
         if not self.state_dir.strip():
@@ -189,6 +195,8 @@ class HarnessEvolutionRecipe(Recipe):
     tree of a new scenario. ``models`` and ``model_metadata`` are the parsed
     ``evolution`` entries. ``executor`` runs the episodes;
     ``worker_executor`` places the episode workers (``execution.evolution``).
+    ``agent`` is ``evolution.agent`` read, ``None`` when no coding agent
+    runs; a method that ``runs_agent`` needs one.
     The model under test is the recipe's inference runtime. It reaches the
     method as ``tools.models.served``, and the adapter's ``model_binding``
     templates write it into each evaluation episode, so neither the seed nor
@@ -208,6 +216,7 @@ class HarnessEvolutionRecipe(Recipe):
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
+    agent: AgentSettings | None = None
     model_name: str | None = None
     #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
@@ -220,6 +229,11 @@ class HarnessEvolutionRecipe(Recipe):
         super().__post_init__()
         if not isinstance(self.method, Method):
             raise ValueError("harness evolution requires a Method")
+        if self.method.runs_agent and self.agent is None:
+            raise RecipeConfigError(
+                f"{type(self.method).__name__} runs a coding agent: set evolution.agent, with a sandbox this host "
+                "can run (sandbox: none runs the agent without isolation)"
+            )
         if self.scorer is None and self.evaluation.policy != "none":
             raise ValueError("harness evolution requires a scorer unless the evaluation policy is none")
         try:
@@ -322,6 +336,7 @@ class HarnessEvolutionRecipe(Recipe):
             }
             executor = build_executor(section, environ=values)
             worker_executor = role_executor_settings(settings, "evolution")
+            agent = agent_settings(evolution.agent, values, state_dir=Path(evolution.state_dir).expanduser())
         except (TypeError, ValueError, ReefError) as exc:
             raise RecipeConfigError(str(exc)) from exc
         try:
@@ -342,6 +357,7 @@ class HarnessEvolutionRecipe(Recipe):
             "model_metadata": model_metadata,
             "executor": executor,
             "worker_executor": worker_executor,
+            "agent": agent,
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
         }
 
@@ -453,7 +469,8 @@ class HarnessEvolutionRecipe(Recipe):
     def build_backend(
         self, scenario: str, releases: ComponentReleases, task_storage: TaskStorage | None
     ) -> HarnessBackend:
-        """The scenario's backend: the binary installed, the history, the evaluator, the tasks and the records."""
+        """The scenario's backend: the binary installed, the history, the evaluator, the tasks, the records and the
+        coding agent bound."""
         descriptor = get_adapter(self.evolution.adapter)
         # Each component of a composed scenario keeps its own proposals, history and records.
         root = self.state_root(scenario) / releases.component
@@ -497,6 +514,8 @@ class HarnessEvolutionRecipe(Recipe):
             ),
             records=StepRecord(root / STEPS_DIR),
             inbox=ProposalInbox(root / PROPOSALS_DIR, self.evolution.max_pending_proposals),
+            # Only a method that runs the agent through its tools gets it bound here.
+            agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
         )
 
     def build_evaluator(
