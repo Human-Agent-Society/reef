@@ -13,6 +13,7 @@ import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -87,23 +88,38 @@ def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
     return result
 
 
+#: Each backend's scenario step: the steps ``backend_step`` ran on it.
+SCENARIO_STEPS: WeakKeyDictionary[HarnessBackend, int] = WeakKeyDictionary()
+
+
 def backend_step(
-    backend: HarnessBackend, data: JobData, state: Mapping[str, Any], policy: CandidateEvaluationPlugin | None = None
+    backend: HarnessBackend,
+    data: JobData,
+    state: Mapping[str, Any],
+    policy: CandidateEvaluationPlugin | None = None,
+    *,
+    scenario_step: int | None = None,
 ) -> TrainStepResult:
     """One step of ``backend`` as the trainer runs it, decided by ``policy`` (a win-count comparison by default).
 
-    A failure aborts the step.
+    The steps of one backend number 1, 2, ... as a scenario numbers its commits: a step that raised keeps its
+    number for its retry. ``scenario_step`` sets the scenario step the step follows instead, as a retry after a
+    lost commit or a resumed scenario sees it. A failure aborts the step.
     """
-    prepared = backend.prepare_step(data, state, 0)
+    scenario_step = SCENARIO_STEPS.get(backend, 0) if scenario_step is None else scenario_step
+    prepared = backend.prepare_step(data, state, scenario_step)
     if prepared.candidate is None:
-        return TrainStepResult(prepared.state, prepared.metrics)
-    selection = ComparePolicy(backend) if policy is None else policy
-    try:
-        decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
-        return backend.settle_step(prepared, decision)
-    except BaseException:
-        backend.abort_step(prepared)
-        raise
+        result = TrainStepResult(prepared.state, prepared.metrics)
+    else:
+        selection = ComparePolicy(backend) if policy is None else policy
+        try:
+            decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
+            result = backend.settle_step(prepared, decision)
+        except BaseException:
+            backend.abort_step(prepared)
+            raise
+    SCENARIO_STEPS[backend] = scenario_step + 1
+    return result
 
 
 async def wait_for_rows(scenario: Scenario, count: int, seconds: float = 30.0) -> tuple[dict[str, Any], ...]:

@@ -12,7 +12,10 @@ Each step gets one directory, which is kept afterwards as the step record::
                     host.json                    the adapter, the parts of its tree, and its config targets
     state/        the method's own files, committed with the step
     scratch/      temporary files, removed when the step ends
-    output/       files the method keeps with the step record
+    output/       files the method keeps with the step record, and what it says about its step:
+                    summary.md                   plain text for the step pages
+                    notes.json                   a JSON object, the commit's method_notes
+                    requires.json                what the change needs where the harness runs
 
 The scenario's history (``reef.evaluation.harness.history``) is beside the
 steps, at ``Workspace.history_dir``; a method reads it and never writes it.
@@ -26,11 +29,13 @@ import json
 import math
 import shutil
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from reef.core.job_data import TrajectorySample
+from reef.core.requirements import parse_requires
 from reef.core.tasks import read_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
@@ -52,6 +57,10 @@ REQUEST_FILE = "request.json"
 EVALUATION_FILE = "evaluation.json"
 FAILURES_FILE = "failures.json"
 HOST_FILE = "host.json"
+#: In ``output/``: what a method says about its step. Each file is optional.
+SUMMARY_FILE = "summary.md"
+NOTES_FILE = "notes.json"
+REQUIRES_FILE = "requires.json"
 #: Where a trace came from: a client's request (``traffic``), or an episode the step ran on a train task
 #: (``rollout``).
 TRACE_SOURCES = ("traffic", "rollout")
@@ -113,6 +122,44 @@ class Trace:
         if self.source == "rollout":
             return None
         return json.loads((self.directory / TRAJECTORY_FILE).read_text(encoding="utf-8"))
+
+
+def json_object(value: Any) -> dict[str, Any]:
+    """``value`` as a JSON object: text keys, and no value that ``json.dumps`` refuses, NaN and infinity included.
+
+    ``ValueError`` otherwise.
+    """
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise ValueError("notes must be a JSON object, whose keys are text")
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"notes must be a JSON object: {exc}") from exc
+    return dict(value)
+
+
+@dataclass(frozen=True)
+class StepOutput:
+    """What a method said about its step, read back from its ``output/``.
+
+    Values: ``summary`` is the stripped text of ``summary.md``, empty without
+    one. ``notes`` is the JSON object of ``notes.json``, and ``requires`` the
+    ``reef.core.requirements`` items of ``requires.json``; each is empty
+    without its file or when the file was refused. ``refused`` maps the name
+    of each refused file to the reason.
+    Purpose: ``Workspace.read_output`` makes it after the method's step; the
+    backend keeps it with the step and the history.
+    """
+
+    summary: str = ""
+    notes: Mapping[str, Any] = field(default_factory=dict)
+    requires: tuple[Mapping[str, Any], ...] = ()
+    refused: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "notes", MappingProxyType(json_object(self.notes)))
+        object.__setattr__(self, "requires", tuple(parse_requires(list(self.requires))))
+        object.__setattr__(self, "refused", MappingProxyType(dict(self.refused)))
 
 
 @dataclass(frozen=True)
@@ -248,6 +295,42 @@ class Workspace:
         """
         return History(self.history_dir)
 
+    def write_output(
+        self, summary: str = "", notes: Mapping[str, Any] | None = None, requires: Sequence[Mapping[str, Any]] = ()
+    ) -> None:
+        """Say what the step did: ``summary.md``, ``notes.json`` and ``requires.json`` in ``output/``.
+
+        An empty argument writes no file. ``ValueError``, before any file is
+        written, when ``notes`` is not a JSON object or an item of
+        ``requires`` is not a requirement.
+        """
+        checked = StepOutput(summary=summary, notes=notes or {}, requires=tuple(requires))
+        self.output.mkdir(parents=True, exist_ok=True)
+        if summary.strip():
+            (self.output / SUMMARY_FILE).write_text(summary.strip() + "\n", encoding="utf-8")
+        if checked.notes:
+            write_json(self.output / NOTES_FILE, dict(checked.notes))
+        if checked.requires:
+            write_json(self.output / REQUIRES_FILE, [dict(item) for item in checked.requires])
+
+    def read_output(self) -> StepOutput:
+        """What the method said about its step; a ``notes.json`` or ``requires.json`` that is not valid is refused."""
+        summary = output_text(self.output / SUMMARY_FILE)
+        notes: dict[str, Any] = {}
+        requires: tuple[Mapping[str, Any], ...] = ()
+        refused: dict[str, str] = {}
+        if text := output_text(self.output / NOTES_FILE):
+            try:
+                notes = json_object(json.loads(text))
+            except ValueError as exc:
+                refused[NOTES_FILE] = str(exc)
+        if text := output_text(self.output / REQUIRES_FILE):
+            try:
+                requires = tuple(parse_requires(json.loads(text)))
+            except ValueError as exc:
+                refused[REQUIRES_FILE] = str(exc)
+        return StepOutput(summary, notes, requires, refused)
+
     def state_files(self) -> dict[str, str]:
         """Every file in ``state/`` as relative path to text.
 
@@ -264,6 +347,11 @@ class Workspace:
                 f"state/ cannot be committed: it holds {size} bytes, and a step commits at most {MAX_STATE_BYTES}"
             )
         return files
+
+
+def output_text(path: Path) -> str:
+    """The stripped text of ``path``; empty when there is no such file."""
+    return path.read_text(encoding="utf-8", errors="replace").strip() if path.is_file() else ""
 
 
 def write_json(path: Path, value: Any) -> None:

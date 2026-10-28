@@ -68,6 +68,7 @@ class ScenarioReleases:
             records = () if not self._store.durable else self._store.history()
             rows = [
                 self._release_row(
+                    step=0,
                     artifact_ref=self._creation_artifact,
                     checkpoint=True,
                     recorded_at=None,
@@ -77,6 +78,7 @@ class ScenarioReleases:
             ]
             rows.extend(
                 self._release_row(
+                    step=record.step,
                     artifact_ref=record.artifact_ref,
                     checkpoint=record.checkpoint,
                     recorded_at=record.recorded_at,
@@ -95,6 +97,7 @@ class ScenarioReleases:
             if not records and scenario_step > 0:
                 rows.append(
                     self._release_row(
+                        step=scenario_step,
                         artifact_ref=self._artifacts.current,
                         checkpoint=True,
                         recorded_at=None,
@@ -212,6 +215,7 @@ class ScenarioReleases:
     @staticmethod
     def _release_row(
         *,
+        step: int,
         artifact_ref: ArtifactRef,
         checkpoint: bool,
         recorded_at: float | None,
@@ -226,6 +230,7 @@ class ScenarioReleases:
         components: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
+            "step": step,
             "release_id": artifact_ref.release_id,
             "parent_release_id": artifact_ref.parent_release_id,
             "content_id": artifact_ref.content_id,

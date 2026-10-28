@@ -13,7 +13,6 @@ from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.harness.tree import TreePatch
 from reef.service.app import create_app
-from reef.train.harness_backend import StepResult
 from reef.train.harness_backend.records import MAX_RECORD_BYTES, read_step_records
 
 SCENARIO = "agents"
@@ -56,7 +55,7 @@ def test_record_scope_and_limits(tmp_path: Path) -> None:
 def test_step_record_http_contract(tmp_path: Path) -> None:
     def method(workspace, tools):
         workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
-        return StepResult("added a rule")
+        workspace.write_output("added a rule", {"rules": 1})
 
     dispatcher = manual_dispatcher(tmp_path, method)
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
@@ -77,10 +76,10 @@ def test_step_record_http_contract(tmp_path: Path) -> None:
             inventory = await response.json()
             assert inventory["status"] == "retained"
             listed = {entry["path"] for entry in inventory["files"]}
-            assert {"calls.json", "result.json", "material/request.json", "material/evaluation.json"} <= listed
-            response = await client.get(url, params={"path": "result.json"}, headers=headers)
+            assert {"calls.json", "output/notes.json", "material/request.json", "material/evaluation.json"} <= listed
+            response = await client.get(url, params={"path": "output/notes.json"}, headers=headers)
             assert response.status == 200
-            assert json.loads((await response.json())["text"])["summary"] == "added a rule"
+            assert json.loads((await response.json())["text"]) == {"rules": 1}
             assert (await client.get(url, params={"path": "../secret.json"}, headers=headers)).status == 400
             assert (await client.get(url, params={"path": "absent.json"}, headers=headers)).status == 404
             assert (await client.get("/reef/harness/releases/99/records", headers=headers)).status == 404
@@ -147,7 +146,8 @@ def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Pa
                     assert metrics["skipped"] == "instruction failed"
                     assert Path(metrics["step_record"]).name == "1"
                 else:
-                    assert Path(metrics["step_record"]).name == "1-2"
+                    # The failed instruction committed step 1, so the retry is step 2 and its record is named so.
+                    assert Path(metrics["step_record"]).name == "2"
                 url = f"/reef/harness/releases/{step}/records"
                 response = await client.get(url, headers=headers)
                 assert (await response.json())["status"] == "retained"

@@ -29,7 +29,7 @@ from reef.core.prompts import untrusted_text
 from reef.core.trajectories import atif_messages
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.train.harness_backend import Method, StepContext, StepResult, Trace
+from reef.train.harness_backend import Method, StepContext, Trace
 
 PROMPTS = Path(__file__).parent / "prompts"
 #: The judge's prompt; ``$trace`` is the run.
@@ -156,7 +156,7 @@ class ReasoningBank(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(ReasoningBankSettings.parse(config, plugin_class=cls))
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         """Label each run among the traces, add its memory items to the bank, and write the bank as the tree's
         ``rb-*`` skills.
 
@@ -242,7 +242,8 @@ class ReasoningBank(Method):
         validation = tools.check(candidate)
         if not validation.passed:
             summary = f"the memory skills fail validation, so the bank stays as it was: {validation.message()}"
-            return StepResult(summary, {**notes, "problems": list(validation.problems)})
+            workspace.write_output(summary, {**notes, "problems": list(validation.problems)})
+            return
         workspace.write_tree(candidate)
         rows = [asdict(item) for item in bank]
         bank_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -251,7 +252,7 @@ class ReasoningBank(Method):
             f"{len(notes['added'])} item(s) added, {len(notes['replaced'])} replaced and {len(dropped)} dropped; "
             f"the bank holds {len(bank)}"
         )
-        return StepResult(summary, notes)
+        workspace.write_output(summary, notes)
 
 
 def trace_text(trace: Trace) -> str:

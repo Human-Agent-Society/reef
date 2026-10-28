@@ -21,7 +21,7 @@ from reef.harness.tree import TreePatch
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
-from reef.train.harness_backend import StepResult, Workspace
+from reef.train.harness_backend import Workspace
 from reef.train.types import JobData
 
 TEXT = "add a skill that texts me when the run is blocked"
@@ -64,16 +64,16 @@ def adding_rules(workspace: Workspace, tools) -> TreePatch | None:
     return TreePatch(changed_rules(workspace.tree().files["rules.md"] + f"rule {workspace.step}\n"))
 
 
-def answered(workspace: Workspace, patch: TreePatch, **result) -> StepResult:
-    """Write ``patch`` over the head tree, so the tree it makes is the candidate, and return the step's result."""
+def answered(workspace: Workspace, patch: TreePatch, **output) -> None:
+    """Write ``patch`` over the head tree, so the tree it makes is the candidate, and say what the step did."""
     workspace.write_tree(workspace.tree().apply(patch))
-    return StepResult(**result)
+    workspace.write_output(**output)
 
 
 def request_rows(scenario) -> list[dict]:
     """The committed rows that answered a request, oldest first."""
     rows = [row for row in scenario.releases() if row.get("metrics", {}).get("training_request")]
-    return sorted(rows, key=lambda row: row["metrics"]["steps"])
+    return sorted(rows, key=lambda row: row["step"])
 
 
 async def committed(scenario, count: int, seconds: float = 30.0) -> list[dict]:
@@ -314,7 +314,8 @@ def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tm
     def method(workspace, tools):
         handed.append([dict(item) for item in workspace.request().requires])
         patch, requires = next(answers)
-        return StepResult() if patch is None else answered(workspace, patch, requires=requires)
+        if patch is not None:
+            answered(workspace, patch, requires=requires)
 
     dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
@@ -447,7 +448,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
         return answered(workspace, MARKER, requires=({"name": "SMTP_HOST", "kind": "env"},))
 
     def keeping(workspace, tools):
-        return StepResult()
+        return None
 
     for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
         (tmp_path / str(index)).mkdir()

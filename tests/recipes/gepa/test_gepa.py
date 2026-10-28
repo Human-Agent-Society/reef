@@ -100,8 +100,9 @@ def gepa_backend(
 
 
 def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainStepResult:
-    """One step on ``samples``, decided by the compare policy on the mean."""
-    return backend_step(backend, JobData(f"demo:{number}", samples), state, ComparePolicy(backend, statistic="mean"))
+    """Step ``number`` on ``samples``, decided by the compare policy on the mean."""
+    policy = ComparePolicy(backend, statistic="mean")
+    return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, scenario_step=number - 1)
 
 
 def sample(name: str, score: float, prompt: str = TASK) -> TrajectorySample:
@@ -113,9 +114,9 @@ def sample(name: str, score: float, prompt: str = TASK) -> TrajectorySample:
     return recorded_trajectory(name, payload, score)
 
 
-def committed(archive: Archive, steps: int = 0) -> dict[str, Any]:
-    """The backend state after ``steps`` steps whose method committed ``archive``."""
-    return HarnessState(steps=steps, method_files={ARCHIVE_FILE: json.dumps(archive.to_state())}).to_json()
+def committed(archive: Archive) -> dict[str, Any]:
+    """The backend state of a step whose method committed ``archive``."""
+    return HarnessState(method_files={ARCHIVE_FILE: json.dumps(archive.to_state())}).to_json()
 
 
 def archive_of(result: TrainStepResult) -> Archive:
@@ -534,5 +535,5 @@ def test_a_pending_candidate_whose_step_reached_no_decision_is_dropped(tmp_path:
     pending.add({"rules.md": REFLECTED}, 0, [1.0], step=3)
     backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(NO_MARKER_REPLY))
     # Step 3 left a candidate pending, and the history holds no decision on it: the backend skipped that step.
-    archive = archive_of(step(backend, 4, committed(pending, steps=3), sample("a1", 0.0)))
+    archive = archive_of(step(backend, 4, committed(pending), sample("a1", 0.0)))
     assert (archive.pending, archive.served, archive.candidates[1].val_scores) == (None, 0, None)

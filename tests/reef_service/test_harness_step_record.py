@@ -38,7 +38,6 @@ from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import LocalExecutor
 from reef.train.backend import ComponentReleases
-from reef.train.harness_backend import StepResult
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
 from reef.train.types import JobData, TrainStepResult
@@ -126,8 +125,9 @@ def steps_dir(tmp_path: Path) -> Path:
     return (tmp_path / "harness" / "demo" / COMPONENT / "steps").resolve()
 
 
-def step(backend: HarnessBackend, state=None) -> TrainStepResult:
-    return backend_step(backend, JobData("demo:1"), backend.initial_state() if state is None else state)
+def step(backend: HarnessBackend, state=None, scenario_step: int | None = None) -> TrainStepResult:
+    state = backend.initial_state() if state is None else state
+    return backend_step(backend, JobData("demo:1"), state, scenario_step=scenario_step)
 
 
 def read_json(path: Path):
@@ -207,9 +207,9 @@ def test_the_record_keeps_every_model_call_through_the_binding_seam(tmp_path: Pa
     assert calls[1]["params"] == {} and calls[1]["messages"][1] == {"role": "user", "content": "second"}
     clipped = calls[1]["messages"][0]["content"]
     assert clipped.startswith("x" * RECORD_TEXT_CAP) and clipped.endswith("... [clipped 5 chars]")
-    # The record keeps the candidate the method left and the result it returned.
+    # The record keeps the candidate the method left; a method that said nothing leaves output/ empty.
     assert HarnessTree.read(record / "harness") == PI_SEED.apply(MARKER)
-    assert read_json(record / "result.json") == {"summary": "", "notes": {}, "requires": []}
+    assert list((record / "output").iterdir()) == []
 
     def wordy(workspace, tools):
         tools.models.served.chat([{"role": "user", "content": "go"}], stop=["z" * (RECORD_TEXT_CAP + 2)])
@@ -250,7 +250,7 @@ def test_the_record_keeps_a_failed_call_and_the_calls_before_a_budget_stop(tmp_p
         step(backend)
     # The stop raised out of the method, and the two calls before it are on file.
     record = steps_dir(tmp_path / "greedy") / "1"
-    assert len(read_json(record / "calls.json")) == 2 and not (record / "result.json").exists()
+    assert len(read_json(record / "calls.json")) == 2 and list((record / "output").iterdir()) == []
 
 
 def test_a_rejected_removal_keeps_its_null_in_the_metrics(tmp_path: Path) -> None:
@@ -309,12 +309,12 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     before = {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")}
 
     # The same step number again (a crash between prepare and commit) lands beside the first attempt.
-    result = step(backend)
+    result = step(backend, scenario_step=0)
     second = root / "1-2"
     assert result.metrics["step_record"] == str(second)
     assert {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")} == before
     assert {path.relative_to(second) for path in second.rglob("*")} == set(before)
-    step(backend)
+    step(backend, scenario_step=0)
     assert sorted(path.name for path in root.iterdir()) == ["1", "1-2", "1-3"]
 
     with pytest.raises(FileExistsError):
@@ -432,13 +432,13 @@ def test_the_record_redacts_credential_shaped_text_from_the_model_calls(tmp_path
         tools.models.served.chat([{"role": "user", "content": f"the key is {key}"}])
         # An agent's gateway records the calls it relays itself.
         tools.calls.record({"source": "agent", "reply": f"the agent used {key}"})
-        return StepResult(f"wrote {key} into the rules")
+        workspace.write_output(f"wrote {key} into the rules")
 
     backend, _ = harness_backend(tmp_path, method)
     result = step(backend)
     assert result.metrics["skipped"] == UNCHANGED
     record = steps_dir(tmp_path) / "1"
-    written = (record / "calls.json").read_text() + (record / "result.json").read_text()
+    written = (record / "calls.json").read_text() + (record / "output" / "summary.md").read_text()
     # The request, the reply, the provider's response, the gateway's entry and the method's summary, each on file
     # without the key.
     assert key not in written and written.count("[redacted credential]") == 5

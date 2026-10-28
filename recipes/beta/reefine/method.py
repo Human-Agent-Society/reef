@@ -17,7 +17,7 @@ from typing import Any
 from recipes.beta.reefine.agent import ReefineAgent, answer_with_agent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, answer_request, learn_from_failures
 from reef.harness.adapters import get_adapter
-from reef.train.harness_backend import Method, StepContext, StepResult
+from reef.train.harness_backend import Method, StepContext
 
 
 class ReefineMethod(Method):
@@ -33,7 +33,7 @@ class ReefineMethod(Method):
     def __init__(self, agent: ReefineAgent | None = None) -> None:
         self.agent = agent
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         head = workspace.tree()
         traces = workspace.traces()
@@ -43,17 +43,20 @@ class ReefineMethod(Method):
             layout = get_adapter(adapter).layout
             patch = None if not traces else learn_from_failures(head, traces, tools.models, layout)
             if patch is None:
-                return StepResult()
+                return
             workspace.write_tree(head.apply(patch))
             plural = "" if len(traces) == 1 else "s"
-            return StepResult(summary=f"Learned {', '.join(patch.changes)} from {len(traces)} failing trace{plural}.")
+            workspace.write_output(
+                summary=f"Learned {', '.join(patch.changes)} from {len(traces)} failing trace{plural}."
+            )
+            return
         # The agent answers requests on pi alone: its rules and its trials are pi's.
         if self.agent is not None and adapter == EXTENSION_ADAPTER:
             answer = answer_with_agent(workspace, tools, head, request, self.agent)
         else:
             answer = answer_request(head, request, traces, tools, adapter)
         workspace.write_tree(head.apply(answer.patch))
-        return StepResult(summary=step_summary(answer.notes), notes=answer.notes, requires=answer.requires)
+        workspace.write_output(summary=step_summary(answer.notes), notes=answer.notes, requires=answer.requires)
 
 
 def step_summary(notes: Mapping[str, Any]) -> str:

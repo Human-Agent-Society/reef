@@ -1096,7 +1096,7 @@ Retained step files
 of the same catalog step's record directory, authenticated and
 scenario-scoped like the version page. The response is
 ``{"status": "retained", "files": [{"path": "calls.json", "bytes": 123}]}``.
-Add ``?path=calls.json`` (or another inventory path, such as ``result.json``
+Add ``?path=calls.json`` (or another inventory path, such as ``output/notes.json``
 or ``material/traces/0/trace.json``) to read
 ``{"status": "retained", "path": "...", "text": "..."}``. The service does not
 interpret model replies or agent events. A console can render those persisted

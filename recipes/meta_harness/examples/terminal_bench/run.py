@@ -31,7 +31,6 @@ from reef.scenario.scenario import Scenario
 from reef.service.deploy.config_utils import load_config
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.harness_backend.state import HarnessState
 
 HERE = Path(__file__).resolve().parent
 SCENARIO = "terminal-bench"
@@ -111,11 +110,6 @@ def harness_backend(scenario: Scenario) -> HarnessBackend:
     return backend
 
 
-def next_step(algorithm_state: Mapping[str, Any] | None) -> int:
-    """The number of the step after the commit that left ``algorithm_state``."""
-    return (0 if algorithm_state is None else HarnessState.from_json(algorithm_state).steps) + 1
-
-
 def served_tree(scenario: Scenario) -> HarnessTree:
     """The head release's source tree: the tree the next step builds on."""
     artifact = scenario.repository.resolve(scenario.repository.require_current_artifact())
@@ -185,7 +179,7 @@ def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory:
     if not commits:
         return {}
     committed = commits[-1]
-    step = next_step(committed.algorithm_state)
+    step = committed.step + 1
     history = harness_backend(scenario).history
     head = served_tree(scenario).checksum()
     members = search_population(history, head, step, recipe.configured_tasks())
@@ -222,7 +216,7 @@ def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) 
     summary = write_summary(scenario, recipe, directory)
     while scenario.scenario_step < recipe.evolution.max_steps:
         # The method's own budget check, before a rollout is spent on a step that would propose nothing.
-        if method.spent_budget(history, next_step(scenario.trainer.state)) is not None:
+        if method.spent_budget(history, scenario.scenario_step + 1) is not None:
             break
         # A previous process may have recorded the report but not committed its
         # step. Let Reef replay it before spending on another rollout.

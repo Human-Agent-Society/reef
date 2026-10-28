@@ -1269,7 +1269,7 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     assert record.step == 1
     assert record.checkpoint is False
     assert record.artifact_ref == head  # head unchanged: no new artifact published
-    assert record.algorithm_state == HarnessState(steps=1).to_json()
+    assert record.algorithm_state == HarnessState().to_json()
     assert record.high_water_sequence == 2
     assert record.consumed_ids == frozenset({"i1", "r1"})
     dispatcher.close()
@@ -1292,7 +1292,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")
     assert recovered.scenario_step == 1
-    assert recovered.trainer.state["steps"] == 1
+    assert recovered.trainer.state == HarnessState().to_json()
     assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
     # Record progress resumes at the committed watermark, not sequence 0.
     assert recovered.trainer.data_offset == 2

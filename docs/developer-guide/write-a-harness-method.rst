@@ -11,11 +11,11 @@ one operation:
 
 .. code:: python
 
-   from reef.train.harness_backend import Method, StepContext, StepResult
+   from reef.train.harness_backend import Method, StepContext
 
 
    class MyMethod(Method):
-       def step(self, context: StepContext) -> StepResult: ...
+       def step(self, context: StepContext) -> None: ...
 
 At each step, Reef calls ``step`` with a ``StepContext`` of two parts:
 
@@ -26,7 +26,8 @@ At each step, Reef calls ``step`` with a ``StepContext`` of two parts:
   deployment's coding agent.
 
 The method edits ``workspace.harness``. The tree there when ``step`` returns
-is the step's candidate. Reef then validates it, evaluates it, records the
+is the step's candidate. What the method says about the step it writes to
+``workspace.output`` (see `What the method says`_). Reef then validates it, evaluates it, records the
 result in the history, and publishes a selected candidate (see `The loop
 <../user-guide/evolve-your-harness.rst#the-loop>`__). A method never
 subclasses the backend.
@@ -41,7 +42,7 @@ traces that scored below 1, and writes the reply to ``rules.md``:
 
    from reef.core.prompts import untrusted_text
    from reef.harness.tree import TreePatch
-   from reef.train.harness_backend import Method, StepContext, StepResult
+   from reef.train.harness_backend import Method, StepContext
 
    PROMPT = "Rewrite these agent rules so that the failing requests succeed. Reply with the rules alone."
 
@@ -49,11 +50,12 @@ traces that scored below 1, and writes the reply to ``rules.md``:
    class Reflect(Method):
        """One model call per step: rewrite rules.md from the failing traces."""
 
-       def step(self, context: StepContext) -> StepResult:
+       def step(self, context: StepContext) -> None:
            workspace, tools = context.workspace, context.tools
            failing = [trace for trace in workspace.traces() if trace.score is not None and trace.score < 1.0]
            if not failing:
-               return StepResult("no failing trace")  # harness/ is unchanged, so the step is skipped
+               workspace.write_output("no failing trace")  # harness/ is unchanged, so the step is skipped
+               return
            tree = workspace.tree()
            shown = "\n\n".join(
                f"task: {trace.task}\nreply: {trace.reply}\nfeedback: {trace.feedback}" for trace in failing
@@ -64,9 +66,10 @@ traces that scored below 1, and writes the reply to ``rules.md``:
            candidate = tree.apply(TreePatch({"rules.md": reply.strip() + "\n"}))
            validation = tools.check(candidate)
            if not validation.passed:
-               return StepResult(f"the new rules fail validation: {validation.message()}")
+               workspace.write_output(f"the new rules fail validation: {validation.message()}")
+               return
            workspace.write_tree(candidate)
-           return StepResult(f"rewrote rules.md from {len(failing)} failing traces", {"failing": len(failing)})
+           workspace.write_output(f"rewrote rules.md from {len(failing)} failing traces", {"failing": len(failing)})
 
 `Configure a deployment`_ shows the deployment that runs it, and `Score an
 episode`_ shows a scorer.
@@ -91,10 +94,10 @@ In a prompt, ``{step}`` becomes the step's number and ``{history}`` the
 history's path from the workspace. Reef's protocol rules
 (``reef/train/harness_backend/agent/protocol.md``) tell the agent the rest:
 the workspace, the files it writes, and its tools (see `Run a coding
-agent`_). After the agent exits, the method reads ``output/summary.md`` (the
-step's summary), ``output/notes.json`` (a JSON object added to its notes) and
-``output/requires.json`` (a JSON array, its requires). A run that does not
-exit 0 leaves the head tree, so the step skips.
+agent`_). The agent says what the step did in ``output/``, as every method
+does (see `What the method says`_), and the method adds the run's outcome to
+the notes under ``agent``. A run that does not exit 0 leaves the head tree,
+so the step skips.
 
 .. code:: yaml
 
@@ -273,22 +276,28 @@ log stays in ``output/agent-session.jsonl``. ``run_agent`` raises
 ``model`` names no binding, and ``ValueError`` when ``tree`` does not render
 for the agent's adapter.
 
-The result
-----------
+What the method says
+--------------------
 
-``StepResult`` has three optional fields:
+A method says what its step did in three optional files of ``output/``. Every
+method writes them the same way, whether it is Python code or a coding agent:
 
-- ``summary``: plain text that says what the step did. The step pages show
+- ``summary.md``: plain text that says what the step did. The step pages show
   it, and the commit metrics keep it as ``method_summary``.
-- ``notes``: a JSON object, kept as ``method_notes``. ``StepResult`` refuses
-  a value that is not one. Reef never reads it to make a decision.
-- ``requires``: what the change needs on the person's machine, as
-  ``reef.core.requirements`` items. Reef reads it on a request step only (see
-  `Answer a training request`_).
+- ``notes.json``: a JSON object, kept as ``method_notes``. Reef never reads it
+  to make a decision.
+- ``requires.json``: what the change needs on the person's machine, a JSON
+  array of ``reef.core.requirements`` items. Reef reads it on a request step
+  only (see `Answer a training request`_).
 
-Reef writes the result to the step record's ``result.json``. The history keeps
-``summary`` and ``notes`` with the candidate, whether the step publishes or
-not.
+``workspace.write_output(summary, notes, requires)`` writes the three files and
+raises ``ValueError`` before it writes any of them when ``notes`` is not a JSON
+object or an item of ``requires`` is not a requirement. After ``step``
+returns, Reef reads the files. It refuses a ``notes.json`` or
+``requires.json`` that is not valid and names it in the commit metrics'
+``method_output_refused``. The step record keeps ``output/`` with the summary
+and notes redacted and clipped, and the history keeps the summary and notes
+with the candidate, whether the step publishes or not.
 
 Keep state between steps
 ------------------------

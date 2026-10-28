@@ -28,7 +28,7 @@ from reef.core.trajectories import atif_messages
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import TreePatch
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.train.harness_backend import Method, StepContext, StepResult, Trace
+from reef.train.harness_backend import Method, StepContext, Trace
 
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 REFLECTOR_PROMPT = (PROMPTS_DIR / "reflector.md").read_text(encoding="utf-8")
@@ -248,7 +248,7 @@ class ACE(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(ACESettings.parse(config, plugin_class=cls))
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         settings = self.settings
         model = tools.models[settings.model]
@@ -298,10 +298,13 @@ class ACE(Method):
         validation = tools.check(candidate)
         if not validation.passed:
             # The playbook stays as the last step left it, so state/ and rules.md still agree.
-            return StepResult(f"kept the last playbook: the new rules fail validation: {validation.message()}", notes)
+            workspace.write_output(
+                f"kept the last playbook: the new rules fail validation: {validation.message()}", notes
+            )
+            return
         path.write_text(kept.to_json(), encoding="utf-8")
         workspace.write_tree(candidate)
-        return StepResult(
+        workspace.write_output(
             f"traces: {len(read)} of {len(traces)} read, {len(skipped)} skipped; tags: {counts['helpful_tags']} "
             f"helpful, {counts['harmful_tags']} harmful; bullets: {counts['added']} added, "
             f"{len(playbook.bullets) - len(kept.bullets)} removed, {len(kept.bullets)} kept",

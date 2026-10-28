@@ -36,7 +36,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend import Method, StepContext, StepResult, Tools, Workspace
+from reef.train.harness_backend import Method, StepContext, Tools, Workspace
 
 #: ``full_history`` branches from any candidate; ``incumbent_only``, the greedy control, from the served one.
 MODES = ("full_history", "incumbent_only")
@@ -162,7 +162,7 @@ class MetaHarness(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(MetaHarnessSettings.parse(config, plugin_class=cls))
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         settings = self.settings
         host = workspace.host()
@@ -181,7 +181,8 @@ class MetaHarness(Method):
         history = workspace.history()
         budget = self.spent_budget(history, workspace.step)
         if budget is not None:
-            return StepResult(f"The {budget} budget is spent.", {"status": "budget_exhausted", "budget": budget})
+            workspace.write_output(f"The {budget} budget is spent.", {"status": "budget_exhausted", "budget": budget})
+            return
         head = workspace.tree().checksum()
         tasks = workspace.tasks()
         members = search_population(
@@ -219,7 +220,10 @@ class MetaHarness(Method):
             tree = self.checked_tree(proposal["files"], parent.tree, layout, parts, tools)
         except ValueError as exc:
             append_attempt(workspace, {"step": workspace.step, "status": "invalid", "error": str(exc)})
-            return StepResult(f"The proposer's reply was invalid: {exc}", {"status": "invalid", "error": str(exc)})
+            workspace.write_output(
+                f"The proposer's reply was invalid: {exc}", {"status": "invalid", "error": str(exc)}
+            )
+            return
         candidate = tree.checksum()
         # The head is a committed tree of the history, so it is known too.
         known = {record.tree for record in history.candidates.values() if not uncommitted(record, workspace.step)}
@@ -233,9 +237,10 @@ class MetaHarness(Method):
                     "parent_id": parent.record.tree,
                 },
             )
-            return StepResult(
+            workspace.write_output(
                 f"The reply repeats candidate {candidate}.", {"status": "duplicate", "candidate_id": candidate}
             )
+            return
         workspace.write_tree(tree)
         notes = {
             "status": "proposed",
@@ -244,7 +249,7 @@ class MetaHarness(Method):
             "changes": proposal["changes"],
         }
         summary = f"Hypothesis: {proposal['hypothesis']}\nChanges: {proposal['changes']}\nParent: {parent.record.tree}"
-        return StepResult(summary, notes)
+        workspace.write_output(summary, notes)
 
     def spent_budget(self, history: History, step: int) -> str | None:
         """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_episodes``, ``None``

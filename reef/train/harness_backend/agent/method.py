@@ -12,8 +12,9 @@ one that no part of the agent's adapter takes.
 
 Each step runs the agent once (``Tools.run_agent``). The tree it leaves in
 ``harness/`` is the candidate; a run that does not exit 0 leaves the head
-tree, so the step skips. ``output/summary.md`` becomes the step's summary,
-``output/notes.json`` its notes, and ``output/requires.json`` its requires.
+tree, so the step skips. The agent says what the step did in ``output/``
+(``summary.md``, ``notes.json``, ``requires.json``), as every method does;
+the method adds the run's outcome to the notes under ``agent``.
 """
 
 from __future__ import annotations
@@ -26,20 +27,15 @@ from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
-from reef.core.requirements import parse_requires
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.agent.run import fill
-from reef.train.harness_backend.contract import Method, StepContext, StepResult
-from reef.train.harness_backend.workspace import Workspace
+from reef.train.harness_backend.contract import Method, StepContext
+from reef.train.harness_backend.workspace import NOTES_FILE, SUMMARY_FILE, json_object, output_text
 
 START_FILE = "START.md"
 RESUME_FILE = "RESUME.md"
 #: The folder's file for people, which the agent is not given.
 README_FILE = "README.md"
-#: In the step's ``output/``: what the agent says about its step.
-SUMMARY_FILE = "summary.md"
-NOTES_FILE = "notes.json"
-REQUIRES_FILE = "requires.json"
 
 
 @dataclass(frozen=True)
@@ -96,56 +92,26 @@ class AgentMethod(Method):
         # The rest is the agent's own tree; rendering it for the agent's adapter refuses a file no part takes.
         return cls(start, resume, HarnessTree(files), settings.model)
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         head = workspace.tree()
         prompt = self.start
         if self.resume is not None and any(workspace.state.iterdir()):
             prompt = self.resume
         outcome = tools.run_agent(fill(prompt, workspace), tree=self.tree, model=self.model)
-        notes: dict[str, Any] = {"agent": outcome.to_json()}
         if not outcome.succeeded:
             workspace.write_tree(head)
-            return StepResult(f"the agent {outcome.describe()}; the step keeps the head tree", notes)
-        own, problem = agent_notes(workspace)
-        notes.update(own)
-        if problem:
-            notes["notes_refused"] = problem
-        requires, problem = agent_requires(workspace)
-        if problem:
-            notes["requires_refused"] = problem
-        return StepResult(read_text(workspace.output / SUMMARY_FILE), notes, requires)
-
-
-def read_text(path: Path) -> str:
-    """The text of ``path``, stripped; empty when there is no such file."""
-    return path.read_text(encoding="utf-8", errors="replace").strip() if path.is_file() else ""
-
-
-def agent_notes(workspace: Workspace) -> tuple[dict[str, Any], str]:
-    """The JSON object the agent wrote to ``output/notes.json`` without its ``agent`` key, which Reef writes, and why
-    the file was refused, empty when it was not."""
-    text = read_text(workspace.output / NOTES_FILE)
-    if not text:
-        return {}, ""
-    try:
-        notes = json.loads(text)
-        StepResult(notes=notes)
-    except (TypeError, ValueError) as exc:
-        return {}, f"{NOTES_FILE} is not a JSON object: {exc}"
-    return {key: value for key, value in notes.items() if key != "agent"}, ""
-
-
-def agent_requires(workspace: Workspace) -> tuple[tuple[dict[str, Any], ...], str]:
-    """The requires items the agent wrote to ``output/requires.json``, and why the file was refused, empty when it
-    was not."""
-    text = read_text(workspace.output / REQUIRES_FILE)
-    if not text:
-        return (), ""
-    try:
-        return tuple(parse_requires(json.loads(text))), ""
-    except ValueError as exc:
-        return (), f"{REQUIRES_FILE}: {exc}"
+            workspace.write_output(
+                f"the agent {outcome.describe()}; the step keeps the head tree", {"agent": outcome.to_json()}
+            )
+            return
+        text = output_text(workspace.output / NOTES_FILE)
+        try:
+            notes = json_object(json.loads(text)) if text else {}
+        except ValueError:
+            # The backend refuses the agent's notes.json as it stands, and records why.
+            return
+        workspace.write_output(output_text(workspace.output / SUMMARY_FILE), {**notes, "agent": outcome.to_json()})
 
 
 __all__ = ["AgentMethod", "AgentMethodSettings"]

@@ -596,11 +596,11 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "s2").mkdir(parents=True)
     (work / "agent-record").mkdir()
     commit = {
+        "step": 1,
         "recorded_at": 1050.0,
         "operation": "training",
         "artifact_ref": {"release_id": "r2", "parent_release_id": "r1"},
         "metrics": {
-            "steps": 1,
             "selected": True,
             "wins": 2,
             "losses": 0,

@@ -173,15 +173,15 @@ def test_the_method_reads_the_committed_manifest_from_its_workspace(tmp_path: Pa
 
 
 def failing_step(
-    tmp_path: Path, binary: str | None, received: list[FailureManifest | None], state: dict
+    tmp_path: Path, binary: str | None, received: list[FailureManifest | None], state: dict, step: int
 ) -> TrainStepResult:
-    """One step whose method rewrites the rules, over ``binary`` (the fake pi when ``None``)."""
+    """Step ``step``, whose method rewrites the rules, over ``binary`` (the fake pi when ``None``)."""
 
     def method(workspace, tools):
         received.append(committed_manifest(workspace))
         return TreePatch(changed_rules(f"rules {len(received)}\n"))
 
-    return backend_step(backend(tmp_path, method, binary), batch(), state)
+    return backend_step(backend(tmp_path, method, binary), batch(), state, scenario_step=step - 1)
 
 
 def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -> None:
@@ -190,7 +190,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
 
     # Step 1: both sides fail at launch, the step is rejected, and the
     # retained current side's failure becomes the manifest.
-    first = failing_step(tmp_path, missing, received, {"steps": 0})
+    first = failing_step(tmp_path, missing, received, {}, 1)
     assert received == [None]
     assert first.metrics["failures"] == {"new": 1, "persisting": 0, "fixed": 0}
     entry = FailureManifest.from_state(first.state["failure_manifest"]).entries[0]
@@ -201,7 +201,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
 
     # Step 2 on the committed state: the method observes the failure, and the
     # unchanged failure persists with its streak extended.
-    second = failing_step(tmp_path, missing, received, dict(first.state))
+    second = failing_step(tmp_path, missing, received, dict(first.state), 2)
     assert isinstance(received[1], FailureManifest)
     assert received[1].entries[0].count == 1
     assert second.metrics["failures"] == {"new": 0, "persisting": 1, "fixed": 0}
@@ -209,7 +209,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
     assert (persisted.count, persisted.first_seen_step, persisted.last_seen_step) == (2, 1, 2)
 
     # Step 3 with a working binary: no episode fails, so the entry is fixed.
-    third = failing_step(tmp_path, None, received, dict(second.state))
+    third = failing_step(tmp_path, None, received, dict(second.state), 3)
     assert received[2] == FailureManifest.from_state(second.state["failure_manifest"])
     assert third.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 1}
     settled = FailureManifest.from_state(third.state["failure_manifest"])
@@ -219,7 +219,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
 
 def test_manifest_recovers_through_the_commit_history(tmp_path: Path) -> None:
     received: list[FailureManifest | None] = []
-    first = failing_step(tmp_path, str(tmp_path / "no-such-binary"), received, {"steps": 0})
+    first = failing_step(tmp_path, str(tmp_path / "no-such-binary"), received, {}, 1)
 
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         log = records.commit_history()
@@ -240,13 +240,14 @@ def test_manifest_recovers_through_the_commit_history(tmp_path: Path) -> None:
     assert recovered is not None
     assert recovered["failure_manifest"] == first.state["failure_manifest"]
 
-    failing_step(tmp_path, str(tmp_path / "no-such-binary"), received, dict(recovered))
+    failing_step(tmp_path, str(tmp_path / "no-such-binary"), received, dict(recovered), 2)
     assert received[1] == FailureManifest.from_state(first.state["failure_manifest"])
 
 
 def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Path) -> None:
-    # Algorithm state may carry only the step counter. It must parse and step,
-    # delivering no previous failure manifest.
+    # An older record's algorithm state may carry only the step counter that the
+    # state no longer keeps. It must parse and step, delivering no previous
+    # failure manifest.
     line = json.dumps(
         {
             "record": "reef-commit/5",
@@ -272,7 +273,7 @@ def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Pa
     record = CommitRecord.from_dict(json.loads(line))
     assert record.algorithm_state is not None
     received: list[FailureManifest | None] = []
-    result = failing_step(tmp_path, None, received, dict(record.algorithm_state))
+    result = failing_step(tmp_path, None, received, dict(record.algorithm_state), 2)
     assert received == [None]
     assert isinstance(FailureManifest.from_state(result.state["failure_manifest"]), FailureManifest)
 

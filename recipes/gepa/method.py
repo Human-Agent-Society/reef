@@ -39,7 +39,7 @@ from reef.core.plugins import ConfiguredPlugin, PluginSettings
 from reef.evaluation.harness import History
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree
-from reef.train.harness_backend import Method, StepContext, StepResult, Tools, Trace, Workspace
+from reef.train.harness_backend import Method, StepContext, Tools, Trace, Workspace
 
 from .archive import Archive
 from .components import candidate_tree, texts_of
@@ -173,7 +173,7 @@ class GEPA(Method):
         )
         return cls(settings, feedback)
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         path = workspace.state / ARCHIVE_FILE
         tasks = workspace.tasks()
@@ -189,7 +189,7 @@ class GEPA(Method):
         )
         summary, record = self.iterate(archive, workspace, tools, head, len(tasks))
         path.write_text(json.dumps(archive.to_state(), indent=2) + "\n", encoding="utf-8")
-        return StepResult(summary, {**record, "metric_calls": archive.metric_calls})
+        workspace.write_output(summary, {**record, "metric_calls": archive.metric_calls})
 
     def iterate(
         self, archive: Archive, workspace: Workspace, tools: Tools, head: HarnessTree, valset_size: int

@@ -6,23 +6,20 @@ harness's components and the step's material are files, and the
 :class:`Tools`, the services that Reef runs for the method: model calls, the
 tree check, the evaluation, and a run of the deployment's coding agent. The
 method edits ``context.workspace.harness``; the tree it leaves there is the
-step's candidate, and an unchanged tree skips the step. It returns a
-:class:`StepResult` that describes what it did. A method never subclasses
-the backend.
+step's candidate, and an unchanged tree skips the step. What it says about the
+step it writes to ``output/`` (``Workspace.write_output``). A method never
+subclasses the backend.
 """
 
 from __future__ import annotations
 
-import json
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from types import MappingProxyType
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from reef.core.plugins import ConfiguredPlugin
-from reef.core.requirements import parse_requires
 from reef.evaluation.harness import EpisodeRecord
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.gateway import ModelCalls
@@ -130,39 +127,6 @@ class Tools(ABC):
 
 
 @dataclass(frozen=True)
-class StepResult:
-    """What a method says about its step.
-
-    Values: ``summary`` is plain text for the step pages, possibly empty.
-    ``notes`` is a JSON object: its keys are text, and ``json.dumps`` writes
-    it without NaN or infinity. The commit metrics keep it as
-    ``method_notes``. ``requires`` are what the change needs from the
-    person's machine beyond the request's own, as ``reef.core.requirements``
-    items.
-    Purpose: the method makes it, as the result of ``Method.step``; the
-    backend records it with the step and the history, whether the step
-    publishes or not.
-    """
-
-    summary: str = ""
-    notes: Mapping[str, Any] = field(default_factory=dict)
-    requires: tuple[Mapping[str, Any], ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.summary, str):
-            raise TypeError("StepResult.summary must be text")
-        notes = dict(self.notes)
-        if any(not isinstance(key, str) for key in notes):
-            raise ValueError("StepResult.notes must be a JSON object, whose keys are text")
-        try:
-            json.dumps(notes, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"StepResult.notes must be a JSON object: {exc}") from exc
-        object.__setattr__(self, "notes", MappingProxyType(notes))
-        object.__setattr__(self, "requires", tuple(parse_requires(list(self.requires))))
-
-
-@dataclass(frozen=True)
 class StepContext:
     """What one step gives a method.
 
@@ -197,8 +161,12 @@ class Method(ConfiguredPlugin, ABC):
     runs_agent: ClassVar[bool] = False
 
     @abstractmethod
-    def step(self, context: StepContext) -> StepResult:
-        """Edit ``context.workspace.harness`` into this step's candidate, or leave it unchanged to skip the step."""
+    def step(self, context: StepContext) -> None:
+        """Edit ``context.workspace.harness`` into this step's candidate, or leave it unchanged to skip the step.
+
+        Say what the step did in ``output/``: ``context.workspace.write_output``
+        writes the summary, the notes and the requires.
+        """
 
 
-__all__ = ["AgentOutcome", "Method", "StepContext", "StepResult", "Tools"]
+__all__ = ["AgentOutcome", "Method", "StepContext", "Tools"]

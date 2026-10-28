@@ -78,7 +78,7 @@ A harness evolution method is a `Method` subclass that implements `step(context)
 1. `workspace.traces()` reads the step's traces, each with its task, the agent's reply, its score and the report's feedback; the method keeps the failing ones (score below 1.0). `workspace.request()` is the person's request on a step that answers one.
 2. One call through `tools.models.served` asks the served model to rewrite `rules.md`. The prompt is `harness/rules_prompt.md`. The call counts against the step's model-call budget and is kept in the step's record.
 3. `workspace.write_tree(...)` leaves the tree with the new `rules.md`. The backend then checks the tree and runs the evaluation.
-4. The `StepResult` says what the step did: `summary` is text for people, and `notes` is JSON for the commit metrics.
+4. `workspace.write_output(...)` says what the step did: the summary is text for people, and the notes are JSON for the commit metrics.
 
 A step that leaves the tree unchanged is skipped, and its `method_summary` metric says why: no failing trace and no request, a failed model call, or an empty reply. `NativeMethod` follows the same steps with the prompt in `harness/native_prompt.md`, and its reply becomes one file of the native loop.
 

@@ -1423,11 +1423,11 @@ skipped or fails.
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import (
-       AgentMethod, AgentOutcome, Method, ModelCalls, StepContext, StepResult, Tools, Trace, Workspace,
+       AgentMethod, AgentOutcome, Method, ModelCalls, StepContext, Tools, Trace, Workspace,
    )
 
    class MyMethod(Method):
-       def step(self, context: StepContext) -> StepResult: ...
+       def step(self, context: StepContext) -> None: ...
 
    class MyScorer(EpisodeScorer):
        def score(self, task, result) -> float: ...
@@ -1439,8 +1439,9 @@ skipped or fails.
    * - Member
      - Contract
    * - ``Method.step(context)``
-     - edit ``context.workspace.harness`` into the step's candidate and
-       return a ``StepResult``; leave the tree unchanged to skip the step
+     - edit ``context.workspace.harness`` into the step's candidate, or leave
+       it unchanged to skip the step; say what the step did with
+       ``context.workspace.write_output``
    * - ``Method.runs_agent``
      - a class attribute, ``False`` by default; ``True`` for a method that
        calls ``Tools.run_agent``, which then gets ``evolution.agent`` and is
@@ -1464,7 +1465,13 @@ skipped or fails.
        ``material/host.json``: ``adapter``, ``parts``, ``config_targets`` and
        ``tasks_are_directories``), ``history()`` and ``state_files()`` (every
        file of ``state/`` as a path mapped to its text; ``ValueError`` past
-       16 MiB or for a file that is not UTF-8 text)
+       16 MiB or for a file that is not UTF-8 text);
+       ``write_output(summary="", notes=None, requires=())`` writes
+       ``output/summary.md`` (the commit's ``method_summary``),
+       ``output/notes.json`` (a JSON object, the commit's ``method_notes``)
+       and ``output/requires.json`` (``reef.core.requirements`` items, read on
+       a request step only), and raises ``ValueError`` before writing when
+       ``notes`` or ``requires`` is not valid
    * - ``TreeLayout``
      - the parts of an adapter's tree, from its ``tree.yaml``; a method gets
        its adapter's as ``get_adapter(workspace.host()["adapter"]).layout``.
@@ -1511,11 +1518,6 @@ skipped or fails.
      - ``exit_code`` (``None`` when the agent did not exit by itself),
        ``timed_out``, ``error`` (why it could not start) and ``seconds``;
        ``succeeded`` is an exit with status 0
-   * - ``StepResult``
-     - ``summary`` (plain text, the commit's ``method_summary``), ``notes``
-       (a JSON object, refused otherwise; the commit's ``method_notes``) and
-       ``requires`` (``reef.core.requirements`` items, read on a request step
-       only); all optional
    * - ``History``
      - ``candidates`` (``CandidateRecord`` by tree checksum), ``episodes``
        and ``decisions`` in file order; ``tree(checksum)``,

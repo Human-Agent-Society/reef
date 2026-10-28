@@ -119,7 +119,7 @@ report with `POST /reef/report`: a `score`, optional `feedback`, and the receipt
 `references`. The score does not have to be a correct answer; a plain 1 for done and 0 for not done is enough.
 With `batch_size: 1`, each report starts one step. The step's record is under
 `recipes/ace/work/harness/<scenario>/harness/steps/<step>/`: the new tree in `harness/`, the playbook in
-`state/playbook.json`, each model call in `calls.json`, and the summary and notes in `result.json`.
+`state/playbook.json`, each model call in `calls.json`, and the summary and notes in `output/`.
 
 To learn from recorded traffic without reports, name the inference stages in the deployment file. Then each
 recorded request is one trace, without a score:

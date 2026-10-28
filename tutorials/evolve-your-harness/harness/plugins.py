@@ -21,7 +21,7 @@ from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree import TreePatch
-from reef.train.harness_backend import Method, StepContext, StepResult, Trace
+from reef.train.harness_backend import Method, StepContext, Trace
 
 from . import evolution, native_evolution
 
@@ -66,12 +66,13 @@ class RulesMethod(Method):
     fails, leaves the tree unchanged: the step skips, and its summary says why.
     """
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         traces = failing(workspace.traces())
         request = workspace.request()
         if not traces and request is None:
-            return StepResult("no failing trace and no request to learn from")
+            workspace.write_output("no failing trace and no request to learn from")
+            return
         tree = workspace.tree()
         prompt = RULES_PROMPT.substitute(
             traces=failures_text(traces),
@@ -83,17 +84,19 @@ class RulesMethod(Method):
                 [{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S
             )
         except ModelBindingError as exc:
-            return StepResult(f"the model call failed: {exc}")
+            workspace.write_output(f"the model call failed: {exc}")
+            return
         # The new rules are the reply's last fenced block, or the whole reply when it fenced nothing.
         blocks = FENCED_BLOCK.findall(reply)
         rules = (blocks[-1] if blocks else reply).strip()
         if not rules:
-            return StepResult("the model replied with no rules")
+            workspace.write_output("the model replied with no rules")
+            return
         workspace.write_tree(tree.apply(TreePatch({"rules.md": rules + "\n"})))
         summary = f"rewrote rules.md from {len(traces)} failing trace(s)"
         if request is not None:
             summary += " and the request"
-        return StepResult(summary, {"failing_traces": len(traces)})
+        workspace.write_output(summary, {"failing_traces": len(traces)})
 
 
 class NativeMethod(Method):
@@ -112,11 +115,12 @@ class NativeMethod(Method):
     says why.
     """
 
-    def step(self, context: StepContext) -> StepResult:
+    def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         traces = failing(workspace.traces())
         if not traces:
-            return StepResult("no failing trace to learn from")
+            workspace.write_output("no failing trace to learn from")
+            return
         tree = workspace.tree()
         prompt = native_evolution.change_prompt(tree, failures_text(traces))
         try:
@@ -124,12 +128,14 @@ class NativeMethod(Method):
                 [{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S
             )
         except ModelBindingError as exc:
-            return StepResult(f"the model call failed: {exc}")
+            workspace.write_output(f"the model call failed: {exc}")
+            return
         patch = native_evolution.patch_of(tree, reply)
         if patch is None:
-            return StepResult("the reply held no usable change")
+            workspace.write_output("the reply held no usable change")
+            return
         workspace.write_tree(tree.apply(patch))
-        return StepResult(
+        workspace.write_output(
             f"wrote {', '.join(sorted(patch.changes))} from {len(traces)} failing trace(s)",
             {"failing_traces": len(traces)},
         )

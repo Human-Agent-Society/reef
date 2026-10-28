@@ -99,7 +99,7 @@ def collect(work: Path) -> dict:
             {
                 "release_id": ref.get("release_id") if published else None,
                 "parent_release_id": ref.get("parent_release_id"),
-                "step": metrics.get("steps"),
+                "step": row.get("step"),
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
                 "recorded_at": row.get("recorded_at"),

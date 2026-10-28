@@ -3,10 +3,11 @@
 Each step claims a fresh directory ``<steps>/<step>`` (a retried step
 ``<step>-<attempt>``) under the scenario's state directory. The directory is
 the step's workspace (``reef.train.harness_backend.workspace``) without its
-``scratch/``, plus ``calls.json`` (every model call of the step) and
-``result.json`` (what the method returned). Every text the backend writes
-into these two files is redacted of credential-shaped literals and clipped,
-since they hold model calls that the tree's checks have not seen.
+``scratch/``, plus ``calls.json``, every model call of the step. What the
+method says about its step is in the workspace's ``output/``. The backend
+redacts credential-shaped literals from ``calls.json`` and from the summary
+and notes in ``output/``, and clips them, since they hold model traffic that
+the tree's checks have not seen.
 ``material/`` keeps the traces as the clients sent them, as the record store
 does, and ``harness/`` the tree as the method left it. ``read_step_records``
 redacts every text it serves, so the release pages show no credential of
@@ -26,7 +27,6 @@ from typing import Any
 from reef.harness.tree.checks import clip_record_text, redact_secret_shaped
 
 CALLS_FILE = "calls.json"
-RESULT_FILE = "result.json"
 
 
 def bounded(value: Any) -> Any:

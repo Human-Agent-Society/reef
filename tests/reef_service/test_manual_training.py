@@ -34,7 +34,6 @@ from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentReleases, PreparedStep
-from reef.train.harness_backend import StepResult
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.pipeline import TrainingPipeline
@@ -706,7 +705,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
 
     def method(workspace, tools):
         workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
-        return StepResult("one rules entry", {"entries": 1})
+        workspace.write_output("one rules entry", {"entries": 1})
 
     def score(task, result):
         raise ValueError("the scorer could not read the episode")
@@ -1085,12 +1084,11 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         assert seen == ["one", "two"]
         assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
         assert [row["skipped"] for row in rows] == [UNCHANGED, UNCHANGED]
-        assert [row["steps"] for row in rows] == [1, 2]
         assert trainer.run_once(2) is None
 
+        # An automatic step past the budget skips; the two instructions above ran past it.
         backend = trainer.candidate_backend
-        state = HarnessState(steps=5).to_json()
-        automatic = backend.prepare_step(JobData("auto", ()), state, 5)
+        automatic = backend.prepare_step(JobData("auto", ()), HarnessState().to_json(), 5)
         assert automatic.metrics["skipped"] == "step budget of 1 exhausted"
         assert seen == ["one", "two"]
     finally:

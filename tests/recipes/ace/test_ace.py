@@ -25,8 +25,9 @@ from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.train.backend import ComponentReleases
-from reef.train.harness_backend import StepContext, StepResult, Workspace
+from reef.train.harness_backend import StepContext, Workspace
 from reef.train.harness_backend.state import HarnessState
+from reef.train.harness_backend.workspace import StepOutput
 from reef.train.types import JobData
 
 PI = get_adapter("pi")
@@ -74,8 +75,8 @@ def playbook_state(*bullets: tuple[str, str, int, int]) -> dict[str, str]:
 
 def ace_step(
     tmp_path: Path, chat: QueueChat, settings: ACESettings, *samples: TrajectorySample, state: dict[str, str]
-) -> tuple[Workspace, StepResult]:
-    """One ACE step on a workspace over the pi seed, with ``chat`` as the served model."""
+) -> tuple[Workspace, StepOutput]:
+    """One ACE step on a workspace over the pi seed, with ``chat`` as the served model, and what it wrote to ``output/``."""
     workspace = Workspace.create(
         tmp_path / "step",
         history_dir=tmp_path / "history",
@@ -88,7 +89,8 @@ def ace_step(
         state_files=state,
     )
     tools = step_tools(workspace, ModelBindings(served=chat))
-    return workspace, ACE(settings).step(StepContext(workspace, tools))
+    ACE(settings).step(StepContext(workspace, tools))
+    return workspace, workspace.read_output()
 
 
 def test_two_steps_grow_the_playbook_that_pi_serves_with_no_episode(tmp_path: Path) -> None:
