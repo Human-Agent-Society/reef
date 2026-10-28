@@ -202,9 +202,8 @@ the tree is unchanged or fails validation for the adapter; there is no retry.
 `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
 documents the workspace, the tools, and the method's state.
 
-Two kinds of step do not run the method: a recheck (see `Rechecking a
-published tree`_), and a step that evaluates a proposal that a client sent
-to ``POST /reef/harness/proposals``.
+A recheck (see `Rechecking a published tree`_) is the one kind of step that
+does not run the method.
 
 Evaluation: the publication policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -540,9 +539,8 @@ continues a session.
 - ``--follow pinned`` logs each new head and waits. ``reef-native mount
   <release_id> --tree ./reef-harness`` applies a release by hand, an older one
   included.
-- ``--self-tools`` lets the model inspect its harness, try a patch for the
-  rest of a turn, and propose a patch to Reef, which evaluates it like a
-  method's candidate.
+- ``--self-tools`` lets the model inspect its harness and try a patch for
+  the rest of a turn. A trial is never published.
 
 The process runs tree code on your machine with your privileges, and the
 evaluation's sandbox does not apply to it. Under ``--follow head``, anyone who

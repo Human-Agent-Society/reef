@@ -346,10 +346,6 @@ class Server(ServeState, ReleaseUpdateListener):
         return self._release_id
 
     @property
-    def session_id(self) -> str | None:
-        return None if self._current is None else self._current.id
-
-    @property
     def host(self) -> NativeHost:
         return self._host
 

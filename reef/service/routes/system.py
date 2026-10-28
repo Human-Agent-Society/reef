@@ -8,7 +8,6 @@ from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.service.auth import page_query
 from reef.service.request_service import RequestService, page_headers
-from reef.service.routes.payload import read_object
 
 
 def register_health_route(app: web.Application) -> None:
@@ -73,11 +72,6 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         )
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
-    async def harness_proposals(request: web.Request) -> web.Response:
-        payload = await read_object(request)
-        answer = await asyncio.to_thread(request_service.harness_propose, request.headers, payload)
-        return web.json_response(answer)
-
     async def status(request: web.Request) -> web.Response:
         value = await asyncio.to_thread(lambda: request_service.dispatcher.build_training_status())
         return web.json_response(value)
@@ -113,7 +107,6 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", harness_step_records)
     app.router.add_get("/reef/harness/requests/{record_id}/page", harness_request_page)
     app.router.add_get("/reef/harness/requests/{record_id}/progress", harness_request_progress)
-    app.router.add_post("/reef/harness/proposals", harness_proposals)
     app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)
 

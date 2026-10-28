@@ -13,8 +13,8 @@ and holds ``AgentMethod``, a method that is a folder of prompts.
 ``backend`` holds ``HarnessBackend``, which the recipe
 ``reef.recipe.harness.HarnessEvolutionRecipe`` builds; methods never
 subclass it. ``tools`` implements the tools of a step, ``calls`` its model
-budget, ``state`` the committed algorithm state, ``inbox`` the clients'
-pending patches, ``records`` the step records, and ``capabilities`` what the service routes may ask a backend.
+budget, ``state`` the committed algorithm state, ``records`` the step
+records, and ``capabilities`` what the service routes may ask a backend.
 The tree itself is ``reef.harness.tree``; the evaluation, the history and the
 publication policies are ``reef.evaluation.harness``.
 """

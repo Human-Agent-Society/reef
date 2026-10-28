@@ -39,7 +39,7 @@ class ValidationResult:
     about when it is about one path. The tree passed every check if and only
     if ``problems`` is empty.
     Purpose: ``validate_tree`` and ``validate_patch`` make it; the backend
-    skips a step whose candidate has problems, the proposal route refuses a
+    skips a step whose candidate has problems, ``harness_try`` refuses a
     patch with them, and a method reads them through ``tools.check``.
     """
 

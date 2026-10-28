@@ -24,7 +24,7 @@ NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
 #: Names reserved for built-in tools (``reef.harness.runners.native.selftools``); no tree file may take one.
-NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
+NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_try")
 #: The native graph's stage vocabulary: the keys a stage may carry and the outcomes its edges may name.
 NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "model": ((), ("tool_calls", "text")),

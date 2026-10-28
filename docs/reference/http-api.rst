@@ -107,8 +107,6 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases/{step}/records``                                    | retained raw step file inventory or file body     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/harness/proposals``                                                 | an agent's proposed tree change, admitted or not  |
-+----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/adapters``                                                   | every harness adapter this process resolves       |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/status``                                                             | training, serving, and storage state              |
@@ -586,7 +584,7 @@ Deleting a scenario
 ``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
 service and frees its name. Nothing is destroyed: the record store and commit
 log move under ``<agent_record_dir>/archived/``, the recipe's own directories
-(a harness scenario's proposal inbox, history and step records) move under an
+(a harness scenario's history and step records) move under an
 ``archived/`` sibling, and the
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every release it published stays reachable. The
@@ -876,62 +874,6 @@ candidate is being prepared. Reads still serialize with publication and
 rollback so a manifest's artifact and evaluation metrics come from the same
 release: reads do not interleave with head movement and its commit-history
 update.
-
-Proposals
-~~~~~~~~~
-
-An agent running on the served tree can propose a change to it. The
-proposal enters the same evaluation as the method's own: nothing it says is served
-until paired episodes settle it.
-
-.. code:: bash
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
-     -d '{"patch": {"rules.md": "Run the tests before you answer.\n"},
-          "reason": "three of five sessions answered before the tests ran",
-          "session": "3f1c2a9d0b7e", "release_id": "rel-12"}' \
-     "$REEF_URL/reef/harness/proposals"
-
-+----------------+----------------------------------------------------------------------+
-| Field          | Meaning                                                              |
-+================+======================================================================+
-| ``patch``      | a JSON object of source tree path to the file's new text, or to      |
-|                | ``null`` to remove the file; it names at least one path              |
-+----------------+----------------------------------------------------------------------+
-| ``reason``     | the agent's own account, stored with the proposal                    |
-+----------------+----------------------------------------------------------------------+
-| ``session``    | the session that proposed, named in the commit that settles it       |
-+----------------+----------------------------------------------------------------------+
-| ``release_id`` | the release the agent was running                                    |
-+----------------+----------------------------------------------------------------------+
-
-The service validates the patched head tree for the scenario's adapter, the
-same validation an evolve step runs on a method's patch. Every path must be
-a path of one of the adapter's parts, each file must pass the checks of its
-part's format (no credential-shaped literal, for one), and the tree must
-render. A patch that changes no file's text is refused too. The answer is
-``{proposal_id, admitted, reason, release_id}``: ``reason`` lists every
-problem that refused the patch, separated by ``;``, else ``null``;
-``release_id`` is the head the patch was validated against.
-
-An admitted proposal waits in the scenario's inbox (``proposals/`` under the
-scenario's ``evolution.state_dir``) until the next automatic evolve step takes
-it, oldest first, in place of running the method. The step
-validates the patch again against its own head, since the head may have
-moved; a patch that no longer passes is refused and the step is skipped.
-Otherwise the evaluation settles it like a method's candidate. The
-commit that settles it carries ``proposal: {id, session, release_id,
-reason}`` in its metrics, and the releases row carries that commit. When
-``evolution.max_pending_proposals`` already wait, the answer is
-``admitted: false`` with reason ``inbox full``. On a scenario in
-``data.training_mode: manual`` it is ``admitted: false`` with reason
-``manual mode takes instructions only``, since no automatic step runs there
-to take the inbox. A malformed body, or a patch that names no path, is HTTP
-400; a scenario whose recipe is not a harness evolution recipe is HTTP 404
-naming that. `Operate a deployment
-<../user-guide/operate.rst#read-the-proposal-inbox>`__ describes the inbox
-directories.
 
 Harness requests
 ~~~~~~~~~~~~~~~~

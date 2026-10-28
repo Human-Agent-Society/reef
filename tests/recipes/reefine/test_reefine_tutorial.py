@@ -92,7 +92,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("recipes/beta/reefine/examples/work/")
     assert config["run_dir"].startswith("recipes/beta/reefine/examples/work/")
-    # The step workspaces, the history and the proposal inbox stay with the run's state.
+    # The step workspaces and the history stay with the run's state.
     assert section["state_dir"].startswith("recipes/beta/reefine/examples/work/")
     assert config["reef"]["port"] == 8901 and config["reef"]["token"] == "reef-local"
 

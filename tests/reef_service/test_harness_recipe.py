@@ -153,7 +153,6 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "max_failure_streak": 2,
         "max_model_calls_per_step": 4,
         "max_episodes_per_step": 5,
-        "max_pending_proposals": 2,
         "publish": "review",
         "review_parts": ["extension"],
     }
@@ -184,7 +183,6 @@ INVALID_SETTINGS = {
     "batch-size": ({"batch_size": 0}, r"evolution\.batch_size must be at least 1"),
     "batch-size-type": ({"batch_size": True}, r"evolution\.batch_size must be a valid int"),
     "episode-budget": ({"max_episodes_per_step": -1}, r"evolution\.max_episodes_per_step must be at least 0"),
-    "inbox-size": ({"max_pending_proposals": 0}, r"evolution\.max_pending_proposals must be at least 1"),
     "state-dir": ({"state_dir": " "}, r"evolution\.state_dir must be a non-empty path"),
     "publish": ({"publish": "staged"}, r"evolution\.publish must be 'auto' or 'review'"),
     "review-parts-type": ({"review_parts": "rules"}, r"evolution\.review_parts must be a list of strings"),
@@ -264,15 +262,15 @@ def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committe
         built.build("demo", SQLiteRecordStore())
 
 
-def test_each_scenario_keeps_its_proposals_history_and_steps_under_the_state_dir(
+def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One recipe serves many scenarios, each under its own directory; a relative state_dir is made absolute at
-    build, and the proposal inbox is not created until a proposal arrives."""
+    build."""
     assert from_config(evolution_config()).evolution.state_dir == ".reef/harness"
     monkeypatch.chdir(tmp_path)
     built = from_config(
-        evolution_config(state_dir="state", max_pending_proposals=2, binary=str(make_pi_binary(tmp_path))),
+        evolution_config(state_dir="state", binary=str(make_pi_binary(tmp_path))),
         runtime=runtime(),
     )
     state = tmp_path.resolve() / "state"
@@ -283,8 +281,6 @@ def test_each_scenario_keeps_its_proposals_history_and_steps_under_the_state_dir
         backend = trainer.candidate_backend
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
-        assert backend.proposals is not None and backend.proposals.directory == root / "proposals"
-        assert backend.proposals.max_pending == 2 and not backend.proposals.directory.exists()
         trainer.close()
     records.close()
 

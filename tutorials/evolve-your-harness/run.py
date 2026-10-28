@@ -34,7 +34,6 @@ these constants point at, on pi (serve.yaml) or on reef's native harness
 (./run.sh native, serve-native.yaml).
 """
 
-import contextlib
 import json
 import os
 import shutil
@@ -319,105 +318,6 @@ def native_main():
     print(f"second pass score: {evolution.grade_text(task, result['text'])} (session {result['session']})")
 
 
-# -- the self tools variant: the model proposes the change itself -----------------------------------------------
-
-SELF_PROMPT = (
-    "You are running on a harness you can read and change: your tools, your loop graph and the rules in your "
-    "system prompt are files of a tree, and the tools harness_inspect and harness_propose read and change it. "
-    "Your recent answers to counting tasks were graded wrong because the final number was not alone on the last "
-    "line of the reply. Do this, in order: 1. call harness_inspect with what=tree and read the files; "
-    "2. call harness_propose with a patch that makes every future answer end with the final integer alone on "
-    'the last line: write the rules file, for example {"patch": {"rules.md": "<the rule>"}}, with a one '
-    "sentence reason; 3. then answer this task yourself: how many primes are below 100000? "
-    "Reply with the count as a plain integer alone on the last line."
-)
-
-
-def self_main():
-    """The serve form with ``--self-tools``: the model inspects its tree and proposes the change; a failing
-    report opens the step, which claims that proposal before it asks the method; the process mounts a win."""
-    tasks = json.loads(TASKS_FILE.read_text())
-    client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
-    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["release_id"]
-    task = tasks[0]
-    before = steps_before(client)
-
-    events, result = turn(SELF_PROMPT)
-    calls = [e["data"] for e in events if e["type"] == "tool/call"]
-    results = [e["data"] for e in events if e["type"] == "tool/result"]
-    print(f"turn 1: session {result['session']} exit {result['exit']} tool calls {[c['name'] for c in calls]}")
-    admitted = False
-    for data in results:
-        if data["name"] not in ("harness_inspect", "harness_propose", "harness_try"):
-            continue
-        print(f"  {data['name']} ({'error' if data.get('is_error') else 'ok'}) -> {str(data.get('content'))[:240]}")
-        if data["name"] == "harness_propose" and not data.get("is_error"):
-            print("  proposed:", json.dumps((data.get("arguments") or {}).get("patch"))[:400])
-            with contextlib.suppress(ValueError, TypeError):
-                admitted = admitted or bool(json.loads(data["content"]).get("admitted"))
-    answer = (result["text"] or "").strip()
-    print("turn 1 answer:", answer.splitlines()[-1] if answer else "(none: the model stopped after the proposal)")
-    if not admitted:
-        print("no admitted proposal: the model did not call harness_propose, or the route refused it")
-        return
-    score = evolution.grade_text(task, answer)
-    report(client, result, score, task.split(maxsplit=1)[0])
-    print(f"reported score {score}; a step runs now and claims the proposal first")
-
-    # The step's result: the catalog row names the proposal it took; a publish moves the head.
-    manifest = None
-    deadline = time.monotonic() + PULL_TIMEOUT_S
-    while manifest is None and time.monotonic() < deadline:
-        try:
-            current = head_manifest(client)
-            rows = training_rows(client)
-        except (ReefClientError, TimeoutError, OSError) as exc:
-            if isinstance(exc, ReefClientError) and exc.status != 404:
-                raise
-            time.sleep(2.0)  # a step in flight holds the catalog on a reef before #285
-            continue
-        if current["release_id"] != seed:
-            manifest = current
-            break
-        if error := client.get("/reef/status").get("error"):
-            raise SystemExit(f"evolve step failed: {error}; check work/reef.log")
-        if len(rows) > before:
-            metrics = rows[-1].get("metrics") or {}
-            step_result = "published" if metrics.get("selected") else metrics.get("skipped") or "rejected"
-            print(f"step {metrics.get('steps')}: {step_result}; proposal {metrics.get('proposal')}")
-            if not metrics.get("selected"):
-                return
-        time.sleep(2.0)
-    if manifest is None:
-        print(f"no result within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh self for another attempt")
-        return
-    release = manifest["release_id"]
-    evaluation = manifest["evaluation"]
-    print(
-        f"published: release {release} (parent {manifest['parent_release_id']}); proposal {evaluation.get('proposal')}"
-    )
-    print(
-        "evaluation:",
-        {key: evaluation.get(key) for key in ("wins", "losses", "ties", "candidate_score", "current_score")},
-    )
-
-    deadline = time.monotonic() + MOUNT_TIMEOUT_S
-    while not mount_events(release) and time.monotonic() < deadline:
-        time.sleep(1.0)
-    mounts = mount_events(release)
-    if not mounts:
-        print(f"the serve process did not mount {release} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
-        return
-    for path, data in mounts:
-        print(f"{path}: harness/mount {json.dumps(data, sort_keys=True)}")
-
-    events, result = turn(task)
-    stages = [event["data"]["stage"] for event in events if event["type"] == "stage/enter"]
-    print(f"second pass {task.split(maxsplit=1)[0]}: stages {' -> '.join(stages)}")
-    print(f"second pass answer: {result['text'].strip().splitlines()[-1] if result['text'].strip() else ''}")
-    print(f"second pass score: {evolution.grade_text(task, result['text'])} (session {result['session']})")
-
-
 def replay():
     """Write work/replay.html from what the run left under work/; a page with nothing to show is still a page."""
     from harness import replay as replay_module
@@ -433,9 +333,9 @@ def replay():
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
-    forms = {"": main, "pull": pull, "native": native_main, "self": self_main, "replay": replay}
+    forms = {"": main, "pull": pull, "native": native_main, "replay": replay}
     if mode not in forms:
-        raise SystemExit(f"usage: run.py [pull|native|self|replay]; got {mode!r}")
+        raise SystemExit(f"usage: run.py [pull|native|replay]; got {mode!r}")
     try:
         forms[mode]()
     finally:

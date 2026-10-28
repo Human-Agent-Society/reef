@@ -348,7 +348,7 @@ def test_harness_try_refuses_any_patch_that_touches_a_loop_file(tmp_path: Path) 
         {**native_tool("whisper", "def run(args, workdir):\n    return 'quiet'\n"), **LOOP_FILE},
         {"native/loops/main.py": None},
     ):
-        with pytest.raises(ToolFailed, match=r"native/loops/.*is reviewed code: propose it, a person promotes it"):
+        with pytest.raises(ToolFailed, match=r"native/loops/.*is reviewed code: a person promotes it"):
             SelfTools(trial, "try").try_({"patch": patch}, str(tmp_path))
     assert trial.tried == []
     result = SelfTools(trial, "try").try_({"patch": {"skills/s/SKILL.md": "# s"}}, str(tmp_path))
@@ -896,11 +896,11 @@ def test_harness_try_refuses_a_native_loop_patch_on_a_served_loop(tmp_path: Path
         result, streamed = _turn(server, "try a loop")
         assert result["exit"] == 0 and result["text"] == "done"
         assert server.live_tree() == HarnessTree(served)
-        assert sorted(server.host.tools) == ["harness_inspect", "harness_propose", "harness_try", "shout"]
+        assert sorted(server.host.tools) == ["harness_inspect", "harness_try", "shout"]
     assert _typed(streamed, "loop/enter") == [{"name": "main"}]
     results = _typed(streamed, "tool/result")
     assert [r["error"]["code"] for r in results] == ["TOOL_FAILED"] * 3
-    assert all("is reviewed code: propose it, a person promotes it" in r["content"] for r in results)
+    assert all("is reviewed code: a person promotes it" in r["content"] for r in results)
     # The refusal is whole: the tool beside the loop file did not mount either, and nothing was tried.
     assert [m["source"] for m in _typed(streamed, "harness/mount")] == []
     assert "harness/unmount" not in {event["type"] for event in streamed}

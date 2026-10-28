@@ -36,7 +36,7 @@ recipe:
           model: served
           max_bullets: 100
           prune_margin: 2
-      # The proposals, the history and the step records of each scenario.
+      # The history and the step records of each scenario.
       state_dir: recipes/ace/work/harness
       evaluation:
         # Run no episode: publish every candidate that passes validation.

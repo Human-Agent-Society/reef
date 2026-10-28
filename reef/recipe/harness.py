@@ -69,13 +69,11 @@ from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Method
-from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.harness_backend.records import StepRecord
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 
 #: The directories of one component's state under ``<evolution.state_dir>/<scenario>/<component>``.
-PROPOSALS_DIR = "proposals"
 HISTORY_DIR = "history"
 STEPS_DIR = "steps"
 
@@ -89,8 +87,8 @@ class EvolutionSettings(Settings):
     empty tree. ``method`` is a plugin setting that names a ``Method``.
     ``models`` maps a name other than ``served`` to a model section (``url``,
     ``model``, ``api_key_env``); ``model_metadata`` maps a model name to its
-    metadata. ``state_dir`` is the directory of every scenario's proposals,
-    history and step records. ``batch_size`` ≥ 1 is the traces of one
+    metadata. ``state_dir`` is the directory of every scenario's history
+    and step records. ``batch_size`` ≥ 1 is the traces of one
     automatic step. Every other count is ≥ 0, where 0 turns its limit off.
     ``publish`` is ``auto`` or ``review``; ``review_parts`` name parts of the
     adapter's tree.
@@ -110,7 +108,7 @@ class EvolutionSettings(Settings):
         default_factory=dict, help="The method's own models by name: url, model and api_key_env."
     )
     model_metadata: Mapping[str, Any] = config_option(default_factory=dict, help="Model metadata by model name.")
-    state_dir: str = config_option(".reef/harness", help="Each scenario's proposals, history and step records.")
+    state_dir: str = config_option(".reef/harness", help="Each scenario's history and step records.")
     batch_size: int = config_option(1, help="The traces of one automatic step.")
     max_steps: int = config_option(0, help="The most automatic steps. 0 sets no limit.")
     max_failure_streak: int = config_option(
@@ -118,7 +116,6 @@ class EvolutionSettings(Settings):
     )
     max_model_calls_per_step: int = config_option(0, help="The most model calls of one step. 0 sets no limit.")
     max_episodes_per_step: int = config_option(0, help="The most episodes a method runs in one step. 0 sets no limit.")
-    max_pending_proposals: int = config_option(8, help="The most client proposals that wait for a step.")
     publish: str = config_option("auto", help="auto serves a selected tree at once; review holds it for a person.")
     review_parts: tuple[str, ...] = config_option(
         (), help="Parts of the adapter's tree whose change always waits for a person."
@@ -144,8 +141,6 @@ class EvolutionSettings(Settings):
         ):
             if value < 0:
                 raise ValueError(f"evolution.{label} must be at least 0 (0 turns the limit off)")
-        if self.max_pending_proposals < 1:
-            raise ValueError("evolution.max_pending_proposals must be at least 1")
         if self.publish not in ("auto", "review"):
             raise ValueError("evolution.publish must be 'auto' or 'review'")
         if "served" in self.models:
@@ -427,7 +422,7 @@ class HarnessEvolutionRecipe(Recipe):
         return dict(self.seed.files) or None
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """The scenario's proposals, history and step records: what a delete archives beside the record store."""
+        """The scenario's history and step records: what a delete archives beside the record store."""
         return (self.state_root(scenario),)
 
     def state_root(self, scenario: str) -> Path:
@@ -478,7 +473,7 @@ class HarnessEvolutionRecipe(Recipe):
         """The scenario's backend: the binary installed, the history, the evaluator, the tasks, the records and the
         coding agent bound."""
         descriptor = get_adapter(self.evolution.adapter)
-        # Each component of a composed scenario keeps its own proposals, history and records.
+        # Each component of a composed scenario keeps its own history and records.
         root = self.state_root(scenario) / releases.component
         try:
             history = History.open(root / HISTORY_DIR)
@@ -519,7 +514,6 @@ class HarnessEvolutionRecipe(Recipe):
                 review_parts=frozenset(self.evolution.review_parts),
             ),
             records=StepRecord(root / STEPS_DIR),
-            inbox=ProposalInbox(root / PROPOSALS_DIR, self.evolution.max_pending_proposals),
             # Only a method that runs the agent through its tools gets it bound here.
             agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
         )

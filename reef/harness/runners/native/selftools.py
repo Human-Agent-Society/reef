@@ -1,12 +1,11 @@
-"""The self referential tools of the serve form: inspect the harness, try a change on this process, propose it to Reef.
+"""The self referential tools of the serve form: inspect the harness and try a change on this process.
 
-Three built-in tools, built in code and registered only by ``reef-native
+Two built-in tools, built in code and registered only by ``reef-native
 serve --self-tools``; the episode form never sees them, so a candidate cannot
 pass the checks by calling them, and a tree file cannot take their names. They
 run in process whatever ``REEF_NATIVE_ENFORCE`` says, since they are reef's
-code and not the tree's. The order a model should use is inspect, then try,
-then propose: a trial that helped is one ``harness_propose`` away from the
-evaluation, and nothing a trial does is served to another session or published.
+code and not the tree's. The order a model should use is inspect, then try;
+nothing a trial does is served to another session or published.
 """
 
 from __future__ import annotations
@@ -45,21 +44,14 @@ PATCH_SCHEMA: dict[str, Any] = {
 INSPECT_DESCRIPTION = (
     "Read the harness you are running in. what=tree returns every file of the live tree by path and the mounted "
     "release id; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
-    "newest releases with the evaluation metrics that admitted each one and, when Reef exposes it, the proposals "
+    "newest releases with the evaluation metrics that admitted each one and, when Reef exposes it, the candidates "
     "the evaluation rejected; what=status shows the mounted release, the follow mode and any pending mount. Read "
     "only. Call it before you change anything."
 )
-PROPOSE_DESCRIPTION = (
-    "Send a change to your harness to Reef for the evaluation. Reef validates the patch at once and answers with "
-    "a proposal id; an admitted proposal is measured on real tasks against the current harness before it is "
-    "served, and nothing changes in this session. Give the reason in one or two sentences. Try the change with "
-    "harness_try first."
-)
 TRY_DESCRIPTION = (
-    "Mount a change on this process for the rest of the current turn only, with the same patch shape as "
-    "harness_propose. New tools, hooks, rules, skills, graphs and agents apply from your next step; at the end "
-    "of the turn the served harness is mounted back. Nothing is published. Use it to check a change works "
-    "before harness_propose. A native loop is reviewed code and is refused here: propose it instead."
+    "Mount a change on this process for the rest of the current turn only. New tools, hooks, rules, skills, "
+    "graphs and agents apply from your next step; at the end of the turn the served harness is mounted back. "
+    "Nothing is published. A native loop is reviewed code and is refused here."
 )
 
 
@@ -73,10 +65,6 @@ class ServeState(ABC):
     @property
     @abstractmethod
     def release_id(self) -> str | None: ...
-
-    @property
-    @abstractmethod
-    def session_id(self) -> str | None: ...
 
     @abstractmethod
     def live_tree(self) -> HarnessTree: ...
@@ -108,7 +96,7 @@ def patch_argument(value: Any) -> TreePatch:
 
 
 class SelfTools(ToolRunner):
-    """The three tools' ``run`` bodies over one serve process."""
+    """The two tools' ``run`` bodies over one serve process."""
 
     def __init__(self, state: ServeState, action: str = "inspect") -> None:
         self._state = state
@@ -119,8 +107,6 @@ class SelfTools(ToolRunner):
             return self.inspect(args, workdir)
         if self._action == "try":
             return self.try_(args, workdir)
-        if self._action == "propose":
-            return self.propose(args, workdir)
         raise ToolFailed(f"unknown self tool action {self._action!r}")
 
     def inspect(self, args: dict[str, Any], workdir: str) -> Any:
@@ -162,30 +148,17 @@ class SelfTools(ToolRunner):
             rejected = evaluation_metrics.get("rejected") if isinstance(evaluation_metrics, Mapping) else None
         return {"head": head, "releases": releases, "rejected": rejected}
 
-    def propose(self, args: dict[str, Any], workdir: str) -> Any:
-        patch = patch_argument(args.get("patch"))
-        body = {
-            "patch": patch.to_json(),
-            "reason": str(args.get("reason") or ""),
-            "session": self._state.session_id or "",
-            "release_id": self._state.release_id or "",
-        }
-        status, payload = self._state.client.propose(body)
-        if status == 404:
-            raise ToolFailed("this reef has no proposals route")
-        return json.dumps(payload, ensure_ascii=False)
-
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
         patch = patch_argument(args.get("patch"))
         for path in patch.changes:
             location = get_adapter("native").layout.locate(path)
             if location is not None and location.part.review:
-                raise ToolFailed(f"{path} is reviewed code: propose it, a person promotes it")
+                raise ToolFailed(f"{path} is reviewed code: a person promotes it")
         return self._state.try_patch(patch, secrets.token_hex(4))
 
 
 def self_tools(state: ServeState) -> list[HostTool]:
-    """The three built-in tools over ``state``, in the order the model should read them."""
+    """The two built-in tools over ``state``, in the order the model should read them."""
     return [
         HostTool(
             "harness_inspect",
@@ -210,20 +183,6 @@ def self_tools(state: ServeState) -> list[HostTool]:
             {"type": "object", "properties": {"patch": PATCH_SCHEMA}, "required": ["patch"]},
             SelfTools(state, "try"),
             capabilities=("exec",),
-        ),
-        HostTool(
-            "harness_propose",
-            PROPOSE_DESCRIPTION,
-            {
-                "type": "object",
-                "properties": {
-                    "patch": PATCH_SCHEMA,
-                    "reason": {"type": "string", "description": "Why this change, in one or two sentences."},
-                },
-                "required": ["patch", "reason"],
-            },
-            SelfTools(state, "propose"),
-            capabilities=("network",),
         ),
     ]
 

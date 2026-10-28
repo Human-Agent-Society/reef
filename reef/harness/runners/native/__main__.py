@@ -36,9 +36,7 @@ def _parser() -> argparse.ArgumentParser:
         "--follow", choices=FOLLOW_MODES, default="head", help="mount a new head at once, or announce it"
     )
     serve.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL_S, metavar="SECONDS")
-    serve.add_argument(
-        "--self-tools", action="store_true", help="give the model harness_inspect, harness_try, harness_propose"
-    )
+    serve.add_argument("--self-tools", action="store_true", help="give the model harness_inspect and harness_try")
     serve.add_argument(
         "--socket", type=Path, help="the Unix socket to listen on (default: native/serve.sock under the tree)"
     )

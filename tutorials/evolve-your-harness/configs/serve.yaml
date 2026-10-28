@@ -39,7 +39,7 @@ recipe:
       # inference.upstream-model below) into each evaluation episode, and the
       # published tree never names an endpoint.
       seed: seeds/pi
-      # Each scenario's proposals, history (the score cache) and step records,
+      # Each scenario's history (the score cache) and step records,
       # relative to the directory run.sh starts Reef in, as every path in this file is.
       state_dir: work/harness
       evaluation:

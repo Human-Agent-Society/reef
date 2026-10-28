@@ -1009,10 +1009,9 @@ serve mode:
 - Tree code runs on the host with the user's privileges; only tool calls
   are confined, and only when ``REEF_NATIVE_ENFORCE=bwrap`` is set. Under
   ``--follow head``, whoever can publish to the scenario runs code there.
-- ``--self-tools`` adds ``harness_inspect``, ``harness_try``, and
-  ``harness_propose``, which run in the process whatever the enforcer. A
-  tree file that takes one of their names fails validation and fails to
-  mount. Episodes never have them.
+- ``--self-tools`` adds ``harness_inspect`` and ``harness_try``, which run
+  in the process whatever the enforcer. A tree file that takes one of their
+  names fails validation and fails to mount. Episodes never have them.
 - A turn over its wall-clock timeout ends with ``turn-timeout``. Code that
   never calls ``ctx`` holds the turn.
 

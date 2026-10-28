@@ -28,11 +28,10 @@ from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
+from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.train.harness_backend.capabilities import PatchAdmission, StepProgressReader, StepRecords
-from reef.train.harness_backend.inbox import ProposalInbox
+from reef.train.harness_backend.capabilities import StepProgressReader, StepRecords
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -777,40 +776,6 @@ class RequestService:
         except ArtifactNotFound:
             return None
         return self.harness_release_id(scenario)
-
-    def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Validate one client's patch against the head tree and hold it for the next automatic step.
-
-        The validation is the backend's own (``PatchAdmission.admit``) and
-        touches no step state. The step validates the patch again when it
-        claims the proposal, since the head may have moved. The answer names
-        the proposal, whether it was admitted, the refusal when not, and the
-        served head.
-        """
-        proposal = ProposalPayload.from_dict(payload)
-        scenario = self._file_scenario(headers)
-        backend = self.files_trainer(scenario).candidate_backend
-        if not isinstance(backend, PatchAdmission) or backend.proposals is None:
-            raise ArtifactNotFound(
-                f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
-                "evolution recipe with a proposal inbox"
-            )
-        head = self.harness_release_id(scenario)
-        proposal_id = ProposalInbox.new_id()
-        # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if self.files_trainer(scenario).pipeline.training_mode == "manual":
-            return {
-                "proposal_id": proposal_id,
-                "admitted": False,
-                "reason": "manual mode takes instructions only",
-                "release_id": head,
-            }
-        validation = backend.admit(proposal.patch)
-        if validation.passed:
-            refusal = backend.proposals.submit(proposal_id, {**proposal.to_dict(), "head_release_id": head})
-        else:
-            refusal = validation.message()
-        return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
 
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The scenario's release catalog with per-release evaluation metrics, newest last.

@@ -44,7 +44,7 @@ from reef.storage.tasks import files_digest
 #: first.
 EVALUATION_SIDES: tuple[str, ...] = ("candidate", "current")
 #: Where a candidate tree comes from: a subset of ``history.ORIGINS``, since the seed is never a candidate.
-CANDIDATE_ORIGINS = ("method", "proposal", "release")
+CANDIDATE_ORIGINS = ("method", "release")
 #: How many candidate episodes an evaluation summarizes, and how much of each text it keeps: a summary for the
 #: pages, never the traffic.
 EPISODE_SUMMARIES = 8
@@ -105,8 +105,7 @@ class HarnessCandidate(UpdateCandidate):
     ``current_tree`` is the head tree the step started from.
     ``evaluation_tasks`` are the tasks both sides run, the seed tasks first.
     ``step`` ≥ 1 is the step that made it. ``origin`` is where the tree came
-    from: ``method``, the step's method; ``proposal``, a client's proposal
-    that the step claimed; or ``release``, the tree the latest publish
+    from: ``method``, the step's method, or ``release``, the tree the latest publish
     replaced, which a recheck evaluates again with fresh episodes, so that
     selecting it rolls back.
     Purpose: ``HarnessBackend.prepare_step`` makes it; the evaluator scores

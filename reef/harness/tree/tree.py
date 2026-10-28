@@ -3,8 +3,8 @@
 A harness is one directory of text files. ``HarnessTree`` is that directory as
 a value: a release stores one, the harness backend reads the head tree from
 git, and ``render_tree`` turns one into the files an adapter's binary reads.
-``TreePatch`` is a change to a tree: a client proposes one, the proposal
-inbox stores one, and ``HarnessTree.apply`` applies it.
+``TreePatch`` is a change to a tree: a method or a trial builds one, and
+``HarnessTree.apply`` applies it.
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ class TreePatch:
     text of that file, or to ``None``, which removes the file. A key that
     ``changes`` does not name keeps its text. The empty patch changes nothing.
     The mapping is read-only, and its order has no meaning.
-    Purpose: the proposal inbox stores a client's patch against the head
-    tree, a method may build one, and ``HarnessTree.apply`` applies it.
+    Purpose: a method or ``harness_try`` builds one against the head tree,
+    and ``HarnessTree.apply`` applies it.
     """
 
     changes: Mapping[str, str | None]

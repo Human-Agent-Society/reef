@@ -451,7 +451,7 @@ def test_factory_cannot_silently_change_the_processor_mode():
     records.close()
 
 
-def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_path):
+def test_manual_instruction_cannot_be_consumed_by_recheck(tmp_path):
     seen = []
 
     def method(workspace, tools):
@@ -463,10 +463,6 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     backend = trainer.candidate_backend
     # A recheck is due on every automatic step: the latest publish replaced the base.
     state = HarnessState(rollback_release_id="base", rollback_context=backend.context_key()).to_json()
-    backend.proposals.submit(
-        "pending-proposal",
-        {"patch": changed_rules("marker\n"), "session": "unrelated", "release_id": "r", "reason": "unrelated"},
-    )
     batch = JobData(
         "manual-request",
         (),
@@ -475,7 +471,6 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     prepared = backend.prepare_step(batch, state, 0)
     assert prepared.outcome == "skip"
     assert seen[0].id == "request-id"
-    assert (backend.proposals.directory / "pending-proposal.json").is_file()
     assert "recheck" not in prepared.metrics
     trainer.close()
     records.close()
@@ -1339,44 +1334,6 @@ def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_pa
             assert await asyncio.to_thread(_wait, lambda: len(seen) == 2)
             assert seen[1] == (None, ("a",))
             assert dispatcher.get_or_create_scenario("s").trainer.pipeline.training_mode == "hybrid"
-        finally:
-            await client.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        dispatcher.close()
-
-
-@pytest.mark.parametrize("target", ["auto", "hybrid"])
-def test_the_proposal_route_refuses_in_manual_mode_and_admits_again_in_a_batching_mode(tmp_path, target):
-    dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, lambda workspace, tools: None))
-    proposal = {
-        "patch": changed_rules("marker rules\n"),
-        "reason": "because",
-        "session": "3f1c2a9d0b7e",
-        "release_id": "rel-0",
-    }
-    inbox = dispatcher.get_or_create_scenario("s").trainer.candidate_backend.proposals.directory
-
-    async def run():
-        assert dispatcher.get_or_create_scenario("s").trainer.pipeline.training_mode == "manual"
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            headers = {"x-reef-scenario": "s"}
-            response = await client.post("/reef/harness/proposals", headers=headers, json=proposal)
-            assert response.status == 200
-            answer = await response.json()
-            assert answer["admitted"] is False
-            assert answer["reason"] == "manual mode takes instructions only"
-            assert not inbox.exists() or not list(inbox.glob("*.json"))
-            response = await client.post("/reef/scenarios/s/update", json={"training_mode": target})
-            assert response.status == 200
-            response = await client.post("/reef/harness/proposals", headers=headers, json=proposal)
-            answer = await response.json()
-            assert answer["admitted"] is True and answer["reason"] is None
-            assert [path.name for path in inbox.glob("*.json")] == [f"{answer['proposal_id']}.json"]
         finally:
             await client.close()
 

@@ -31,7 +31,7 @@ recipe:
       # It carries no provider: Reef renders its own model binding into each
       # evaluation episode.
       seed: seeds/native
-      # Each scenario's proposals, history (the score cache) and step records,
+      # Each scenario's history (the score cache) and step records,
       # relative to the directory run.sh starts Reef in, as every path in this file is.
       state_dir: work/harness
       evaluation:

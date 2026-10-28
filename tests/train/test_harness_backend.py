@@ -39,7 +39,6 @@ from reef.harness.tree import HarnessTree, TreePatch
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import Workspace
-from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput
 from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication, TrainStepResult
@@ -325,29 +324,6 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_episode_bud
     assert errors == ["the scorer broke"] + ["1 episodes must run, and the step's episode budget has 0 left"] * 2
 
 
-def test_a_claimed_proposal_joins_the_history_and_an_instruction_step_leaves_the_inbox(tmp_path: Path) -> None:
-    stepped: list[int] = []
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: stepped.append(workspace.step))
-    inbox = backend.proposals
-    assert inbox is not None
-
-    def submit(patch: TreePatch) -> str:
-        proposal_id = ProposalInbox.new_id()
-        body = {"patch": patch.to_json(), "reason": "r", "session": "s", "release_id": "base"}
-        assert inbox.submit(proposal_id, body) is None
-        return proposal_id
-
-    submit(MARKER)
-    first = backend_step(backend, data(1), backend.initial_state())
-    # No method ran: the history describes the candidate by the client's reason.
-    record = backend.history.candidates[PI_SEED.apply(MARKER).checksum()]
-    assert (record.origin, record.parent, record.summary) == ("proposal", PI_SEED.checksum(), "r")
-    # An instruction step runs the method and leaves the inbox to the next automatic step.
-    waiting = submit(PLAIN)
-    backend_step(backend, data(2, request=REQUEST), first.state)
-    assert stepped == [2] and inbox.pending() == [waiting]
-
-
 def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -> None:
     backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
     prepared = backend.prepare_step(data(1), backend.initial_state(), 0)
@@ -461,15 +437,11 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
         return marker_score(task, result)
 
     backend, _ = harness_backend(tmp_path, step, score=score, evaluation={"recheck_every": 1})
-    body = {"patch": PLAIN.to_json(), "reason": "", "session": "", "release_id": ""}
-    backend.proposals.submit(ProposalInbox.new_id(), body)
     tasks = (TaskSample(Path("train one")), TaskSample(Path("train two")))
     state = HarnessState(rollback_release_id="base", rollback_context="drifted").to_json()
     result = backend_step(backend, data(2, *tasks), state)
-    # The method ran on the rollouts, although a recheck was due and a proposal waited.
-    assert (
-        "recheck" not in result.metrics and "proposal" not in result.metrics and len(backend.proposals.pending()) == 1
-    )
+    # The method ran on the rollouts, although a recheck was due.
+    assert "recheck" not in result.metrics
     assert result.metrics["rollouts"] == 2 and result.metrics["selected"] is True
     assert seen["phases"] == [
         ("rolling out", 2),

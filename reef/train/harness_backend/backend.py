@@ -4,10 +4,10 @@ One step runs in the trainer's three phases:
 
 ``prepare_step``
     Read the head tree from git through ``ComponentReleases``. The candidate
-    is the tree the latest publish replaced (a recheck), a client's patch from
-    the inbox, or the tree the method leaves in a fresh step workspace. An
-    offline step's job data holds train tasks: the step rolls them out on the
-    head tree first, and the method reads the episodes as rollout traces.
+    is the tree the latest publish replaced (a recheck) or the tree the method
+    leaves in a fresh step workspace. An offline step's job data holds train
+    tasks: the step rolls them out on the head tree first, and the method
+    reads the episodes as rollout traces.
     Validate the candidate, and make a ``HarnessCandidate`` of it against the
     head.
 ``evaluate``
@@ -49,14 +49,13 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
-from reef.harness.tree import HarnessTree, TreePatch, ValidationResult, validate_patch, validate_tree
+from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.harness.tree.checks import clip_record_text, directive_shaped, secret_shaped
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
-from reef.train.harness_backend.capabilities import PatchAdmission, StepProgress, StepProgressReader, StepRecords
+from reef.train.harness_backend.capabilities import StepProgress, StepProgressReader, StepRecords
 from reef.train.harness_backend.contract import Method, StepContext
-from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.harness_backend.records import CALLS_FILE, StepRecord, bounded
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.tools import StepTools
@@ -104,7 +103,7 @@ class StepLimits:
             raise ValueError("publish must be 'auto' or 'review'")
 
 
-class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission, StepRecords, StepProgressReader):
+class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, StepProgressReader):
     """Evolve one harness component: one candidate per step, evaluated against the head tree.
 
     Methods never subclass it. A method's behavior arrives as ``method``, and
@@ -128,7 +127,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         model_resolver: ModelBindingsResolver | None = None,
         limits: StepLimits,
         records: StepRecord,
-        inbox: ProposalInbox | None = None,
         agent: AgentExecution | None = None,
     ) -> None:
         self.descriptor = descriptor
@@ -141,7 +139,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         self.model_resolver = model_resolver
         self.limits = limits
         self.records = records
-        self.inbox = inbox
         self.agent = agent
         #: The source trees of selected candidates, by step, until their commit is durable.
         # The selected tree of the step in flight, until the committer stored it.
@@ -217,7 +214,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
             started_at=time.time(),
             step_record=str(step_dir),
         )
-        # A recheck and a client's proposal wait for a step without rollouts: the method reads every rolled-out chunk.
+        # A recheck waits for a step without rollouts: the method reads every rolled-out chunk.
         if automatic and not rollout_tasks and self.recheck_due(state, step) and state.rollback_release_id is not None:
             # The candidate is the tree the latest publish replaced; it wins only when the head got worse.
             target = self.releases.release(state.rollback_release_id)
@@ -244,73 +241,55 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 origin="release",
             )
             return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
-        claimed = None if self.inbox is None or not automatic or rollout_tasks else self.inbox.claim()
-        if claimed is not None:
-            metrics["proposal"] = {
-                "id": claimed.id,
-                "session": claimed.session,
-                "release_id": claimed.release_id,
-                "reason": claimed.reason,
-            }
-            validation = validate_patch(head_tree, claimed.patch, self.descriptor)
-            if not validation.passed:
-                self.inbox_refuse(claimed.id, validation.message())
-                return skipped(state, metrics, validation.message())
-            candidate_tree = head_tree.apply(claimed.patch)
-            # No method ran: the client's reason describes the candidate.
-            self.history.add_candidate(
-                candidate_tree, step=step, origin="proposal", parent=head_record.tree, summary=claimed.reason
-            )
-        else:
-            rollouts = self.roll_out(head_tree, rollout_tasks, step) if rollout_tasks else ()
-            workspace = Workspace.create(
-                step_dir,
-                history_dir=self.history.root,
-                step=step,
-                tree=head_tree,
-                descriptor=self.descriptor,
-                tasks=step_tasks.tasks,
-                repeats=0 if self.evaluator is None else self.evaluator.episode_repeats,
-                samples=samples,
-                rollouts=rollouts,
-                request=data.request,
-                state_files=state.method_files,
-            )
-            output = self.run_method(workspace, head_record.tree, metrics, calls)
-            try:
-                state = replace(state, method_files=workspace.state_files())
-                candidate_tree = workspace.tree()
-            except ValueError as exc:
-                return skipped(state, metrics, str(exc))
-            if candidate_tree == head_tree:
-                return skipped(state, metrics, "the method left the head tree unchanged")
-            validation = validate_tree(candidate_tree, self.descriptor)
-            if not validation.passed:
-                return skipped(state, metrics, validation.message())
-            self.history.add_candidate(
-                candidate_tree,
-                step=step,
-                origin="method",
-                parent=head_record.tree,
-                summary=output.summary,
-                notes=output.notes,
-            )
-            # An instruction step never claims a proposal: its method's requires join the request's.
-            if data.request is not None:
-                added, refused = screened_requires(data.request.requires, output.requires)
-                requires = merge_requires(data.request.requires, added)
-                if len(requires) > MAX_REQUIRES:
-                    return skipped(state, metrics, f"the step requires {len(requires)} items; at most {MAX_REQUIRES}")
-                metrics["training_request"] = {"id": data.request.id, **data.request.to_dict(), "requires": requires}
-                if refused:
-                    metrics["training_request"]["refused_requires"] = refused
+        rollouts = self.roll_out(head_tree, rollout_tasks, step) if rollout_tasks else ()
+        workspace = Workspace.create(
+            step_dir,
+            history_dir=self.history.root,
+            step=step,
+            tree=head_tree,
+            descriptor=self.descriptor,
+            tasks=step_tasks.tasks,
+            repeats=0 if self.evaluator is None else self.evaluator.episode_repeats,
+            samples=samples,
+            rollouts=rollouts,
+            request=data.request,
+            state_files=state.method_files,
+        )
+        output = self.run_method(workspace, head_record.tree, metrics, calls)
+        try:
+            state = replace(state, method_files=workspace.state_files())
+            candidate_tree = workspace.tree()
+        except ValueError as exc:
+            return skipped(state, metrics, str(exc))
+        if candidate_tree == head_tree:
+            return skipped(state, metrics, "the method left the head tree unchanged")
+        validation = validate_tree(candidate_tree, self.descriptor)
+        if not validation.passed:
+            return skipped(state, metrics, validation.message())
+        self.history.add_candidate(
+            candidate_tree,
+            step=step,
+            origin="method",
+            parent=head_record.tree,
+            summary=output.summary,
+            notes=output.notes,
+        )
+        # An instruction step's method requires join the request's.
+        if data.request is not None:
+            added, refused = screened_requires(data.request.requires, output.requires)
+            requires = merge_requires(data.request.requires, added)
+            if len(requires) > MAX_REQUIRES:
+                return skipped(state, metrics, f"the step requires {len(requires)} items; at most {MAX_REQUIRES}")
+            metrics["training_request"] = {"id": data.request.id, **data.request.to_dict(), "requires": requires}
+            if refused:
+                metrics["training_request"]["refused_requires"] = refused
         candidate = HarnessCandidate(
             candidate_id=f"{data.data_id}:candidate",
             candidate_tree=candidate_tree,
             current_tree=head_tree,
             evaluation_tasks=step_tasks.tasks,
             step=step,
-            origin="method" if claimed is None else "proposal",
+            origin="method",
         )
         return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
 
@@ -433,11 +412,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 "patch_parts": self.patch_parts(candidate.patch),
             }
         )
-        if candidate.origin == "proposal" and self.inbox is not None:
-            self.inbox.settle(
-                metrics["proposal"]["id"],
-                {"step": candidate.step, "selected": decision.selected, "reason": decision.reason},
-            )
         if not decision.selected:
             return TrainStepResult(state.to_json(), metrics)
         directory = Path(tempfile.mkdtemp(prefix="reef-harness-"))
@@ -467,8 +441,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 if key in prepared.metrics
             },
         }
-        if candidate.origin == "proposal":
-            self.inbox_refuse(prepared.metrics["proposal"]["id"], "step aborted before a result")
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Discard the step's local source tree once the committer stored it in git."""
@@ -480,13 +452,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         return dict(self.failed_step)
 
     # -- the service capabilities ------------------------------------------------------------------------------------
-
-    @property
-    def proposals(self) -> ProposalInbox | None:
-        return self.inbox
-
-    def admit(self, patch: TreePatch) -> ValidationResult:
-        return validate_patch(HarnessTree(self.releases.head().files), patch, self.descriptor)
 
     def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]:
         return self.records.read(directory, relative)
@@ -525,10 +490,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         """The part of the adapter's tree each path of ``patch`` is, for the step pages."""
         located = {path: self.descriptor.layout.locate(path) for path in patch.changes}
         return {path: location.part.name for path, location in located.items() if location is not None}
-
-    def inbox_refuse(self, proposal_id: str, reason: str) -> None:
-        if self.inbox is not None:
-            self.inbox.refuse(proposal_id, reason)
 
 
 def screened_requires(

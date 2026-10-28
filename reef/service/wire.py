@@ -14,7 +14,6 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.core.records_types import RequestType, parse_references
-from reef.harness.tree import TreePatch
 
 SCENARIO_HEADER = "x-reef-scenario"
 RELEASE_ID_HEADER = "x-reef-release-id"
@@ -115,42 +114,3 @@ class ReportPayload:
         if self.metadata:
             result["metadata"] = dict(self.metadata)
         return result
-
-
-@dataclass(frozen=True)
-class ProposalPayload:
-    """``POST /reef/harness/proposals``: a patch to the head tree, and where it came from.
-
-    Values: ``patch`` is a JSON object of tree path to new text, or to
-    ``null`` for a removal, and changes at least one path; ``reason`` is the
-    proposer's own account; ``session`` and ``release_id`` name the session
-    that proposed and the release it was running, so a commit that settles
-    the proposal is attributable. The service validates the patch against
-    the head tree; the wire checks only its shape.
-    """
-
-    patch: TreePatch
-    reason: str
-    session: str
-    release_id: str
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> ProposalPayload:
-        patch = TreePatch.from_json(payload.get("patch"))
-        if not patch.changes:
-            raise ValueError("patch must change at least one path")
-        fields: dict[str, str] = {}
-        for key in ("reason", "session", "release_id"):
-            value = payload.get(key)
-            if not isinstance(value, str):
-                raise ValueError(f"{key} must be a string")
-            fields[key] = value
-        return cls(patch=patch, **fields)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "patch": self.patch.to_json(),
-            "reason": self.reason,
-            "session": self.session,
-            "release_id": self.release_id,
-        }

@@ -43,8 +43,8 @@ EPISODES_FILE = "episodes.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
 TREES_DIR = "trees"
 EPISODES_DIR = "episodes"
-#: Where a candidate came from: the seed tree, a method's step, a client's proposal, or an earlier release.
-ORIGINS = ("seed", "method", "proposal", "release")
+#: Where a candidate came from: the seed tree, a method's step, or an earlier release.
+ORIGINS = ("seed", "method", "release")
 
 
 @dataclass(frozen=True)
@@ -56,9 +56,8 @@ class CandidateRecord:
     is one of ``ORIGINS``. ``parent`` is the checksum of the head tree it was
     proposed against; it is ``None`` exactly when ``origin`` is ``seed`` or
     ``release``. ``summary`` and ``notes`` describe the tree when a step
-    proposed it: what the method said, or for a ``proposal`` the client's
-    reason and no notes. Both are empty for a tree that no step proposed. The
-    latest line of a tree in ``candidates.jsonl`` is its record.
+    proposed it: what the method said. Both are empty for a tree that no step
+    proposed. The latest line of a tree in ``candidates.jsonl`` is its record.
     Purpose: the history makes one per tree; a method reads them to choose a
     parent or to show what was tried.
     """

@@ -608,14 +608,13 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
             "candidate_score": 2.0,
             "current_score": 0.0,
             "patch": {"rules.md": "one line\n"},
-            "proposal": {"id": "p1", "session": "s1", "reason": "because"},
             "selection": {"reason": "candidate won 2 task pairings and lost 0"},
             "method_summary": "rewrote rules.md from 1 failing trace(s)",
             "model_seconds": 1.5,
         },
     }
     write_commits(work / "agent-record", commit)
-    for name, release, tool in (("s1", "r1", "harness_propose"), ("s2", "r2", None)):
+    for name, release, tool in (("s1", "r1", "harness_try"), ("s2", "r2", None)):
         events = session_events(name, release, ["think"], tool)
         (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     mounts = (
@@ -634,7 +633,6 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     assert seed_release["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
     assert published["files"] == {**NATIVE_SEED.files, "rules.md": "one line\n"}
     assert published["diff"] == {"added": ["rules.md"], "updated": [], "removed": []}
-    assert published["proposal"] == {"id": "p1", "session": "s1", "reason": "because"}
     assert published["summary"] == "rewrote rules.md from 1 failing trace(s)"
     assert published["result"]["wins"] == 2 and published["result"]["reason"].startswith("candidate won")
     assert published["result"]["model_seconds"] == 1.5
@@ -649,7 +647,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         {**data, "sessions": [{**data["sessions"][0], "events": [*data["sessions"][0]["events"], hostile]}]}
     )
     assert page.startswith("<title>Harness Evolution Replay</title>")
-    assert '<script id="data" type="application/json">' in page and "harness_propose" in page
+    assert '<script id="data" type="application/json">' in page and "harness_try" in page
     # No "<" survives inside the data element: neither a closing tag nor the comment opener that would keep the
     # element from closing and swallow the page's own script.
     payload = page.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]

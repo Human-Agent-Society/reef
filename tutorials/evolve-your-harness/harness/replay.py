@@ -103,7 +103,6 @@ def collect(work: Path) -> dict:
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
                 "recorded_at": row.get("recorded_at"),
-                "proposal": metrics.get("proposal"),
                 "summary": metrics.get("method_summary"),
                 "patch": sorted(patch),
                 "result": {
@@ -231,7 +230,7 @@ function renderChain() {
   D.releases.forEach((r, i) => {
     const d = document.createElement('div'); d.className = 'rel' + (i === state.release ? ' sel' : ''); d.tabIndex = 0;
     const v = r.result || {};
-    const source = r.proposal ? `agent proposal, session ${short(r.proposal.session)}` : (r.step ? 'method proposal' : 'the served tree before any step');
+    const source = r.step ? 'method proposal' : 'the served tree before any step';
     const muts = r.diff ? '' : (r.patch || []).map(path => `<li>${esc(path)}</li>`).join('');
     const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(esc).join(', ')}</li>`).join('') : '';
     d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.release_id) || '-')}</div>` +

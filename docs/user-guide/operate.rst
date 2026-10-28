@@ -48,33 +48,6 @@ Newest first. Each row names its scenario ``step`` (0 for the creation row), the
 
 For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
 
-Read the proposal inbox
------------------------
-
-.. code:: bash
-
-   ls -R .reef/harness/code-repair/harness/proposals
-   cat .reef/harness/code-repair/harness/proposals/settled/*.json
-
-A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``<evolution.state_dir>/<scenario>/<component>/proposals/``, where ``evolution.state_dir`` defaults to ``.reef/harness`` and ``<component>`` is the release component the recipe evolves: ``harness`` for ``HarnessEvolutionRecipe``, as in the commands above (see `History <evolve-your-harness.rst#history>`__). Each file holds the body the agent sent (``patch``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 75
-
-   * - Directory
-     - Meaning
-   * - ``proposals/`` itself
-     - pending: admitted at the route, not yet taken by a step
-   * - ``claimed/``
-     - taken by the step now running; a step that failed before it settled leaves the file here, and no later step takes it again
-   * - ``refused/``
-     - the step's own validation refused it, because the head had moved; ``refused`` holds the problems
-   * - ``settled/``
-     - the evaluation settled it; ``result`` holds the step, whether it was selected, and the selection's reason
-
-The commit that settled a proposal carries ``proposal: {id, session, release_id, reason}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. An automatic step takes the oldest pending proposal in place of running the method; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
-
 Read what a release requires
 ----------------------------
 
@@ -193,7 +166,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
 
 Choose the storage backend
 --------------------------

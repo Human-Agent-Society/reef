@@ -1,9 +1,9 @@
 """What the service routes may ask a harness backend, beyond the candidate lifecycle.
 
 The routes check each capability with ``isinstance``, so a backend that
-lacks one simply does not offer the route: ``PatchAdmission`` backs
-``POST /reef/harness/proposals``, ``StepRecords`` the release pages' record
-reads, and ``StepProgressReader`` the request page that follows a step.
+lacks one simply does not offer the route: ``StepRecords`` backs the release
+pages' record reads, and ``StepProgressReader`` the request page that follows
+a step.
 """
 
 from __future__ import annotations
@@ -12,26 +12,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-
-from reef.harness.tree import TreePatch, ValidationResult
-from reef.train.harness_backend.inbox import ProposalInbox
-
-
-class PatchAdmission(ABC):
-    """Validate a client's patch against the head tree and hold it for the next automatic step.
-
-    Purpose: ``POST /reef/harness/proposals`` validates a patch with
-    ``admit`` and files an admitted one in ``proposals``.
-    """
-
-    @property
-    @abstractmethod
-    def proposals(self) -> ProposalInbox | None:
-        """The scenario's proposal inbox, ``None`` when the deployment takes no proposals."""
-
-    @abstractmethod
-    def admit(self, patch: TreePatch) -> ValidationResult:
-        """``validate_patch`` of ``patch`` against the head tree; touches no step state."""
 
 
 class StepRecords(ABC):
@@ -53,7 +33,7 @@ class StepProgress:
     """Where the running step stands, for a page a person watches.
 
     Values: ``request_id`` names the instruction the step answers, ``None``
-    for an automatic step or a client's proposal. ``phase`` is one of
+    for an automatic step. ``phase`` is one of
     ``STEP_PHASES``: ``"rolling out"`` while an offline step runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
     episodes run, and ``"proposing"`` at any other time from the moment the
@@ -98,4 +78,4 @@ class StepProgressReader(ABC):
     def step_progress(self) -> StepProgress | None: ...
 
 
-__all__ = ["STEP_PHASES", "PatchAdmission", "StepProgress", "StepProgressReader", "StepRecords"]
+__all__ = ["STEP_PHASES", "StepProgress", "StepProgressReader", "StepRecords"]

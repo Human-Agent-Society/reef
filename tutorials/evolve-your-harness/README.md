@@ -64,7 +64,6 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 ```bash
 ./run.sh          # on pi (serve.yaml)
 ./run.sh native   # on reef's native harness (serve-native.yaml)
-./run.sh self     # the same, and the model proposes the change itself through its self tools
 ```
 
 Every run ends by writing `work/replay.html`: the release chain with each step's result and the files its patch changed, the loop graph replayed from a session's events, the session event log and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
@@ -175,10 +174,6 @@ Pick a model that fails at least one task. A model that passes all three tasks s
 - The pass runs through the serve form. `run.sh native` names the scenario and writes the model binding under `work/tree` (`python3 run.py pull`), then starts `reef-native serve --tree work/tree --scenario harness-evolve-demo --follow head --poll-interval 5`, which pulls the served source tree itself. `python3 run.py native` sends each task to that process as one turn with `reef-native turn`, grades the reply and reports the score against the receipts the turn returned. When the evaluation publishes, the running process mounts the new release between two steps or at once while idle, one `harness/mount` line in `work/tree/native/sessions/serve.jsonl` (or in the open turn's session), with no reinstall and no restart; `run.py` then sends the first task again and prints the stages of the new session, which are the mounted graph's. `work/serve.log` is the process's stderr.
 
 The recorded pass is identical, so the two variants are comparable on the same three tasks.
-
-## Self tools variant
-
-`./run.sh self` is the native variant with `reef-native serve --self-tools`: the served model gets `harness_inspect`, `harness_try` and `harness_propose`, the built-in tools of the resident process. `python3 run.py self` sends one turn that tells the model it runs on a harness it can read and change and asks it to inspect the tree, propose one change through `harness_propose` that makes its answers end with the integer alone on the last line, and then answer the sieve task. The route admits the proposal into the scenario's inbox; the turn's answer is graded and reported against the turn's receipts, and the report opens a step that claims the proposal before it asks the method. A win publishes, the process mounts the release the model proposed (the commit's `proposal` names the proposal and the session that made it), and the first task runs again on the mounted tree. The prompt names the goal and the shape of a patch to `rules.md`, not the rule's text: what the model writes is what the evaluation judges.
 
 ## Known limitations
 

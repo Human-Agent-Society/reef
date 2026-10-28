@@ -95,7 +95,6 @@ tests/reef_service/test_error_translation.py
 tests/reef_service/test_generator_deploy.py
 tests/reef_service/test_harness_channel.py
 tests/reef_service/test_harness_example.py
-tests/reef_service/test_harness_proposals.py
 tests/reef_service/test_harness_recipe.py
 tests/reef_service/test_harness_requests.py
 tests/reef_service/test_harness_step_record.py
