@@ -60,12 +60,19 @@ The harness tree
 A harness tree is one directory of text files: the mutable, versioned part of
 one harness. Each release in the scenario's git history holds one tree, and
 each step changes it with a patch, a set of paths mapped to their new text, or
-to ``null`` for a removal. The layout fixes where each kind of file lives, so
-the same tree means the same thing to every adapter
-(`reef/harness/tree/layout.py <../../reef/harness/tree/layout.py>`__):
+to ``null`` for a removal.
+
+The adapter decides which parts a tree may hold. Each adapter declares the
+parts of its tree in a ``tree.yaml`` file beside its descriptor, for example
+`reef/harness/adapters/pi/tree.yaml
+<../../reef/harness/adapters/pi/tree.yaml>`__. A part names a tree path, the
+format that Reef checks the file as, the path where the agent reads the file,
+and what the file holds. The bundled adapters use the same tree path for the
+same part, so a tree means the same thing to every adapter that takes its
+parts:
 
 +------------------------------+--------------------+-----------------------------------------------+
-| Path                         | Kind               | Holds                                         |
+| Path                         | Part               | Holds                                         |
 +==============================+====================+===============================================+
 | ``rules.md``                 | ``rules``          | the text every session reads                  |
 +------------------------------+--------------------+-----------------------------------------------+
@@ -74,9 +81,9 @@ the same tree means the same thing to every adapter
 +------------------------------+--------------------+-----------------------------------------------+
 | ``skills/<name>/SKILL.md``   | ``skill``          | an Agent Skill                                |
 +------------------------------+--------------------+-----------------------------------------------+
-| ``commands/<name>.md``       | ``agent_command``  | a prompt template a person types as a command |
+| ``commands/<name>.md``       | ``command``        | a prompt template a person types as a command |
 +------------------------------+--------------------+-----------------------------------------------+
-| ``extensions/<name>.<ext>``  | ``code_extension`` | code the harness loads in process; the        |
+| ``extensions/<name>.<ext>``  | ``extension``      | code the harness loads in process; the        |
 |                              |                    | adapter names the suffix                      |
 +------------------------------+--------------------+-----------------------------------------------+
 | ``native/tools/<name>.py``   | ``native_tool``    | a tool of the native loop                     |
@@ -90,44 +97,45 @@ the same tree means the same thing to every adapter
 | ``native/loops/<name>.py``   | ``native_loop``    | the native loop itself as code                |
 +------------------------------+--------------------+-----------------------------------------------+
 
-A path off this layout is refused. An adapter maps each kind to a concrete
-file for one agent. Turning the tree into those files is called rendering,
-and it is more than a copy: each config file merges over the adapter's
-enforced defaults, and the adapter's quirks rewrite some files (a skill's
-frontmatter, say). See the adapter guide's `Rendering
-<../developer-guide/harness-adapters.rst#rendering>`__ section for the
-details.
+A path that no part of the adapter's tree takes is refused at validation and
+at render, never dropped. Turning the tree into the agent's files is called
+rendering, and it is more than a copy: each config file merges over the
+adapter's enforced defaults, and the adapter's quirks rewrite some files (a
+skill's frontmatter, say). The adapter guide's `Tree parts
+<../developer-guide/harness-adapters.rst#tree-parts>`__ section describes
+``tree.yaml``, and its `Rendering
+<../developer-guide/harness-adapters.rst#rendering>`__ section gives the
+details of rendering.
 
 Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)), for ``terminus``, Terminal-Bench's Terminus 2 run through a
 Reef-owned Harbor runner, and for ``native``, Reef's own agent.
 
-An adapter need not render every kind, and a file of a kind it leaves out is
-refused at validation and at render rather than dropped, so the adapter decides
-which files a tree may hold. Every bundled adapter renders ``rules``, ``config``
-and ``skill``, so a change to one of those renders under any harness.
+An adapter need not take every part. Every bundled adapter takes ``rules``,
+``config`` and ``skill``, so a change to one of those renders under any
+harness.
 
-Every adapter except ``native`` renders ``agent_command``; a Codex command is a
-skill invoked as ``$name``. ``native`` renders neither ``agent_command`` nor
-``code_extension``, because the two presuppose a vendor binary: its loop reads
-no prompt directory and loads no vendor plugin.
+Every adapter except ``native`` takes ``command``. On Codex, a command renders
+as a skill that a person invokes as ``$name``. ``native`` takes neither
+``command`` nor ``extension``, because the two presuppose a vendor binary: its
+loop reads no prompt directory and loads no vendor plugin.
 
-``code_extension`` is narrower still. Codex rejects it because lifecycle hooks
-run outside its command sandbox. Terminus accepts one Python module defining
-``Agent(Terminus2)``, and only when Reef's sandbox isolates the runner and
-Harbor runs the tasks remotely (``e2b`` or ``modal``); see the adapter guide for the required
-deployment settings.
+``extension`` is narrower still. Codex takes no ``extension`` part, because
+lifecycle hooks run outside its command sandbox. Terminus takes one Python
+module defining ``Agent(Terminus2)``, and runs it only when Reef's sandbox
+isolates the runner and Harbor runs the tasks remotely (``e2b`` or
+``modal``); see the adapter guide for the required deployment settings.
 
 Native files
 ~~~~~~~~~~~~
 
-``native`` is a loop inside Reef rather than a vendor binary, so its five kinds
-are the loop itself: its tools, the listeners at its loop events, its control
-flow, the agents it delegates to, and the loop as code. The agent can
-therefore evolve the tools it runs, how its loop reacts, the loop itself, and
-who it delegates to, not only the text around a vendor binary. No other
-adapter renders these kinds.
+``native`` is a loop inside Reef rather than a vendor binary, so its five
+``native_*`` parts are the loop itself: its tools, the listeners at its loop
+events, its control flow, the agents it delegates to, and the loop as code.
+The agent can therefore evolve the tools it runs, how its loop reacts, the
+loop itself, and who it delegates to, not only the text around a vendor
+binary. No other bundled adapter takes these parts.
 
 A tool file defines ``run(args, workdir) -> str`` and ends with the constants
 ``NAME``, ``DESCRIPTION``, ``PARAMETERS`` (a JSON schema) and ``CAPABILITIES``;
@@ -149,9 +157,10 @@ tools, budgets, the session log and the sandbox stay Reef's; a loop that
 raises, or calls the context past its budget of transitions, ends the turn
 with ``LOOP_ERROR`` and fails the checks, and the first end of a turn is final
 whatever the loop code catches. A tree holds at most one loop. Loop code runs
-inside the loop's own process, so a win that creates, changes or removes a
-loop is always a pending release a person promotes, whether or not
-``evolution.review_kinds`` names the kind, and ``harness_try`` refuses to
+inside the loop's own process, so native's ``tree.yaml`` marks the
+``native_loop`` part ``review: true``. A win that creates, changes or removes
+a loop is always a pending release a person promotes, whether or not
+``evolution.review_parts`` names the part, and ``harness_try`` refuses to
 mount one on a serving process: the model proposes a loop, a person serves it.
 
 Rendered paths
@@ -169,7 +178,8 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
      skills/<name>/SKILL.md    <- skills/<name>/SKILL.md
      extensions/<name>.ts      <- extensions/<name>.ts
 
-``GET /reef/harness?form=source`` serves the tree itself. The adapter guide
+``GET /reef/harness?form=source`` serves the tree itself. The adapter guide's
+`Render paths <../developer-guide/harness-adapters.rst#render-paths>`__ table
 gives the paths each other adapter renders to.
 
 Model endpoints stay outside the tree
@@ -542,11 +552,14 @@ Every decision is in the history with the candidate it decided, so a method
 can read what the evaluation refused before it tries again.
 
 By default a successful evaluation is served at once.
-``evolution.publish: review`` holds every win as a pending release instead,
-and ``evolution.review_kinds`` (a list of tree kinds, empty by default) holds
-only the wins whose patch touches those kinds, so ``[code_extension]`` lets
-rules and config auto publish while code waits for a person; a win that
-touches a ``native_loop`` waits whether or not the list names it. A pending release sits in the catalog with its evaluation
+``evolution.publish: review`` holds every win as a pending release instead.
+``evolution.review_parts`` (a list of part names of the adapter's tree, empty
+by default) holds only the wins whose patch touches those parts, so
+``[extension]`` lets rules and config publish at once while code waits for a
+person. Startup refuses a name that is not a part of the adapter's tree. A
+win that touches a part marked ``review: true`` in the adapter's
+``tree.yaml``, such as native's ``native_loop``, waits whether or not the
+list names it. A pending release sits in the catalog with its evaluation
 metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
 names it; the loop keeps evolving from it in the meantime, so promoting the
 latest pending release serves everything accumulated since the head.
@@ -623,8 +636,9 @@ Commit history
 Every result is recorded in the scenario's commit history, whether the candidate
 was published, rejected or skipped. A commit carries:
 
-- its patch: each changed path with its new text, or ``null`` for a removal,
-  so a rejected rewrite is readable too;
+- its patch: ``patch`` maps each changed path to its new text, or to
+  ``null`` for a removal, so a rejected rewrite is readable too, and
+  ``patch_parts`` maps each changed path to its part of the adapter's tree;
 - the sum of the episode scores of each side the policy ran
   (``candidate_score`` and ``current_score``), the decision's numbers
   (``wins``, ``losses`` and ``ties``; ``candidate_mean`` and
@@ -953,7 +967,7 @@ what an earlier one added.
 
 An evolved extension runs in the harness's process with your privileges, so
 the tutorial's ``configs/deployment.yaml`` sets
-``evolution.review_kinds: [code_extension]``: a release that changes one waits
+``evolution.review_parts: [extension]``: a release that changes one waits
 as pending until a person promotes it. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused. The
 beta `Reefine <../../recipes/beta/reefine/README.md>`__ recipe answers
@@ -973,9 +987,9 @@ and what the release needs. The HTTP API's `Version page
 Promote a pending release
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A win that touches a kind in ``evolution.review_kinds`` (``code_extension``
-in the tutorial's ``deployment.yaml``) or a ``native_loop`` sits in the
-catalog with ``pending: true`` and is served to no client. Find its id in
+A win that touches a part in ``evolution.review_parts`` (``extension`` in
+the tutorial's ``deployment.yaml``) or a ``native_loop`` sits in the catalog
+with ``pending: true`` and is served to no client. Find its id in
 ``GET /reef/harness/releases`` (the newest row marked ``pending``), read the
 change on its page or with ``GET /reef/harness?release_id=<id>``, and name it
 to the promote route. The answer is the new head with a fresh release id,
@@ -1104,7 +1118,7 @@ names one method in ``evolution.method``. The packages in this repository
 learn in different ways:
 
 - `GEPA <recipes/gepa.rst>`__ (``recipes/gepa/``): reflective prompt
-  evolution. A reflection model rewrites one part of the tree from the
+  evolution. A reflection model rewrites one text file of the tree from the
   feedback of a minibatch of tasks, and the evaluation compares mean scores.
 - `Meta-Harness <../../recipes/meta_harness/README.md>`__
   (``recipes/meta_harness/``): a model reads every earlier candidate with its
@@ -1132,40 +1146,42 @@ workspace, the tools, the state and the history, with worked examples.
 Connect a different agent
 -------------------------
 
-An adapter is one descriptor: where each kind of tree file is written, which
-kinds the agent accepts, how the binary is launched, and how a model binds to
-it. The bundled descriptors cover these agents:
+An adapter is a descriptor and the parts of its tree. Its ``tree.yaml``
+declares which parts the agent takes and where each one is written. Its
+``descriptor.yaml`` declares how the binary is launched and how a model binds
+to it. The bundled adapters cover these agents:
 
 +---------------+----------------------------------+----------------------------------------+
-| Adapter       | Agent                            | Kinds it renders                       |
+| Adapter       | Agent                            | Parts it takes                         |
 +===============+==================================+========================================+
-| ``pi``        | pi coding agent                  | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
+| ``pi``        | pi coding agent                  | config, rules, command, skill,         |
+|               |                                  | extension                              |
 +---------------+----------------------------------+----------------------------------------+
-| ``opencode``  | OpenCode                         | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
+| ``opencode``  | OpenCode                         | config, rules, command, skill,         |
+|               |                                  | extension                              |
 +---------------+----------------------------------+----------------------------------------+
-| ``claude``    | Claude Code                      | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
+| ``claude``    | Claude Code                      | config, rules, command, skill,         |
+|               |                                  | extension                              |
 +---------------+----------------------------------+----------------------------------------+
-| ``codex``     | Codex CLI                        | config, rules, agent_command, skill    |
+| ``codex``     | Codex CLI                        | config, rules, command, skill          |
 +---------------+----------------------------------+----------------------------------------+
-| ``dsh``       | DeepSeek Harness                 | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
+| ``dsh``       | DeepSeek Harness                 | config, rules, command, skill,         |
+|               |                                  | extension                              |
 +---------------+----------------------------------+----------------------------------------+
-| ``hermes``    | Hermes Agent                     | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
+| ``hermes``    | Hermes Agent                     | config, rules, command, skill,         |
+|               |                                  | extension                              |
 +---------------+----------------------------------+----------------------------------------+
-| ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill,   |
-|               |                                  | code_extension (sandbox + E2B)         |
+| ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, command, skill,         |
+|               |                                  | extension (sandbox + remote tasks)     |
 +---------------+----------------------------------+----------------------------------------+
 | ``native``    | Reef's own loop                  | config, rules, skill, native_tool,     |
 |               |                                  | native_hook, native_graph,             |
 |               |                                  | native_agent, native_loop              |
 +---------------+----------------------------------+----------------------------------------+
 
-`Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
-how to connect an agent that has no adapter yet.
+`Harness adapters <../developer-guide/harness-adapters.rst>`__ is the
+reference for ``tree.yaml`` and ``descriptor.yaml``, and explains how to
+connect an agent that has no adapter yet.
 
 .. seealso::
 

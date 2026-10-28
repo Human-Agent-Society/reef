@@ -25,7 +25,7 @@ from harness import native_evolution
 from harness.plugins import MAX_TOKENS, TIMEOUT_S, failures_text
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
-from reef.harness.tree import HarnessTree, locate, validate_patch
+from reef.harness.tree import HarnessTree, validate_patch
 from reef.train.harness_backend import Trace
 
 
@@ -36,7 +36,7 @@ def seed_tree(serve: Path) -> HarnessTree:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sample the native method and count admitted changes by kind.")
+    parser = argparse.ArgumentParser(description="Sample the native method and count admitted changes by part.")
     parser.add_argument("--serve", default=HERE.parent / "configs" / "serve-native.yaml", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:11434", help="the OpenAI compatible endpoint")
     parser.add_argument("--model", default="qwen2.5:7b")
@@ -76,8 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         row = {"i": i, "seconds": round(time.time() - started), "parsed": patch is not None}
         if patch is not None:
             # The first path is the change's own file; an agent's graph edit rides beside it.
-            location = locate(next(iter(patch.changes)))
-            row["kind"] = "?" if location is None else location.kind.value
+            location = descriptor.layout.locate(next(iter(patch.changes)))
+            row["part"] = "?" if location is None else location.part.name
             validation = validate_patch(tree, patch, descriptor)
             row["admitted"] = validation.passed
             if not validation.passed:
@@ -88,12 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         args.rows.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
     parsed = [row for row in rows if row["parsed"]]
-    by_kind = Counter(row["kind"] for row in parsed)
-    admitted = Counter(row["kind"] for row in parsed if row["admitted"])
+    by_part = Counter(row["part"] for row in parsed)
+    admitted = Counter(row["part"] for row in parsed if row["admitted"])
     print(f"\nsamples {len(rows)}  parsed {len(parsed)}  unparsed {len(rows) - len(parsed)}")
-    for kind in native_evolution.KINDS:
-        if by_kind[kind]:
-            print(f"{kind}: {by_kind[kind]} proposed, {admitted[kind]} admitted")
+    for part in native_evolution.KINDS:
+        if by_part[part]:
+            print(f"{part}: {by_part[part]} proposed, {admitted[part]} admitted")
     for row in parsed:
         if not row["admitted"]:
             print(f"refused: {row['reason']}")

@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-import reef.harness.adapters
+from tests.support.harness_render import descriptor_data, write_descriptor
+
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.codex.quirks import bundled_model_catalog
@@ -119,11 +120,11 @@ def test_render_matches_the_golden_tree(adapter: str) -> None:
 
 def test_render_refuses_a_tree_it_cannot_lay_out() -> None:
     for files, message in (
-        ({"RULES.md": "x"}, "RULES.md is not a path of the harness layout"),
+        ({"RULES.md": "x"}, "RULES.md is not a path of the opencode harness tree"),
         ({"config/primary.json": "{"}, "config/primary.json is not JSON"),
         ({"config/primary.json": "[]"}, "config/primary.json must hold a JSON object"),
         (config({}, "models"), "adapter 'opencode' declares no config target 'models'"),
-        ({"native/tools/shout.py": SHOUT_TOOL}, "adapter 'opencode' does not render native_tool files"),
+        ({"native/tools/shout.py": SHOUT_TOOL}, "native/tools/shout.py is not a path of the opencode harness tree"),
     ):
         with pytest.raises(RenderError, match=re.escape(message)):
             render(files, OPENCODE)
@@ -144,11 +145,18 @@ def test_config_merges_the_tree_over_the_defaults_and_each_overlay_over_the_tree
     assert settings == {"cleanupPeriodDays": 7, "disableDeepLinkRegistration": "disable", "includeCoAuthoredBy": False}
 
 
-def test_native_renders_no_command_or_extension() -> None:
-    # The loop never reads a command or an extension, so native declares no path for either kind.
-    for path, kind in (("commands/summarize.md", "agent_command"), ("extensions/tracer.py", "code_extension")):
-        with pytest.raises(RenderError, match=f"adapter 'native' does not render {kind} files"):
-            render({path: "x"}, NATIVE)
+def test_native_and_codex_take_no_part_their_harness_never_reads() -> None:
+    # The loop never reads a command or an extension, so native declares neither part; Codex's hooks would run
+    # outside its command sandbox, so it declares no extension part.
+    for path, descriptor in (
+        ("commands/summarize.md", NATIVE),
+        ("extensions/tracer.py", NATIVE),
+        ("extensions/tracer.mjs", CODEX),
+    ):
+        with pytest.raises(
+            RenderError, match=f"{re.escape(path)} is not a path of the {descriptor.name} harness tree"
+        ):
+            render({path: "x"}, descriptor)
 
 
 def test_codex_binding_uses_the_responses_api() -> None:
@@ -164,11 +172,6 @@ def test_codex_binding_uses_the_responses_api() -> None:
         "supports_websockets": False,
         "experimental_bearer_token": "k-1",
     }
-
-
-def test_codex_rejects_code_extensions_until_hooks_have_separate_isolation() -> None:
-    with pytest.raises(RenderError, match="native hooks run outside the command sandbox"):
-        render({"extensions/tracer.mjs": "export default () => null"}, CODEX)
 
 
 def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
@@ -312,7 +315,7 @@ def test_codex_overrides_native_capabilities_and_keeps_instructions(
     assert catalog == {**bundled, model: expected}
 
 
-def test_terminus_folds_agent_commands_into_a_second_skill_root() -> None:
+def test_terminus_folds_commands_into_a_second_skill_root() -> None:
     files = render(SOURCES["terminus"], TERMINUS)
     # Both roots carry a SKILL.md, and the quirk synthesized frontmatter on each.
     assert files["terminus/skills/notes/SKILL.md"].startswith("---\nname: notes\n")
@@ -340,7 +343,7 @@ def test_terminus_extension_requires_an_agent_class() -> None:
 def test_terminus_renders_one_extension_without_executing_it() -> None:
     code = "raise RuntimeError('must not run')\nclass Agent: pass\n"
     assert render({"extensions/agent.py": code}, TERMINUS)["terminus/context/agent.py"] == code
-    with pytest.raises(RenderError, match="exactly one code_extension"):
+    with pytest.raises(RenderError, match="exactly one extension"):
         render({"extensions/agent.py": code, "extensions/second.py": code}, TERMINUS)
 
 
@@ -1137,10 +1140,7 @@ def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch)
         "class SecondRenderer(AdapterRenderer):\n    pass\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
-    data["quirks"] = module_name
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    target = write_descriptor(tmp_path, "native", {**descriptor_data("native"), "quirks": module_name})
     with pytest.raises(DescriptorError, match="more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer"):
         load_descriptor(target)
 
@@ -1155,10 +1155,7 @@ def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch)
     ],
 )
 def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
-    data[field] = value
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    target = write_descriptor(tmp_path, "pi", {**descriptor_data("pi"), field: value})
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
 

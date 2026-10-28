@@ -7,6 +7,8 @@ such as its ``rules.md`` and ``skills/<name>/SKILL.md``, which Reef renders
 for the agent's adapter after its protocol rules. A ``README.md`` is for
 people and is not given to the agent. In a prompt, ``{step}`` becomes the
 step's number and ``{history}`` the history's path from the workspace.
+Every other file of the folder is a file of the agent's tree; a run refuses
+one that no part of the agent's adapter takes.
 
 Each step runs the agent once (``Tools.run_agent``). The tree it leaves in
 ``harness/`` is the candidate; a run that does not exit 0 leaves the head
@@ -25,7 +27,7 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.requirements import parse_requires
-from reef.harness.tree import HarnessTree, locate
+from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.agent.run import fill
 from reef.train.harness_backend.contract import Method, StepContext, StepResult
 from reef.train.harness_backend.workspace import Workspace
@@ -91,12 +93,7 @@ class AgentMethod(Method):
             raise PluginConfigError(f"AgentMethod prompts: {folder} holds no {START_FILE}")
         resume = files.pop(RESUME_FILE, None)
         files.pop(README_FILE, None)
-        off = sorted(path for path in files if locate(path) is None)
-        if off:
-            raise PluginConfigError(
-                f"AgentMethod prompts: {folder} holds files that are neither prompts nor harness tree paths: "
-                f"{', '.join(off)}"
-            )
+        # The rest is the agent's own tree; rendering it for the agent's adapter refuses a file no part takes.
         return cls(start, resume, HarnessTree(files), settings.model)
 
     def step(self, context: StepContext) -> StepResult:

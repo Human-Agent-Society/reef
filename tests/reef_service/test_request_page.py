@@ -86,10 +86,16 @@ def request_page(record: dict, rows: list[dict], **options) -> str:
     return build_request_page(record, rows, scenario=SCENARIO, **options)
 
 
+#: The part of the pi harness tree each path the test patches write is, as the backend records it.
+PARTS = {"rules.md": "rules", "extensions/notify.ts": "extension", "skills/old/SKILL.md": "skill"}
+
+
 def _answered(**extra) -> dict:
-    """The metrics of the row that answered the request, the trainer's ``training_request`` stamp included."""
+    """The metrics of the row that answered the request, the trainer's ``training_request`` stamp included, and the
+    part of each path its patch writes."""
     request = {"id": RECORD_ID, "text": TEXT, "session": SESSION, "release_id": "rel-0", "requires": []}
-    return {"steps": 1, "training_request": request, **extra}
+    parts = {path: PARTS[path] for path in extra.get("patch", {}) if path in PARTS}
+    return {"steps": 1, "training_request": request, "patch_parts": parts, **extra}
 
 
 def _sections(page: str) -> list[str]:
@@ -193,7 +199,7 @@ def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_wi
     assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result
     changed = _section(page, "What changed")
-    # Each file the patch wrote, with its kind in the harness layout.
+    # Each file the patch wrote, with its part of the harness tree.
     assert '<span class="tag operation-write">write</span><span class="node-id">rules.md</span>' in changed
     assert '<span class="tag">rules</span>' in changed
     # The next action is the call that pulls the published files.
@@ -218,7 +224,7 @@ def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_wi
     changed = _section(page, "Proposed changes")
     assert changed.count("<li>") == 3
     assert '<span class="tag operation-write">write</span><span class="node-id">extensions/notify.ts</span>' in changed
-    assert '<span class="tag">code_extension</span>' in changed
+    assert '<span class="tag">extension</span>' in changed
     assert (
         '<span class="tag operation-remove">remove</span><span class="node-id">skills/old/SKILL.md</span>' in changed
     )

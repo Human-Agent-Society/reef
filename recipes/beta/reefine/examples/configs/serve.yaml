@@ -30,7 +30,7 @@ recipe:
         preset: openrouter
         api_key: ${REEF_MULTIMODAL_API_KEY}
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
-      review_kinds: [code_extension]
+      review_parts: [extension]
       # Each step's workspace (its tree, material, calls and output), the history of every candidate, and the
       # proposal inbox of POST /reef/harness/proposals, one directory per scenario. It stays outside the
       # checkout: with agent.sandbox none the agent works in a step's directory, and pi reads every AGENTS.md

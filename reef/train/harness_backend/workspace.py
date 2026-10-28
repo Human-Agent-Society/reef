@@ -9,7 +9,7 @@ Each step gets one directory, which is kept afterwards as the step record::
                     request.json                 the instruction the step answers (instruction steps only)
                     evaluation.json              the step's evaluation tasks and repeats
                     failures.json                the head tree's failure manifest (after its first evaluation)
-                    host.json                    the adapter, the tree kinds it renders, and its config targets
+                    host.json                    the adapter, the parts of its tree, and its config targets
     state/        the method's own files, committed with the step
     scratch/      temporary files, removed when the step ends
     output/       files the method keeps with the step record
@@ -37,8 +37,7 @@ from reef.core.trajectories import source_record_id
 from reef.evaluation.harness import EpisodeRecord, History
 from reef.evaluation.harness.tasks import client_of, prompt_of
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tree import HarnessTree, TreeKind
-from reef.harness.tree.layout import KIND_GUIDE
+from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.manifest import FailureManifest
 
 HARNESS_DIR = "harness"
@@ -237,8 +236,8 @@ class Workspace:
         return int(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["repeats"])
 
     def host(self) -> Mapping[str, Any]:
-        """The host facts: ``adapter``, ``kinds`` (each kind the adapter renders, with its guide),
-        ``config_targets`` and ``tasks_are_directories``."""
+        """The host facts: ``adapter``, ``parts`` (each part of the adapter's tree, with its ``path``, ``format``,
+        ``renders``, ``holds`` and ``review``), ``config_targets`` and ``tasks_are_directories``."""
         return json.loads((self.material / HOST_FILE).read_text(encoding="utf-8"))
 
     def history(self) -> History:
@@ -338,15 +337,10 @@ def reply_of(sample: TrajectorySample) -> str | None:
 
 
 def host_facts(descriptor: AdapterDescriptor) -> dict[str, Any]:
-    """What a method needs to know about the adapter: the kinds it renders, with their guide, and its targets."""
-    kinds = [
-        kind
-        for kind in TreeKind
-        if (kind is TreeKind.CONFIG and descriptor.config_targets) or kind.value in descriptor.kind_paths
-    ]
+    """What a method needs to know about the adapter: the parts of its tree and its config targets."""
     return {
         "adapter": descriptor.name,
-        "kinds": {kind.value: KIND_GUIDE[kind] for kind in kinds},
+        "parts": {name: part.to_json() for name, part in descriptor.layout.parts.items()},
         "config_targets": sorted(descriptor.config_targets),
         "tasks_are_directories": descriptor.is_prompt_task_directory,
     }

@@ -3,7 +3,7 @@
 GEPA optimizes a ``dict[str, str]``: one instruction text per named
 component of the program under search, and every reflective mutation
 rewrites exactly one entry of that mapping. Here a component is one file of
-the served tree whose kind carries instructions (``rules.md``, a skill, a
+the served tree whose part carries instructions (the rules, a skill, a
 command), and its name is the file's tree path. A candidate's tree is
 therefore the served tree with the candidate's texts in place, path for path.
 """
@@ -12,25 +12,32 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from reef.harness.tree import HarnessTree, TreeKind, TreePatch, locate
+from reef.harness.adapters.parts import Format, TreeLayout
+from reef.harness.tree import HarnessTree, TreePatch
 
-#: The kinds whose file is free text GEPA can rewrite. Config and extension
-#: files are structure, not instructions: a reflection reply is prose, and
-#: letting it rewrite JSON or executable code would break the tree rather
+#: The formats whose files are free text GEPA can rewrite. Config, code and
+#: native files are structure, not instructions: a reflection reply is prose,
+#: and letting it rewrite JSON or executable code would break the tree rather
 #: than evolve it.
-EVOLVABLE_KINDS = (TreeKind.RULES, TreeKind.SKILL, TreeKind.AGENT_COMMAND)
+EVOLVABLE_FORMATS = (Format.TEXT, Format.SKILL, Format.COMMAND)
 
 
-def texts_of(tree: HarnessTree, kinds: Sequence[TreeKind]) -> dict[str, str]:
-    """The tree as a GEPA candidate: the path of every file of one of ``kinds``, to its text, in path order.
+def texts_of(tree: HarnessTree, layout: TreeLayout, parts: Sequence[str]) -> dict[str, str]:
+    """The tree as a GEPA candidate: the path of every file of one of ``parts``, to its text, in path order.
 
-    ``kinds`` is the method's evolvable subset, so a deployment can evolve
-    only its rules while its skills stay fixed.
+    ``parts`` is the method's evolvable subset, so a deployment can evolve
+    only its rules while its skills stay fixed. ValueError for a name that
+    is not a part of ``layout`` whose format is free text.
     """
+    for name in parts:
+        part = layout.parts.get(name)
+        if part is None or part.format not in EVOLVABLE_FORMATS:
+            evolvable = [part.name for part in layout.parts.values() if part.format in EVOLVABLE_FORMATS]
+            raise ValueError(f"GEPA components must name text parts of the tree: {', '.join(evolvable)}")
     return {
         path: text
         for path, text in tree.files.items()
-        if (location := locate(path)) is not None and location.kind in kinds
+        if (location := layout.locate(path)) is not None and location.part.name in parts
     }
 
 
@@ -46,4 +53,4 @@ def candidate_tree(served: HarnessTree, texts: Mapping[str, str]) -> HarnessTree
     return served.apply(TreePatch({path: text for path, text in texts.items() if path in served.files}))
 
 
-__all__ = ["EVOLVABLE_KINDS", "candidate_tree", "texts_of"]
+__all__ = ["EVOLVABLE_FORMATS", "candidate_tree", "texts_of"]

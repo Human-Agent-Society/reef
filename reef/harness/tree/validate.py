@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.adapters.parts import Format, TreeLayout, TreeLocation
 from reef.harness.tree.checks import (
     reject_inline_secret,
     reject_secret_shaped_text,
@@ -25,7 +26,6 @@ from reef.harness.tree.checks import (
     validate_native_loop,
     validate_native_tool,
 )
-from reef.harness.tree.layout import TreeKind, TreeLocation, extension_suffix, locate
 from reef.harness.tree.render import RenderError, render_tree
 from reef.harness.tree.tree import HarnessTree, TreePatch
 
@@ -63,34 +63,37 @@ class ValidationResult:
 def validate_tree(tree: HarnessTree, descriptor: AdapterDescriptor) -> ValidationResult:
     """Every problem ``tree`` has for ``descriptor``'s adapter.
 
-    Each file must sit on the layout, be of a kind the adapter renders, and
-    pass its kind's content checks. The native files must reference only
-    tools, skills, graphs and agents the tree holds, without delegation
-    cycles, and a tree holds at most one native loop. A tree with none of
-    those problems must also render. The result passes if and only if the
-    tree can be evaluated, published and installed.
+    Each file must be a path of one of the adapter's parts (its
+    ``tree.yaml``) and pass the checks of the part's format. The native
+    files must reference only tools, skills, graphs and agents the tree
+    holds, without delegation cycles, and a tree holds at most one native
+    loop. A tree with none of those problems must also render. The result
+    passes if and only if the tree can be evaluated, published and
+    installed.
     """
+    layout = descriptor.layout
     problems: list[str] = []
     graphs: dict[str, Mapping[str, Any]] = {}
     agents: dict[str, Mapping[str, Any]] = {}
     for path, text in tree.files.items():
-        location = locate(path)
+        location = layout.locate(path)
         if location is None:
-            problems.append(f"{path}: not a path of the harness layout (see reef.harness.tree.layout)")
+            taken = ", ".join(part.path for part in layout.parts.values())
+            problems.append(f"{path}: not a path of the {descriptor.name} harness tree, which takes {taken}")
             continue
         try:
             parsed = check_file(location, text, descriptor)
         except ValueError as error:
             problems.append(f"{path}: {error}")
             continue
-        if location.kind is TreeKind.NATIVE_GRAPH:
+        if location.part.format is Format.NATIVE_GRAPH:
             graphs[location.name] = parsed
-        elif location.kind is TreeKind.NATIVE_AGENT:
+        elif location.part.format is Format.NATIVE_AGENT:
             agents[location.name] = parsed
-    loops = sorted(path for path in tree.files if path.startswith("native/loops/"))
+    loops = sorted(path for path in tree.files if format_of(layout, path) is Format.NATIVE_LOOP)
     if len(loops) > 1:
         problems.append(f"one native loop per tree: {', '.join(loops)}")
-    problems.extend(native_reference_problems(tree, graphs, agents))
+    problems.extend(native_reference_problems(tree, layout, graphs, agents))
     if not problems:
         try:
             render_tree(tree, descriptor)
@@ -107,45 +110,45 @@ def validate_patch(head: HarnessTree, patch: TreePatch, descriptor: AdapterDescr
 
 
 def check_file(location: TreeLocation, text: str, descriptor: AdapterDescriptor) -> Mapping[str, Any]:
-    """Check one file of kind ``location.kind``; return its parsed JSON object, or an empty mapping for text kinds.
+    """Check one file as its part's format; return its parsed JSON object, or an empty mapping for a text format.
 
     Raises ValueError naming the first problem.
     """
-    kind = location.kind
-    if kind is TreeKind.CONFIG:
+    format = location.part.format
+    if format is Format.CONFIG:
         if location.name not in descriptor.config_targets:
             raise ValueError(f"adapter {descriptor.name!r} declares no config target {location.name!r}")
         data = json_object(text)
         reject_inline_secret(data, "config")
         return data
-    if kind.value not in descriptor.kind_paths:
-        raise ValueError(f"adapter {descriptor.name!r} does not render {kind} files")
-    if kind is TreeKind.CODE_EXTENSION and location.suffix != extension_suffix(descriptor.kind_paths[kind.value]):
-        raise ValueError(
-            f"adapter {descriptor.name!r} loads {extension_suffix(descriptor.kind_paths[kind.value])} extensions"
-        )
     if not text.strip():
         raise ValueError("the file is empty")
     reject_secret_shaped_text(text, "the file")
-    if kind is TreeKind.CODE_EXTENSION:
+    if format is Format.CODE:
         reject_unguarded_console_write(text, "the extension")
-    elif kind in (TreeKind.NATIVE_TOOL, TreeKind.NATIVE_HOOK):
+    elif format in (Format.NATIVE_TOOL, Format.NATIVE_HOOK):
         # Every NAME the module assigns is the file's, so a file cannot pass for another tool or hook.
         declared_name(text, location.name)
-        if kind is TreeKind.NATIVE_TOOL:
+        if format is Format.NATIVE_TOOL:
             validate_native_tool(text, location.name)
         else:
             validate_native_hook(text, location.name)
-    elif kind is TreeKind.NATIVE_LOOP:
+    elif format is Format.NATIVE_LOOP:
         validate_native_loop({"name": declared_name(text, location.name), "code": text})
-    elif kind in (TreeKind.NATIVE_GRAPH, TreeKind.NATIVE_AGENT):
+    elif format in (Format.NATIVE_GRAPH, Format.NATIVE_AGENT):
         data = json_object(text)
-        validator = validate_native_graph if kind is TreeKind.NATIVE_GRAPH else validate_native_agent
+        validator = validate_native_graph if format is Format.NATIVE_GRAPH else validate_native_agent
         validator(data)
         if data.get("name") != location.name:
             raise ValueError(f"the object's name {data.get('name')!r} must be the file name {location.name!r}")
         return data
     return {}
+
+
+def format_of(layout: TreeLayout, path: str) -> Format | None:
+    """The format of the part that takes ``path``, or ``None`` when no part does."""
+    location = layout.locate(path)
+    return None if location is None else location.part.format
 
 
 def json_object(text: str) -> Mapping[str, Any]:
@@ -178,7 +181,10 @@ def declared_name(code: str, file_name: str) -> str:
 
 
 def native_reference_problems(
-    tree: HarnessTree, graphs: Mapping[str, Mapping[str, Any]], agents: Mapping[str, Mapping[str, Any]]
+    tree: HarnessTree,
+    layout: TreeLayout,
+    graphs: Mapping[str, Mapping[str, Any]],
+    agents: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
     """Names the native graphs and agents use that the tree lacks, and delegation cycles among the agents.
 
@@ -187,18 +193,18 @@ def native_reference_problems(
     ``then`` list and to those its graph's subagent stages call; a cycle
     would run without end, so delegation must form a finite tree.
     """
-    names: dict[TreeKind, set[str]] = {kind: set() for kind in TreeKind}
+    names: dict[Format, set[str]] = {format: set() for format in Format}
     for path in tree.files:
-        location = locate(path)
+        location = layout.locate(path)
         if location is not None:
-            names[location.kind].add(location.name)
+            names[location.part.format].add(location.name)
     graph_names = set(graphs) | {"main", "seed"}
     problems: list[str] = []
     called_by_graph: dict[str, list[str]] = {}
     for graph_name, graph in graphs.items():
         called: list[str] = []
         for stage_name, stage in graph["stages"].items():
-            missing = sorted(set(stage.get("allow") or ()) - names[TreeKind.NATIVE_TOOL])
+            missing = sorted(set(stage.get("allow") or ()) - names[Format.NATIVE_TOOL])
             if missing:
                 problems.append(f"native graph {graph_name!r} stage {stage_name!r} allows missing tools: {missing}")
             if stage.get("kind") == "subagent":
@@ -209,8 +215,8 @@ def native_reference_problems(
     calls: dict[str, list[str]] = {"": called_by_graph.get("main", [])}
     for agent_name, agent in agents.items():
         for key, known in (
-            ("tools", names[TreeKind.NATIVE_TOOL]),
-            ("skills", names[TreeKind.SKILL]),
+            ("tools", names[Format.NATIVE_TOOL]),
+            ("skills", names[Format.SKILL]),
             ("then", set(agents)),
         ):
             missing = sorted(set(agent.get(key) or ()) - known)

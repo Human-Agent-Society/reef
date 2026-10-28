@@ -118,9 +118,11 @@ import a concrete integration.
 | ``reef/artifact/``      | artifact bytes, repositories,                            | commit policy or delivery                  |
 |                         | materialization, release heads                           | behavior                                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/harness/``       | harness descriptors, the source tree (layout,            | recipe policy, the release chain           |
-|                         | patches, validation, rendering), episodes,               |                                            |
-|                         | runners, trajectories                                    |                                            |
+| ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the release chain           |
+|                         | descriptor), the source tree (patches, validation,       |                                            |
+|                         | rendering), episodes, runners, trajectories, and the     |                                            |
+|                         | loopback gateway an agent process reaches its model      |                                            |
+|                         | and tools through                                        |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
 |                         | and environment lifecycle through Harbor                 | policy                                     |
@@ -337,9 +339,16 @@ The extension points those packages expose are in `Python API
   training stack in its own ``reef/train/<integration>/`` subtree.
   ``reef/train/harness_backend/`` is the general harness evolution engine:
   the step, its workspace, and the method contract.
+  ``reef/train/harness_backend/agent/`` runs the deployment's coding agent
+  for a method (``evolution.agent``, ``run_agent``) and holds
+  ``AgentMethod`` and ``protocol.md``, Reef's rules for every agent run.
   ``reef/evaluation/harness/`` holds the harness evaluation, the history and
   the publication policies, and ``reef/harness/tree/`` holds the source tree
-  the engine evolves.
+  the engine evolves. ``reef/harness/adapters/`` holds one directory per
+  agent: the ``tree.yaml`` that declares the parts of its tree, its
+  ``descriptor.yaml``, and its quirks. ``reef/harness/gateway.py`` is the
+  loopback gateway an agent process reaches its model and its tools
+  through; it defines ``ModelCalls``, the budget each model call spends.
   ``reef/train/slime_backend/`` is the weights counterpart.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into samples? Put the
@@ -394,7 +403,11 @@ beside ``reef/``.
 The harness method contract is in the ``reef/train/harness_backend/``
 package docstring, and `Write a harness method
 <../developer-guide/write-a-harness-method.rst>`__ explains it.
-``reef/harness/tree/layout.py`` defines the source tree layout.
+``reef/harness/adapters/parts.py`` defines the parts a harness tree may hold,
+and each adapter declares its own parts in a ``tree.yaml``, such as
+``reef/harness/adapters/pi/tree.yaml``. `Harness adapters
+<../developer-guide/harness-adapters.rst>`__ explains ``tree.yaml`` and
+``descriptor.yaml``.
 
 Adding a new subpackage under ``reef/`` or a new method under ``recipes/``
 requires an RFC that states which layer owns the behavior.

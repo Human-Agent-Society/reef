@@ -1,0 +1,51 @@
+# The harness tree of native, Reef's own loop. A method writes each part at
+# its path; Reef checks the file as its format and renders it to its renders
+# path, inside the native directory of an episode or of an install. A tree
+# file that no part takes is refused.
+#
+# The loop reads no prompt directory and loads no vendor plugin, so native
+# takes no command part and no code part: a tree that holds one fails
+# validation instead of installing a file the loop never reads.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    renders: native/RULES.md
+    holds: the instructions the loop reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: native/skills/{name}/SKILL.md
+    holds: an Agent Skill, which the loop loads when its description fits the task
+  native_tool:
+    path: native/tools/{name}.py
+    format: native_tool
+    renders: native/tools/{name}.py
+    holds: "a tool of the loop: run(args, workdir), then NAME, DESCRIPTION, PARAMETERS and CAPABILITIES"
+  native_hook:
+    path: native/hooks/{name}.py
+    format: native_hook
+    renders: native/hooks/{name}.py
+    holds: "a listener at one event of the loop: listen(payload, next), then NAME and EVENT"
+  native_graph:
+    path: native/graphs/{name}.json
+    format: native_graph
+    renders: native/graphs/{name}.json
+    holds: the loop's control flow, as stages and the transitions between them
+  native_agent:
+    path: native/agents/{name}.json
+    format: native_agent
+    renders: native/agents/{name}.json
+    holds: one agent the loop delegates to, with its graph, tools and skills
+  # Loop code runs in the loop's own process with its privileges, so a change
+  # always waits for a person.
+  native_loop:
+    path: native/loops/{name}.py
+    format: native_loop
+    renders: native/loops/{name}.py
+    holds: "the loop itself as code: run_turn(ctx), which runs the root turn in place of the graph"
+    review: true
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into native/config.json (primary) or native/models.json (models)

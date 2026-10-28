@@ -20,7 +20,7 @@ from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.harness_facts import harness_facts
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.tree import HarnessTree, TreeKind
+from reef.harness.tree import HarnessTree
 
 CHAT = {"commands/chat.md": "# chat\n\nChat mode is on."}
 RULES = {"rules.md": "While chat mode is on, only search the web.\n"}
@@ -60,10 +60,10 @@ def test_the_request_prompt_names_the_harness_its_rules_file_its_command_and_its
 
 
 def test_a_config_file_is_offered_only_where_it_enforces_a_behavior_and_keeps_to_its_keys() -> None:
-    skill_rules_commands = (TreeKind.SKILL, TreeKind.RULES, TreeKind.AGENT_COMMAND)
-    assert reefine_answer.request_kinds("opencode") == (*skill_rules_commands, TreeKind.CONFIG)
-    assert reefine_answer.request_kinds("hermes") == skill_rules_commands
-    assert reefine_answer.request_kinds("pi") == (*skill_rules_commands, TreeKind.CODE_EXTENSION)
+    skill_rules_commands = ("skill", "rules", "command")
+    assert reefine_answer.request_parts("opencode") == (*skill_rules_commands, "config")
+    assert reefine_answer.request_parts("hermes") == skill_rules_commands
+    assert reefine_answer.request_parts("pi") == (*skill_rules_commands, "extension")
     agent = {"chat": {"mode": "primary", "prompt": "Chat.", "permission": {"*": "deny", "websearch": "allow"}}}
     # A second config target is not the harness config: dropped, while the primary config and the command land.
     files = {"config/primary.json": json.dumps({"agent": agent}), "config/env.json": json.dumps({"agent": agent})}
@@ -108,14 +108,16 @@ def test_the_review_judges_commands_by_the_harness_surface() -> None:
     assert "pi.registerCommand" in review_prompt(model)
 
 
-def test_a_file_dropped_for_its_kind_is_named_in_the_notes_and_in_the_retry() -> None:
+def test_a_file_dropped_for_its_part_is_named_in_the_notes_and_in_the_retry() -> None:
     """An extension off pi is dropped, as ever; the step says so and the retry tells the model."""
     loader = extension("chat", "export default function (pi) {}\n")
     partial = json.dumps({"result": "partial", "delivers": True, "covered": [], "uncovered": ["no /chat command"]})
     model = Model(designed(loader, RULES), partial, designed(CHAT, RULES), COMPLETE)
     outcome = answer(model, "hermes")
     assert outcome.patch.changes == {**CHAT, **RULES}
-    dropped = "extensions/chat.ts was dropped: this harness takes skill, rules, agent_command"
+    dropped = (
+        "extensions/chat.ts was dropped: a request may write skills/{name}/SKILL.md, rules.md, commands/{name}.md"
+    )
     retry = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
     assert retry and f"- {dropped}" in retry[0]
 
@@ -316,7 +318,7 @@ def test_terminus_gets_its_own_facts_and_runs_in_its_task_container() -> None:
     assert f"This harness is {facts.title}" in model.prompt and facts.tools in model.prompt
     # Its runs happen in a task's Linux container: the prompt says so instead of the person's platforms.
     assert facts.machine in model.prompt and "macOS, Linux or Windows under WSL 2" not in model.prompt
-    assert reefine_answer.request_kinds("terminus") == (TreeKind.SKILL, TreeKind.RULES, TreeKind.AGENT_COMMAND)
+    assert reefine_answer.request_parts("terminus") == ("skill", "rules", "command")
     text = review_prompt(model)
     assert "This harness is Terminus 2" in text and "pi.registerCommand" not in text
 

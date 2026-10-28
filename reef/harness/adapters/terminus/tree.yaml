@@ -1,0 +1,33 @@
+# The harness tree Terminus 2 takes. A method writes each part at its path;
+# Reef checks the file as its format and renders it to its renders path,
+# inside the episode root the Reef-owned Harbor runner reads. A tree file that
+# no part takes is refused.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    renders: terminus/AGENTS.md
+    holds: the instructions Harbor appends to each task's instruction
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: terminus/skills/{name}/SKILL.md
+    holds: an Agent Skill, which Terminus 2 loads when its description fits the task
+  # Terminus 2 has no slash-command surface, so a command is a skill in a
+  # second root. Harbor loads both roots and keeps its progressive skill
+  # loading, so a command is discovered rather than pasted into the prompt.
+  command:
+    path: commands/{name}.md
+    format: command
+    renders: terminus-commands/{name}/SKILL.md
+    holds: a prompt template, rendered as a skill under a second root
+  # One module exporting Agent(Terminus2), imported only inside Reef's jail.
+  extension:
+    path: extensions/{name}.py
+    format: code
+    renders: terminus/context/{name}.py
+    holds: a Python module defining class Agent, a subclass of Harbor's Terminus2
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into terminus/config.json (primary), the Terminus 2 constructor arguments

@@ -6,18 +6,17 @@ same way for an episode, for an install, and for the files a client pulls.
 Each config target merges, in order, the descriptor's enforced defaults, the
 tree's ``config/<target>.json`` and the overlays, so an overlay wins every
 key it writes. ``ModelBinding.config_overlays`` makes the overlays that point
-the harness at a model. Every other file lands at the path the descriptor's
-template for its kind names. The shared checks then refuse a
-config that fails a check its target declares, and the descriptor's
-``renderer`` processes the config, skill and command files, checks the model
-route, writes each config file in its harness's format, and gets the last
-word in ``finalize_render``.
+the harness at a model. Every other file lands at the render path of its part
+(the adapter's ``tree.yaml``). The shared checks then refuse a config that
+fails a check its target declares, and the descriptor's ``renderer``
+processes the config files and the files of the ``skill`` and ``command``
+formats, checks the model route, writes each config file in its harness's
+format, and gets the last word in ``finalize_render``.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
@@ -28,7 +27,7 @@ import yaml
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.matchers import Each, select
-from reef.harness.tree.layout import TreeKind, locate
+from reef.harness.adapters.parts import Format
 from reef.harness.tree.tree import HarnessTree
 
 
@@ -55,19 +54,20 @@ def render_tree(
     ``overlays`` are ``(config target, data)`` pairs, merged in order after
     the tree's config. A model binding's overlays point the harness at a
     model; without them, the files carry no endpoint, as a client pulls them.
-    Every rendered file ends in a newline. Raises RenderError for a path off
-    the layout, a config file that is not a JSON object, a kind or config
-    target the adapter does not render, two files that land on one path, and
-    whatever the adapter's renderer refuses.
+    Every rendered file ends in a newline. Raises RenderError for a path that
+    no part of the adapter takes, a config file that is not a JSON object, a
+    config target the adapter does not declare, two files that land on one
+    path, and whatever the adapter's renderer refuses.
     """
     configs = {name: deep_merge({}, target.defaults) for name, target in descriptor.config_targets.items()}
     owners = {target.path: f"config target {name!r}" for name, target in descriptor.config_targets.items()}
     files: dict[str, str] = {}
+    formats: dict[str, Format] = {}
     for path, text in tree.files.items():
-        location = locate(path)
+        location = descriptor.layout.locate(path)
         if location is None:
-            raise RenderError(f"{path} is not a path of the harness layout")
-        if location.kind is TreeKind.CONFIG:
+            raise RenderError(f"{path} is not a path of the {descriptor.name} harness tree")
+        if location.part.format is Format.CONFIG:
             if location.name not in configs:
                 raise RenderError(f"adapter {descriptor.name!r} declares no config target {location.name!r}")
             try:
@@ -78,45 +78,41 @@ def render_tree(
                 raise RenderError(f"{path} must hold a JSON object")
             configs[location.name] = deep_merge(configs[location.name], data)
             continue
-        template = descriptor.kind_paths.get(location.kind.value)
-        if template is None:
-            raise RenderError(f"adapter {descriptor.name!r} does not render {location.kind} files")
-        rendered_path = template if location.kind is TreeKind.RULES else template.format(name=location.name)
+        rendered_path = location.part.render_path(location.name)
         if rendered_path in owners:
             raise RenderError(f"{path} and {owners[rendered_path]} both render to {rendered_path!r}; rename one")
         owners[rendered_path] = path
         files[rendered_path] = text if text.endswith("\n") else text + "\n"
+        formats[rendered_path] = location.part.format
     for target_name, data in overlays:
         if target_name not in configs:
             raise RenderError(f"adapter {descriptor.name!r} declares no config target {target_name!r}")
         configs[target_name] = deep_merge(configs[target_name], data)
     for name, target in descriptor.config_targets.items():
         files[target.path] = json.dumps(configs[name], indent=2, sort_keys=True) + "\n"
-    return apply_adapter_renderer(descriptor, files)
+    return apply_adapter_renderer(descriptor, files, formats)
 
 
-def apply_adapter_renderer(descriptor: AdapterDescriptor, files: dict[str, str]) -> dict[str, str]:
+def apply_adapter_renderer(
+    descriptor: AdapterDescriptor, files: dict[str, str], formats: Mapping[str, Format]
+) -> dict[str, str]:
     """Run the adapter's renderer steps over the laid-out files, whose config files are JSON objects.
 
-    A path that both the ``skill`` and the ``agent_command`` template match is a skill.
+    ``formats`` maps each rendered path that is not a config file to its part's format.
     """
     renderer = descriptor.renderer
     merged = {target.path: json.loads(files[target.path]) for target in descriptor.config_targets.values()}
     check_model_route(descriptor, merged)
     check_config(descriptor, merged)
     configs = {path: renderer.process_config(path, config) for path, config in merged.items()}
-    skill_path = template_pattern(descriptor.kind_paths["skill"])
-    command_template = descriptor.kind_paths.get("agent_command")
-    command_path = None if command_template is None else template_pattern(command_template)
-    skills: dict[str, str] = {}
-    commands: dict[str, str] = {}
-    for path, text in files.items():
-        if path in configs:
-            continue
-        if skill_path.fullmatch(path):
-            skills[path] = renderer.process_skill(path, text)
-        elif command_path is not None and command_path.fullmatch(path):
-            commands[path] = renderer.process_command(path, text)
+    skills = {
+        path: renderer.process_skill(path, files[path]) for path, format in formats.items() if format is Format.SKILL
+    }
+    commands = {
+        path: renderer.process_command(path, files[path])
+        for path, format in formats.items()
+        if format is Format.COMMAND
+    }
     files.update(skills)
     files.update(commands)
     renderer.check_model_route(configs, skills, commands)
@@ -217,9 +213,3 @@ def write_config(adapter: str, path: str, config: Mapping[str, Any]) -> str:
     if suffix == ".env":
         return "".join(f"{key}={value}\n" for key, value in sorted(config.items()))
     return json.dumps(config, indent=2, sort_keys=True) + "\n"
-
-
-def template_pattern(template: str) -> re.Pattern[str]:
-    """The paths a kind's path template renders: ``{name}`` is one path segment."""
-    before, _, after = template.partition("{name}")
-    return re.compile(re.escape(before) + r"[^/]+" + re.escape(after))

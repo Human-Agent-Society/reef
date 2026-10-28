@@ -73,10 +73,10 @@ def test_the_route_validates_the_patch_against_the_head_and_stores_it(tmp_path: 
     assert scenario is not None
     head = scenario.repository.require_current_artifact().release_id
     refused = {
-        "notes.txt": "notes.txt: not a path of the harness layout",
+        "notes.txt": "notes.txt: not a path of the pi harness tree",
         "rules.md": "the patch changes nothing",
         "config/other.json": "adapter 'pi' declares no config target 'other'",
-        "native/tools/t.py": "adapter 'pi' does not render native_tool files",
+        "native/tools/t.py": "native/tools/t.py: not a path of the pi harness tree",
         "config/primary.json": "config field 'config.apiKey' carries an inline credential",
     }
     texts = {"rules.md": "Answer briefly.\n", "config/primary.json": json.dumps({"apiKey": "abcd"})}

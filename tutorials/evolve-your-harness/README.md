@@ -47,7 +47,7 @@ evolve-your-harness/
                  registry reads them; run.sh and the notebook call it
     probe_proposals.py
                  samples the native method's model call over one failing
-                 task and counts what validation lets through, by kind
+                 task and counts what validation lets through, by part
     replay.py    writes work/replay.html from a run's files: the release
                  chain, the loop graph replayed from a session, the session
                  event log and the process timeline
@@ -155,7 +155,7 @@ against the receipts of its model calls with `POST /reef/report`, as
 describes. Adapt `deployment.yaml`'s tasks and `harness/evolution.py`'s grader
 for your workload before starting the deployment.
 
-`deployment.yaml` also sets `evolution.review_kinds: [code_extension]`: a win that touches a `code_extension` waits as a pending release, because an evolved extension runs in pi's process with your privileges. A pending release is served to no client until a person promotes it with `POST /reef/scenarios/{scenario}/promote` and `{"release_id": ...}`, the id of the row marked `pending: true` in `GET /reef/harness/releases`; the curl is under [Promote a pending release](../../docs/user-guide/evolve-your-harness.rst#promote-a-pending-release) in the user guide. `serve.yaml` and `serve-native.yaml` set no review kinds.
+`deployment.yaml` also sets `evolution.review_parts: [extension]`: a win that touches an `extension` waits as a pending release, because an evolved extension runs in pi's process with your privileges. A pending release is served to no client until a person promotes it with `POST /reef/scenarios/{scenario}/promote` and `{"release_id": ...}`, the id of the row marked `pending: true` in `GET /reef/harness/releases`; the curl is under [Promote a pending release](../../docs/user-guide/evolve-your-harness.rst#promote-a-pending-release) in the user guide. `serve.yaml` and `serve-native.yaml` set no review parts.
 
 ## Notebook
 

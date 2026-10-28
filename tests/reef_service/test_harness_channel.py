@@ -11,12 +11,11 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-import yaml
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_render import descriptor_data, write_descriptor
 from tests.support.harness_service import EchoInference, harness_dispatcher
 from tests.support.harness_steps import changed_rules, harness_recipe
 
-import reef.harness.adapters
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -458,13 +457,10 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
 
 
 def descriptor_with(tmp_path: Path, adapter: str, change) -> Path:
-    """A copy of a bundled adapter's descriptor, changed by ``change``."""
-    source = Path(reef.harness.adapters.__file__).parent / adapter / "descriptor.yaml"
-    data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    """A copy of a bundled adapter's descriptor, changed by ``change``, beside its tree."""
+    data = descriptor_data(adapter)
     change(data)
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    return target
+    return write_descriptor(tmp_path, adapter, data)
 
 
 @pytest.mark.unit

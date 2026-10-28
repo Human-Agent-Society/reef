@@ -46,7 +46,7 @@ from recipes.beta.reefine.answer import (
     client_text,
     failures_section,
     kept_design,
-    request_kinds,
+    request_parts,
     review_answer,
     screened_requires,
     undeclared_env,
@@ -58,11 +58,12 @@ from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.adapters.parts import TreeLayout
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import headless_argv
 from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.gateway import AgentTool
-from reef.harness.tree import HarnessTree, TreePatch, locate, render_tree
+from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.sandbox.environment import download_directory
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
 from reef.train.harness_backend import Tools, Workspace
@@ -234,19 +235,21 @@ def agent_requires(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any
     return screened_requires(items)
 
 
-def unread_lines(left_out: Mapping[str, str], paths: Iterable[str]) -> list[str]:
+def unread_lines(left_out: Mapping[str, str], paths: Iterable[str], layout: TreeLayout) -> list[str]:
     """One line for each path of ``left_out`` with its reason, in order. A path inside a directory that holds none
-    of ``paths`` on the layout is named by the outermost such directory instead, once for the directory."""
-    layout_directories = {str(parent) for path in paths if locate(path) for parent in PurePosixPath(path).parents}
+    of ``paths`` that ``layout`` takes is named by the outermost such directory instead, once for the directory."""
+    layout_directories = {
+        str(parent) for path in paths if layout.locate(path) for parent in PurePosixPath(path).parents
+    }
     lines: dict[str, None] = {}
     for relative, reason in left_out.items():
-        # The parents from the outermost down; the tree's root holds the layout itself, so it is never named.
+        # The parents from the outermost down; the tree's root holds the parts themselves, so it is never named.
         parents = reversed(PurePosixPath(relative).parents[:-1])
         outside = next((str(parent) for parent in parents if str(parent) not in layout_directories), None)
         if outside is None:
             lines[f"harness/{relative} {reason}, so it is not read"] = None
         else:
-            lines[f"harness/{outside}/ holds no file of the harness layout, so nothing in it is read"] = None
+            lines[f"harness/{outside}/ holds no file of the harness tree, so nothing in it is read"] = None
     return list(lines)
 
 
@@ -318,13 +321,14 @@ class AgentRun:
 
         The candidate is the head tree with the agent's changes to the files a
         request may write on pi. Every other change is left out and named: a
-        path off the layout, a file of a kind a request may not change, a
-        symbolic link and a special file. A directory that holds no file of
-        the layout, such as the ``node_modules/`` of an install, is named
-        once. ``ValueError`` when a file a request may write is a symbolic
+        path that no part of pi's tree takes, a file of a part a request may
+        not change, a symbolic link and a special file. A directory that holds
+        no file of the tree, such as the ``node_modules/`` of an install, is
+        named once. ``ValueError`` when a file a request may write is a symbolic
         link, is not a regular file, or is not UTF-8 text.
         """
-        kinds = request_kinds(self.descriptor.name)
+        parts = request_parts(self.descriptor.name)
+        layout = self.descriptor.layout
         root = self.workspace.harness
         found: dict[str, Path] = {}
         for directory, subdirectories, names in os.walk(root):
@@ -335,10 +339,10 @@ class AgentRun:
         kept: dict[str, str | None] = {}
         left_out: dict[str, str] = {}
         for relative in sorted(found.keys() | self.head.files.keys()):
-            location = locate(relative)
+            location = layout.locate(relative)
             path = found.get(relative)
             head_text = self.head.files.get(relative)
-            if location is not None and location.kind in kinds:
+            if location is not None and location.part.name in parts:
                 if path is None:
                     kept[relative] = None
                     continue
@@ -356,11 +360,11 @@ class AgentRun:
             elif path is not None and not path.is_file():
                 left_out[relative] = "is not a regular file"
             elif location is None:
-                # The head tree is valid, so it holds no path off the layout: every such path is the agent's.
-                left_out[relative] = "is not a path of the harness layout"
+                # The head tree is valid, so it holds no path that no part takes: every such path is the agent's.
+                left_out[relative] = "is not a path of the harness tree"
             elif path is None or head_text is None or path.read_bytes() != head_text.encode("utf-8"):
                 left_out[relative] = "is a file a request may not change"
-        return self.head.apply(TreePatch(kept)), unread_lines(left_out, (*found, *self.head.files))
+        return self.head.apply(TreePatch(kept)), unread_lines(left_out, (*found, *self.head.files), layout)
 
     def check(self) -> dict[str, Any]:
         try:
@@ -658,7 +662,7 @@ def read_answer(run: AgentRun, request: TrainingRequest, record: dict[str, Any])
         notes["review"] = review
     else:
         notes["review_failure"] = review_failure or "the review did not run"
-    undeclared = undeclared_env(patch, [*own, *added])
+    undeclared = undeclared_env(patch, [*own, *added], run.descriptor.layout)
     if undeclared:
         notes["undeclared_env"] = undeclared
     if review is not None and review.get("delivers") is False:

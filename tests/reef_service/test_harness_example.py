@@ -386,16 +386,16 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
     monkeypatch.chdir(REPO_ROOT)
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
     assert config["data"]["training_mode"] == "hybrid"
-    assert config["evolution"]["review_kinds"] == ["code_extension"]
+    assert config["evolution"]["review_parts"] == ["extension"]
     for name in ("serve", "serve-native"):
         demo = load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
-        assert demo["data"]["training_mode"] == "auto" and "review_kinds" not in demo["evolution"]
+        assert demo["data"]["training_mode"] == "auto" and "review_parts" not in demo["evolution"]
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
         default_runtime=_upstream_runtime(service_config_from_mapping(config)),
     )
-    assert built.evolution.review_kinds == ("code_extension",)
+    assert built.evolution.review_parts == ("extension",)
     # The seed is the starter tree alone: Reef adds no entries of its own to it.
     assert built.seed == PI_SEED
 

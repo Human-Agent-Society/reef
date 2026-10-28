@@ -27,28 +27,25 @@ env:
   XDG_CACHE_HOME: "{root}/xdg-cache"
   XDG_STATE_HOME: "{root}/xdg-state"
   npm_config_cache: "{root}/xdg-cache/npm"
-files:
-  config:
-    primary:
-      path: "opencode/opencode.json"
-      defaults:
-        autoupdate: false
-        share: "disabled"
-        enabled_providers: ["reef"]
-        permission:
-          "*": "allow"
-      checks:
-        # Keep a benchmark episode hermetic and on the binding's provider only.
-        - key: [autoupdate, share, enabled_providers]
-          match: IsDefault()
-        # Each of these chooses a model beyond the binding.
-        - key: [small_model, disabled_providers, agent.*.model, mode.*.model, command.*.model]
-          match: IsAbsent()
-          reason: Reef's model binding chooses the model
-  rules: "opencode/AGENTS.md"
-  agent_command: "opencode/command/{name}.md"
-  skill: "opencode/skill/{name}/SKILL.md"
-  code_extension: "opencode/plugin/{name}.ts"
+# The config files the harness reads: the defaults Reef merges first, and the checks the merged
+# file must pass. A tree's config part (tree.yaml) merges into one of them.
+config:
+  primary:
+    path: "opencode/opencode.json"
+    defaults:
+      autoupdate: false
+      share: "disabled"
+      enabled_providers: ["reef"]
+      permission:
+        "*": "allow"
+    checks:
+      # Keep a benchmark episode hermetic and on the binding's provider only.
+      - key: [autoupdate, share, enabled_providers]
+        match: IsDefault()
+      # Each of these chooses a model beyond the binding.
+      - key: [small_model, disabled_providers, agent.*.model, mode.*.model, command.*.model]
+        match: IsAbsent()
+        reason: Reef's model binding chooses the model
 # opencode keeps its sessions in opencode.db in its data directory.
 trajectory:
   format: opencode-session-sqlite

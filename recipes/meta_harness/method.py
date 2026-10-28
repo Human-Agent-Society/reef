@@ -32,7 +32,9 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.prompts import untrusted_text
 from reef.evaluation.harness import CandidateRecord, EpisodeRecord, History
-from reef.harness.tree import HarnessTree, TreeKind, locate
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.parts import TreeLayout
+from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import redact_secret_shaped
 from reef.train.harness_backend import Method, StepContext, StepResult, Tools, Workspace
 
@@ -57,7 +59,7 @@ class MetaHarnessSettings(PluginSettings):
 
     Values: ``mode`` is one of ``MODES``. ``model`` names an
     ``evolution.models`` binding and is never ``served``. ``components`` are
-    distinct tree kinds, empty for every kind the adapter renders.
+    distinct parts of the adapter's tree, empty for every part.
     ``max_candidates`` and ``max_target_episodes`` are budgets ≥ 0, where 0
     sets no limit. ``max_files`` ≥ 1, ``max_traces`` ≥ 0 and
     ``trace_chars`` ≥ 1 bound one proposal and one prompt.
@@ -70,7 +72,7 @@ class MetaHarnessSettings(PluginSettings):
     )
     model: str = config_option("proposer", help="The evolution.models binding that proposes; never the served model.")
     components: tuple[str, ...] = config_option(
-        (), help="The tree kinds a proposal may change; none means every kind the adapter renders."
+        (), help="The parts of the tree a proposal may change; none means every part."
     )
     max_candidates: int = config_option(0, help="The most candidates the method proposes. 0 sets no limit.")
     max_target_episodes: int = config_option(
@@ -87,12 +89,8 @@ class MetaHarnessSettings(PluginSettings):
             raise ValueError(
                 "model must name an evolution.models binding: the served model never proposes its harness"
             )
-        kinds = {kind.value for kind in TreeKind}
-        unknown = [kind for kind in self.components if kind not in kinds]
-        if unknown:
-            raise ValueError(f"components must be tree kinds ({', '.join(sorted(kinds))}), got {unknown}")
         if len(set(self.components)) != len(self.components):
-            raise ValueError("components must not repeat a kind")
+            raise ValueError("components must not repeat a part")
         for label, value, least in (
             ("max_candidates", self.max_candidates, 0),
             ("max_target_episodes", self.max_target_episodes, 0),
@@ -168,11 +166,11 @@ class MetaHarness(Method):
         workspace, tools = context.workspace, context.tools
         settings = self.settings
         host = workspace.host()
-        available = tuple(TreeKind(kind) for kind in host["kinds"])
-        kinds = tuple(TreeKind(kind) for kind in settings.components) or available
-        unsupported = [kind.value for kind in kinds if kind not in available]
+        layout = get_adapter(str(host["adapter"])).layout
+        parts = settings.components or tuple(layout.parts)
+        unsupported = [part for part in parts if part not in layout.parts]
         if unsupported:
-            raise ValueError(f"adapter {host['adapter']!r} does not render the Meta-Harness components {unsupported}")
+            raise ValueError(f"the {host['adapter']} harness tree has no parts {unsupported}")
         try:
             proposer = tools.models[settings.model]
         except KeyError as exc:
@@ -194,8 +192,8 @@ class MetaHarness(Method):
             "mode": settings.mode,
             "adapter": host["adapter"],
             "config_targets": host["config_targets"],
-            "file_guide": host["kinds"],
-            "evolvable_kinds": [kind.value for kind in kinds],
+            "parts": host["parts"],
+            "evolvable_parts": list(parts),
             "max_files": settings.max_files,
             "served_candidate_id": head,
             "evaluation_tasks": {task_id: task for task, task_id in task_ids.items()},
@@ -218,7 +216,7 @@ class MetaHarness(Method):
             parent = next((member for member in members if member.record.tree == proposal["parent_id"]), None)
             if parent is None:
                 raise ValueError(f"parent_id must name a candidate of the population ({settings.mode} mode)")
-            tree = self.checked_tree(proposal["files"], parent.tree, kinds, tools)
+            tree = self.checked_tree(proposal["files"], parent.tree, layout, parts, tools)
         except ValueError as exc:
             append_attempt(workspace, {"step": workspace.step, "status": "invalid", "error": str(exc)})
             return StepResult(f"The proposer's reply was invalid: {exc}", {"status": "invalid", "error": str(exc)})
@@ -268,15 +266,15 @@ class MetaHarness(Method):
         return None
 
     def checked_tree(
-        self, files: Mapping[str, Any], parent: HarnessTree, kinds: Sequence[TreeKind], tools: Tools
+        self, files: Mapping[str, Any], parent: HarnessTree, layout: TreeLayout, parts: Sequence[str], tools: Tools
     ) -> HarnessTree:
-        """The proposed tree when it passes the adapter's validation and changes only files of ``kinds`` of
+        """The proposed tree when it passes the adapter's validation and changes only files of ``parts`` of
         ``parent``; ``ValueError`` otherwise."""
         tree = HarnessTree(dict(files))
         if len(tree.files) > self.settings.max_files:
             raise ValueError(f"the tree holds {len(tree.files)} files; max_files is {self.settings.max_files}")
-        if fixed_files(tree, kinds) != fixed_files(parent, kinds):
-            raise ValueError(f"a proposal may change only the files of kinds {[kind.value for kind in kinds]}")
+        if fixed_files(tree, layout, parts) != fixed_files(parent, layout, parts):
+            raise ValueError(f"a proposal may change only the files of the parts {list(parts)}")
         validation = tools.check(tree)
         if not validation.passed:
             raise ValueError(f"the tree fails validation: {validation.message()}")
@@ -398,12 +396,12 @@ def member_json(member: Member, task_ids: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
-def fixed_files(tree: HarnessTree, kinds: Sequence[TreeKind]) -> dict[str, str]:
-    """The files of ``tree`` that a proposal must keep: every file whose kind is not in ``kinds``."""
+def fixed_files(tree: HarnessTree, layout: TreeLayout, parts: Sequence[str]) -> dict[str, str]:
+    """The files of ``tree`` that a proposal must keep: every file whose part is not in ``parts``."""
     return {
         path: text
         for path, text in tree.files.items()
-        if (location := locate(path)) is None or location.kind not in kinds
+        if (location := layout.locate(path)) is None or location.part.name not in parts
     }
 
 

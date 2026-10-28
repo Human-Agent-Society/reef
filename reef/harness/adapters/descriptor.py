@@ -1,16 +1,18 @@
 """Declarative adapter descriptors: how one harness renders, runs, and cleans.
 
-An ``AdapterDescriptor`` is loaded from a ``descriptor.yaml`` and states
-everything the shared engines need to drive one harness binary:
+An ``AdapterDescriptor`` is loaded from a ``descriptor.yaml`` and the
+``tree.yaml`` beside it, and states everything the shared engines need to
+drive one harness binary:
 
-- ``config_targets``: named JSON config files with their enforced defaults
-  (a ``primary`` target is required; a tree's ``config/<target>.json`` merges into its target) and
-  their checks (a key of the merged config and the matcher every value there
-  must match; see :mod:`reef.harness.adapters.matchers`).
-- ``kind_paths``: root-relative render paths for the other tree kinds
-  (``reef.harness.tree.layout``); named kinds carry a ``{name}`` placeholder.
-  A kind the adapter leaves out is refused by validation and at render, never
-  dropped.
+- ``layout``: the parts of the harness tree the adapter takes, from
+  ``tree.yaml`` (``reef.harness.adapters.parts``): each part's tree path, format
+  and render path. A tree file that no part takes is refused by validation
+  and at render, never dropped.
+- ``config_targets``: named JSON config files (``config:``) with their
+  enforced defaults (a ``primary`` target is required; the tree's config part
+  merges into a target) and their checks (a key of the merged config and the
+  matcher every value there must match; see
+  :mod:`reef.harness.adapters.matchers`).
 - ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
   episode) and the relocation environment (``{root}`` substituted per
   episode) that points the binary's whole configuration at the episode root.
@@ -36,7 +38,7 @@ A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and the :class:`AdapterRenderer` subclass it defines adds the
 adapter's own render steps (the seam that enforces what the declaration cannot
 state, such as opencode's agent and command shapes; what a config must keep or
-must not set is declared under ``files.config.<target>.checks`` and checked by
+must not set is declared under ``config.<target>.checks`` and checked by
 the shared render). External adapters register through the
 ``reef.harness_adapters`` entry point group, each entry resolving to an
 ``AdapterDescriptor`` or a zero-argument callable returning one.
@@ -56,6 +58,7 @@ import yaml
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
+from reef.harness.adapters.parts import TREE_FILE, TreeLayout, TreeLayoutError, load_tree_layout
 from reef.sandbox.process import EpisodeExecutor
 
 
@@ -70,8 +73,8 @@ class AdapterRenderer:
     """An adapter's own render steps, each given only the files of its concern.
 
     The shared render runs them in a fixed order: ``process_config`` for each config file, ``process_skill`` and
-    ``process_command`` for each skill and command file, ``check_model_route``, then ``finalize_render`` after the
-    render has written each config file as text in the format its suffix names. Before any of them, the render
+    ``process_command`` for each file of a part whose format is ``skill`` or ``command``, ``check_model_route``,
+    then ``finalize_render`` after the render has written each config file as text in the format its suffix names. Before any of them, the render
     refuses a tree that sets a key Reef's model binding writes without the binding's credential, and a tree whose
     config fails a check its target declares. A rule on config values belongs in those checks; a step is for
     changing files and for what a check cannot state, such as a model in a skill's frontmatter or a value that
@@ -120,12 +123,12 @@ class AdapterRenderer:
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:
-        """Check and adjust one rendered ``skill`` file."""
+        """Check and adjust one rendered file of a ``skill`` format part."""
         return text
 
     @staticmethod
     def process_command(path: str, text: str) -> str:
-        """Check and adjust one rendered ``agent_command`` file."""
+        """Check and adjust one rendered file of a ``command`` format part."""
         return text
 
     @staticmethod
@@ -136,8 +139,8 @@ class AdapterRenderer:
         model or a second provider.
 
         ``configs`` maps each config file's path to its content after ``process_config``. ``skills`` and
-        ``commands`` map the path of each ``skill`` and ``agent_command`` file to its text after ``process_skill``
-        and ``process_command``, for a harness that reads a model from their frontmatter. The render has already
+        ``commands`` map the path of each file of a ``skill`` and of a ``command`` format part to its text after
+        ``process_skill`` and ``process_command``, for a harness that reads a model from their frontmatter. The render has already
         refused a tree that sets one of the binding's own keys without the binding's credential.
 
         A config is the file's content as a JSON object: its values are only ``dict``, ``list``, ``str``, ``int``,
@@ -157,28 +160,6 @@ class AdapterRenderer:
 
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
-
-#: Tree kinds rendered to one path per named file; templates need ``{name}``.
-NAMED_KINDS = (
-    "agent_command",
-    "skill",
-    "code_extension",
-    "native_tool",
-    "native_hook",
-    "native_graph",
-    "native_agent",
-    "native_loop",
-)
-#: Named kinds an adapter may leave out; a tree that holds one then fails validation for it.
-OPTIONAL_KINDS = (
-    "agent_command",
-    "code_extension",
-    "native_tool",
-    "native_hook",
-    "native_graph",
-    "native_agent",
-    "native_loop",
-)
 
 
 class DescriptorError(ReefError):
@@ -261,7 +242,7 @@ class AdapterDescriptor:
     argv: tuple[str, ...]
     env: Mapping[str, str]
     config_targets: Mapping[str, ConfigTarget]
-    kind_paths: Mapping[str, str]
+    layout: TreeLayout
     trajectory_format: str
     trajectory_path: str
     cleanup_whitelist: tuple[str, ...] = ()
@@ -317,7 +298,7 @@ def _relative_paths(value: Any, where: str) -> tuple[str, ...]:
 
 
 def load_descriptor(path: Path) -> AdapterDescriptor:
-    """Load and validate one ``descriptor.yaml``, resolving its quirks module."""
+    """Load and validate one ``descriptor.yaml`` and the ``tree.yaml`` beside it, resolving its quirks module."""
     try:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
@@ -326,11 +307,11 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"adapter descriptor {path} must be a YAML object")
     name = _require_str(data, "name", "descriptor")
     where = f"descriptor {name!r}"
-    files = data.get("files")
-    if not isinstance(files, Mapping):
-        raise DescriptorError(f"{where} requires a 'files' object")
-    config_targets = _parse_config_targets(files.get("config"), where)
-    kind_paths = parse_kind_paths(files, where)
+    config_targets = _parse_config_targets(data.get("config"), where)
+    try:
+        layout = load_tree_layout(Path(path).with_name(TREE_FILE))
+    except TreeLayoutError as exc:
+        raise DescriptorError(f"{where}: {exc}") from exc
     trajectory = data.get("trajectory")
     if not isinstance(trajectory, Mapping):
         raise DescriptorError(f"{where} requires a 'trajectory' object")
@@ -366,7 +347,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         argv=_str_list(data.get("argv"), f"{where} 'argv'"),
         env=dict(env),
         config_targets=config_targets,
-        kind_paths=kind_paths,
+        layout=layout,
         trajectory_format=_require_str(trajectory, "format", f"{where} trajectory"),
         trajectory_path=_require_str(trajectory, "path", f"{where} trajectory"),
         cleanup_whitelist=whitelist + quirk_whitelist,
@@ -384,7 +365,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
 
 def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
     if not isinstance(raw, Mapping) or "primary" not in raw:
-        raise DescriptorError(f"{where} requires files.config with a 'primary' target")
+        raise DescriptorError(f"{where} requires config with a 'primary' target")
     targets: dict[str, ConfigTarget] = {}
     for target_name, target in raw.items():
         if not isinstance(target, Mapping):
@@ -505,19 +486,6 @@ def _parse_install(raw: Any, where: str) -> InstallSpec | None:
         repository=repository,
         ref=ref,
     )
-
-
-def parse_kind_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
-    """The descriptor's ``files:`` path templates by tree kind; a required kind left out is a DescriptorError."""
-    kind_paths = {"rules": _require_str(files, "rules", f"{where} files")}
-    for kind in NAMED_KINDS:
-        if kind in OPTIONAL_KINDS and kind not in files:
-            continue
-        template = _require_str(files, kind, f"{where} files")
-        if "{name}" not in template:
-            raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")
-        kind_paths[kind] = template
-    return kind_paths
 
 
 def _load_quirks(

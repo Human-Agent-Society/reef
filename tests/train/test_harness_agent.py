@@ -174,14 +174,10 @@ def test_an_agent_that_fails_leaves_the_head_tree_so_the_step_skips(tmp_path: Pa
     assert result.metrics["method_summary"].startswith("the agent exited 3")
 
 
-def test_a_method_folder_needs_a_start_prompt_and_only_tree_paths(tmp_path: Path) -> None:
+def test_a_method_folder_needs_a_start_prompt(tmp_path: Path) -> None:
     folder = method_folder(tmp_path)
     (folder / "START.md").unlink()
     with pytest.raises(PluginConfigError, match=r"holds no START\.md"):
-        AgentMethod.from_config({"prompts": str(folder)})
-    (folder / "START.md").write_text("go\n")
-    (folder / "notes.txt").write_text("stray\n")
-    with pytest.raises(PluginConfigError, match=r"notes\.txt"):
         AgentMethod.from_config({"prompts": str(folder)})
 
 

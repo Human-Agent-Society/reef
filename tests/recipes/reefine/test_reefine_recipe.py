@@ -37,7 +37,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert isinstance(built, ReefineRecipe)
     assert built.name == "reefine" and built.training_mode == "manual"
     assert isinstance(built.method, ReefineMethod) and built.method.agent is None and built.agent is None
-    assert built.evolution.review_kinds == ("code_extension",)
+    assert built.evolution.review_parts == ("extension",)
     # The floor: the candidate alone must pass every evaluation task; the current release is not run.
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
     assert isinstance(built.scorer, AnswerScorer)
@@ -60,14 +60,14 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
             "evolution": {
                 "evaluation": {"tasks": ["[fib] Compute fib(90)."], "policy": "compare"},
                 "seed": str(seed),
-                "review_kinds": [],
+                "review_parts": [],
                 "agent": None,
             },
         },
     )
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.stages().sample2job.config == {"batch_size": 3}
-    assert built.seed == HarnessTree({"rules.md": "Answer in one line.\n"}) and built.evolution.review_kinds == ()
+    assert built.seed == HarnessTree({"rules.md": "Answer in one line.\n"}) and built.evolution.review_parts == ()
     assert built.evaluation.policy == "compare" and isinstance(built.scorer, AnswerScorer)
 
 

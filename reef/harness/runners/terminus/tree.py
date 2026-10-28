@@ -1,14 +1,14 @@
 """Translate a rendered terminus tree into Harbor's native agent inputs.
 
 Stdlib only, and free of any Harbor import: this is the half of the runner
-that loads anywhere, including CI without Docker, so the mapping from node
-kind to agent input is testable without the benchmark.
+that loads anywhere, including CI without Docker, so the mapping from a
+part of the tree to agent input is testable without the benchmark.
 
-Harbor accepts the declarative nodes as native inputs:
+Harbor accepts the declarative parts as native inputs:
 
 - ``config`` becomes Terminus 2 constructor arguments.
 - ``rules`` becomes a trial ``extra_instruction_paths`` entry.
-- ``skill`` and ``agent_command`` become ``AgentConfig.skills`` roots, which
+- ``skill`` and ``command`` become ``AgentConfig.skills`` roots, which
   keeps Harbor's progressive skill loading instead of pasting every skill
   body into the prompt.
 """
@@ -46,18 +46,18 @@ def extension_source(files: Mapping[str, str]) -> tuple[str, str] | None:
     if not modules:
         return None
     if len(modules) != 1:
-        raise TerminusTreeError("terminus accepts exactly one code_extension defining class Agent")
+        raise TerminusTreeError("terminus accepts exactly one extension defining class Agent")
     path, code = modules[0]
     name = path.removeprefix(CONTEXT_ROOT)
     if "/" in name or not name.endswith(".py") or not name[:-3].isidentifier():
-        raise TerminusTreeError("terminus code_extension must have a Python identifier name")
+        raise TerminusTreeError("terminus extension must have a Python identifier name")
     try:
         module = ast.parse(code, filename=path)
         compile(module, path, "exec")
     except (SyntaxError, ValueError) as exc:
-        raise TerminusTreeError(f"invalid terminus code_extension: {exc}") from exc
+        raise TerminusTreeError(f"invalid terminus extension: {exc}") from exc
     if not any(isinstance(node, ast.ClassDef) and node.name == "Agent" for node in module.body):
-        raise TerminusTreeError("terminus code_extension must define class Agent inheriting Harbor's Terminus2")
+        raise TerminusTreeError("terminus extension must define class Agent inheriting Harbor's Terminus2")
     return path, code
 
 
@@ -66,7 +66,7 @@ def load_tree(root: Path | str) -> dict[str, str]:
 
     ``root`` is the episode root rather than the ``terminus`` directory,
     because ``terminus-commands`` sits beside it; reading one level down would
-    drop every ``agent_command`` and rekey the rest.
+    drop every command and rekey the rest.
 
     Only rendered paths are read back. The episode root also holds the task
     workspace and, once the run starts, the session and trial directories,

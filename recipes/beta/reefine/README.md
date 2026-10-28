@@ -134,7 +134,7 @@ measurement of which requests passed the checks.
    evaluation, or skipped with the reason, followed by the step's summary.
    The request page also gives the next action: the promote route for a
    pending release, `GET /reef/harness` for a published one.
-4. Promote. A release that touches a `code_extension` is held back from the
+4. Promote. A release that touches an `extension` file is held back from the
    served head, so Reef serves it to no client. Read its step page, which
    carries the step's summary (the design, how to use the change and the
    review) and the numbers, then promote it:
@@ -168,7 +168,7 @@ measurement of which requests passed the checks.
   that integration and the path from invocation to a visible result, including
   state and an off command for modes. Headless trials cannot verify the dropdown;
   the agent records any unverified interactive checks in its design.
-* `evolution.review_kinds: [code_extension]` holds code changes pending
+* `evolution.review_parts: [extension]` holds code changes pending
   human promotion.
 * `evolution.evaluation.policy: floor` is the default: the evaluation runs the
   candidate alone, scored by `AnswerScorer`, and publishes it when every task
@@ -208,13 +208,13 @@ request with rules, skills and commands, and with a `config/primary.json`
 file where the harness's config enforces a behavior (an opencode agent with
 a permission map, Claude Code permissions that pre-approve only
 `WebSearch` and `WebFetch`, Codex's `web_search`). It writes no
-`code_extension`, since it knows pi's extension API and no other. The
+`extension` file, since it knows pi's extension API and no other. The
 prompt tells it that harness's own facts from
 [`harness_facts/<adapter>.yaml`](harness_facts/): how you type a command there, which file holds the
 rules, which tools the harness has (web search among them, with what it
 needs: `DEEPSEEK_API_KEY` on dsh) and how the harness offers a mode. The
 review judges new commands by the same facts. Its design says when the
-request needs behavior these kinds cannot give.
+request needs behavior these files cannot give.
 
 On `claude`, `codex`, `hermes` and `dsh` a command cannot take a tool
 away, so a mode there is guidance the model follows while every tool stays
@@ -279,11 +279,11 @@ where it may change `skills/<name>/SKILL.md`, `rules.md`,
 `output/requires.json`, `output/design.md` and `output/progress.md`, and
 reads `scratch/reference/pi-extension-api.md`, this deployment's summary of
 the extension API, and the step's `material/`. The step does not read back a
-file the agent writes outside the layout, a file of a kind a request may not
-change, or a symbolic link, and the check names each one. It names a
-directory that holds no file of the layout, such as the `node_modules/` of an
-install, once. A file of a kind a request may write must be UTF-8 text and
-not a link, or the check fails. When the reference omits an interface or leaves
+file the agent writes at a path that no part of pi's tree takes, a file of a
+part a request may not change, or a symbolic link, and the check names each
+one. It names a directory that holds no file of the harness tree, such as the
+`node_modules/` of an install, once. A file of a part a request may write
+must be UTF-8 text and not a link, or the check fails. When the reference omits an interface or leaves
 behavior unclear, the agent may read the installed pi package's
 documentation, type definitions and relevant source files. It checks the
 installed version first; if source is missing locally, it may consult that
@@ -319,7 +319,7 @@ each check and trial with its result, and each image or speech call with the
 provider's status, so a long run shows what it is doing.
 
 When the agent stops, its tree is the step's candidate: the head tree with
-the files it changed of the kinds a request may write, beside its `requires`
+the files it changed of the parts a request may write, beside its `requires`
 items and design, reviewed as a text answer is. A run that changed no file,
 ran past its limit or ended on a failed model response hands back no change,
 its reason under `failure`. The step record keeps the agent's session log

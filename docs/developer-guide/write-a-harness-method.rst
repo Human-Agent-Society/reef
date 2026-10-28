@@ -3,7 +3,7 @@ Write a harness method
 
 .. page::
    :for: authors of a harness evolution method, and anyone reading ``reef/train/harness_backend/``
-   :needs: the loop and the tree layout from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
+   :needs: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
    :outcome: a method that runs in Reef's steps, the evaluation it needs, and a deployment that names it
 
 A harness method decides how the harness tree changes. At each step, Reef
@@ -202,9 +202,10 @@ after the step as the step record.
   ``workspace.evaluation_repeats()`` read.
 - ``failures.json``: the failure manifest of the head tree, after the
   first evaluation.
-- ``host.json``: the adapter, each tree kind it renders with that kind's
-  path pattern and description, its config targets, and whether its tasks
-  are directories.
+- ``host.json``: the adapter; the parts of its tree (``parts``), each with
+  its tree ``path``, its ``format``, the path it ``renders`` to and what it
+  ``holds``; its config targets; and whether its tasks are directories. A
+  file at a path that no part takes fails validation.
 
 The scenario's history is beside the step directories, at
 ``workspace.history_dir``. A method reads it and never writes it (see `Read
@@ -237,8 +238,12 @@ A Python method reads the directories through ``Workspace``:
        (``evolution.evaluation.repeats``), 0 when the deployment configured
        no scorer
    * - ``host()``
-     - the host facts: ``adapter``, ``kinds``, ``config_targets`` and
-       ``tasks_are_directories``
+     - the host facts of ``host.json``: ``adapter``, ``parts``,
+       ``config_targets`` and ``tasks_are_directories``.
+       ``get_adapter(host()["adapter"]).layout.locate(path)`` returns the
+       part of a tree path and the name it holds, or ``None`` when no part
+       takes the path (see `Python API
+       <../reference/python-api.rst#harness-method>`__)
    * - ``history()``
      - the scenario's ``History``, read from ``history_dir``
 
@@ -737,10 +742,10 @@ chat-template control token. The step counts these under
 the promoted prompts of each tagged client, and
 ``evolution.evaluation.max_promoted_tasks`` limits all of them.
 
-Put code-bearing kinds that client text can shape (``code_extension``,
-``native_tool`` and ``native_hook``) in ``evolution.review_kinds``, so that a
+Put the parts whose code client text can shape (``extension``,
+``native_tool`` and ``native_hook``) in ``evolution.review_parts``, so that a
 person reviews them before publication. A ``native_graph`` holds no code and
-can publish on the evaluation alone; add it to ``review_kinds`` if every loop
+can publish on the evaluation alone; add it to ``review_parts`` if every loop
 change needs a review. A ``native_loop`` always waits for a person.
 
 .. warning::

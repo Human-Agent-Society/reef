@@ -133,7 +133,7 @@ def test_an_invalid_candidate_skips_with_its_problems(tmp_path: Path) -> None:
 
     backend, _ = harness_backend(tmp_path, step)
     result = backend_step(backend, data(1), backend.initial_state())
-    assert result.metrics["skipped"] == "notes.txt: not a path of the harness layout (see reef.harness.tree.layout)"
+    assert result.metrics["skipped"].startswith("notes.txt: not a path of the pi harness tree, which takes rules.md")
 
 
 @pytest.mark.parametrize(
@@ -222,7 +222,14 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
         "close",
         "i1",
     )
-    assert seen["host"]["adapter"] == "pi" and "rules" in seen["host"]["kinds"] and seen["model"] == "qwen3-8b"
+    assert seen["host"]["adapter"] == "pi" and seen["model"] == "qwen3-8b"
+    assert seen["host"]["parts"]["rules"] == {
+        "path": "rules.md",
+        "format": "text",
+        "renders": "pi-agent/AGENTS.md",
+        "holds": "the instructions pi reads at the start of every session",
+        "review": False,
+    }
     step_dir = Path(result.metrics["step_record"])
     assert step_dir == (tmp_path / "harness" / "demo" / "harness" / "steps" / "1").resolve()
     assert not (step_dir / "scratch").exists() and (step_dir / "output" / "report.md").read_text() == "kept"
@@ -354,15 +361,15 @@ def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -
     [
         ({"publish": "review"}, MARKER, True),
         (
-            {"review_kinds": ("code_extension",)},
+            {"review_parts": ("extension",)},
             TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"}),
             True,
         ),
-        ({"review_kinds": ("code_extension",)}, MARKER, False),
+        ({"review_parts": ("extension",)}, MARKER, False),
     ],
-    ids=["publish-review", "reviewed-kind", "other-kind"],
+    ids=["publish-review", "reviewed-part", "other-part"],
 )
-def test_a_win_waits_for_review_under_publish_review_or_when_it_changes_a_reviewed_kind(
+def test_a_win_waits_for_review_under_publish_review_or_when_it_changes_a_reviewed_part(
     tmp_path: Path, fields: dict, patch: TreePatch, pending: bool
 ) -> None:
     backend, _ = harness_backend(tmp_path, lambda workspace, tools: patch, **fields)
@@ -381,7 +388,7 @@ def test_a_recheck_rolls_back_when_the_replaced_tree_wins(tmp_path: Path) -> Non
         lambda workspace, tools: MARKER,
         score=score,
         evaluation={"recheck_every": 2},
-        review_kinds=("rules",),
+        review_parts=("rules",),
     )
     first = backend_step(backend, data(1), backend.initial_state())
     assert first.metrics["selected"] is True and first.pending is True

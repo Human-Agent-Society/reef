@@ -1,6 +1,6 @@
 ---
 name: pi-extension-api
-description: The pi 0.84.2 extension API in brief. Read before writing or changing a code_extension file for pi. Covers the file shape, tools with typebox parameters, commands, events, ctx.ui, messages, exec, and the rules an extension in a Reef tree must keep.
+description: The pi 0.84.2 extension API in brief. Read before writing or changing an extension file for pi. Covers the file shape, tools with typebox parameters, commands, events, ctx.ui, messages, exec, and the rules an extension in a Reef tree must keep.
 ---
 # pi extension API (0.84.2)
 
@@ -80,7 +80,7 @@ The handler gets the text after /standup as args. A command runs no model call b
 
 Registered commands appear in pi's native `/` autocomplete dropdown alongside built-in commands; `description` tells the user what each does. Register at extension load, after the required `PI_OFFLINE` guard, not inside an event handler or behind `ctx.hasUI`. Guard UI operations inside the handler instead. An `input` hook that recognizes `/name` does not register it for the dropdown. Avoid names already used by built-in commands, prompt templates or other extensions.
 
-For a command that only expands a prompt, use an `agent_command` file (`commands/<name>.md` in the tree) instead of an extension. Reef renders its text to `pi-agent/prompts/<name>.md`; start the text with YAML frontmatter containing `description` for the native dropdown. Check both menu selection and direct invocation after reload/startup. A headless run does not verify the dropdown.
+For a command that only expands a prompt, use a `command` file (`commands/<name>.md` in the tree) instead of an extension. Reef renders its text to `pi-agent/prompts/<name>.md`; start the text with YAML frontmatter containing `description` for the native dropdown. Check both menu selection and direct invocation after reload/startup. A headless run does not verify the dropdown.
 
 ## Events: pi.on(name, handler)
 

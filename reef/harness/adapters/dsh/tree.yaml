@@ -1,0 +1,35 @@
+# The harness tree DeepSeek Harness takes. A method writes each part at its
+# path; Reef checks the file as its format and renders it to its renders path,
+# inside the dsh home of an episode or of an install. A tree file that no part
+# takes is refused.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    renders: dsh/AGENTS.md
+    holds: the instructions dsh reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: dsh/skills/{name}/SKILL.md
+    holds: an Agent Skill, which dsh loads when its description fits the task
+  # dsh's only command surface is a user invocable skill (/name) under its
+  # second skill root.
+  command:
+    path: commands/{name}.md
+    format: command
+    renders: dsh-agents/skills/{name}/SKILL.md
+    holds: a prompt template that a person runs as /name, rendered as a skill under a second root
+  # A cordis plugin module that the patch layers insert by relative path, the
+  # web patch from the headless profile's directory.
+  extension:
+    path: extensions/{name}.mjs
+    format: code
+    renders: dsh/profiles/headless/extensions/{name}.mjs
+    holds: a cordis plugin module that dsh loads in its process
+  config:
+    path: config/{name}.json
+    format: config
+    holds: >-
+      a JSON object merged into the headless patch layer (primary), dsh/.env (env), the web patch layer
+      (web) or the web profile's package.json (web_manifest)

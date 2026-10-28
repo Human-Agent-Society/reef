@@ -34,8 +34,9 @@ from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
+from reef.harness.adapters.parts import Format, TreeLayout
 from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.tree import HarnessTree, TreeKind, TreePatch, locate
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.train.harness_backend import ModelCalls, Tools, Trace
 
 #: The one adapter whose extension API Reefine knows; the others take rules, skills and commands from it.
@@ -133,17 +134,17 @@ DECLINED = "the design says no file this harness takes can deliver the request"
 FAILURES_PROMPT = prompt("failures")
 
 
-def request_kinds(adapter: str) -> tuple[TreeKind, ...]:
-    """The kinds a request may write on ``adapter``: skills, rules and commands everywhere, extensions on pi, and
+def request_parts(adapter: str) -> tuple[str, ...]:
+    """The parts a request may write on ``adapter``: skills, rules and commands everywhere, extensions on pi, and
     the primary config where the harness's own config can enforce a behavior (``HarnessFacts.config_keys``)."""
     facts = harness_facts(adapter)
     if adapter == EXTENSION_ADAPTER:
-        extra: tuple[TreeKind, ...] = (TreeKind.CODE_EXTENSION,)
+        extra: tuple[str, ...] = ("extension",)
     elif facts is not None and facts.config_keys:
-        extra = (TreeKind.CONFIG,)
+        extra = ("config",)
     else:
         extra = ()
-    return (TreeKind.SKILL, TreeKind.RULES, TreeKind.AGENT_COMMAND, *extra)
+    return ("skill", "rules", "command", *extra)
 
 
 def request_config_keys(adapter: str) -> tuple[str, ...]:
@@ -159,30 +160,30 @@ def file_name(path: str, fallback: str) -> str:
 def file_lines(adapter: str) -> str:
     """One prompt line per file a request may write on ``adapter``, with what it holds and where it lands."""
     descriptor = get_adapter(adapter)
-    rules = file_name(descriptor.kind_paths.get("rules", ""), f"{adapter}'s rules file")
+    rules = file_name(descriptor.layout.parts["rules"].renders or "", f"{adapter}'s rules file")
     primary = descriptor.config_targets.get("primary")
     lines = {
-        TreeKind.SKILL: (
+        "skill": (
             "- skills/<name>/SKILL.md: a skill; the text starts with YAML frontmatter "
             "(--- name: <name> / description: <one line> ---) followed by the skill's markdown\n"
         ),
-        TreeKind.RULES: (
+        "rules": (
             f"- rules.md: the markdown every session reads ({rules}); write the whole file, keeping every rule "
             "that still holds\n"
         ),
-        TreeKind.AGENT_COMMAND: (
+        "command": (
             "- commands/<name>.md: the prompt template of the /<name> command\n"
             if adapter == EXTENSION_ADAPTER
             else "- commands/<name>.md: the command file, as the harness notes below describe\n"
         ),
-        TreeKind.CODE_EXTENSION: "- extensions/<name>.ts: a complete pi extension module\n",
-        TreeKind.CONFIG: (
+        "extension": "- extensions/<name>.ts: a complete pi extension module\n",
+        "config": (
             f"- {PRIMARY_CONFIG}: a JSON object merged into "
             f"{file_name(primary.path if primary else '', 'the primary config')}; write the whole file, and "
             f"change only the top level keys {', '.join(request_config_keys(adapter))}\n"
         ),
     }
-    return "".join(lines[kind] for kind in request_kinds(adapter))
+    return "".join(lines[part] for part in request_parts(adapter))
 
 
 def harness_section(adapter: str) -> str:
@@ -289,7 +290,7 @@ class UnusableAnswer:
 
 @dataclass(frozen=True)
 class DeclinedAnswer:
-    """A design that says no file of the kinds this harness takes can deliver the request.
+    """A design that says no file of the parts this harness takes can deliver the request.
 
     Values: ``notes`` hold the design, ``declined`` and the review that
     names what is out of reach.
@@ -482,7 +483,10 @@ def answer_once(
     if reply is None:
         return FailedCall({"failure": failure})
     slipped = slipped_json(reply)
-    parsed = None if slipped else parse_answer(reply, tree, request_kinds(adapter), request_config_keys(adapter))
+    layout = get_adapter(adapter).layout
+    parsed = (
+        None if slipped else parse_answer(reply, tree, layout, request_parts(adapter), request_config_keys(adapter))
+    )
     design = design_text(reply)
     if parsed is None or not parsed.patch.changes:
         refusal = provider_refusal(models)
@@ -499,7 +503,7 @@ def answer_once(
             return declined_answer(models, request, design, adapter)
         return nothing_to_apply(reply, "the reply holds no usable file")
     patch = parsed.patch
-    written = files_in_short(patch)
+    written = files_in_short(patch, layout)
     candidate = tree.apply(patch)
     if candidate == tree:
         # The step skips a tree it left unchanged, so such an answer is written again instead.
@@ -531,7 +535,7 @@ def answer_once(
         notes["review_failure"] = review_failure or "the review did not run"
     if refused:
         notes["refused_requires"] = refused
-    undeclared = undeclared_env(patch, [*own, *added])
+    undeclared = undeclared_env(patch, [*own, *added], layout)
     if undeclared:
         notes["undeclared_env"] = undeclared
     return WrittenAnswer(patch, added, notes)
@@ -565,7 +569,7 @@ def clipped(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " ..."
 
 
-def files_in_short(patch: TreePatch) -> str:
+def files_in_short(patch: TreePatch, layout: TreeLayout) -> str:
     """A patch for a retry prompt: one line per path, so the model can rewrite from it.
 
     A config file shows its JSON object with every long text cut, so each of its keys stays in view; any other
@@ -573,8 +577,8 @@ def files_in_short(patch: TreePatch) -> str:
     """
     lines = []
     for path, text in patch.changes.items():
-        location = locate(path)
-        data = json_object_of(text) if location is not None and location.kind is TreeKind.CONFIG else {}
+        location = layout.locate(path)
+        data = json_object_of(text) if location is not None and location.part.format is Format.CONFIG else {}
         if text is None:
             shown = "(removed)"
         elif data:
@@ -596,15 +600,15 @@ def short_texts(value: Any) -> Any:
     return value
 
 
-def files_view(tree: HarnessTree) -> str:
+def files_view(tree: HarnessTree, layout: TreeLayout) -> str:
     """The tree as the request prompt shows it: each path, then its text, whole for the rules and config files up to
     ``WHOLE_FILE_CHARS`` and the start of every other file."""
     if not tree.files:
         return "(the tree holds no file yet)"
     parts = []
     for path, text in tree.files.items():
-        location = locate(path)
-        whole = location is not None and location.kind in (TreeKind.RULES, TreeKind.CONFIG)
+        location = layout.locate(path)
+        whole = location is not None and (location.part.name == "rules" or location.part.format is Format.CONFIG)
         parts.append(f"--- {path}\n{clipped(text, WHOLE_FILE_CHARS if whole else PREVIEW_CHARS)}")
     return "\n".join(parts)
 
@@ -719,9 +723,8 @@ def request_prompt(
     """The request prompt: the request fenced as data, the failures beside it when the step has any traces, every
     file of the tree, the steps the plan call found need a tool, and the extension API reference on pi."""
     request_text = untrusted_text(request.text, "user request")
-    view = files_view(tree)
-    kinds = request_kinds(adapter)
-    extensions = TreeKind.CODE_EXTENSION in kinds
+    view = files_view(tree, get_adapter(adapter).layout)
+    extensions = "extension" in request_parts(adapter)
     facts = harness_facts(adapter)
     # The plan call first: the steps the harness cannot perform get a tool written beside their rule on pi, and
     # off pi the harness's own tools, which the plan call is told about, before the step is called undone.
@@ -757,12 +760,12 @@ def request_prompt(
 
 
 def parse_answer(
-    reply: str, tree: HarnessTree, kinds: Sequence[TreeKind], config_keys: Sequence[str]
+    reply: str, tree: HarnessTree, layout: TreeLayout, parts: Sequence[str], config_keys: Sequence[str]
 ) -> ParsedAnswer | None:
     """The design and the files of a request reply; ``None`` when the reply holds no object with ``files``.
 
-    A file is kept when its path is on the layout, its kind is one of
-    ``kinds``, and its text is a string or ``None`` (a removal). The primary
+    A file is kept when its path is a path of ``layout``, its part is one of
+    ``parts``, and its text is a string or ``None`` (a removal). The primary
     config file is kept when it is the only config file the reply writes and
     every top level key it changes is in ``config_keys``. Every other file is
     dropped with a reason.
@@ -772,17 +775,16 @@ def parse_answer(
         return None
     kept: dict[str, str | None] = {}
     dropped: list[str] = []
+    taken = ", ".join(layout.parts[part].path for part in parts if part in layout.parts)
     for path, text in value["files"].items():
-        location = locate(str(path))
-        if location is None:
-            dropped.append(f"{path} was dropped: it is not a path of the harness layout")
-        elif location.kind not in kinds:
-            dropped.append(f"{path} was dropped: this harness takes {', '.join(kind.value for kind in kinds)}")
+        location = layout.locate(str(path))
+        if location is None or location.part.name not in parts:
+            dropped.append(f"{path} was dropped: a request may write {taken}")
         elif text is not None and (not isinstance(text, str) or not text.strip()):
             dropped.append(f"{path} was dropped: its text is empty or not a string")
-        elif location.kind is TreeKind.CONFIG and (path != PRIMARY_CONFIG or text is None):
+        elif location.part.format is Format.CONFIG and (path != PRIMARY_CONFIG or text is None):
             dropped.append(f"{path} was dropped: a request may change {PRIMARY_CONFIG} only, and never remove it")
-        elif location.kind is TreeKind.CONFIG:
+        elif location.part.format is Format.CONFIG:
             changed = changed_keys(json_object_of(tree.files.get(PRIMARY_CONFIG)), json_object_of(text))
             outside = sorted(changed - set(config_keys))
             if outside or not json_object_of(text):
@@ -822,7 +824,7 @@ def review_answer(
     if requires:
         written["requires"] = [dict(item) for item in requires]
     notes_harness = adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None
-    words = ENV_WORDS["extension" if TreeKind.CODE_EXTENSION in request_kinds(adapter) else "files"]
+    words = ENV_WORDS["extension" if "extension" in request_parts(adapter) else "files"]
     review_prompt = REVIEW_PROMPT.format(
         request=untrusted_text(request_text, "user request"),
         design="(none written)" if design is None else design,
@@ -903,14 +905,14 @@ def kept_design(design: str) -> str:
     return head[: DESIGN_CHARS - len(last) - len(marker)].rstrip() + marker + last
 
 
-def undeclared_env(patch: TreePatch, requires: Sequence[Mapping[str, Any]]) -> list[str]:
+def undeclared_env(patch: TreePatch, requires: Sequence[Mapping[str, Any]], layout: TreeLayout) -> list[str]:
     """The variables the patch's extensions read through ``process.env`` that no requires item names, in reading
     order; the ones pi and the shell set, and reef's own, are not needs of the user's."""
     declared = {str(item.get(key)) for item in requires for key in ("name", "check")}
     found: list[str] = []
     for path, text in patch.changes.items():
-        location = locate(path)
-        if text is None or location is None or location.kind is not TreeKind.CODE_EXTENSION:
+        location = layout.locate(path)
+        if text is None or location is None or location.part.format is not Format.CODE:
             continue
         for dotted, bracketed in ENV_READ.findall(text):
             variable = dotted or bracketed
@@ -1137,13 +1139,15 @@ def open_brackets(text: str) -> int:
     return depth
 
 
-def learn_from_failures(tree: HarnessTree, traces: Sequence[Trace], models: ModelBindings) -> TreePatch | None:
+def learn_from_failures(
+    tree: HarnessTree, traces: Sequence[Trace], models: ModelBindings, layout: TreeLayout
+) -> TreePatch | None:
     """One improved or new skill from the step's failing traces; ``None`` when the call fails or the reply holds
     no skill, and the reason goes to the log alone."""
     skills = {
         path: text
         for path, text in tree.files.items()
-        if (location := locate(path)) and location.kind is TreeKind.SKILL
+        if (location := layout.locate(path)) and location.part.name == "skill"
     }
     # The requests and their feedback are client text: fenced as data so nothing inside them can speak as this prompt.
     failures_prompt = FAILURES_PROMPT.format(
@@ -1152,7 +1156,7 @@ def learn_from_failures(tree: HarnessTree, traces: Sequence[Trace], models: Mode
     reply, _ = ask(models, failures_prompt, max_tokens=max_tokens(8192), timeout_s=timeout_s(60.0))
     if reply is None:
         return None
-    parsed = parse_answer(reply, tree, (TreeKind.SKILL,), ())
+    parsed = parse_answer(reply, tree, layout, ("skill",), ())
     if parsed is None:
         return None
     first = next(((path, text) for path, text in parsed.patch.changes.items() if text is not None), None)
@@ -1170,7 +1174,7 @@ __all__ = [
     "failures_section",
     "kept_design",
     "learn_from_failures",
-    "request_kinds",
+    "request_parts",
     "review_answer",
     "screened_requires",
     "undeclared_env",

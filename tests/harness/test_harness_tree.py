@@ -1,26 +1,18 @@
-"""Guarantees of the harness source tree: the tree and patch values, the layout, and validation."""
+"""Guarantees of the harness source tree: the tree and patch values, the parts an adapter's tree takes, and
+validation."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
-from reef.harness.adapters import get_adapter
-from reef.harness.tree import (
-    HarnessTree,
-    TreeKind,
-    TreeLocation,
-    TreePatch,
-    ValidationResult,
-    locate,
-    source_path,
-    validate_patch,
-    validate_tree,
-)
-from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
+from reef.harness.adapters import BUILTIN_ADAPTERS, get_adapter
+from reef.harness.adapters.parts import TREE_FILE, Format, Part, TreeLayout, TreeLayoutError, load_tree_layout
+from reef.harness.tree import HarnessTree, TreePatch, ValidationResult, validate_patch, validate_tree
 from reef.harness.tree.tree import normalized_path
 
 PI = get_adapter("pi")
@@ -121,48 +113,75 @@ def test_read_and_write_round_trip_and_read_refuses_a_link_and_binary_text(tmp_p
         HarnessTree.read(tmp_path / "binary")
 
 
-# -- the layout ----------------------------------------------------------------------------------------------------
+# -- the parts ------------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("path", "location"),
+    ("descriptor", "path", "part", "name"),
     [
-        ("rules.md", TreeLocation(TreeKind.RULES, "")),
-        ("config/primary.json", TreeLocation(TreeKind.CONFIG, "primary")),
-        ("skills/notes/SKILL.md", TreeLocation(TreeKind.SKILL, "notes")),
-        ("commands/summarize.md", TreeLocation(TreeKind.AGENT_COMMAND, "summarize")),
-        ("extensions/a.b.ts", TreeLocation(TreeKind.CODE_EXTENSION, "a.b", ".ts")),
-        ("native/tools/shout.py", TreeLocation(TreeKind.NATIVE_TOOL, "shout")),
-        ("native/hooks/guard.py", TreeLocation(TreeKind.NATIVE_HOOK, "guard")),
-        ("native/graphs/main.json", TreeLocation(TreeKind.NATIVE_GRAPH, "main")),
-        ("native/agents/helper.json", TreeLocation(TreeKind.NATIVE_AGENT, "helper")),
-        ("native/loops/main.py", TreeLocation(TreeKind.NATIVE_LOOP, "main")),
+        (PI, "rules.md", "rules", ""),
+        (PI, "config/primary.json", "config", "primary"),
+        (PI, "skills/notes/SKILL.md", "skill", "notes"),
+        (PI, "commands/summarize.md", "command", "summarize"),
+        (PI, "extensions/a.b.ts", "extension", "a.b"),
+        (NATIVE, "native/tools/shout.py", "native_tool", "shout"),
+        (NATIVE, "native/hooks/guard.py", "native_hook", "guard"),
+        (NATIVE, "native/graphs/main.json", "native_graph", "main"),
+        (NATIVE, "native/agents/helper.json", "native_agent", "helper"),
+        (NATIVE, "native/loops/main.py", "native_loop", "main"),
     ],
 )
-def test_every_layout_path_locates_to_its_kind_and_back(path: str, location: TreeLocation) -> None:
-    assert locate(path) == location
-    assert source_path(location) == path
+def test_every_part_path_locates_to_its_part_and_back(descriptor, path: str, part: str, name: str) -> None:
+    location = descriptor.layout.locate(path)
+    assert location is not None and (location.part.name, location.name) == (part, name)
+    assert location.part.tree_path(name) == path
 
 
 @pytest.mark.parametrize(
     "path", ["RULES.md", "skills/notes.md", "skills/a/b/SKILL.md", "extensions/a.rb", "native/tools/a.ts", "x"]
 )
-def test_a_path_off_the_layout_locates_to_nothing(path: str) -> None:
-    assert locate(path) is None
+def test_a_path_that_no_part_takes_locates_to_nothing(path: str) -> None:
+    assert PI.layout.locate(path) is None
 
 
-def test_a_location_holds_a_name_exactly_when_it_is_not_rules_and_a_suffix_only_for_an_extension() -> None:
-    with pytest.raises(ValueError):
-        TreeLocation(TreeKind.RULES, "x")
-    with pytest.raises(ValueError):
-        TreeLocation(TreeKind.SKILL, "")
-    with pytest.raises(ValueError):
-        TreeLocation(TreeKind.SKILL, "a/b")
-    with pytest.raises(ValueError):
-        TreeLocation(TreeKind.SKILL, "a", ".ts")
-    with pytest.raises(ValueError):
-        TreeLocation(TreeKind.CODE_EXTENSION, "a", ".rb")
-    assert TreeKind.NATIVE_LOOP in ALWAYS_REVIEWED_KINDS
+def test_a_part_of_one_name_has_one_tree_path_on_every_bundled_adapter() -> None:
+    """A method writes a part the same way for every adapter that takes it; only an extension's suffix is the
+    language of its harness."""
+    paths: dict[str, set[str]] = {}
+    for adapter in BUILTIN_ADAPTERS:
+        for part in get_adapter(adapter).layout.parts.values():
+            paths.setdefault(part.name, set()).add(
+                part.path.rsplit(".", 1)[0] if part.name == "extension" else part.path
+            )
+    assert {name: len(found) for name, found in paths.items()} == dict.fromkeys(paths, 1)
+    assert [part.name for part in NATIVE.layout.parts.values() if part.review] == ["native_loop"]
+
+
+@pytest.mark.parametrize(
+    ("entry", "problem"),
+    [
+        ({"path": "a.md", "format": "text", "holds": "x"}, "renders exactly when its format is not config"),
+        ({"path": "a.md", "format": "config", "holds": "x"}, "needs {name} in its path"),
+        ({"path": "a/{name}.md", "format": "text", "renders": "a.md", "holds": "x"}, "renders {name} exactly"),
+        ({"path": "../a.md", "format": "text", "renders": "a.md", "holds": "x"}, "normal relative path"),
+        ({"path": "a.md", "format": "prose", "renders": "a.md", "holds": "x"}, "format must be one of"),
+        ({"path": "a.md", "format": "text", "renders": "a.md", "holds": ""}, "needs holds"),
+        ({"path": "a.md", "format": "text", "renders": "a.md", "holds": "x", "limit": 1}, "takes renders and review"),
+    ],
+)
+def test_a_tree_yaml_refuses_a_malformed_part(tmp_path: Path, entry: dict, problem: str) -> None:
+    (tmp_path / TREE_FILE).write_text(json.dumps({"parts": {"notes": entry}}))
+    with pytest.raises(TreeLayoutError, match=re.escape(problem)):
+        load_tree_layout(tmp_path / TREE_FILE)
+
+
+def test_a_layout_refuses_two_parts_that_take_one_path_and_a_second_config_part() -> None:
+    rules = Part("rules", "rules.md", Format.TEXT, "AGENTS.md", "the rules")
+    with pytest.raises(TreeLayoutError, match=re.escape("both take the path 'rules.md'")):
+        TreeLayout({"rules": rules, "again": Part("again", "rules.md", Format.TEXT, "B.md", "the rules again")})
+    config = Part("config", "config/{name}.json", Format.CONFIG, None, "a config")
+    with pytest.raises(TreeLayoutError, match="at most one config part"):
+        TreeLayout({"config": config, "settings": Part("settings", "s/{name}.json", Format.CONFIG, None, "more")})
 
 
 # -- validation ----------------------------------------------------------------------------------------------------
@@ -185,12 +204,13 @@ def test_validation_reports_every_problem_of_the_tree_at_once() -> None:
         }
     )
     assert len(found) == 6
-    assert found[0].startswith("RULES.md: not a path of the harness layout")
+    taken = "rules.md, skills/{name}/SKILL.md, commands/{name}.md, extensions/{name}.ts, config/{name}.json"
+    assert found[0] == f"RULES.md: not a path of the pi harness tree, which takes {taken}"
     assert "config/nope.json: adapter 'pi' declares no config target 'nope'" in found
     assert any(problem.startswith("config/primary.json: must hold a JSON object") for problem in found)
-    assert "native/tools/shout.py: adapter 'pi' does not render native_tool files" in found
+    assert any(problem.startswith("native/tools/shout.py: not a path of the pi harness tree") for problem in found)
     assert "skills/empty/SKILL.md: the file is empty" in found
-    assert "extensions/tracer.js: adapter 'pi' loads .ts extensions" in found
+    assert any(problem.startswith("extensions/tracer.js: not a path of the pi harness tree") for problem in found)
 
 
 def test_validation_refuses_credentials_in_config_and_in_free_text() -> None:

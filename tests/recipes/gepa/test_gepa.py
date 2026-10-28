@@ -28,9 +28,10 @@ from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.evaluation.harness import ComparePolicy, DecisionRecord, EpisodeRecord, FailureObservation, History
+from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.tree import HarnessTree, TreeKind
+from reef.harness.tree import HarnessTree
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
@@ -123,17 +124,20 @@ def archive_of(result: TrainStepResult) -> Archive:
 
 
 RULES_ONLY = GEPASettings(components=("rules",))
+PI_LAYOUT = get_adapter("pi").layout
 
 
 # -- components: the tree as a GEPA candidate ----------------------------------
 
 
-def test_texts_of_keys_the_evolvable_files_by_path() -> None:
-    assert components.texts_of(TREE, (TreeKind.RULES, TreeKind.SKILL)) == {
+def test_texts_of_keys_the_evolvable_files_by_path_and_refuses_a_part_that_is_not_text() -> None:
+    assert components.texts_of(TREE, PI_LAYOUT, ("rules", "skill")) == {
         "rules.md": SEED_TEXT,
         "skills/notes/SKILL.md": "# notes\n",
     }
-    assert components.texts_of(TREE, (TreeKind.RULES,)) == {"rules.md": SEED_TEXT}
+    assert components.texts_of(TREE, PI_LAYOUT, ("rules",)) == {"rules.md": SEED_TEXT}
+    with pytest.raises(ValueError, match="GEPA components must name text parts of the tree: rules, skill, command"):
+        components.texts_of(TREE, PI_LAYOUT, ("extension",))
 
 
 def test_a_candidate_tree_is_the_served_tree_with_the_candidates_texts() -> None:
@@ -142,7 +146,7 @@ def test_a_candidate_tree_is_the_served_tree_with_the_candidates_texts() -> None
     assert components.candidate_tree(TREE, texts) == HarnessTree(
         {**TREE.files, "rules.md": REFLECTED, "skills/notes/SKILL.md": "# better\n"}
     )
-    assert components.candidate_tree(TREE, components.texts_of(TREE, (TreeKind.RULES,))) == TREE
+    assert components.candidate_tree(TREE, components.texts_of(TREE, PI_LAYOUT, ("rules",))) == TREE
 
 
 # -- reflection: the copied prompt and extractor --------------------------------
@@ -343,7 +347,7 @@ def test_the_config_parses_into_settings_and_builds_the_feedback() -> None:
     }
     method = GEPA.from_config(config)
     assert method.settings == GEPASettings(**{**config, "components": ("rules",)})
-    assert method.settings.kinds == (TreeKind.RULES,) and isinstance(method.feedback, ScoreFeedback)
+    assert isinstance(method.feedback, ScoreFeedback)
     # Without a feedback setting the reflection reads the score restated.
     assert isinstance(GEPA.from_config({}).feedback, ScoreFeedback)
 
@@ -351,9 +355,8 @@ def test_the_config_parses_into_settings_and_builds_the_feedback() -> None:
 @pytest.mark.parametrize(
     ("config", "message"),
     [
-        ({"components": ["config"]}, "components must name kinds from rules"),
-        ({"components": ["bogus"]}, "components must name kinds from rules"),
-        ({"components": []}, "components must name kinds from rules"),
+        ({"components": ["rules", "rules"]}, "components must name one or more distinct parts"),
+        ({"components": []}, "components must name one or more distinct parts"),
         ({"archive": "gepa"}, "unknown config fields: archive"),
         ({"minibatch_size": 0}, "minibatch_size must be positive"),
         ({"seed": "zero"}, "GEPA.seed must be a valid int"),

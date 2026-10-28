@@ -729,7 +729,7 @@ def test_a_trial_that_fails_validation_or_load_is_refused_and_the_served_tree_st
         result, streamed = _turn(server, "try things")
         assert result["exit"] == 0 and server.live_tree() == HarnessTree(_tool("shout", "    return 'LOUD'"))
     results = _typed(streamed, "tool/result")
-    assert "native/tools/shout.md: not a path of the harness layout" in json.loads(results[0]["content"])["error"]
+    assert "native/tools/shout.md: not a path of the native harness tree" in json.loads(results[0]["content"])["error"]
     assert "binds no run(args, workdir) at its top level" in json.loads(results[1]["content"])["error"]
     assert "boom.py failed to import: RuntimeError: boom" in json.loads(results[2]["content"])["error"]
     # A native loop is reviewed code: a trial never mounts one.

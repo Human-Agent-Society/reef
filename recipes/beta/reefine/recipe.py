@@ -3,7 +3,7 @@
 ``ReefineRecipe`` answers a person's training instructions, one step per
 instruction (``training_mode: manual``), with ``ReefineMethod``. It merges
 Reefine's defaults into the deployment's ``evolution`` section: the method,
-the seed beside this module, extensions held for a promote (``review_kinds``),
+the seed beside this module, extensions held for a promote (``review_parts``),
 and an evaluation that runs the candidate alone on the deployment's tasks,
 scored by ``AnswerScorer``, and publishes it when every task meets the floor.
 On the health task the floor checks that the tree still works, not that the
@@ -32,7 +32,6 @@ from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettin
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.tree import TreeKind
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -47,9 +46,10 @@ SEED_DIRECTORY = Path(__file__).with_name("seed")
 EVOLUTION_DEFAULTS: Mapping[str, Any] = {
     "method": f"{ReefineMethod.__module__}:{ReefineMethod.__qualname__}",
     "seed": str(SEED_DIRECTORY),
-    # An extension runs in the harness's process, so it waits for a person.
-    "review_kinds": [TreeKind.CODE_EXTENSION.value],
 }
+#: The parts whose change waits for a person when the adapter's tree has them: an extension runs in the harness's
+#: process.
+REVIEWED_PARTS = ("extension",)
 EVALUATION_DEFAULTS: Mapping[str, Any] = {
     "policy": "floor",
     "scorer": f"{AnswerScorer.__module__}:{AnswerScorer.__qualname__}",
@@ -137,8 +137,10 @@ class ReefineRecipe(HarnessEvolutionRecipe):
                 raise RecipeConfigError("evolution.agent.trial_timeout_s must be a positive number")
             binary = section.get("binary")
             agent = {**({"binary": binary} if binary else {}), **agent}
+        reviewed = [part for part in REVIEWED_PARTS if part in descriptor.layout.parts]
+        defaults = {**EVOLUTION_DEFAULTS, "review_parts": reviewed}
         kwargs = super()._recipe_kwargs(
-            {**settings, "evolution": {**EVOLUTION_DEFAULTS, **own, "agent": agent, "evaluation": evaluation}}, values
+            {**settings, "evolution": {**defaults, **own, "agent": agent, "evaluation": evaluation}}, values
         )
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(section.get("multimodal"), values)

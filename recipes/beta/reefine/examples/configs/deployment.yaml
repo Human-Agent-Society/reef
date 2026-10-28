@@ -20,7 +20,7 @@ recipe:
       # skills, rules, commands and extensions a request may write on pi.
       agent: null
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
-      review_kinds: [code_extension]
+      review_parts: [extension]
       # Each step's workspace (its tree, material, calls and output), the history of every candidate, and the
       # proposal inbox of POST /reef/harness/proposals, one directory per scenario.
       state_dir: recipes/beta/reefine/examples/work/deployment/harness

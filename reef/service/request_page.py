@@ -24,7 +24,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reef.core.requirements import required_by
-from reef.harness.tree import locate
 from reef.service.page_layout import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import (
     failed_words,
@@ -345,18 +344,19 @@ def result_html(
 
 
 def what_changed(metrics: Mapping[str, object]) -> str:
-    """The files the step's patch writes or removes, each with its kind in the harness layout."""
+    """The files the step's patch writes or removes, each with its part of the harness tree."""
     patch = recorded_patch(metrics)
     if not patch:
         return '<p class="empty">No changes were produced by this step.</p>'
+    parts = metrics.get("patch_parts")
+    parts = parts if isinstance(parts, Mapping) else {}
     items = []
     for path, after in sorted(patch.items()):
         operation = "remove" if after is None else "write"
-        location = locate(path)
         items.append(
             f'<li><span class="tag operation-{operation}">{operation}</span>'
             f'<span class="node-id">{escape(path)}</span>'
-            f'<span class="tag">{escape("?" if location is None else location.kind.value)}</span></li>'
+            f'<span class="tag">{escape(str(parts.get(path, "?")))}</span></li>'
         )
     return '<ul class="changed-files">' + "".join(items) + "</ul>"
 

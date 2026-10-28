@@ -155,7 +155,7 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "max_episodes_per_step": 5,
         "max_pending_proposals": 2,
         "publish": "review",
-        "review_kinds": ["code_extension"],
+        "review_parts": ["extension"],
         "client_models": ["model-b"],
     }
     evaluation = {
@@ -172,7 +172,7 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
     built = from_config(evolution_config(evaluation=evaluation, **evolution))
     assert built.evolution == dataclasses.replace(
         defaults.evolution,
-        **{**evolution, "review_kinds": ("code_extension",), "client_models": ("model-b",)},
+        **{**evolution, "review_parts": ("extension",), "client_models": ("model-b",)},
     )
     assert built.evaluation == dataclasses.replace(defaults.evaluation, **{**evaluation, "episode_timeout_s": 5.0})
     assert built.batch_size == 2
@@ -188,8 +188,8 @@ INVALID_SETTINGS = {
     "inbox-size": ({"max_pending_proposals": 0}, r"evolution\.max_pending_proposals must be at least 1"),
     "state-dir": ({"state_dir": " "}, r"evolution\.state_dir must be a non-empty path"),
     "publish": ({"publish": "staged"}, r"evolution\.publish must be 'auto' or 'review'"),
-    "review-kinds-type": ({"review_kinds": "rules"}, r"evolution\.review_kinds must be a list of strings"),
-    "review-kinds": ({"review_kinds": ["extension"]}, r"evolution\.review_kinds must name tree kinds"),
+    "review-parts-type": ({"review_parts": "rules"}, r"evolution\.review_parts must be a list of strings"),
+    "review-parts": ({"review_parts": ["plugin"]}, r"evolution\.review_parts names plugin, which are not parts"),
     "served-model": ({"models": {"served": {"url": "http://x", "model": "m"}}}, "may not name a model 'served'"),
     "policy": ({"evaluation": {"policy": "best"}}, r"evaluation\.policy must be one of compare, floor, none"),
     "statistic": ({"evaluation": {"statistic": "median"}}, r"evaluation\.statistic must be one of wins, mean"),
@@ -308,8 +308,8 @@ def test_the_seed_is_a_directory_whose_tree_is_the_base_release(tmp_path: Path) 
     ("files", "problem"),
     [
         ({"rules.md": ""}, "rules.md: the file is empty"),
-        ({"notes.txt": "x"}, "notes.txt: not a path of the harness layout"),
-        ({"native/tools/shout.py": "NAME = 'shout'\n"}, "adapter 'pi' does not render native_tool files"),
+        ({"notes.txt": "x"}, "notes.txt: not a path of the pi harness tree"),
+        ({"native/tools/shout.py": "NAME = 'shout'\n"}, "native/tools/shout.py: not a path of the pi harness tree"),
         (
             {"config/models.json": json.dumps({"providers": {"qwen": {"apiKey": "sk-476-inline"}}})},
             r"inline credential.*reef\.upstream_api_key",
@@ -317,7 +317,7 @@ def test_the_seed_is_a_directory_whose_tree_is_the_base_release(tmp_path: Path) 
         ({"config/models.json": json.dumps({"apiKeys": ["sk-476-list"]})}, "inline credential"),
         ({"config/models.json": json.dumps({"providers": {"a": {"tokens": ["sk-476-plural"]}}})}, "inline credential"),
     ],
-    ids=["empty-file", "off-layout", "kind-pi-does-not-render", "inline-key", "list-valued-key", "plural-key"],
+    ids=["empty-file", "off-the-tree", "part-pi-does-not-take", "inline-key", "list-valued-key", "plural-key"],
 )
 def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
     tmp_path: Path, files: dict, problem: str

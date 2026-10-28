@@ -6,7 +6,7 @@ The request `run.py bugfix` files, the text of the fenced block below, one line:
 when I ask you to fix a bug: reproduce it first with a failing test, fix it, run the tests, then have a second agent review the diff before you tell me it is done
 ```
 
-A working answer is a rules file or a skill that names the four steps in order (reproduce with a failing test, fix, run the tests, review), or an `agent_command` such as `/fix-bug`, or a `code_extension` that runs a second pi session over the diff before the reply. The evaluation runs whatever the method wrote on the recipe's health task, which checks that the harness still works and not that it follows the workflow; the design and the review on the step's page say whether the change answers the request.
+A working answer is a rules file or a skill that names the four steps in order (reproduce with a failing test, fix, run the tests, review), or a `command` such as `/fix-bug`, or an `extension` that runs a second pi session over the diff before the reply. The evaluation runs whatever the method wrote on the recipe's health task, which checks that the harness still works and not that it follows the workflow; the design and the review on the step's page say whether the change answers the request.
 
 ## The workspace fixture
 

@@ -53,7 +53,7 @@ raw histories, and audit records remain internal.
 These measurements used the local experiment runner, before the shared
 Terminus adapter supported Python extensions. They validate the search method;
 they are not benchmark measurements of the updated adapter. A focused contract
-test now loads the checked-in harness as a `code_extension` through the
+test now loads the checked-in harness as an `extension` file through the
 method, the harness evolution recipe, the episode lifecycle, the Terminus
 runner, and the publication path, with process launch and the remote trial
 replaced by test doubles.

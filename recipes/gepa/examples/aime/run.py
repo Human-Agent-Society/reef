@@ -60,7 +60,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.delivery import HARNESS_COMPONENT
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.tree import HarnessTree, TreeKind, TreePatch, render_tree
+from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HISTORY_DIR, HarnessEvolutionRecipe
@@ -88,7 +88,6 @@ SCENARIO = os.environ.get("REEF_GEPA_SCENARIO", "gepa-aime")
 # the default single-node run is the one the retained record compares against.
 MULTI = os.environ.get("REEF_GEPA_MULTI") == "1"
 COMPONENTS = ["rules", "skill"] if MULTI else ["rules"]
-KINDS = tuple(TreeKind(component) for component in COMPONENTS)
 # The service key the Pi episodes present. The embedded service does not
 # authenticate; this must never be the provider key, which would land in a
 # rendered models.json inside the episode root.
@@ -387,7 +386,7 @@ def committed_archive(service: RunService, tasks: Sequence[str], served: Harness
         state.method_files.get(ARCHIVE_FILE),
         service.history(),
         tasks,
-        texts_of(served, KINDS),
+        texts_of(served, get_adapter("pi").layout, COMPONENTS),
         repeats=service.recipe.evaluation.repeats,
         rng_seed=seed,
     )
