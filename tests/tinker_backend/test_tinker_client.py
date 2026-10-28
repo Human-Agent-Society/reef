@@ -1,17 +1,14 @@
 """SDK call-order tests without credentials, model downloads, or GPU dependencies."""
 
-import sys
 from dataclasses import replace
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
-from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import TinkerSDKSampler
-from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerSDKClient
+from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow
 
@@ -51,10 +48,6 @@ class Trainer:
     def save_weights_for_sampler(self, name, ttl_seconds):
         self.events.append(("save_weights_for_sampler", name, ttl_seconds))
         return Future(SimpleNamespace(path="tinker://next/sampler"))
-
-    def save_weights_external(self, name, ttl_seconds):
-        self.events.append(("save_weights_external", name, ttl_seconds))
-        return Future(SimpleNamespace(path="tinker://next/external_weights"))
 
 
 class Sampler:
@@ -99,10 +92,6 @@ class Service:
             raise NotFoundError("checkpoint metadata not found")
         rank = 8 if path.endswith("/rank-8") else 32
         return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=rank))
-
-    def get_external_weights_urls(self, path):
-        self.events.append(("external_weights_urls", path))
-        return Future(SimpleNamespace(urls=self.adapter_urls))
 
     def create_training_client_from_state_with_optimizer(self, path):
         self.events.append(("restore_with_optimizer", path))
@@ -180,74 +169,10 @@ def sampler(client):
     return value
 
 
-def test_download_keeps_tinkers_adapter_beside_its_peft_conversion(client, tmp_path, monkeypatch):
-    exported = tmp_path / "exported"
-    exported.mkdir()
-    (exported / "adapter_config.json").write_bytes(b"{}")
-    (exported / "adapter_model.safetensors").write_bytes(b"tinker names")
-    client._service.adapter_urls = {path.name: path.as_uri() for path in exported.iterdir()}
-    conversions = []
-
-    def build_lora_adapter(*, base_model, adapter_path, output_path):
-        conversions.append((base_model, (Path(adapter_path) / "adapter_model.safetensors").read_bytes()))
-        Path(output_path).mkdir(parents=True)
-        (Path(output_path) / "adapter_model.safetensors").write_bytes(b"model names")
-
-    cookbook = ModuleType("tinker_cookbook")
-    cookbook.weights = SimpleNamespace(build_lora_adapter=build_lora_adapter)
-    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
-    release = tmp_path / "jobs" / "job" / "4"
-    release.mkdir(parents=True)
-    checkpoint = TinkerCheckpoint(
-        "Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler", adapter_path="tinker://s/external_weights/a"
-    )
-
-    client.download(checkpoint, release)
-
-    assert ("external_weights_urls", "tinker://s/external_weights/a") in client._sdk.events
-    assert conversions == [("Qwen/Qwen3-8B", b"tinker names")]
-    assert (release / ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"model names"
-    assert (release / TINKER_ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"tinker names"
-    assert (release / TINKER_ADAPTER_DIR / "adapter_config.json").read_bytes() == b"{}"
-    assert sorted(path.name for path in release.parent.iterdir()) == ["4"]
-
-
-def test_download_refuses_a_checkpoint_without_an_exported_adapter_or_a_file_outside_it(client, tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="without an exported adapter"):
-        client.download(TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler"), tmp_path)
-    cookbook = ModuleType("tinker_cookbook")
-    cookbook.weights = SimpleNamespace(build_lora_adapter=lambda **options: pytest.fail("converted an unsafe adapter"))
-    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
-    client._service.adapter_urls = {"../escape": (tmp_path / "x").as_uri()}
-    checkpoint = TinkerCheckpoint(
-        "Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler", adapter_path="tinker://a"
-    )
-    with pytest.raises(ValueError, match="outside its directory"):
-        client.download(checkpoint, tmp_path / "release")
-    assert not (tmp_path / "escape").exists() and not (tmp_path / ".release.download").exists()
-
-
-def test_training_exports_the_adapter_only_with_export_adapter(client):
-    base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
-    row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
-    assert checkpoint.adapter_path is None and "save_weights_external" not in [e[0] for e in client._sdk.events]
-
-    checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=True)
-    saves = [event for event in client._sdk.events if event[0].startswith("save_")]
-    assert [event[0] for event in saves[-3:]] == ["save_state", "save_weights_for_sampler", "save_weights_external"]
-    assert saves[-1][1] == saves[-2][1] and saves[-1][2] is None
-    assert checkpoint.adapter_path == "tinker://next/external_weights"
-    assert TinkerCheckpoint.from_dict(checkpoint.to_dict()) == checkpoint
-    assert "adapter_path" not in base.to_dict()
-
-
 def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    checkpoint, _ = client.train(
-        base, [[row], [row]], ImportanceSamplingLoss(), [1e-4, 5e-5], kl_coef=0.0, export_adapter=False
-    )
+    checkpoint, _ = client.train(base, [[row], [row]], ImportanceSamplingLoss(), [1e-4, 5e-5], kl_coef=0.0)
     events = client._sdk.events
     assert [event[0] for event in events] == [
         "session",
@@ -278,11 +203,11 @@ def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client)
     row = TokenRow((10, 20), (1,), (-0.25,), 1)
     client._sdk.fail = True
     with pytest.raises(TimeoutError):
-        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
+        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert client._sdk.events[-1] == ("close", "errored")
     assert not any(event[0] == "save_state" for event in client._sdk.events)
     client._sdk.fail = False
-    client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
+    client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert client._sdk.events[-1] == ("close", "success")
     assert [event[1] for event in client._sdk.events if event[0] == "restore_with_optimizer"] == [base.state_path] * 2
 
@@ -297,7 +222,7 @@ def test_custom_loss_routes_to_forward_backward_custom(client):
 
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    _, metrics = client.train(base, [[row]], Custom(), [1e-4], kl_coef=0.0, export_adapter=False)
+    _, metrics = client.train(base, [[row]], Custom(), [1e-4], kl_coef=0.0)
     names = [event[0] for event in client._sdk.events]
     assert "forward_backward_custom" in names and "forward_backward" not in names
     assert next(event for event in client._sdk.events if event[0] == "forward_backward_custom")[2] == pytest.approx(
@@ -346,9 +271,7 @@ def test_a_service_without_the_session_finish_call_still_trains(client):
     try:
         base = TinkerCheckpoint(client._model, 32, "tinker://b/state", "tinker://b/sampler")
         row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-        checkpoint, _ = client.train(
-            base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False
-        )
+        checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
         client.close()
     finally:
         Service.close_refusal = None
@@ -367,7 +290,6 @@ def test_base_sampling_clients_are_made_at_their_first_use(client, sampler):
         ImportanceSamplingLoss(),
         [1e-4],
         kl_coef=0.0,
-        export_adapter=False,
     )
     assert not any(event[0] == "base_sampler" for event in client._sdk.events)
 
@@ -406,7 +328,7 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, sampler
         lambda _, path: Future(SimpleNamespace(base_model="other/model", is_lora=True, lora_rank=32)),
     )
     with pytest.raises(ValueError, match="remote Tinker training checkpoint"):
-        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
+        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert not any(event[0] == "forward_backward" for event in client._sdk.events)
     monkeypatch.setattr(Sampler, "get_base_model", lambda _: "other/model")
     with pytest.raises(ValueError, match="remote Tinker sampler checkpoint"):
