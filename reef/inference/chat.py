@@ -10,25 +10,44 @@ to construct a training sample.
 The engine-specific part is a :class:`NativeGenerateClient`: it shapes the
 native request and parses the native response into a
 :class:`CapturedGeneration`. Everything else here is shared by every engine.
+
+An engine client that supports images also records the engine's own prompt
+ids, because the engine expands each image placeholder (see
+:mod:`reef.core.images`).
 """
 
 from __future__ import annotations
 
+import asyncio
 import codecs
+import concurrent.futures
 import copy
 import json
+import logging
 import math
 import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.core.images import (
+    ImageConfig,
+    PreparedImage,
+    expanded_prompt_ids,
+    image_base64,
+    image_spans,
+    prepare_base64_images,
+)
+from reef.core.trajectories import UNRECORDED_KEY, has_image_content
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
+from reef.inference.images import DEFAULT_IMAGE_MAX_PIXELS, image_config_from_model
 from reef.runtime.interfaces import InferenceStream
+
+logger = logging.getLogger(__name__)
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
@@ -46,6 +65,15 @@ THINK_START = "<think>"
 THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 
+#: Exact image capture supports one image per request for now (#749). Several images per prompt need
+#: the engine's vision cache off and all images in one prefill chunk.
+MAX_IMAGES_PER_REQUEST = 1
+#: Worker threads of one handler's image preparation pool. A 1080p screenshot takes about 90 ms, so 4
+#: threads prepare about 40 images a second, more than one engine serves. A 50-million-pixel image needs
+#: up to about 0.4 GB while it is prepared, so 4 threads bound that at about 1.6 GB. The pool is the
+#: handler's own, so image work never queues the service's calls on asyncio's default executor.
+IMAGE_PREPARATION_THREADS = 4
+
 
 @dataclass(frozen=True)
 class CapturedGeneration:
@@ -56,7 +84,8 @@ class CapturedGeneration:
     ``text`` is the engine's own decoding when it provides one; ``None`` makes
     the handler decode the ids with its tokenizer. ``public_meta`` is the
     engine metadata exposed to clients as ``choice["meta_info"]``; it must not
-    carry tensors.
+    carry tensors. ``prompt_ids`` are the ids the engine ran, when the request
+    asked for them (image requests only).
     """
 
     output_ids: list[int]
@@ -67,6 +96,7 @@ class CapturedGeneration:
     public_meta: dict[str, Any]
     topk_indices: list[list[int]] | None = None
     topk_log_probs: list[list[float]] | None = None
+    prompt_ids: list[int] | None = None
 
     def __post_init__(self) -> None:
         count = len(self.output_ids)
@@ -87,6 +117,8 @@ class NativeGenerateClient(ABC):
     generate_path: str
     #: Label for upstream errors, naming the engine and route.
     error_label: str
+    #: Whether ``payload`` sends images and ``parse`` returns the engine's prompt ids.
+    accepts_image_input: bool = False
 
     @abstractmethod
     def sampling_params(self, request: Mapping[str, Any], defaults: Mapping[str, Any]) -> dict[str, Any]:
@@ -101,8 +133,13 @@ class NativeGenerateClient(ABC):
         *,
         capture_topk: int,
         stream: bool,
+        images: Sequence[PreparedImage] = (),
     ) -> dict[str, Any]:
-        """The native request body for ``prompt_ids``, asking for log-probs and, if ``capture_topk``, top-k."""
+        """The native request body for ``prompt_ids``, asking for log-probs and, if ``capture_topk``, top-k.
+
+        ``prompt_ids`` hold one placeholder per image of ``images``. A client
+        without ``accepts_image_input`` never receives images.
+        """
 
     @abstractmethod
     def parse(self, artifact: Artifact, response: Mapping[str, Any], *, capture_topk: int) -> CapturedGeneration:
@@ -507,15 +544,47 @@ def _argument_text(arguments: Any) -> str:
 
 
 @dataclass(frozen=True)
+class RenderedPrompt:
+    """One rendered prompt: its ids, the request's prepared images and the ids the engine must run."""
+
+    #: The chat template's ids, with one placeholder per image.
+    prompt_ids: list[int]
+    #: The prepared images, in prompt order; empty for a text-only request.
+    images: tuple[PreparedImage, ...]
+    #: ``prompt_ids`` with each image placeholder expanded to its span; ``prompt_ids`` for a text-only request.
+    expected_prompt_ids: list[int]
+
+    @property
+    def predicted_prompt_length(self) -> int:
+        """The prompt length the engine runs, known before the engine answers."""
+        return len(self.expected_prompt_ids)
+
+
+@dataclass(frozen=True)
 class ChatCall:
     """One validated chat request, rendered and ready for the engine's generate route."""
 
     anthropic: bool
     payload: Mapping[str, Any]
     request: dict[str, Any]
-    prompt_ids: list[int]
+    rendered: RenderedPrompt
     sampling_params: dict[str, Any]
     tool_parser: Any
+
+    @property
+    def prompt_ids(self) -> list[int]:
+        return self.rendered.prompt_ids
+
+    @property
+    def images(self) -> tuple[PreparedImage, ...]:
+        return self.rendered.images
+
+    def payload_images(self) -> dict[str, tuple[PreparedImage, ...]]:
+        """The ``images`` argument of ``NativeGenerateClient.payload``; empty for a text-only request.
+
+        A text-only request passes no ``images``, so a client without image support gets the same call.
+        """
+        return {"images": self.images} if self.images else {}
 
 
 def stream_ids() -> tuple[str, str, int]:
@@ -607,12 +676,15 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         chat_template_kwargs: Mapping[str, Any] | None = None,
         rollout_continuation: bool = False,
         request_headers: RequestHeadersFactory | None = None,
+        image_max_pixels: int = DEFAULT_IMAGE_MAX_PIXELS,
     ) -> None:
         super().__init__(
             upstream_url, request_headers=request_headers, timeout_s=timeout_s, error_label=client.error_label
         )
         if tokenizer is None and not model_path:
             raise ValueError("chat training inference requires model_path")
+        if not isinstance(image_max_pixels, int) or isinstance(image_max_pixels, bool) or image_max_pixels <= 0:
+            raise ValueError("image_max_pixels must be a positive integer")
         self._client = client
         self._model_path = model_path
         self._tokenizer = tokenizer
@@ -639,6 +711,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # the trained tokens. Off, every request renders from the template.
         self._rollout_continuation = bool(rollout_continuation)
         self._rollout_prefixes: OrderedDict[str, RolloutPrefix] = OrderedDict()
+        self._image_max_pixels = image_max_pixels
+        # Read on the first image, so a text-only deployment never needs the processor files.
+        self._image_config: ImageConfig | None = None
+        # Threads start on the first image, so a text-only deployment starts none.
+        self._image_preparation_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=IMAGE_PREPARATION_THREADS, thread_name_prefix="reef-image"
+        )
 
     @property
     def client(self) -> NativeGenerateClient:
@@ -656,13 +735,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == ANTHROPIC_COUNT_TOKENS_PATH:
-            return self._anthropic_count_tokens(artifact, payload)
+            return await self._anthropic_count_tokens(artifact, payload)
         if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
             raise ValueError(
                 "chat training inference supports only "
                 f"{CHAT_COMPLETIONS_PATH}, {ANTHROPIC_MESSAGES_PATH}, and {ANTHROPIC_COUNT_TOKENS_PATH}"
             )
-        call = self._chat_call(path, payload)
+        call = await self._chat_call(path, payload)
         response, provider_response = await self._complete(artifact, call)
         return provider_response if call.anthropic else response
 
@@ -672,7 +751,12 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             artifact,
             self._client.generate_path,
             self._client.payload(
-                call.request, call.prompt_ids, call.sampling_params, capture_topk=self._capture_topk, stream=False
+                call.request,
+                call.prompt_ids,
+                call.sampling_params,
+                capture_topk=self._capture_topk,
+                stream=False,
+                **call.payload_images(),
             ),
         )
         captured = self._client.parse(artifact, native, capture_topk=self._capture_topk)
@@ -681,20 +765,119 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             return response, response
         return response, self._anthropic_response(call.payload, call.request, response)
 
-    def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
+    async def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""
         anthropic = path == ANTHROPIC_MESSAGES_PATH
         request = self._anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
             raise ValueError("exact training capture currently requires n=1")
+        rendered = await self.prepare_prompt(request)
+        sampling_params = self._client.sampling_params(request, self._sampling_defaults)
         return ChatCall(
             anthropic=anthropic,
             payload=payload,
             request=request,
-            prompt_ids=self._prompt_ids(request),
-            sampling_params=self._client.sampling_params(request, self._sampling_defaults),
+            rendered=rendered,
+            sampling_params=sampling_params,
             tool_parser=self._configured_tool_parser(request),
         )
+
+    async def prepare_prompt(self, request: Mapping[str, Any]) -> RenderedPrompt:
+        """Prepare the request's images and render the prompt once.
+
+        Decoding, resizing and encoding an image takes about 90 ms for a 1080p
+        screenshot and up to about a second for a large photo. So only that
+        work runs in the handler's pool of ``IMAGE_PREPARATION_THREADS``
+        worker threads. The tokenizer stays on the event loop: its lazy first import and
+        its Rust state are not safe to share across threads. A text-only
+        request runs only on the event loop.
+        """
+        if not has_image_content(request):
+            # Checks the content lists; a request without image parts has no images to return.
+            self.message_images(request.get("messages"))
+            prompt_ids = self._prompt_ids(request)
+            return RenderedPrompt(prompt_ids, (), prompt_ids)
+        if self._rollout_id(request) is not None:
+            # The previous call's tokens hold the engine's expanded image spans, and the next call would
+            # send them as text ids without the image data. So a rollout carries no images for now.
+            raise ValueError(
+                "rollout continuation does not support image content yet; "
+                "send a request with images without the user field"
+            )
+        if not self._client.accepts_image_input:
+            raise ValueError(f"image input is not supported by {self._client.error_label}")
+        encoded_images = self.message_images(request.get("messages"))
+        if len(encoded_images) > MAX_IMAGES_PER_REQUEST:
+            raise ValueError(
+                f"exact image capture supports only {MAX_IMAGES_PER_REQUEST} image per request for now; "
+                f"the request has {len(encoded_images)}"
+            )
+        config = self.require_image_config()
+        images = await asyncio.get_running_loop().run_in_executor(
+            self._image_preparation_pool, prepare_base64_images, encoded_images, config
+        )
+        prompt_ids = self._render_prompt(request)
+        return RenderedPrompt(prompt_ids, images, expanded_prompt_ids(prompt_ids, images, config))
+
+    @staticmethod
+    def message_images(messages: Any) -> list[str]:
+        """Validate the message contents and return the client's base64 image data in prompt order.
+
+        A content list is accepted only in a user or tool message, and only
+        when it carries an image. Its parts are text parts, OpenAI
+        ``image_url`` parts with a base64 data URL, and Anthropic base64
+        ``image`` blocks. Other content stays text-only.
+        """
+        if not isinstance(messages, list):
+            return []
+        images: list[str] = []
+        for message in messages:
+            if not isinstance(message, Mapping) or not isinstance(message.get("content"), list):
+                continue
+            message_images: list[str] = []
+            other_part = False
+            for part in message["content"]:
+                if not isinstance(part, Mapping):
+                    raise ValueError("exact chat capture currently requires text-only message content")
+                encoded = image_base64(part)
+                if encoded is not None:
+                    message_images.append(encoded)
+                elif part.get("type") != "text" or not isinstance(part.get("text"), str):
+                    other_part = True
+            if not message_images:
+                raise ValueError("exact chat capture currently requires text-only message content")
+            if other_part:
+                raise ValueError(
+                    "exact image capture accepts only text parts with string text, OpenAI image_url "
+                    "parts and Anthropic image blocks in a content list"
+                )
+            if message.get("role") not in {"user", "tool"}:
+                raise ValueError("exact image capture accepts images only in user and tool messages")
+            images.extend(message_images)
+        return images
+
+    def require_image_config(self) -> ImageConfig:
+        if self._image_config is None:
+            self._image_config = image_config_from_model(
+                self._model_path, self._require_tokenizer(), max_pixels=self._image_max_pixels
+            )
+        return self._image_config
+
+    def image_capture_problem(self, call: ChatCall, captured: CapturedGeneration) -> str | None:
+        """Why the engine's sample of an image request cannot train, or ``None`` when it can."""
+        if captured.prompt_ids is None:
+            return "the engine returned no prompt_token_ids, or its stream events disagree on them"
+        if captured.prompt_ids != call.rendered.expected_prompt_ids:
+            return (
+                f"the engine ran {len(captured.prompt_ids)} prompt ids, which differ from the "
+                f"{call.rendered.predicted_prompt_length} ids Reef predicted for the image"
+            )
+        # A sampled <|image_pad|> or <|video_pad|> would not match the record's images in the trainer's
+        # forward. Reef also drops the other vision ids, to keep it simple. The engine samples them very rarely.
+        vision_ids = set(self.require_image_config().vision_token_ids)
+        if any(token in vision_ids for token in captured.output_ids):
+            return "the sampled output contains a vision special token"
+        return None
 
     def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
         """The OpenAI-shaped response, with training tensors, for one exact sample."""
@@ -720,20 +903,40 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         runtime_load_spans = self._runtime_load_spans(captured.token_runtime_load_ids)
         versions = {span["runtime_load_id"] for span in runtime_load_spans}
         runtime_load_id = versions.pop() if len(versions) == 1 else None
-        training: dict[str, Any] = {
-            "tokens": [*call.prompt_ids, *captured.output_ids],
-            "loss_mask": [1] * len(captured.output_ids),
-            "rollout_log_probs": list(captured.rollout_log_probs),
-            "prompt_length": len(call.prompt_ids),
-            "response_length": len(captured.output_ids),
-            "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
-            "runtime_load_spans": runtime_load_spans,
-        }
-        if captured.topk_indices is not None and captured.topk_log_probs is not None:
-            training["topk_indices"] = captured.topk_indices
-            training["topk_log_probs"] = captured.topk_log_probs
+        # An image request records the ids the engine ran: the engine expands each image placeholder.
+        if call.images:
+            prompt_ids = captured.prompt_ids if captured.prompt_ids is not None else call.rendered.expected_prompt_ids
+            unrecorded = self.image_capture_problem(call, captured)
+        else:
+            prompt_ids = call.prompt_ids
+            unrecorded = None
+        training: dict[str, Any]
+        if unrecorded is not None:
+            # Serve the response, but store no record: Reef cannot train on this sample (#749).
+            logger.warning("exact image capture keeps no record of this request: %s", unrecorded)
+            training = {
+                "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
+                "runtime_load_spans": runtime_load_spans,
+                UNRECORDED_KEY: unrecorded,
+            }
+        else:
+            training = {
+                "tokens": [*prompt_ids, *captured.output_ids],
+                "loss_mask": [1] * len(captured.output_ids),
+                "rollout_log_probs": list(captured.rollout_log_probs),
+                "prompt_length": len(prompt_ids),
+                "response_length": len(captured.output_ids),
+                "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
+                "runtime_load_spans": runtime_load_spans,
+            }
+            if call.images:
+                training["images"] = image_spans(prompt_ids, call.images, self.require_image_config())
+            if captured.topk_indices is not None and captured.topk_log_probs is not None:
+                training["topk_indices"] = captured.topk_indices
+                training["topk_log_probs"] = captured.topk_log_probs
         rollout_id = self._rollout_id(call.request)
-        if rollout_id is not None:
+        if rollout_id is not None and unrecorded is None:
+            # An unrecorded call has no exact tokens to extend, so the rollout keeps its previous call.
             self._remember_rollout(rollout_id, training["tokens"], call.request)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -742,9 +945,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             "model": str(call.request.get("model", self._model_path)),
             "choices": [choice],
             "usage": {
-                "prompt_tokens": len(call.prompt_ids),
+                "prompt_tokens": len(prompt_ids),
                 "completion_tokens": len(captured.output_ids),
-                "total_tokens": len(call.prompt_ids) + len(captured.output_ids),
+                "total_tokens": len(prompt_ids) + len(captured.output_ids),
             },
             "training": training,
         }
@@ -776,7 +979,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             return _AnthropicEventWriter(
                 message_id,
                 model=str(call.payload.get("model", self._model_path)),
-                input_tokens=len(call.prompt_ids),
+                input_tokens=call.rendered.predicted_prompt_length,
             )
         return _OpenAIChunkWriter(
             {
@@ -817,7 +1020,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         in the stream format it asked for.
         """
         self._validate_stream_path(path)
-        call = self._chat_call(path, payload)
+        call = await self._chat_call(path, payload)
         response, _ = await self._complete(artifact, call)
         chat_id, message_id, created = stream_ids()
         relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), None)
@@ -842,13 +1045,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
 
     # -- Anthropic Messages -----------------------------------------------------
 
-    def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+    async def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Count the exact templated input without creating policy tensors."""
         request = self._anthropic_request({**payload, "max_tokens": 1})
-        prompt_ids = self._render_prompt(request)
+        rendered = await self.prepare_prompt(request)
         runtime_load_id = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
         return {
-            "input_tokens": len(prompt_ids),
+            "input_tokens": rendered.predicted_prompt_length,
             # RequestService strips this block from the client response. It
             # supplies the producing version required by durable-request validation, but
             # deliberately contains no tokens/loss mask/log-probabilities, so
@@ -931,12 +1134,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             raise ValueError(f"Anthropic user message {message_index} content must be text or content blocks")
 
         normalized: list[dict[str, Any]] = []
-        text_parts: list[str] = []
+        # The text and image blocks of the user message being built.
+        user_parts: list[dict[str, Any]] = []
 
         def flush_text() -> None:
-            if text_parts:
-                normalized.append({"role": "user", "content": "\n".join(text_parts)})
-                text_parts.clear()
+            if user_parts:
+                normalized.append({"role": "user", "content": cls.anthropic_message_content(user_parts)})
+                user_parts.clear()
 
         for block_index, block in enumerate(content):
             if not isinstance(block, Mapping):
@@ -948,7 +1152,12 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 text = block.get("text")
                 if not isinstance(text, str):
                     raise ValueError("Anthropic text blocks require string text")
-                text_parts.append(text)
+                user_parts.append({"type": "text", "text": text})
+                continue
+            if kind == "image":
+                # The record keeps the client's image block unchanged. A trainer prepares the image again
+                # and compares ``image_hash``.
+                user_parts.append(dict(block))
                 continue
             if kind != "tool_result":
                 raise ValueError(
@@ -958,11 +1167,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             tool_call_id = block.get("tool_use_id", block.get("id"))
             if not isinstance(tool_call_id, str) or not tool_call_id:
                 raise ValueError("Anthropic tool_result requires tool_use_id")
-            tool_content = cls._anthropic_text_content(
-                block.get("content"),
-                f"tool_result {tool_call_id}",
-                allow_missing=True,
-            )
+            tool_content = cls.anthropic_tool_result_content(block.get("content"), f"tool_result {tool_call_id}")
             normalized.append(
                 {
                     "role": "tool",
@@ -1031,6 +1236,40 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if tool_calls:
             message["tool_calls"] = tool_calls
         return message
+
+    @classmethod
+    def anthropic_tool_result_content(cls, content: Any, label: str) -> str | list[dict[str, Any]]:
+        """A tool result's text, or its text and image parts in order when it carries an image."""
+        if not isinstance(content, list) or not any(
+            isinstance(block, Mapping) and block.get("type") == "image" for block in content
+        ):
+            return cls._anthropic_text_content(content, label, allow_missing=True)
+        for block in content:
+            if not isinstance(block, Mapping) or not (
+                block.get("type") == "image" or (block.get("type") == "text" and isinstance(block.get("text"), str))
+            ):
+                raise ValueError(f"Anthropic {label} supports only text and image blocks")
+        return cls.anthropic_message_content([dict(block) for block in content])
+
+    @staticmethod
+    def anthropic_message_content(blocks: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        """Anthropic text and image blocks as one message's content.
+
+        Adjacent text blocks join with newlines. Without an image the content
+        stays one string, so a text-only request renders the same string as a
+        plain text message. Each image block stays its own part.
+        """
+        parts: list[dict[str, Any]] = []
+        for block in blocks:
+            if block["type"] == "text" and parts and parts[-1]["type"] == "text":
+                parts[-1] = {"type": "text", "text": parts[-1]["text"] + "\n" + block["text"]}
+            elif block["type"] == "text":
+                parts.append({"type": "text", "text": block["text"]})
+            else:
+                parts.append(block)
+        if any(part["type"] == "image" for part in parts):
+            return parts
+        return parts[0]["text"]
 
     @staticmethod
     def _anthropic_text_content(content: Any, label: str, *, allow_missing: bool = False) -> str:
@@ -1184,7 +1423,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             return rollout_id
         return None
 
-    def _prompt_ids(self, request: dict[str, Any]) -> list[int]:
+    def _prompt_ids(self, request: Mapping[str, Any]) -> list[int]:
         """Render the prompt, or extend the rollout's previous call when the request continues one."""
         rollout_id = self._rollout_id(request)
         prefix = None if rollout_id is None else self._rollout_prefixes.get(rollout_id)
@@ -1273,9 +1512,10 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if any(
             not isinstance(message, Mapping)
             or not isinstance(message.get("role"), str)
-            or (message.get("content") is not None and not isinstance(message.get("content"), str))
+            or (message.get("content") is not None and not isinstance(message.get("content"), (str, list)))
             for message in messages
         ):
+            # ``message_images`` has checked every content list.
             raise ValueError("exact chat capture currently requires text-only message content")
         template_kwargs = template_kwargs_of(payload.get("chat_template_kwargs"), "chat_template_kwargs")
         template_messages = self._template_messages(messages)
@@ -1324,6 +1564,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         normalized: list[dict[str, Any]] = []
         for message in messages:
             entry = dict(message)
+            content = entry.get("content")
+            if isinstance(content, list):
+                # The chat template renders one image placeholder per ``{"type": "image"}`` part.
+                entry["content"] = [
+                    {"type": "text", "text": part["text"]} if part.get("type") == "text" else {"type": "image"}
+                    for part in content
+                ]
             tool_calls = entry.get("tool_calls")
             if isinstance(tool_calls, list):
                 normalized_calls = []

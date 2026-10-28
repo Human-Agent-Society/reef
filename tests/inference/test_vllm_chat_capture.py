@@ -180,6 +180,23 @@ def test_vllm_facade_rejects_a_live_release_without_per_token_versions() -> None
 
 
 @pytest.mark.unit
+def test_vllm_facade_refuses_image_input_before_calling_the_engine(tmp_path) -> None:
+    backend = VLLMInferenceHandler("http://unused", model_path="model", tokenizer=FakeTokenizer())
+    artifact = _local_artifact(tmp_path)
+
+    # Reef refuses before it reads the image, so even a remote URL or an assistant image gets the vLLM reason.
+    for role, url in (
+        ("user", "data:image/png;base64,AAAA"),
+        ("user", "https://example.com/a.png"),
+        ("assistant", ""),
+    ):
+        image = {"type": "image_url", "image_url": {"url": url}}
+        messages = [{"role": "user", "content": "look"}, {"role": role, "content": [image]}]
+        with pytest.raises(ValueError, match="image input is not supported by vLLM"):
+            asyncio.run(backend.inference(artifact, "/v1/chat/completions", {"messages": messages}))
+
+
+@pytest.mark.unit
 def test_vllm_facade_rejects_a_response_without_one_logprob_per_token() -> None:
     body = _generate_response(stamps=["engine:6", "engine:6"])
     body["choices"][0]["logprobs"]["content"].pop()
@@ -406,11 +423,13 @@ def test_vllm_tool_call_parser_adapts_vllm_extraction_without_changing_training_
 def test_vllm_facade_requires_a_tool_parser_for_tool_requests() -> None:
     backend = VLLMInferenceHandler("http://unused", model_path="model", tokenizer=FakeTokenizer())
     with pytest.raises(ValueError, match="tool_call_parser"):
-        backend._chat_call(
-            "/v1/chat/completions",
-            {
-                "model": "m",
-                "messages": [{"role": "user", "content": "x"}],
-                "tools": [{"type": "function", "function": {"name": "read", "parameters": {}}}],
-            },
+        asyncio.run(
+            backend._chat_call(
+                "/v1/chat/completions",
+                {
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "x"}],
+                    "tools": [{"type": "function", "function": {"name": "read", "parameters": {}}}],
+                },
+            )
         )

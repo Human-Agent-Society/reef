@@ -841,6 +841,12 @@ bookkeeping keys: ``lora_path`` to address the served adapter and
 naming a different ``lora_path`` is refused. Set ``"stream": true`` and read
 the SSE response for streaming.
 
+An inference handler can serve a response and keep no record of it. For
+example, the SGLang handler does this when it cannot capture an image request
+exactly (see the `configuration reference <configuration.rst>`__). Such a
+response is HTTP 200 without a receipt. The call succeeded, but no report can reference it.
+Reef's harness client counts such a call as failed, because it has no receipt.
+
 The receipt identifies the stored record:
 
 +---------------+-----------------------------------------------------------+

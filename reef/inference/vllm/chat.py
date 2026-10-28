@@ -10,11 +10,12 @@ carry no ``kv_transfer_params``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
+from reef.core.images import PreparedImage
 from reef.inference.chat import (
     CapturedGeneration,
     NativeGenerateClient,
@@ -93,7 +94,9 @@ class VLLMGenerateClient(NativeGenerateClient):
         *,
         capture_topk: int,
         stream: bool,
+        images: Sequence[PreparedImage] = (),
     ) -> dict[str, Any]:
+        # The handler refuses image requests for vLLM, so ``images`` is always empty.
         # ``logprobs: N`` returns the sampled token's log-prob plus the top N;
         # 0 keeps only the sampled token, which is all a training record needs.
         logprobs = 0

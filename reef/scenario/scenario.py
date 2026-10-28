@@ -59,6 +59,7 @@ class Scenario:
                 "serve/retries_total",
                 "serve/version_mismatch_total",
                 "serve/timeouts_total",
+                "serve/unrecorded_total",
                 "evaluate/retries_total",
                 "evaluate/version_mismatch_total",
                 "evaluate/timeouts_total",

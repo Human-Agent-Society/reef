@@ -116,6 +116,54 @@ def make_trajectory(
     )
 
 
+#: The content part types that carry an image in OpenAI, Anthropic, and Responses requests,
+#: including the screenshot of a Responses ``computer_call_output``.
+IMAGE_CONTENT_TYPES = frozenset({"image", "image_url", "input_image", "computer_screenshot"})
+
+
+def has_image_content(payload: Mapping[str, Any]) -> bool:
+    """Whether a request body or a recorded inference carries an image in its request messages.
+
+    The check reads ``messages``, ``input``, and a recorded
+    ``response.training.request_messages``. It also reads nested ``content``,
+    ``output`` and ``source``, such as an image in an Anthropic ``tool_result``
+    or in the content source of an Anthropic ``document``, or in a Responses
+    ``function_call_output`` or ``computer_call_output``. The walk
+    uses an explicit stack, so deeply nested content cannot exhaust the
+    Python call stack.
+    """
+    response = payload.get("response")
+    training = response.get("training") if isinstance(response, Mapping) else None
+    recorded_messages = training.get("request_messages") if isinstance(training, Mapping) else None
+    pending: list[Any] = [payload.get("messages"), payload.get("input"), recorded_messages]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, Mapping):
+            kind = value.get("type")
+            if isinstance(kind, str) and kind in IMAGE_CONTENT_TYPES:
+                return True
+            pending.extend((value.get("content"), value.get("output"), value.get("source")))
+    return False
+
+
+#: The ``training`` key a token-native handler sets when the service must not store a served response.
+UNRECORDED_KEY = "unrecorded"
+
+
+def is_unrecorded(response: Mapping[str, Any]) -> bool:
+    """Whether the service must not store a served inference response.
+
+    A token-native handler sets ``training.unrecorded`` to the reason when
+    Reef cannot train on the sample, for example when the engine's prompt ids
+    for an image differ from Reef's prediction. The client still gets the
+    response, without a receipt.
+    """
+    training = response.get("training")
+    return isinstance(training, Mapping) and UNRECORDED_KEY in training
+
+
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     response = payload.get("response", {})
     response = response if isinstance(response, Mapping) else {"content": response}

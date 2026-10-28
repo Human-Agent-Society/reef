@@ -515,6 +515,66 @@ pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
 so such a request keeps its reply in ``content``. An explicit value bypasses
 this check.
 
+The SGLang handler also accepts one image per request for Qwen3.5 models.
+The vLLM handler refuses image requests with HTTP 400.
+
+- Accepted images: OpenAI ``image_url`` parts with a base64 data URL, and
+  Anthropic base64 ``image`` blocks, in user and tool messages. The image must
+  be PNG, JPEG, GIF or WebP, with at most 50 million pixels. An animated image
+  keeps its first frame. Image input needs Pillow and transformers 5.5 or
+  later in the Reef environment.
+- These image requests return HTTP 400:
+
+  - a remote image URL;
+  - an image in a system or assistant message;
+  - a second image;
+  - an image in a request that names a rollout in the ``user`` field while
+    ``rollout_continuation`` is on, in any message;
+  - an image that Reef cannot decode;
+  - an image with an aspect ratio above 200;
+  - text that contains a vision special token, such as ``<|image_pad|>``;
+  - a content part that is not text or an image;
+  - a model that is not Qwen3.5.
+
+- Reef resizes each image to the model's vision grid and sends it to SGLang as
+  PNG. ``inference.handler-config.image_max_pixels`` sets the pixel limit for
+  the deployment, and every scenario shares it. Only the SGLang handler
+  accepts this option.
+
+  - The default is ``1048576`` (1024×1024). The model processor's own limit
+    applies when it is lower.
+  - The lower of the two limits must be at least twice the processor's
+    minimum (``min_pixels``, or ``size.shortest_edge``; 65536 for Qwen3.5).
+    Near the minimum, resizing can round an image below it. The processor
+    then scales it up again, and the request keeps no record.
+  - Reef checks this value at the first image request, not at startup. Until
+    the value is fixed, image requests return HTTP 400, and the error names
+    the limit that is too low.
+  - Reef reads the processor settings from ``preprocessor_config.json``, or
+    from the ``image_processor`` block of ``processor_config.json``. When
+    the model path is a Hugging Face model ID, Reef downloads only these
+    files and ``config.json``, like the tokenizer.
+
+- The record keeps the prompt ids that SGLang ran, with each image expanded.
+  ``training.images`` gives, for each image, ``image_hash`` (SHA-256 of the
+  PNG that Reef sent), ``token_offset`` and ``token_length`` (where its tokens
+  are in ``training.tokens``), ``grid`` (``[t, h, w]``) and ``orig_size``
+  (the client's ``[width, height]``). The client's own image stays in the
+  stored request. The PNG bytes, and so the hash, repeat only with the same
+  Pillow and zlib build.
+- If Reef cannot capture an image request exactly, the client still gets the
+  response, but Reef logs a warning and stores no record. This happens when:
+
+  - SGLang returns no prompt ids;
+  - its prompt ids differ from Reef's prediction;
+  - stream events disagree on them;
+  - the output contains a vision special token (``<|vision_start|>``,
+    ``<|vision_end|>``, ``<|vision_pad|>``, ``<|image_pad|>`` or
+    ``<|video_pad|>``).
+
+  The response then has no receipt (see the `HTTP API <http-api.rst>`__), and
+  ``serve/unrecorded_total`` counts it (see `Operational metrics`_).
+
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1663,6 +1723,10 @@ The following names are relative to ``operations/``:
        inference retry deadline. Retries do not create extra request counts.
        Calls on the evaluation route count under ``evaluate/retries_total``
        and ``evaluate/timeouts_total``.
+   * - ``serve/unrecorded_total``
+     - Served responses that the inference handler marked unrecorded, for
+       example an image request that Reef could not capture exactly. Reef
+       stored no record and sent no receipt.
    * - ``serve/version_mismatch_total``
      - Responses rejected by runtime-load-ID verification, including missing
        engine version information and buffered or deferred streaming responses.

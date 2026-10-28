@@ -21,6 +21,7 @@ from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import normalize_training_request_payload
+from reef.core.trajectories import is_unrecorded
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
@@ -296,7 +297,9 @@ class RequestService:
                             prepared.hooks.verify_response(prepared.artifact, path, response)
                         self._stamp_durable_runtime_load_id(prepared, payload, response)
                         item = None
-                        if record:
+                        if record and is_unrecorded(response):
+                            operations.increment("serve/unrecorded_total")
+                        elif record:
                             item = await asyncio.to_thread(
                                 self._accept,
                                 prepared.parsed,
@@ -429,7 +432,8 @@ class RequestService:
             raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
         return await relay.relay(path, payload)
 
-    def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
+    def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord | None:
+        """Store the streamed exchange, and return it; ``None`` when the handler marked it unrecorded."""
         succeeded = False
         try:
             payload = dict(pending.item.payload)
@@ -454,10 +458,16 @@ class RequestService:
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
-            # An evaluation call is served like any other and kept by nobody.
-            stored = (
-                item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
-            )
+            # An evaluation call is served like any other and kept by nobody. So is a response the
+            # handler marks unrecorded: Reef cannot train on it.
+            if not pending.record:
+                stored = item
+            elif is_unrecorded(response):
+                if pending.measurement is not None:
+                    pending.measurement.metrics.increment("serve/unrecorded_total")
+                stored = None
+            else:
+                stored = self._dispatcher.accept_record(item, release_id=pending.release_id)
             delivery = response.get("stream_delivery", response)
             succeeded = (
                 isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")

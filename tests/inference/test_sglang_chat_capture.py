@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import importlib
+import io
 import json
+import logging
+import os
+import sys
+import threading
+import zlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +20,8 @@ from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, ArtifactRef
-from reef.inference.chat import ReasoningStreamSplitter
+from reef.core.images import PreparedImage
+from reef.inference.chat import CapturedGeneration, ChatCall, ReasoningStreamSplitter, RenderedPrompt
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.runtime.interfaces import inference_aborted
 from reef.service.request_service import client_inference_response
@@ -1221,7 +1232,7 @@ def test_openclaw_reads_canonical_anthropic_exchange_from_private_training_block
         ({"tools": []}, "non-empty list"),
         (
             {"messages": [{"role": "user", "content": [{"type": "image_url"}]}]},
-            "text-only message content",
+            "require image_url.url",
         ),
         ({"max_completion_tokens": 0}, "positive integer"),
     ],
@@ -1308,3 +1319,825 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_rea
         assert response["training"]["response_length"] == 3
 
     asyncio.run(run())
+
+
+# -- Image capture ------------------------------------------------------------
+
+VISION_START, VISION_END, VISION_PAD, IMAGE_PAD, VIDEO_PAD = 248053, 248054, 248055, 248056, 248057
+VISION_IDS = {
+    "<|vision_start|>": VISION_START,
+    "<|vision_end|>": VISION_END,
+    "<|vision_pad|>": VISION_PAD,
+    "<|image_pad|>": IMAGE_PAD,
+    "<|video_pad|>": VIDEO_PAD,
+}
+#: A 640x480 image fits the default pixel limit: grid [1, 30, 40], 30 * 40 / 4 = 300 image tokens.
+IMAGE_SIZE, IMAGE_GRID, IMAGE_TOKENS = (640, 480), [1, 30, 40], 300
+
+
+class ImageTokenizer(FakeTokenizer):
+    """Renders a text message as 10, a text part as 11 (or the vision id it names) and an image part as one placeholder."""
+
+    unk_token_id = 0
+
+    def convert_tokens_to_ids(self, token):
+        return VISION_IDS.get(token, self.unk_token_id)
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+        if not tokenize:
+            return "<user></user><assistant>"
+        self.rendered_messages = (messages, kwargs)
+        ids = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                ids.append(VISION_IDS.get(content, 10))
+                continue
+            for part in content:
+                if part["type"] == "image":
+                    ids.extend([VISION_START, IMAGE_PAD, VISION_END])
+                else:
+                    ids.append(VISION_IDS.get(part["text"], 11))
+        return [*ids, 12]
+
+
+def image_model(tmp_path, model_type="qwen3_5", **processor_overrides):
+    """A model directory with Qwen3.5's image processor settings and no weights."""
+    model = tmp_path / "model"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "config.json").write_text(json.dumps({"model_type": model_type}))
+    processor = {"patch_size": 16, "merge_size": 2, "size": {"shortest_edge": 65536, "longest_edge": 16777216}}
+    (model / "preprocessor_config.json").write_text(json.dumps({**processor, **processor_overrides}))
+    return str(model)
+
+
+def broken_png():
+    """A PNG whose second IDAT chunk has a bad type; Pillow raises SyntaxError while it decodes."""
+    Image = require_image_modules()
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), color=(200, 30, 30)).save(buffer, format="PNG")
+    png = buffer.getvalue()
+    start = png.index(b"IDAT") - 4
+    length = int.from_bytes(png[start : start + 4], "big")
+    data = png[start + 8 : start + 8 + length]
+    half = len(data) // 2
+
+    def chunk(kind, body):
+        return len(body).to_bytes(4, "big") + kind + body + zlib.crc32(kind + body).to_bytes(4, "big")
+
+    return png[:start] + chunk(b"IDAT", data[:half]) + chunk(b"I$AT", data[half:]) + png[start + 12 + length :]
+
+
+def png_with_late_chunk(kind, body):
+    """A valid PNG with one more chunk, with a correct CRC, after IDAT; Pillow reads it in ``load_end``."""
+    png = base64.b64decode(png_base64((64, 48)))
+    end = png.index(b"IEND") - 4
+    chunk = len(body).to_bytes(4, "big") + kind + body + zlib.crc32(kind + body).to_bytes(4, "big")
+    return base64.b64encode(png[:end] + chunk + png[end:]).decode()
+
+
+def require_image_modules():
+    """Skip without Pillow or transformers. With transformers, a missing ``smart_resize`` module fails."""
+    from reef.core.images import SMART_RESIZE_MODULE
+
+    Image = pytest.importorskip("PIL.Image")
+    pytest.importorskip("transformers")
+    importlib.import_module(SMART_RESIZE_MODULE)
+    return Image
+
+
+def png_base64(size=IMAGE_SIZE, mode="RGB", image_format="PNG"):
+    """A red image; a GIF has a second, blue frame."""
+    Image = require_image_modules()
+    buffer = io.BytesIO()
+    red = {"RGB": (200, 30, 30), "RGBA": (200, 30, 30, 128), "CMYK": (0, 220, 220, 30)}[mode]
+    image = Image.new(mode, size, color=red)
+    if image_format == "GIF":
+        image.save(buffer, format="GIF", save_all=True, append_images=[Image.new(mode, size, color=(30, 30, 200))])
+    else:
+        image.save(buffer, format=image_format)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def openai_image(data):
+    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{data}"}}
+
+
+def anthropic_image(data):
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+
+
+#: The rendered prompt of one user message "look" plus one image, before and after the engine expands the image.
+RENDERED = [11, VISION_START, IMAGE_PAD, VISION_END, 12]
+EXPANDED = [11, VISION_START, *[IMAGE_PAD] * IMAGE_TOKENS, VISION_END, 12]
+
+
+def image_requests(data):
+    """One image request per supported place: path, body and the rendered ids before expansion."""
+    return {
+        "openai-user": (
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, openai_image(data)]}]},
+            RENDERED,
+        ),
+        "openai-tool": (
+            "/v1/chat/completions",
+            {
+                "messages": [
+                    {"role": "user", "content": "go"},
+                    {"role": "tool", "tool_call_id": "c1", "content": [openai_image(data)]},
+                ]
+            },
+            [10, VISION_START, IMAGE_PAD, VISION_END, 12],
+        ),
+        "anthropic-user": (
+            "/v1/messages",
+            {
+                "model": "m",
+                "max_tokens": 2,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, anthropic_image(data)]}],
+            },
+            RENDERED,
+        ),
+        "anthropic-tool-result": (
+            "/v1/messages",
+            {
+                "model": "m",
+                "max_tokens": 2,
+                "messages": [
+                    {"role": "user", "content": "go"},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "shot", "input": {}}]},
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "c1", "content": [anthropic_image(data)]}],
+                    },
+                ],
+            },
+            [10, 10, VISION_START, IMAGE_PAD, VISION_END, 12],
+        ),
+    }
+
+
+def expanded(rendered):
+    index = rendered.index(IMAGE_PAD)
+    return [*rendered[:index], *[IMAGE_PAD] * IMAGE_TOKENS, *rendered[index + 1 :]]
+
+
+async def generate_once(tmp_path, path, body, engine_response, *, stream=False, **handler_config):
+    """Serve one image request against a fake SGLang; return the native request and the handler's response."""
+    seen = {}
+
+    async def generate(request):
+        seen["native"] = await request.json()
+        if not stream:
+            return web.json_response(engine_response)
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        for event in engine_response:
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    app = web.Application()
+    app.router.add_post("/generate", generate)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        backend = SGLangInferenceHandler(
+            str(server.make_url("")).rstrip("/"),
+            model_path=image_model(tmp_path),
+            tokenizer=ImageTokenizer(),
+            **handler_config,
+        )
+        if not stream:
+            return await backend.inference(_artifact(tmp_path), path, body), seen
+        handler_stream = await backend.inference_stream(_artifact(tmp_path), path, {**body, "stream": True})
+        frames = b"".join([chunk async for chunk in handler_stream.chunks])
+        return (frames, stream_record(handler_stream, frames, complete=True)), seen
+    finally:
+        await server.close()
+
+
+def engine_response(prompt_ids, output_ids=(20, 21)):
+    response = {
+        "text": "a red square",
+        "meta_info": {
+            "finish_reason": {"type": "stop"},
+            "output_token_logprobs": [[-0.5, token] for token in output_ids],
+            "weight_version": "wv-1",
+        },
+    }
+    if prompt_ids is not None:
+        response["prompt_token_ids"] = list(prompt_ids)
+    return response
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("place", ["openai-user", "openai-tool", "anthropic-user", "anthropic-tool-result"])
+def test_image_request_records_the_engine_prompt_ids(tmp_path, place) -> None:
+    data = png_base64()
+    path, body, rendered = image_requests(data)[place]
+
+    response, seen = asyncio.run(generate_once(tmp_path, path, body, engine_response(expanded(rendered))))
+
+    native = seen["native"]
+    assert native["input_ids"] == rendered
+    assert native["return_prompt_token_ids"] is True
+    [image_url] = native["image_data"]
+    png = base64.b64decode(image_url.removeprefix("data:image/png;base64,"))
+    # The client's PNG already fits its grid, so Reef sends it re-encoded at the same size.
+    assert pytest.importorskip("PIL.Image").open(io.BytesIO(png)).size == IMAGE_SIZE
+    # Reef does not ban the vision special tokens.
+    assert "logit_bias" not in native["sampling_params"]
+    training = response["training"]
+    assert training["tokens"] == [*expanded(rendered), 20, 21]
+    assert training["prompt_length"] == len(rendered) - 1 + IMAGE_TOKENS
+    assert training["images"] == [
+        {
+            "image_hash": hashlib.sha256(png).hexdigest(),
+            "token_offset": rendered.index(IMAGE_PAD),
+            "token_length": IMAGE_TOKENS,
+            "grid": IMAGE_GRID,
+            "orig_size": list(IMAGE_SIZE),
+        }
+    ]
+    if path == "/v1/messages":
+        assert response["usage"]["input_tokens"] == training["prompt_length"]
+        # The record keeps the client's image block unchanged, not the prepared PNG.
+        contents = [message["content"] for message in training["request_messages"]]
+        assert any(isinstance(content, list) and anthropic_image(data) in content for content in contents)
+    else:
+        assert response["usage"]["prompt_tokens"] == training["prompt_length"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("prompt_ids", "output_ids", "reason"),
+    [
+        (None, (20, 21), "no prompt_token_ids"),
+        (RENDERED, (20, 21), "differ from the 304 ids Reef predicted"),
+        *[(EXPANDED, (20, token), "vision special token") for token in VISION_IDS.values()],
+    ],
+)
+def test_image_request_is_served_but_unrecorded_when_the_engine_ids_cannot_train(
+    tmp_path, caplog, prompt_ids, output_ids, reason
+) -> None:
+    path, body, _ = image_requests(png_base64())["openai-user"]
+
+    with caplog.at_level(logging.WARNING, logger="reef.inference.chat"):
+        response, _ = asyncio.run(generate_once(tmp_path, path, body, engine_response(prompt_ids, output_ids)))
+
+    assert response["choices"][0]["message"]["content"] == "a red square"
+    assert reason in response["training"].pop("unrecorded")
+    assert any("keeps no record" in record.getMessage() and reason in record.getMessage() for record in caplog.records)
+    assert response["training"] == {
+        "runtime_load_id": "wv-1",
+        "runtime_load_spans": [{"start": 0, "end": len(output_ids), "runtime_load_id": "wv-1"}],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("turn", ["first", "later-user", "later-tool", "history"])
+def test_image_request_that_names_a_rollout_is_refused_before_generation(tmp_path, turn, stream) -> None:
+    # The rollout's previous call would hold the expanded image span, and the next call would send it
+    # as text ids without the image, so a request that names a rollout carries no image.
+    image = openai_image(png_base64())
+    first = {"user": "rollout-1", "messages": [{"role": "user", "content": "go"}]}
+    later = {**first, "messages": [*first["messages"], {"role": "assistant", "content": "ok"}]}
+    requests = {
+        "first": {**first, "messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, image]}]},
+        "later-user": {**later, "messages": [*later["messages"], {"role": "user", "content": [image]}]},
+        "later-tool": {
+            **later,
+            "messages": [*later["messages"], {"role": "tool", "tool_call_id": "c1", "content": [image]}],
+        },
+        # An image in an earlier message, which the client sent before it named the rollout.
+        "history": {
+            **first,
+            "messages": [
+                {"role": "user", "content": [image]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "go"},
+            ],
+        },
+    }
+    prompts = []
+
+    async def run():
+        async def generate(request):
+            prompts.append((await request.json())["input_ids"])
+            return web.json_response(engine_response(None))
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            handler = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path=image_model(tmp_path),
+                tokenizer=ImageTokenizer(),
+                rollout_continuation=True,
+            )
+            artifact = _artifact(tmp_path)
+            if turn.startswith("later"):
+                await handler.inference(artifact, "/v1/chat/completions", first)
+            kept = handler._rollout_prefixes.get("rollout-1")
+            with pytest.raises(ValueError, match="rollout continuation does not support image content"):
+                if stream:
+                    await handler.inference_stream(
+                        artifact, "/v1/chat/completions", {**requests[turn], "stream": True}
+                    )
+                else:
+                    await handler.inference(artifact, "/v1/chat/completions", requests[turn])
+            # The refused request leaves the rollout as it was: absent, or the first call's tokens.
+            assert handler._rollout_prefixes.get("rollout-1") == kept
+            return kept
+        finally:
+            await server.close()
+
+    kept = asyncio.run(run())
+    assert len(prompts) == (1 if turn.startswith("later") else 0)
+    if turn.startswith("later"):
+        assert kept.tokens == (10, 12, 20, 21)
+
+
+@pytest.mark.unit
+def test_image_request_without_a_rollout_is_captured_when_continuation_is_on(tmp_path) -> None:
+    path, body, rendered = image_requests(png_base64())["openai-user"]
+
+    response, seen = asyncio.run(
+        generate_once(tmp_path, path, body, engine_response(expanded(rendered)), rollout_continuation=True)
+    )
+
+    assert seen["native"]["input_ids"] == rendered
+    assert len(seen["native"]["image_data"]) == 1
+    assert response["training"]["tokens"] == [*expanded(rendered), 20, 21]
+    assert len(response["training"]["images"]) == 1
+
+
+@pytest.mark.unit
+def test_an_unrecorded_call_keeps_the_rollout_previous_call(tmp_path) -> None:
+    # The refusal above keeps image calls out of rollouts; this checks the handler does not
+    # read tokens that an unrecorded result does not have.
+    handler = SGLangInferenceHandler(
+        "http://engine.invalid",
+        model_path=image_model(tmp_path),
+        tokenizer=ImageTokenizer(),
+        rollout_continuation=True,
+    )
+    previous = {"user": "rollout-1", "messages": [{"role": "user", "content": "go"}]}
+    handler._remember_rollout("rollout-1", [10, 12, 20], previous)
+    request = {
+        **previous,
+        "messages": [
+            *previous["messages"],
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": [openai_image(png_base64())]},
+        ],
+    }
+    image = PreparedImage(b"png", "hash", (1, 30, 40), IMAGE_SIZE, IMAGE_TOKENS)
+    call = ChatCall(
+        anthropic=False,
+        payload=request,
+        request=request,
+        rendered=RenderedPrompt(RENDERED, (image,), EXPANDED),
+        sampling_params={},
+        tool_parser=None,
+    )
+    captured = CapturedGeneration([20, 21], [-0.5, -0.5], ["wv-1", "wv-1"], "stop", "a red square", {})
+
+    response = handler._response_from_capture(call, captured, None)
+
+    assert "no prompt_token_ids" in response["training"]["unrecorded"]
+    assert "tokens" not in response["training"]
+    assert handler._rollout_prefixes["rollout-1"].tokens == (10, 12, 20)
+    assert handler._rollout_prefixes["rollout-1"].request == previous
+
+
+@pytest.mark.unit
+def test_image_request_passes_the_client_logit_bias_unchanged(tmp_path) -> None:
+    path, body, _ = image_requests(png_base64())["openai-user"]
+    bias = {"0248056": 5, "7": -1.5}
+
+    _, seen = asyncio.run(generate_once(tmp_path, path, {**body, "logit_bias": bias}, engine_response(EXPANDED)))
+
+    assert seen["native"]["sampling_params"]["logit_bias"] == bias
+
+
+@pytest.mark.unit
+def test_text_only_request_records_a_sampled_vision_special_token(tmp_path) -> None:
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+
+    response, seen = asyncio.run(
+        generate_once(tmp_path, "/v1/chat/completions", body, engine_response(None, (20, IMAGE_PAD)))
+    )
+
+    assert "unrecorded" not in response["training"]
+    assert response["training"]["tokens"] == [*seen["native"]["input_ids"], 20, IMAGE_PAD]
+
+
+def stream_events(prompt_ids_per_event):
+    return [
+        {
+            "text": text,
+            "output_ids": [token],
+            "prompt_token_ids": prompt_ids,
+            "meta_info": {
+                "finish_reason": {"type": "stop"} if index else None,
+                "completion_tokens": index + 1,
+                "output_token_logprobs": [[-0.5, token]],
+                "weight_version": "wv-1",
+            },
+        }
+        for index, (text, token, prompt_ids) in enumerate(
+            zip(("a red", " square"), (20, 21), prompt_ids_per_event, strict=True)
+        )
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+@pytest.mark.parametrize("agree", [True, False])
+def test_streamed_image_request_records_the_engine_prompt_ids_when_every_event_agrees(tmp_path, path, agree) -> None:
+    place = "openai-user" if path == "/v1/chat/completions" else "anthropic-user"
+    _, body, _ = image_requests(png_base64())[place]
+    events = stream_events([EXPANDED, EXPANDED if agree else RENDERED])
+
+    (frames, recorded), seen = asyncio.run(generate_once(tmp_path, path, body, events, stream=True))
+
+    assert seen["native"]["stream"] is True
+    assert b"square" in frames
+    if path == "/v1/messages":
+        # message_start goes out before the engine answers, so it reports the predicted length.
+        assert f'"input_tokens": {len(EXPANDED)}'.encode() in frames
+    if agree:
+        assert recorded["training"]["tokens"] == [*EXPANDED, 20, 21]
+        assert "unrecorded" not in recorded["training"]
+    else:
+        assert "disagree" in recorded["training"]["unrecorded"]
+        assert "tokens" not in recorded["training"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_streamed_image_request_is_unrecorded_when_the_output_holds_a_vision_special_token(tmp_path, path) -> None:
+    place = "openai-user" if path == "/v1/chat/completions" else "anthropic-user"
+    _, body, _ = image_requests(png_base64())[place]
+    events = stream_events([EXPANDED, EXPANDED])
+    events[1]["output_ids"] = [VISION_IDS["<|vision_end|>"]]
+    events[1]["meta_info"]["output_token_logprobs"] = [[-0.5, VISION_IDS["<|vision_end|>"]]]
+
+    (frames, recorded), _ = asyncio.run(generate_once(tmp_path, path, body, events, stream=True))
+
+    assert b"square" in frames
+    assert "vision special token" in recorded["training"]["unrecorded"]
+    assert "tokens" not in recorded["training"]
+
+
+@pytest.mark.unit
+def test_anthropic_count_tokens_counts_the_expanded_image(tmp_path) -> None:
+    _, body, _ = image_requests(png_base64())["anthropic-user"]
+    backend = SGLangInferenceHandler("http://unused", model_path=image_model(tmp_path), tokenizer=ImageTokenizer())
+
+    counted = asyncio.run(backend.inference(_artifact(tmp_path), "/v1/messages/count_tokens", body))
+
+    assert counted["input_tokens"] == len(EXPANDED)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("messages", "extra", "message"),
+    [
+        (
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}],
+            {},
+            "only base64 data URLs",
+        ),
+        ([{"role": "system", "content": ["IMAGE"]}, {"role": "user", "content": "hi"}], {}, "user and tool messages"),
+        ([{"role": "user", "content": ["IMAGE", "IMAGE"]}], {}, "only 1 image per request"),
+        (
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,%%"}}]}],
+            {},
+            "not valid base64",
+        ),
+        (
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}],
+            {},
+            "cannot be decoded",
+        ),
+        ([{"role": "user", "content": [{"type": "text", "text": "<|image_pad|>"}, "IMAGE"]}], {}, "vision special"),
+        ([{"role": "user", "content": [{"type": "text", "text": "text only"}]}], {}, "text-only message content"),
+        ([{"role": "user", "content": ["WIDE"]}], {}, "aspect ratio must be smaller than 200"),
+        ([{"role": "user", "content": ["BROKEN"]}], {}, "cannot be decoded"),
+        ([{"role": "user", "content": ["BMP"]}], {}, "cannot be decoded as PNG, JPEG, GIF, WEBP"),
+        ([{"role": "user", "content": ["TRUNCATED"]}], {}, "cannot be decoded"),
+        ([{"role": "user", "content": ["LATE_GAMA"]}], {}, "cannot be decoded"),
+        ([{"role": "user", "content": ["LATE_CHRM"]}], {}, "cannot be decoded"),
+        ([{"role": "user", "content": ["LATE_TRNS"]}], {}, "cannot be decoded"),
+        ([{"role": "user", "content": ["LATE_ICCP"]}], {}, "cannot be decoded"),
+        # A list without an image part keeps the text-only message.
+        ([{"role": "user", "content": [{"type": "input_audio", "data": "x"}]}], {}, "text-only message content"),
+        (
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]}],
+            {},
+            "cannot be decoded",
+        ),
+        (
+            [{"role": "user", "content": [{"type": "input_audio", "data": "x"}, "IMAGE"]}],
+            {},
+            "accepts only text parts",
+        ),
+    ],
+)
+def test_image_request_that_cannot_be_captured_exactly_is_refused(tmp_path, messages, extra, message) -> None:
+    png = png_base64()
+    images = {
+        "IMAGE": openai_image(png),
+        "WIDE": openai_image(png_base64((2010, 10))),
+        "BROKEN": openai_image(base64.b64encode(broken_png()).decode()),
+        "BMP": openai_image(png_base64(image_format="BMP")),
+        "TRUNCATED": openai_image(base64.b64encode(base64.b64decode(png)[:60]).decode()),
+        # Short chunks after IDAT: Pillow raises struct.error or IndexError while it converts the image.
+        "LATE_GAMA": openai_image(png_with_late_chunk(b"gAMA", b"")),
+        "LATE_CHRM": openai_image(png_with_late_chunk(b"cHRM", b"\x00")),
+        "LATE_TRNS": openai_image(png_with_late_chunk(b"tRNS", b"\x00\x00\x00")),
+        "LATE_ICCP": openai_image(png_with_late_chunk(b"iCCP", b"")),
+    }
+    messages = [
+        (
+            {
+                **entry,
+                "content": [images.get(part, part) if isinstance(part, str) else part for part in entry["content"]],
+            }
+            if isinstance(entry["content"], list)
+            else entry
+        )
+        for entry in messages
+    ]
+    backend = SGLangInferenceHandler("http://unused", model_path=image_model(tmp_path), tokenizer=ImageTokenizer())
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(backend.inference(_artifact(tmp_path), "/v1/chat/completions", {"messages": messages, **extra}))
+
+
+@pytest.mark.unit
+def test_image_request_is_refused_for_a_model_without_image_support(tmp_path) -> None:
+    backend = SGLangInferenceHandler(
+        "http://unused", model_path=image_model(tmp_path, model_type="qwen3"), tokenizer=ImageTokenizer()
+    )
+    body = image_requests(png_base64())["openai-user"][1]
+
+    with pytest.raises(ValueError, match=r"supports Qwen3\.5 only"):
+        asyncio.run(backend.inference(_artifact(tmp_path), "/v1/chat/completions", body))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("size", "mode", "image_format"),
+    [
+        ((1920, 1080), "RGB", "PNG"),
+        ((640, 480), "RGBA", "PNG"),
+        ((640, 480), "CMYK", "JPEG"),
+        ((640, 480), "RGB", "GIF"),
+    ],
+)
+def test_prepare_image_resizes_within_the_pixel_limit_and_encodes_rgb_png(tmp_path, size, mode, image_format) -> None:
+    Image = require_image_modules()
+    from reef.core.images import prepare_image
+    from reef.inference.images import image_config_from_model
+
+    config = image_config_from_model(image_model(tmp_path), ImageTokenizer(), max_pixels=1024 * 1024)
+    raw = base64.b64decode(png_base64(size, mode, image_format))
+
+    prepared = prepare_image(raw, config)
+
+    with Image.open(io.BytesIO(prepared.png)) as png:
+        assert png.format == "PNG"
+        assert png.mode == "RGB"
+        assert png.size == (prepared.grid[2] * 16, prepared.grid[1] * 16)
+        # Every format keeps the red of the first frame.
+        red, green, blue = png.getpixel((0, 0))
+        assert red > 150 and green < 80 and blue < 80
+    assert prepared.orig_size == size
+    assert prepared.grid[1] * prepared.grid[2] * 256 <= 1024 * 1024
+    assert prepared.token_length == prepared.grid[1] * prepared.grid[2] // 4
+    assert prepare_image(raw, config).image_hash == prepared.image_hash == hashlib.sha256(prepared.png).hexdigest()
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not os.environ.get("REEF_TEST_QWEN3_5_PATH"), reason="needs Qwen3.5 tokenizer and processor files")
+def test_expanded_image_prompt_matches_the_hf_processor() -> None:
+    """Contract test (#749): Reef's rendering, expanded, equals the HF processor's input ids and grid."""
+    Image = pytest.importorskip("PIL.Image")
+    transformers = pytest.importorskip("transformers")
+    from reef.core.images import expanded_prompt_ids, prepare_image
+    from reef.inference.images import image_config_from_model
+
+    model_path = os.environ["REEF_TEST_QWEN3_5_PATH"]
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    processor = transformers.AutoProcessor.from_pretrained(model_path)
+    backend = SGLangInferenceHandler("http://unused", model_path=model_path, tokenizer=tokenizer)
+    config = image_config_from_model(model_path, tokenizer, max_pixels=1024 * 1024)
+    for size in ((640, 480), (1920, 1080), (333, 517)):
+        data = png_base64(size)
+        for place, (path, body, _) in image_requests(data).items():
+            request = backend._anthropic_request(body) if path == "/v1/messages" else body
+            rendered = asyncio.run(backend.prepare_prompt(request))
+            prompt_ids, images, expected = rendered.prompt_ids, rendered.images, rendered.expected_prompt_ids
+            template_messages = backend._template_messages(request["messages"])
+            text = tokenizer.apply_chat_template(template_messages, tokenize=False, add_generation_prompt=True)
+            pixels = [Image.open(io.BytesIO(image.png)) for image in images]
+            processed = processor(text=[text], images=pixels, return_tensors="np")
+            unresized = processor(text=[text], images=pixels, return_tensors="np", do_resize=False)
+            assert expected == processed["input_ids"][0].tolist(), (size, place)
+            assert [list(image.grid) for image in images] == processed["image_grid_thw"].tolist(), (size, place)
+            # The processor's own resize is a no-op on the prepared PNG.
+            assert (processed["pixel_values"] == unresized["pixel_values"]).all(), (size, place)
+            assert expanded_prompt_ids(prompt_ids, images, config) == expected
+            assert prepare_image(base64.b64decode(data), config) == images[0]
+
+
+@pytest.mark.unit
+def test_image_config_reads_top_level_pixel_limits_and_refuses_a_limit_below_the_minimum(tmp_path) -> None:
+    require_image_modules()
+    from reef.inference.images import image_config_from_model
+
+    model = image_model(tmp_path, min_pixels=4096, max_pixels=262144)
+    config = image_config_from_model(model, ImageTokenizer(), max_pixels=1024 * 1024)
+    assert (config.min_pixels, config.max_pixels) == (4096, 262144)
+
+    # Near the minimum, resizing can round below it, so the limit must be at least twice the minimum.
+    for limit in (40000, 70000, 131071):
+        with pytest.raises(ValueError, match="at least twice the model processor's minimum of 65536"):
+            image_config_from_model(image_model(tmp_path / "default"), ImageTokenizer(), max_pixels=limit)
+    assert image_config_from_model(image_model(tmp_path / "default"), ImageTokenizer(), max_pixels=131072)
+    # The check uses the lower of the two limits, and names the processor's when it is the lower one.
+    with pytest.raises(ValueError, match="the model processor's max_pixels 100000 must be at least twice"):
+        image_config_from_model(image_model(tmp_path / "low", max_pixels=100000), ImageTokenizer(), max_pixels=1 << 20)
+
+    # As in the HF processor, a null top-level limit falls back to ``size``, and an integral float is accepted.
+    model = image_model(tmp_path / "null", min_pixels=None, max_pixels=262144.0)
+    config = image_config_from_model(model, ImageTokenizer(), max_pixels=1024 * 1024)
+    assert (config.min_pixels, config.max_pixels) == (65536, 262144)
+
+
+@pytest.mark.unit
+def test_image_config_reads_the_image_processor_of_a_saved_processor(tmp_path) -> None:
+    """``processor.save_pretrained`` writes only processor_config.json, with the image processor nested."""
+    require_image_modules()
+    from reef.inference.images import image_config_from_model
+
+    model = Path(image_model(tmp_path))
+    settings = json.loads((model / "preprocessor_config.json").read_text())
+    (model / "preprocessor_config.json").unlink()
+    (model / "processor_config.json").write_text(json.dumps({"image_processor": {**settings, "max_pixels": 262144}}))
+
+    config = image_config_from_model(str(model), ImageTokenizer(), max_pixels=1024 * 1024)
+
+    assert (config.patch_size, config.min_pixels, config.max_pixels) == (16, 65536, 262144)
+    (model / "processor_config.json").unlink()
+    with pytest.raises(ValueError, match=r"neither preprocessor_config\.json nor processor_config\.json"):
+        image_config_from_model(str(model), ImageTokenizer(), max_pixels=1024 * 1024)
+
+
+@pytest.mark.unit
+def test_image_config_downloads_the_settings_of_a_hugging_face_model_id(tmp_path, monkeypatch) -> None:
+    """With ``inference.remote`` and a hosted training backend, ``model_path`` stays a Hugging Face model ID."""
+    require_image_modules()
+    import huggingface_hub
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    from reef.inference.images import IMAGE_SETTINGS_FILES, image_config_from_model
+
+    downloaded = image_model(tmp_path / "cache")
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return downloaded
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    config = image_config_from_model("Qwen/Qwen3.5-0.8B", ImageTokenizer(), max_pixels=1024 * 1024)
+
+    assert (config.patch_size, config.merge_size, config.min_pixels) == (16, 2, 65536)
+    assert calls == [{"repo_id": "Qwen/Qwen3.5-0.8B", "allow_patterns": list(IMAGE_SETTINGS_FILES)}]
+    # A local directory is read as it is, with no download.
+    image_config_from_model(image_model(tmp_path / "local"), ImageTokenizer(), max_pixels=1024 * 1024)
+    assert len(calls) == 1
+
+    def offline_snapshot_download(**kwargs):
+        raise LocalEntryNotFoundError("no cached snapshot, and the hub is not reachable")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", offline_snapshot_download)
+    with pytest.raises(ValueError, match="is not a local directory, and Reef cannot download its image settings"):
+        image_config_from_model("Qwen/Qwen3.5-0.8B", ImageTokenizer(), max_pixels=1024 * 1024)
+
+
+@pytest.mark.unit
+def test_image_larger_than_the_decode_limit_is_refused(tmp_path, monkeypatch) -> None:
+    require_image_modules()
+    from reef.core import images
+    from reef.inference.images import image_config_from_model
+
+    monkeypatch.setattr(images, "MAX_SOURCE_IMAGE_PIXELS", 640 * 480 - 1)
+    config = image_config_from_model(image_model(tmp_path), ImageTokenizer(), max_pixels=1024 * 1024)
+
+    with pytest.raises(ValueError, match="the image has 640x480 pixels"):
+        images.prepare_image(base64.b64decode(png_base64()), config)
+
+
+@pytest.mark.unit
+def test_image_request_without_pillow_is_refused(tmp_path, monkeypatch) -> None:
+    body = image_requests(base64.b64encode(b"not decoded").decode())["openai-user"][1]
+    backend = SGLangInferenceHandler("http://unused", model_path=image_model(tmp_path), tokenizer=ImageTokenizer())
+    monkeypatch.setitem(sys.modules, "PIL", None)
+
+    with pytest.raises(ValueError, match="needs Pillow"):
+        asyncio.run(backend.inference(_artifact(tmp_path), "/v1/chat/completions", body))
+
+
+@pytest.mark.unit
+def test_image_request_without_transformers_is_refused(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("PIL.Image")
+    from reef.core.images import SMART_RESIZE_MODULE
+
+    body = image_requests(base64.b64encode(b"not decoded").decode())["openai-user"][1]
+    backend = SGLangInferenceHandler("http://unused", model_path=image_model(tmp_path), tokenizer=ImageTokenizer())
+    monkeypatch.setitem(sys.modules, SMART_RESIZE_MODULE, None)
+
+    with pytest.raises(ValueError, match=r"needs transformers 5\.5 or later"):
+        asyncio.run(backend.inference(_artifact(tmp_path), "/v1/chat/completions", body))
+
+
+@pytest.mark.unit
+def test_image_preparation_runs_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
+    from reef.core import images
+
+    threads = []
+    prepare = images.prepare_image
+
+    def recording_prepare(raw, config):
+        threads.append(threading.current_thread())
+        return prepare(raw, config)
+
+    monkeypatch.setattr(images, "prepare_image", recording_prepare)
+    path, body, rendered = image_requests(png_base64())["anthropic-user"]
+
+    asyncio.run(generate_once(tmp_path, path, body, engine_response(expanded(rendered))))
+
+    assert threads and all(thread is not threading.main_thread() for thread in threads)
+
+
+@pytest.mark.unit
+def test_concurrent_first_requests_load_the_tokenizer_and_render_on_the_event_loop(tmp_path, monkeypatch) -> None:
+    """Only image decoding runs in worker threads; the first tokenizer load and every render stay on the loop."""
+    loads = []
+    renders = []
+
+    class RecordingTokenizer(ImageTokenizer):
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            renders.append(threading.current_thread())
+            return super().apply_chat_template(
+                messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, **kwargs
+            )
+
+    def from_pretrained(path, **options):
+        loads.append(threading.current_thread())
+        return RecordingTokenizer()
+
+    # Import the real smart_resize first; the fake package below then only replaces AutoTokenizer.
+    require_image_modules()
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=from_pretrained)),
+    )
+    _, image_body, rendered = image_requests(png_base64())["openai-user"]
+    text_body = {"messages": [{"role": "user", "content": "hello"}]}
+
+    async def run():
+        async def generate(request):
+            native = await request.json()
+            return web.json_response(engine_response(expanded(rendered) if "image_data" in native else None))
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(str(server.make_url("")).rstrip("/"), model_path=image_model(tmp_path))
+            artifact = _artifact(tmp_path)
+            bodies = [image_body] * 6 + [text_body] * 2
+            return await asyncio.gather(
+                *(backend.inference(artifact, "/v1/chat/completions", body) for body in bodies)
+            )
+        finally:
+            await server.close()
+
+    responses = asyncio.run(run())
+
+    assert [len(response["training"]["tokens"]) for response in responses] == [len(EXPANDED) + 2] * 6 + [4] * 2
+    assert loads and all(thread is threading.main_thread() for thread in loads)
+    assert renders and all(thread is threading.main_thread() for thread in renders)

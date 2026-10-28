@@ -236,7 +236,12 @@ HTTP provider handling lives in ``inference/http.py``.
 over a token-native generate route: it renders the prompt, builds the training
 record from a ``CapturedGeneration`` and streams protocol frames. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the
+and builds its tool-call parser. ``core/images.py`` holds the image settings
+type, the prepared image, and the image preparation (resize to the model's
+vision grid, PNG, hash) with the prediction of the expanded prompt ids and
+image spans. The chat facade and the record-to-sample stage share it.
+``inference/images.py`` reads the image settings from the model's files
+(``image_config_from_model``). ``inference/engine_control.py`` holds the
 control classes that SGLang and vLLM share: the inference backend, the
 inference service, the control actor and its default serving executor.
 ``inference/sglang/`` owns SGLang engine launch, capture and control
