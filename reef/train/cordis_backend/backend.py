@@ -47,19 +47,13 @@ from reef.harness.tree.mutations import (
     admit_mutations,
     nodes_from_entries,
 )
-from reef.harness.tree.nodes import (
-    ALWAYS_REVIEWED_KINDS,
-    NODE_KINDS,
-    RESERVED_ENTRY_IDS,
-    clip_record_text,
-    directive_shaped,
-    secret_shaped,
-)
+from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_text, directive_shaped, secret_shaped
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.storage.tasks import TaskStore
+from reef.surface.files import entries_file, read_entries
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.manifest import FailureManifest, advance
@@ -394,8 +388,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         promote: Promoter | None = None,
         recheck_every: int = 0,
         max_rejected_history: int = 25,
-        publish: str = "auto",
-        review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         proposals_dir: str | Path | None = None,
         max_pending_proposals: int = 8,
@@ -464,10 +456,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._promote_task = promote
         self._recheck_every = recheck_every
         self._max_rejected_history = max_rejected_history
-        if publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
-        self._publish = publish
-        self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
         # Selected compositions render into temporary source trees before the
         # scenario committer copies them into repository-owned storage.
@@ -616,6 +604,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         published = {
             **render_composition(nodes_from_entries(entries), self._descriptor),
             **tree_files(self._descriptor, entries),
+            **entries_file(entries),
         }
         artifact = Artifact.local(_write_rendered_files(published))
         # commit_applied discards the rendered directory once the commit is durable, as it does a step's.
@@ -628,6 +617,24 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         return TrainStepResult(
             {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
         )
+
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step evolves the entries that ``artifact`` holds (``read_entries``).
+
+        The recheck target belongs to the old start, so it is dropped. Raise
+        ``ValueError`` when the artifact holds no entries, or when they do not
+        pass the admission a proposal meets.
+        """
+        if artifact.local_path is None:
+            raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
+        entries = read_entries(artifact.local_path)
+        admitted, refusal = admit_mutations(entries, (), self._descriptor)
+        if refusal is not None:
+            raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
+        kept = {
+            key: value for key, value in state.items() if key not in ("recheck_entries", "recheck_evaluation_context")
+        }
+        return {**kept, "entries": [dict(entry) for entry in admitted]}
 
     @property
     def step_progress(self) -> StepProgress | None:
@@ -705,12 +712,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         promoted_clients = dict(state.get("promoted_clients", {}))
         if promoted_clients:
             carried["promoted_clients"] = promoted_clients
-        # Carried through skips so a no-commit step keeps the rollback target.
-        rollback_entries = state.get("rollback_entries")
-        rollback_evaluation_context = state.get("rollback_evaluation_context")
-        if rollback_entries is not None:
-            carried["rollback_entries"] = rollback_entries
-            carried["rollback_evaluation_context"] = rollback_evaluation_context
+        # Carried through skips so a no-commit step keeps the recheck target.
+        recheck_entries = state.get("recheck_entries")
+        recheck_evaluation_context = state.get("recheck_evaluation_context")
+        if recheck_entries is not None:
+            carried["recheck_entries"] = recheck_entries
+            carried["recheck_evaluation_context"] = recheck_evaluation_context
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
@@ -776,10 +783,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             step_record=None if step_dir is None else str(step_dir),
         )
         # Re-evaluate the last-good tree against the published one on cadence or when the served model changed.
-        drifted = rollback_evaluation_context is not None and rollback_evaluation_context != self.evaluation_context()
+        drifted = recheck_evaluation_context is not None and recheck_evaluation_context != self.evaluation_context()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
-        if data.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
-            target = [dict(entry) for entry in rollback_entries]
+        if data.request is None and self._recheck_every and recheck_entries is not None and (due or drifted):
+            target = [dict(entry) for entry in recheck_entries]
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
             metrics["recheck_reason"] = "drift" if drifted else "cadence"
@@ -967,26 +974,26 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         else:
             streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
         metrics["evaluation_context"] = self.evaluation_context()
-        # A publish stores the replaced tree and its evaluation stamp as the rollback target; a rollback consumes it.
-        rollback_entries = prepared.state.get("rollback_entries")
-        rollback_evaluation_context = prepared.state.get("rollback_evaluation_context")
+        # A publish stores the replaced tree and its evaluation stamp as the recheck target; a recheck consumes it.
+        recheck_entries = prepared.state.get("recheck_entries")
+        recheck_evaluation_context = prepared.state.get("recheck_evaluation_context")
         if candidate.recheck and decision.selected:
             metrics["rolled_back"] = True
-            rollback_entries = None
-            rollback_evaluation_context = None
+            recheck_entries = None
+            recheck_evaluation_context = None
         elif candidate.recheck:
             metrics["rolled_back"] = False
         elif decision.selected and self._recheck_every:
-            rollback_entries = list(candidate.current_entries)
-            rollback_evaluation_context = metrics["evaluation_context"]
+            recheck_entries = list(candidate.current_entries)
+            recheck_evaluation_context = metrics["evaluation_context"]
         state = {**prepared.state, "failure_streak": streak}
         if manifest is not None:
             state["failure_manifest"] = manifest.to_state()
-        state.pop("rollback_entries", None)
-        state.pop("rollback_evaluation_context", None)
-        if rollback_entries is not None:
-            state["rollback_entries"] = rollback_entries
-            state["rollback_evaluation_context"] = rollback_evaluation_context
+        state.pop("recheck_entries", None)
+        state.pop("recheck_evaluation_context", None)
+        if recheck_entries is not None:
+            state["recheck_entries"] = recheck_entries
+            state["recheck_evaluation_context"] = recheck_evaluation_context
         # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))
@@ -1025,19 +1032,20 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # The loader writes live changes into the rows it holds, config included; the returned state shares none.
             self._loader.root.update([copy.deepcopy(entry) for entry in entries])
             # The published tree carries its entries list too, so a resident process can mount it entry by entry.
-            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries)}
+            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries), **entries_file(entries)}
             artifact = Artifact.local(_write_rendered_files(published))
             step = int(state["steps"])
             replaced = self._rendered_publications.get(step)
             if replaced is not None:
                 replaced.discard()
             self._rendered_publications[step] = artifact
-            # Under review, or when a reviewed kind is touched, the release waits for a promote; loop code is
-            # reviewed whether or not the deployment listed it.
-            pending = self._publish == "review" or bool(
-                (self._review_kinds | ALWAYS_REVIEWED_KINDS) & self._mutation_kinds(candidate)
+            # The scenario's activation rule decides whether the kept tree serves, from the kinds it changes.
+            return TrainStepResult(
+                {**state, "entries": entries},
+                metrics,
+                artifact=artifact,
+                changed_kinds=frozenset(self._mutation_kinds(candidate)),
             )
-            return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])

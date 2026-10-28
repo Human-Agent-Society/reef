@@ -26,7 +26,6 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2sample.assembly import SampleAssemblySettings
@@ -562,7 +561,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
 
 @pytest.mark.unit
 def test_trainer_rejects_structural_plugin_before_constructing_processor() -> None:
-    from tests.support._candidate_evaluation_plugin import DuckPlugin
+    from tests.support._activation_rule_plugin import DuckPlugin
 
     def pipeline_factory(context):
         raise AssertionError("an invalid plugin must fail before processor construction")
@@ -854,7 +853,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
                 scenario,
                 records,
                 pipeline_factory=grouped_policy_pipeline,
-                job_loop=JobLoop(component, self.job_plan(), AlwaysSelectCheckpointPlugin(), scenario=scenario),
+                job_loop=JobLoop(component, self.job_plan(), scenario=scenario),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
                 default_job_samples=1,

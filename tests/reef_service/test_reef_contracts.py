@@ -42,7 +42,7 @@ class WeightRecipe(Recipe):
     """A recipe whose scenarios serve weights (the core ``recipe`` implementation serves a plain evolution surface)."""
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_weight_surface()
+        return create_weight_surface(kind="model")
 
 
 def weight_dispatcher(tmp_path, initial, *, training: bool = False):

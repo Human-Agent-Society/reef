@@ -233,7 +233,7 @@ class SaoStack:
             lora=False,
             loss_family="sao",
         )
-        self.start: str | None = None
+        self.start = self.component.base_start
 
     def run(self, step: int = 0) -> JobStatus:
         batch = JobData(

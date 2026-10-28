@@ -492,7 +492,7 @@ class HarnessCandidate(UpdateCandidate):
     mutations: tuple[Mutation, ...]
     #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
     evaluation_tasks: tuple[str, ...] = ()
-    #: The candidate is the rollback target, so selecting it rolls back.
+    #: The candidate is the recheck target, so selecting it brings that tree back.
     recheck: bool = False
     #: The inbox proposal these mutations came from, settled with the result; None for the method's own.
     proposal_id: str | None = None

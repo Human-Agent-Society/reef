@@ -171,7 +171,7 @@ class SelfTools(ToolRunner):
                 "release_id": row.get("release_id"),
                 "parent_release_id": row.get("parent_release_id"),
                 "operation": row.get("operation"),
-                "pending": row.get("pending", False),
+                "active": bool(row.get("active")),
                 "recorded_at": row.get("recorded_at"),
                 "evaluation": row.get("metrics"),
             }
@@ -212,7 +212,7 @@ class SelfTools(ToolRunner):
             # The kind the options name and the kind the entry has: an update that renames the kind touches both.
             for kind in (options.get("name"), kinds.get(mutation.id)):
                 if kind in ALWAYS_REVIEWED_KINDS:
-                    raise ToolFailed(f"{kind} is reviewed code: propose it, a person promotes it")
+                    raise ToolFailed(f"{kind} is reviewed code: propose it, a person activates it")
         return self._state.try_mount(mutations, secrets.token_hex(4))
 
 

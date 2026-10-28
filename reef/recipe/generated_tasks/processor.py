@@ -983,7 +983,7 @@ class GeneratedTaskJobData(Sample2Job):
 
     When the job's end is durable, ``job_ended`` gives a result to each trained task without one: its rewards
     in the job's ``rollout_rewards`` metric, or an infrastructure failure. One task job runs at a time, so
-    such a task belongs to the ended job, or to an earlier job that a rollback cancelled. A second call for
+    such a task belongs to the ended job, or to an earlier job that a new training start cancelled. A second call for
     the same end saves nothing new. The record-to-sample stage then sends the finished generations' results to
     the generator.
     """

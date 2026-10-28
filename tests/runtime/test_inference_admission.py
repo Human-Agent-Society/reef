@@ -50,7 +50,7 @@ def test_stream_and_failure_release_their_inference_admission_handles(tmp_path) 
         operations = OperationMetrics(("serve/request", "serve/admission"))
         recipe = "test"
         repository = LocalReleases(tmp_path / "releases")
-        surface = create_weight_surface()
+        surface = create_weight_surface(kind="model")
         inference_handler = None
 
         @staticmethod
