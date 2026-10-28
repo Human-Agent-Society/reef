@@ -16,7 +16,8 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
     tracker = RecordingExperimentTracker()
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
-    initial = scenario.current_artifact_ref()
+    # The creation carries the base artifact, named by the repository base release.
+    base_artifact = scenario.repository.backend.resolve_release("base").release_id
     entered, release = Event(), Event()
     record_train_from = tracker.record_train_from
 
@@ -29,10 +30,10 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
         train(value, 1)
         monkeypatch.setattr(tracker, "record_train_from", blocked)
         trained = scenario.current_artifact_ref()
-        value.train_from("math", initial.release_id)
+        value.train_from("math", base_artifact)
         assert entered.wait(5)
         value.train_from("math", trained.release_id)
-        value.activate("math", initial.release_id)
+        value.activate("math", base_artifact)
         assert value.get_or_create_scenario("math") is scenario
         assert tracker.starts == []
         release.set()

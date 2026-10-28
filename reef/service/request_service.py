@@ -701,14 +701,14 @@ class RequestService:
         single = scenario.surface.single
         harness = [row for row in scenario.artifacts() if single or row["component"] == files_component]
         by_release = {row["release_id"]: row for row in harness}
-        by_content = {row["content_id"]: row for row in harness if row["content_id"] is not None}
+        by_artifact = {row["artifact_id"]: row for row in harness}
         manifests = scenario.release_queries.manifests(scenario.scenario_step)
 
         def artifact_of(release_id: str | None) -> dict[str, Any] | None:
             """The harness artifact that the release ``release_id`` binds, or ``None`` when it is not known."""
             if release_id is None or release_id in by_release:
                 return None if release_id is None else by_release[release_id]
-            return by_content.get((manifests.get(release_id) or {}).get(str(files_component)))
+            return by_artifact.get((manifests.get(release_id) or {}).get(str(files_component)))
 
         kept: list[dict[str, Any]] = []
         for row in scenario.releases():
@@ -792,12 +792,9 @@ class RequestService:
                 "reason": "manual mode takes instructions only",
                 "release_id": head,
             }
-        # The entries the head commit logged, which the served tree.json carries too, not the trainer's live
-        # state, which a step in flight has already moved; the seed before the first commit.
-        logged = scenario.release_queries.entries_for_version(head)
-        info = scenario.surface.harness
-        if logged is None and info is not None:
-            logged = info.seed_entries
+        # The entries of the head, which the served tree.json carries too, not the trainer's live state, which a
+        # step in flight has already moved; the base artifact's before the first commit.
+        logged = scenario.release_queries.entries_for_version(head, scenario.scenario_step)
         entries = [dict(entry) for entry in logged or ()]
         try:
             mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
@@ -872,11 +869,7 @@ class RequestService:
         before_entries: Sequence[Mapping[str, Any]] = ()
         before_files: Mapping[str, str] | None = None
         if before is not None:
-            info = scenario.surface.harness
-            logged = scenario.release_queries.entries_for_version(before)
-            if logged is None and info is not None:
-                logged = info.seed_entries
-            before_entries = logged or ()
+            before_entries = scenario.release_queries.entries_for_version(before, scenario.scenario_step) or ()
             tree = scenario.surface.files
             try:
                 artifact, _ = scenario.release_queries.artifact_with_metrics(before)
@@ -1052,9 +1045,8 @@ class RequestService:
 
         The served composition never carries an endpoint or a credential, so
         an installed tree needs one written beside it: the release's own
-        entries (the recipe's seed for the base release no step published)
-        plus the descriptor's binding template, the base URL taken from the
-        request's Host, the model from the evaluation the release ran against (the
+        entries (the base artifact's for the creation) plus the descriptor's
+        binding template, the base URL taken from the request's Host, the model from the evaluation the release ran against (the
         recipe's served model for the base release), and the token left as a
         placeholder the script fills from the client's environment. Empty
         when any of those is unknown, and the script then installs the
@@ -1070,9 +1062,7 @@ class RequestService:
         info = scenario.surface.harness
         if not isinstance(model, str) or not model:
             model = None if info is None else info.served_model
-        entries = scenario.release_queries.entries_for_version(manifest["release_id"])
-        if entries is None and info is not None:
-            entries = info.seed_entries
+        entries = scenario.release_queries.entries_for_version(manifest["release_id"], scenario.scenario_step)
         if not service_url or not model or not entries:
             return {}
         api = "openai" if info is None else info.served_api

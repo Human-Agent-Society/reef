@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -25,13 +25,12 @@ from reef.artifact.artifact import (
 from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
 from reef.artifact.repository import (
+    BaseArtifactSource,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     RepositoryBackendContext,
     StagedReleaseRepositoryBackend,
 )
-from reef.artifact.sources import GitVersionSource, download_huggingface_snapshot, parse_artifact_source
-from reef.core.components import validate_component_name
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 
@@ -272,9 +271,6 @@ class _GitWorkspace:
         self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
         return self.git("rev-parse", "FETCH_HEAD")
 
-    def fetch_lfs_objects(self, version: str) -> None:
-        self.git("lfs", "fetch", "origin", version)
-
     def show_file(self, version: str, path: str) -> str:
         self.fetch_version(version)
         return self.git("show", f"FETCH_HEAD:{path}")
@@ -405,22 +401,28 @@ class _ArtifactManifest:
 
 
 class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
+    """The releases of one scenario in a Git LFS repository.
+
+    Every scenario of the repository forks from the repository's base
+    artifact (``refs/reef/base``). When the repository has no base, the
+    constructor imports ``base`` as the base. ``None`` is an empty base. The
+    constructor raises ``ArtifactSourceError`` when the base was not imported,
+    as the base of an older Reef was not. It also raises
+    ``ArtifactSourceError`` when the base came from inputs other than
+    ``base.inputs``.
+    """
+
     def __init__(
         self,
         scenario: str,
         repository: str | Path,
-        bootstrap_artifact: str | None = None,
         *,
         work_dir: Path,
         cache_dir: Path,
-        snapshot_download: Callable[..., str] | None = None,
-        bootstrap_files: Mapping[str, str] | None = None,
-        bootstrap_subdirectory: str | None = None,
+        base: BaseArtifactSource | None = None,
     ) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
-        if bootstrap_subdirectory is not None:
-            validate_component_name(bootstrap_subdirectory)
         _check_tools()
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         self.ref_name = f"refs/reef/scenarios/{encoded}"
@@ -440,48 +442,33 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         )
         self._manifest = _ArtifactManifest(self._workspace)
         self._open_repository()
-        if bootstrap_artifact is not None:
-            self._bootstrap(
-                bootstrap_artifact,
-                snapshot_download=snapshot_download,
-                subdirectory=bootstrap_subdirectory,
-                files=bootstrap_files or {},
-            )
-        elif local_repository is not None:
-            self._bootstrap_empty(bootstrap_files or {})
+        self._import_base(BaseArtifactSource() if base is None else base)
 
     @classmethod
     def factory(
         cls,
         repository: str | Path,
-        bootstrap_artifact: str | None = None,
         *,
         work_dir: Path,
         cache_dir: Path,
-        snapshot_download: Callable[..., str] | None = None,
-        bootstrap_files: Mapping[str, str] | None = None,
-        bootstrap_subdirectory: str | None = None,
+        base: BaseArtifactSource | None = None,
     ) -> GitLFSRepositoryBackendFactory:
-        """A factory of scenario backends over one repository.
-
-        ``bootstrap_subdirectory`` names the release component a bootstrap
-        model snapshot belongs to: a multi-component scenario keeps one
-        directory per component, so the snapshot goes under that directory
-        while ``bootstrap_files`` seed the others beside it.
-        """
+        """A factory of scenario backends over one repository, whose base artifact is ``base`` (None: empty)."""
         _check_tools()
         return GitLFSRepositoryBackendFactory(
             cls,
             repository,
-            bootstrap_artifact,
             work_dir=work_dir,
             cache_dir=cache_dir,
-            snapshot_download=snapshot_download,
-            bootstrap_files=bootstrap_files,
-            bootstrap_subdirectory=bootstrap_subdirectory,
+            base=BaseArtifactSource() if base is None else base,
         )
 
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
+        if release_id == "base":
+            base = self._workspace.ls_remote("refs/reef/base")
+            if base is None:
+                raise ArtifactNotFound("artifact repository has no base artifact")
+            return self._manifest.artifact_ref(base)
         if release_id is None or release_id == "head":
             resolved_release = self._workspace.ls_remote("refs/reef/head") or self._workspace.ls_remote(
                 "refs/reef/base"
@@ -509,8 +496,9 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             if existing is not None:
                 return self._manifest.artifact_ref(existing)
             selected = self.resolve_release(release_id)
+            # The fork commit reuses the selected tree's LFS pointers, which the remote holds: the push needs no
+            # LFS object, so none is fetched.
             self._workspace.checkout(selected.release_id)
-            self._workspace.fetch_lfs_objects(selected.release_id)
             self._manifest.write(
                 content_id=selected.content_id,
                 parent_release_id=selected.release_id,
@@ -525,6 +513,16 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 if existing is None:
                     raise
                 return self._manifest.artifact_ref(existing)
+            selected_tree = self.cache_dir / selected.release_id
+            if selected_tree.is_dir():
+                # The fork holds the selected files, so its cache entry links them instead of pulling them again.
+                paths = tuple(
+                    str(path.relative_to(selected_tree))
+                    for path in selected_tree.rglob("*")
+                    if path.is_file() and path.relative_to(selected_tree) != Path(_MANIFEST)
+                )
+                manifest = (self._workspace.clone_dir / _MANIFEST).read_text()
+                self._cache_release(commit, selected_tree, paths, {_MANIFEST: manifest})
             return self._manifest.artifact_ref(commit)
 
     def metadata(self) -> Mapping[str, object] | None:
@@ -679,99 +677,75 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                     raise ArtifactConflict("repository head changed while committing a staged release") from exc
                 raise
 
-    def _bootstrap(
-        self,
-        artifact_source: str,
-        *,
-        snapshot_download: Callable[..., str] | None,
-        subdirectory: str | None = None,
-        files: Mapping[str, str] = {},
-    ) -> ArtifactRef:
-        """The base release from a model snapshot, under ``subdirectory`` when named, with ``files`` beside it."""
-        source = parse_artifact_source(artifact_source)
-        if isinstance(source, GitVersionSource):
-            version = self._workspace.fetch_version(source.version)
-            self._workspace.push(f"+{version}:refs/reef/head")
-            return self._manifest.artifact_ref(version)
-        existing = self._workspace.ls_remote("refs/reef/base")
-        if existing is not None:
-            if self._workspace.ls_remote("refs/reef/head") is None:
-                self._workspace.push(f"{existing}:refs/reef/head")
-            return self._manifest.artifact_ref(existing)
-        downloaded = download_huggingface_snapshot(
-            source,
-            snapshot_download=snapshot_download,
-        )
+    def _import_base(self, source: BaseArtifactSource) -> None:
+        """Import ``source`` as the repository's base artifact when the repository has none, then check its inputs.
+
+        When two processes import at the same time, both push to one ref.
+        The second process then reads the base of the first.
+        """
+        base = self._workspace.ls_remote("refs/reef/base")
+        if base is None:
+            if self._workspace.has_refs():
+                raise ArtifactSourceError(
+                    f"artifact repository {self.repository} has releases but no base artifact; "
+                    "an older Reef made it, so create the artifact repository again"
+                )
+            base = self._push_base(source)
+        recorded = self._manifest.read(base).get("source")
+        if not isinstance(recorded, Mapping) or recorded.get("kind") != "import":
+            raise ArtifactSourceError(
+                f"the base artifact of {self.repository} was not imported from a configuration; "
+                "an older Reef made it, so create the artifact repository again"
+            )
+        if recorded.get("inputs") != dict(source.inputs):
+            raise ArtifactSourceError(
+                f"the base artifact of {self.repository} was imported from {recorded.get('inputs')!r}, "
+                f"but the deployment configures {dict(source.inputs)!r}; restore that configuration, "
+                "or create the artifact repository again"
+            )
+        self._restore_head(base)
+
+    def _push_base(self, source: BaseArtifactSource) -> str:
+        """Commit the content of ``source`` with no parent, push it to ``refs/reef/base``, and return the base.
+
+        The import also fills the base's cache entry. Thus the first materialize links the files and pulls nothing.
+        """
         with self._workspace.lock:
             self._workspace.orphan_checkout()
-            self._workspace.replace_tree(downloaded.local_path, subdirectory=subdirectory)
-            for relative, text in files.items():
+            if source.model_directory is not None:
+                self._workspace.replace_tree(source.model_directory, subdirectory=source.model_component)
+            for relative, text in source.files.items():
                 target = self._workspace.clone_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 write_fresh(target, text)
             self._workspace.write_lfs_attributes()
             self._manifest.write(
-                content_id=f"content:{uuid.uuid4().hex}",
+                content_id=source.content_id,
                 parent_release_id=None,
-                source={
-                    "kind": "huggingface",
-                    "name": source.model_name,
-                    "version": downloaded.version,
-                    **({} if subdirectory is None else {"component": subdirectory}),
-                },
-                metadata={},
+                source={"kind": "import", "inputs": dict(source.inputs)},
+                metadata=source.metadata,
             )
-            commit = self._workspace.commit("import bootstrap artifact")
-            self._workspace.push(
-                f"{commit}:refs/reef/base",
-                f"{commit}:refs/reef/head",
-            )
-            return self._manifest.artifact_ref(commit)
-
-    def _bootstrap_empty(self, files: Mapping[str, str] = {}) -> ArtifactRef:
-        """The base artifact of a local repository: ``files`` when the recipe seeds one, else empty.
-
-        An existing base always wins, so a redeploy with a changed seed keeps
-        the base its scenarios forked from."""
-        existing = self._bootstrap_ref()
-        if existing is not None:
-            return existing
-        if self._workspace.has_refs():
-            existing = self._bootstrap_ref()
-            if existing is not None:
-                return existing
-            raise ArtifactSourceError("artifact repository has refs but no base or head release")
-        with self._workspace.lock:
-            self._workspace.orphan_checkout()
-            for relative, text in files.items():
-                target = self._workspace.clone_dir / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                write_fresh(target, text)
-            self._manifest.write(
-                content_id=f"content:{uuid.uuid4().hex}",
-                parent_release_id=None,
-                source={"kind": "seed" if files else "empty"},
-                metadata={},
-            )
-            commit = self._workspace.commit("initialize artifact repository")
+            commit = self._workspace.commit("import base artifact")
             try:
+                # A ref that exists already refuses this unrelated commit, so the first importer wins.
                 self._workspace.push(f"{commit}:refs/reef/base")
-                base = commit
             except ArtifactPublicationError:
                 winner = self._workspace.ls_remote("refs/reef/base")
                 if winner is None:
                     raise
-                base = winner
-            return self._manifest.artifact_ref(self._restore_head(base))
-
-    def _bootstrap_ref(self) -> ArtifactRef | None:
-        base = self._workspace.ls_remote("refs/reef/base")
-        head = self._workspace.ls_remote("refs/reef/head")
-        if base is not None:
-            return self._manifest.artifact_ref(head or self._restore_head(base))
-        if head is not None:
-            return self._manifest.artifact_ref(head)
-        return None
+                return winner
+            paths = tuple(
+                path
+                for path in self._workspace.git("ls-files", "-z").split("\0")
+                if path and path != _MANIFEST and path != ".gitattributes"
+            )
+            self._cache_release(
+                commit,
+                self._workspace.clone_dir,
+                paths,
+                {".gitattributes": _LFS_ATTRIBUTES, _MANIFEST: (self._workspace.clone_dir / _MANIFEST).read_text()},
+            )
+            return commit
 
     def _restore_head(self, base: str) -> str:
         head = self._workspace.ls_remote("refs/reef/head")
@@ -809,23 +783,17 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         self,
         backend_type: type[GitLFSRepositoryBackend],
         repository: str | Path,
-        bootstrap_artifact: str | None,
         *,
         work_dir: Path,
         cache_dir: Path,
-        snapshot_download: Callable[..., str] | None,
-        bootstrap_files: Mapping[str, str] | None = None,
-        bootstrap_subdirectory: str | None = None,
+        base: BaseArtifactSource,
     ) -> None:
         super().__init__()
         self._backend_type = backend_type
         self._repository = repository
-        self._bootstrap_artifact = bootstrap_artifact
         self._work_dir = Path(work_dir)
         self._cache_dir = Path(cache_dir)
-        self._snapshot_download = snapshot_download
-        self._bootstrap_files = None if bootstrap_files is None else dict(bootstrap_files)
-        self.bootstrap_subdirectory = bootstrap_subdirectory
+        self._base = base
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
@@ -834,12 +802,9 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         return cls(
             GitLFSRepositoryBackend,
             repository if "://" in repository or repository.startswith("git@") else Path(repository),
-            None,
             work_dir=context.work_dir,
             cache_dir=context.cache_dir,
-            snapshot_download=None,
-            bootstrap_files=context.bootstrap_files,
-            bootstrap_subdirectory=context.bootstrap_component,
+            base=context.base,
         )
 
     def _build_backend(self, scenario: str) -> GitLFSRepositoryBackend:
@@ -847,12 +812,9 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         return self._backend_type(
             scenario,
             self._repository,
-            self._bootstrap_artifact,
             work_dir=self._work_dir / encoded,
             cache_dir=self._cache_dir,
-            snapshot_download=self._snapshot_download,
-            bootstrap_files=self._bootstrap_files,
-            bootstrap_subdirectory=self.bootstrap_subdirectory,
+            base=self._base,
         )
 
     def _has_persisted_registration(self, scenario: str) -> bool:

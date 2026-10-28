@@ -29,8 +29,8 @@ from reef.artifact.repository import (
     EnumerableRepositoryBackendFactory,
     RepositoryBackendFactory,
 )
+from reef.core.activation import ActivationRule
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
-from reef.core.plugins import PluginReference
 from reef.evaluation.activation import (
     EvaluatedActivation,
     activation_setting,
@@ -327,25 +327,27 @@ class ScenarioRegistry:
         ``artifact_evaluation`` is the checked ``ArtifactEvaluationSettings`` as JSON, or None to evaluate none.
         ``activation`` is the scenario's own rule, a built-in rule in the mapping form, or None to follow the
         deployment's rule. Return the rule as stored. Raise ``PluginConfigError`` for an ``activation`` that names
-        no built-in rule, and ``ValueError`` when the rule that would apply is ``evaluated`` and
-        ``artifact_evaluation`` is None: no new artifact would then activate. A refused pair stores nothing.
+        no built-in rule. Raise ``ValueError`` when the rule that would apply is ``evaluated`` and
+        ``artifact_evaluation`` is None, because then no new artifact activates. A refused pair stores nothing.
         The loaded instance applies the rule to the artifacts that training makes from now on.
         """
-        reference = None if activation is None else scenario_activation_reference(activation)
-        rule = None if reference is None else build_activation_rule(reference)
-        effective_rule = build_activation_rule(self._recipe.activation) if rule is None else rule
-        if artifact_evaluation is None and isinstance(effective_rule, EvaluatedActivation):
-            raise ValueError(
-                "the evaluated activation activates an artifact only after its evaluation: "
-                "set artifact_evaluation, or select another activation"
-            )
-        stored_activation = None if reference is None else activation_setting(reference)
+        stored_activation = (
+            None if activation is None else activation_setting(scenario_activation_reference(activation))
+        )
         with self.lock_for(scenario):
             current = self.require(scenario)
-            settings = self._storage.read_settings(scenario)
-            self._storage.write_settings(
-                scenario, replace(settings, artifact_evaluation=artifact_evaluation, activation=stored_activation)
+            settings = replace(
+                self._storage.read_settings(scenario),
+                artifact_evaluation=artifact_evaluation,
+                activation=stored_activation,
             )
+            rule = self.activation_rule(settings)
+            if artifact_evaluation is None and isinstance(rule, EvaluatedActivation):
+                raise ValueError(
+                    "the evaluated activation activates an artifact only after its evaluation: "
+                    "set artifact_evaluation, or select another activation"
+                )
+            self._storage.write_settings(scenario, settings)
             current.set_activation_rule(rule)
         return stored_activation
 
@@ -353,12 +355,17 @@ class ScenarioRegistry:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self._storage.read_settings(scenario)
 
-    def effective_activation(self, settings: ScenarioSettings) -> PluginReference | None:
-        """The rule that applies to a scenario with ``settings``: its own, else the deployment's (None is
-        ``always``)."""
+    def activation_rule(self, settings: ScenarioSettings) -> ActivationRule:
+        """The rule that applies to a scenario with ``settings``: its own rule, else the recipe's rule
+        (``Recipe.activation_rule``)."""
         if settings.activation is None:
-            return self._recipe.activation
-        return scenario_activation_reference(settings.activation)
+            return self._recipe.activation_rule()
+        return build_activation_rule(scenario_activation_reference(settings.activation))
+
+    def effective_activation(self, settings: ScenarioSettings) -> Mapping[str, object]:
+        """The JSON form of the rule that applies to a scenario with ``settings``: its own ``activation``, else the
+        deployment's ``activation`` section."""
+        return activation_setting(self._recipe.activation) if settings.activation is None else settings.activation
 
     def configure_model(
         self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
@@ -477,12 +484,12 @@ class ScenarioRegistry:
                         settings.training_mode,
                         exc,
                     )
-            if settings.activation is not None:
-                instance.set_activation_rule(build_activation_rule(scenario_activation_reference(settings.activation)))
+            rule = self.activation_rule(settings)
+            instance.set_activation_rule(rule)
         except BaseException:
             instance.close()
             raise
-        if settings.artifact_evaluation is None and isinstance(instance.activation_rule, EvaluatedActivation):
+        if settings.artifact_evaluation is None and isinstance(rule, EvaluatedActivation):
             logger.warning(
                 "Scenario %r activates no new artifact: its activation is evaluated, and it has no artifact_evaluation",
                 instance.name,

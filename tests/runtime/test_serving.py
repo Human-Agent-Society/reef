@@ -108,13 +108,6 @@ def saved_full_weights(path: Path) -> Path:
     return path
 
 
-def base_release(path: Path) -> Path:
-    """A release with only the repository's files: the base model."""
-    path.mkdir(parents=True)
-    (path / "reef-artifact.json").write_text("{}")
-    return path
-
-
 def release(path: Path, content_id: str) -> Artifact:
     return Artifact(ArtifactRef(content_id, f"release-{content_id}", None), None, local_path=path)
 
@@ -172,30 +165,14 @@ def test_scenarios_serve_their_own_adapters_and_a_restart_loads_each_release_aga
     assert again.split(":")[0] != math.split(":")[0]
 
 
-def test_a_rollback_loads_another_release_and_a_release_without_weights_serves_the_base(serving, tmp_path):
+def test_an_activation_loads_another_release_and_the_base_artifact_loads_as_any_adapter(serving, tmp_path):
     first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
     older = serving.activate_checkpoint(release(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    serving.activate_checkpoint(release(base_release(tmp_path / "empty"), "base"), scenario="math")
-    assert serving.serving_adapter_runtime_load_id("math") is None
-
-
-def test_a_base_model_release_unloads_the_scenario_adapter_and_serves_the_base_version(engines, tmp_path):
-    serving = AdapterServingRuntime(engines, Handler(), adapter_capacity=1)
-    base = serving.current_runtime_load_id()
-    assert base == serving.base_version
-    math = serving.activate_checkpoint(release(saved_adapter(tmp_path / "math"), "m"), scenario="math")
-    assert serving.current_runtime_load_id() == math != base
-    assert serving.activate_checkpoint(release(base_release(tmp_path / "empty"), "base"), scenario="math") == base
-    # Generation pauses while the adapter unloads.
-    assert engines.events[-3:] == ["pause", ("unload", adapter_name("math", math)), "resume"]
-    assert serving.current_runtime_load_id() == base
-    assert serving.serving_adapter_runtime_load_id("math") is None
-    assert serving.adapter_residency_status()["resident"] == 0
-    # The freed slot takes another scenario's adapter without an eviction.
-    code = serving.activate_checkpoint(release(saved_adapter(tmp_path / "code"), "c"), scenario="code")
-    assert serving.current_runtime_load_id() == code
-    assert serving.adapter_residency_status()["counters"]["evictions"] == 0
+    # The base artifact holds the untrained adapter, which loads under a version of its own.
+    base = serving.activate_checkpoint(release(saved_adapter(tmp_path / "untrained"), "base"), scenario="math")
+    assert base not in (first, older, serving.base_version)
+    assert serving.serving_adapter_runtime_load_id("math") == base
 
 
 def test_only_a_saved_adapter_of_a_named_scenario_is_served(serving, tmp_path):
@@ -262,8 +239,6 @@ def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothin
     initial = serving.current_runtime_load_id()
     assert not serving.per_scenario_adapters and not serving.shared_by_training_scenarios
     assert serving.served_weight_kind == "model"
-    # Before any load, a release without weights is the base model that the engines already serve.
-    assert serving.activate_checkpoint(release(base_release(tmp_path / "base"), "base")) == initial
     weights = saved_full_weights(tmp_path / "step-1")
     version = serving.activate_checkpoint(release(weights, "w1"))
     assert version != initial
@@ -274,16 +249,6 @@ def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothin
     assert len(engines.events) == calls
     rolled_back = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-0"), "w0"))
     assert rolled_back not in (initial, version)
-
-
-def test_full_weights_cannot_return_to_the_base_model(engines, tmp_path):
-    serving = FullWeightServingRuntime(engines, Handler())
-    version = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-1"), "w1"))
-    calls = len(engines.events)
-    with pytest.raises(ReefError, match="cannot return to the base model"):
-        serving.activate_checkpoint(release(base_release(tmp_path / "base"), "base"))
-    assert len(engines.events) == calls
-    assert serving.current_runtime_load_id() == version
 
 
 def test_engines_that_report_another_version_after_a_full_load_fail_it_and_keep_the_served_version(engines, tmp_path):

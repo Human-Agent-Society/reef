@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
+from reef.core.components import made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
@@ -88,8 +89,8 @@ class EvaluationRun:
 
 @dataclass(frozen=True)
 class NewArtifact:
-    """An artifact that a commit published: the scenario, the artifact's ID, and the component whose trainer
-    committed it, or None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
+    """An artifact that a commit made: the scenario, the artifact's ID, and the component whose artifact it is, or
+    None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
     evaluates it with the scenario's settings."""
 
     scenario: str
@@ -111,8 +112,16 @@ class NewArtifacts(RecordObserver):
 
     def record_committed(self, commit: CommitRecord) -> None:
         # An activation or a new training start names an artifact that exists already: it reports none.
-        if commit.made_artifact:
+        if not commit.made_artifact:
+            return
+        if commit.components is None:
             self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
+            return
+        # With several components, the release made the artifact of each component that it gave a new artifact_id.
+        release_id = commit.artifact_ref.release_id
+        for name, artifact_id in commit.components.items():
+            if artifact_id == made_artifact_id(release_id, name, single=False):
+                self.queue.put(NewArtifact(commit.scenario, artifact_id, name))
 
     def close(self) -> None:
         self.queue.put(None)
@@ -224,42 +233,41 @@ class ArtifactEvaluations:
         """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed
         setting as stored.
 
-        ``changes`` holds ``artifact_evaluation``, ``activation``, or both. ``artifact_evaluation`` is the settings
-        that Reef evaluates each new artifact with, or None to evaluate none. They are checked against the
-        scenario's current artifact as a client's request would be, except that the eval tasks may still be
-        missing. ``activation`` is the scenario's own built-in activation rule, or None to follow the deployment's.
-        A setting that ``changes`` leaves out keeps its stored value. Reef checks the two settings together and
+        ``changes`` holds ``artifact_evaluation``, ``activation``, or both:
+
+        - ``artifact_evaluation`` is the settings that Reef evaluates each new artifact with, or None to evaluate
+          none. Reef checks them against the scenario's active artifact, as it checks a client's request. The eval
+          tasks can still be missing.
+        - ``activation`` is the scenario's own built-in activation rule, or None to follow the deployment's rule.
+
+        A setting that ``changes`` leaves out keeps its stored value. Reef checks the two settings together, and
         stores both or neither (``Dispatcher.set_evaluation_and_activation``). Raise ``ValueError`` or
         ``ReefError`` for settings that the scenario cannot run.
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = self.dispatcher.stored_settings(scenario)
             artifact_evaluation = stored.artifact_evaluation
-            if "artifact_evaluation" in changes:
-                value = changes["artifact_evaluation"]
-                if value is None:
-                    artifact_evaluation = None
-                else:
-                    settings = ArtifactEvaluationSettings.from_json(value)
-                    self.checked(current, current.current_artifact_ref().release_id, settings)
-                    artifact_evaluation = settings.to_json()
+            value = changes.get("artifact_evaluation")
+            if value is not None:
+                settings = ArtifactEvaluationSettings.from_json(value)
+                self.checked(current, None, settings)
+                artifact_evaluation = settings.to_json()
+            elif "artifact_evaluation" in changes:
+                artifact_evaluation = None
             activation = self.dispatcher.set_evaluation_and_activation(
                 scenario,
                 artifact_evaluation=artifact_evaluation,
                 activation=changes.get("activation", stored.activation),
             )
-        stored_changes: dict[str, object] = {}
-        if "artifact_evaluation" in changes:
-            stored_changes["artifact_evaluation"] = artifact_evaluation
-        if "activation" in changes:
-            stored_changes["activation"] = activation
-        return stored_changes
+        changed = {"artifact_evaluation": artifact_evaluation, "activation": activation}
+        return {key: changed[key] for key in changed if key in changes}
 
     def checked(
-        self, current: Scenario, artifact_id: str, settings: ArtifactEvaluationSettings
+        self, current: Scenario, artifact_id: str | None, settings: ArtifactEvaluationSettings
     ) -> tuple[ArtifactEvaluationRequest, Artifact, PolicyModel]:
-        """The request of ``settings`` for ``artifact_id``, the materialized artifact, and the model that the
-        runtime serves for it; ``ValueError`` or ``ReefError`` when ``current`` cannot run it."""
+        """The request of ``settings`` for ``artifact_id`` (None: the component's active artifact), the materialized
+        artifact, and the model that the runtime serves for it; ``ValueError`` or ``ReefError`` when ``current``
+        cannot run it."""
         kinds = {name: component.kind for name, component in current.surface.components.items()}
         component = settings.component
         if component is None:
@@ -269,6 +277,9 @@ class ArtifactEvaluations:
             component = named[0]
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
+        if artifact_id is None:
+            active = Artifact(current.current_artifact_ref(), current.repository)
+            artifact_id = current.surface.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind == "harness_plugin":
@@ -279,7 +290,8 @@ class ArtifactEvaluations:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
         if any(other == "harness_plugin" for other in kinds.values()):
             raise ReefError("Reef evaluates a model artifact only in a scenario whose artifacts hold no harness")
-        artifact = current.release_queries.artifact_for_version(artifact_id).materialize()
+        _, release = current.resolve_artifact(artifact_id, component)
+        artifact = release.materialize()
         runtime = current.runtime
         model = None if runtime is None else runtime.artifact_model(artifact)
         if model is None:

@@ -2544,7 +2544,9 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
             assert result is not None and result.artifact is not None
             scenario.commit(result)
         second, first = scenario.artifacts()[:2]
-        assert second["active"] and "r2" in ids(scenario.release_queries.entries_for_version(second["artifact_id"]))
+        assert second["active"] and "r2" in ids(
+            scenario.release_queries.entries_for_version(second["artifact_id"], scenario.scenario_step)
+        )
 
         started = dispatcher.train_from("start", first["artifact_id"])
         assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
@@ -2562,7 +2564,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
         assert ids(scenario.trainer.state["entries"]) == ids(
-            scenario.release_queries.entries_for_version(first["artifact_id"])
+            scenario.release_queries.entries_for_version(first["artifact_id"], scenario.scenario_step)
         )
         assert scenario.current_artifact_ref().release_id == second["release_id"]
         # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
@@ -2573,7 +2575,9 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         scenario.commit(result)
         newest = scenario.store.history()[-1]
         assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["release_id"]
-        evolved = ids(scenario.release_queries.entries_for_version(newest.artifact_ref.release_id))
+        evolved = ids(
+            scenario.release_queries.entries_for_version(newest.artifact_ref.release_id, scenario.scenario_step)
+        )
         assert "r1" in evolved and "r3" in evolved and "r2" not in evolved
     finally:
         restarted.close()

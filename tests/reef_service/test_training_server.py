@@ -298,7 +298,10 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
-        "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
+        # The base artifact is the training component's untrained checkpoint.
+        "context": RepositoryBackendContext(
+            work_dir=Path("/state/work"), cache_dir=Path("/state/cache"), base=component.base_artifact_source()
+        ),
     }
 
 

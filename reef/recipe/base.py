@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
@@ -357,9 +358,9 @@ class Recipe:
         checks = every_check(component.validator, self.build_artifact_validator())
         return replace(surface, components={name: replace(component, validator=checks)})
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
-        return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The content of the deployment's base artifact, which every new scenario starts from; empty by default."""
+        return BaseArtifactSource()
 
     @property
     def harness_adapter(self) -> str | None:
@@ -369,10 +370,6 @@ class Recipe:
         the process shares it, so the scenario list names it before a
         scenario loads.
         """
-        return None
-
-    def bootstrap_artifact_component(self) -> str | None:
-        """The release component a bootstrap model snapshot belongs to; ``None`` places it at the release root."""
         return None
 
     def serving_status(self) -> Mapping[str, Any] | None:
@@ -481,6 +478,10 @@ class WeightTrainingRecipe(Recipe):
             # Every scenario owns an adapter on the shared base: route by scenario.
             return create_weight_surface(scenario=scenario, runtime=self.runtime, kind=self.runtime.served_weight_kind)
         return create_weight_surface(kind=self.runtime.served_weight_kind)
+
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The training component's untrained checkpoint (``TrainingComponent.base_artifact_source``)."""
+        return self.training_component.base_artifact_source()
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """The engine's adapter residency on a runtime that serves per-scenario adapters."""

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.job_data import JobData
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 
@@ -31,8 +32,8 @@ class TrainingJob:
     """One bounded training job: a data snapshot, the weights it starts from, and the backend's parameters.
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
-    (the directory of the start weights as the component reads them, or
-    ``None`` for the backend's base model), ``data`` (the job data that the job trains; the component cuts it into
+    (the non-empty start that the component reads, ``TrainingComponent.base_start`` for the base artifact),
+    ``data`` (the job data that the job trains; the component cuts it into
     optimizer batches by its own batch size)
     and ``parameters``, a mapping that encodes as JSON.
 
@@ -42,7 +43,7 @@ class TrainingJob:
 
     job_id: str
     backend: str
-    start: str | None
+    start: str
     data: JobData
     parameters: Mapping[str, Any] = field(default_factory=dict)
 
@@ -51,8 +52,8 @@ class TrainingJob:
             raise ValueError("TrainingJob.job_id must be a non-empty string")
         if not isinstance(self.backend, str) or not self.backend:
             raise ValueError("TrainingJob.backend must be a non-empty string")
-        if self.start is not None and (not isinstance(self.start, str) or not self.start):
-            raise ValueError("TrainingJob.start must be a non-empty string or None")
+        if not isinstance(self.start, str) or not self.start:
+            raise ValueError("TrainingJob.start must be a non-empty string")
         if not isinstance(self.data, JobData):
             raise TypeError("TrainingJob.data must be a JobData")
         if not isinstance(self.parameters, Mapping):
@@ -60,7 +61,7 @@ class TrainingJob:
         json.dumps(dict(self.parameters), allow_nan=False)
 
 
-def job_id_for(backend: str, start: str | None, data_identity: object, parameters: Mapping[str, Any]) -> str:
+def job_id_for(backend: str, start: str, data_identity: object, parameters: Mapping[str, Any]) -> str:
     """The ID of a job: a hash of its backend, start, data and parameters, so a retry gets the same ID.
 
     ``data_identity`` is a JSON value that names the data, not the job data's
@@ -231,6 +232,22 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
+    @abstractmethod
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The component's untrained checkpoint, laid out as one of its releases, and the configuration it comes from.
+
+        Reef imports it as the base artifact of the component that this
+        component trains. It has the layout of every other release
+        (``release_format``), so serving and training read it as they read
+        any release. Its ``inputs`` name the model and the settings that
+        decide its content.
+        """
+
+    @property
+    @abstractmethod
+    def base_start(self) -> str:
+        """The start of a job from the untrained checkpoint; the first job of every trainer starts from it."""
+
     @property
     def shares_scenarios(self) -> bool:
         """Whether jobs of several scenarios can run on this component.
@@ -254,23 +271,21 @@ class TrainingComponent(ABC):
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
     @abstractmethod
-    def import_start(self, release: Path) -> str | None:
+    def import_start(self, release: Path) -> str:
         """Take the published release in ``release`` as the start of later jobs; return that start.
 
         Reef calls this when a trainer starts training from an artifact
         (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
-        discarded later. A release without weights is the base model, whose
-        start is ``None``. Raise ``ValueError``, and change nothing, when the
+        discarded later. Raise ``ValueError``, and change nothing, when the
         component cannot start from these weights; a component may refuse
         every release.
         """
 
-    def fresh_start(self, start: str | None) -> str | None:
+    def fresh_start(self, start: str) -> str:
         """A start with the weights of ``start`` and no training state; Reef calls it when a plan restarts training.
 
-        The returned start holds the same weights as ``start`` (``None``: the
-        base model, as for a job). A job from it trains with a new optimizer
+        The returned start holds the same weights as ``start``. A job from it trains with a new optimizer
         state, its learning-rate schedule from step 0, and an empty objective
         state. The component writes it durably. The same ``start`` always
         gives the same result, so a resubmission after the service restarts

@@ -23,7 +23,6 @@ from reef.dispatcher import ingest
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.status import TrainingStatus
-from reef.evaluation.activation import activation_setting
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.runtime.deployment import close_runtimes
@@ -466,7 +465,7 @@ class Dispatcher(ScenarioLifecycle):
                 "model": current.model_config.view(),
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
-                "effective_activation": activation_setting(self.registry.effective_activation(settings)),
+                "effective_activation": self.registry.effective_activation(settings),
             }
 
     def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:

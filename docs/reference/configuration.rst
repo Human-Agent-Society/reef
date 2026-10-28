@@ -1219,8 +1219,9 @@ The built-in rules:
   ``mean_score`` of at least ``min_mean_score`` (required). Set the scenario's
   ``artifact_evaluation`` (`Automatic evaluation
   <http-api.rst#automatic-evaluation>`__) so Reef evaluates each new artifact.
-  Reef logs a warning when it creates or loads a scenario without it under
-  this rule: such a scenario activates no new artifact.
+  If a scenario has no ``artifact_evaluation`` under this rule, Reef logs a
+  warning when it creates or loads the scenario. Such a scenario activates no
+  new artifact.
 
 A rule of your own subclasses ``ActivationRule``:
 

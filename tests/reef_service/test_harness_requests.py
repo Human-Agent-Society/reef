@@ -131,7 +131,7 @@ def _manual(tmp_path: Path, propose, **overrides) -> CordisRecipe:
 def _seeded(tmp_path: Path, recipe: CordisRecipe):
     """The seed's files as the base artifact, what the service assembly does, so the base release serves."""
     initial = tmp_path / "initial"
-    for relative, text in (recipe.base_artifact_files() or {}).items():
+    for relative, text in recipe.base_artifact_source().files.items():
         (initial / relative).parent.mkdir(parents=True, exist_ok=True)
         (initial / relative).write_text(text, encoding="utf-8")
     return _dispatcher(tmp_path, recipe)
@@ -760,9 +760,11 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
                 (base, False),
                 (inactive["release_id"], True),
             ]
-            entries = scenario.release_queries.entries_for_version(inactive["release_id"])
+            entries = scenario.release_queries.entries_for_version(inactive["release_id"], scenario.scenario_step)
             assert entries is not None and any(entry["id"] == "r1" for entry in entries)
-            assert scenario.release_queries.entries_for_version(base) is None
+            # The creation carries the base artifact's entries: the seed's, without the evolved one.
+            base_entries = scenario.release_queries.entries_for_version(base, scenario.scenario_step)
+            assert base_entries is not None and not any(entry["id"] == "r1" for entry in base_entries)
             # Installing the activated release rebinds the model endpoint without losing evolved settings.
             service = RequestService(dispatcher)
             manifest = service.harness_manifest(headers, release_id=inactive["release_id"])

@@ -16,9 +16,10 @@ An ``activation`` section has this shape::
   ``mean_score`` of at least ``min_mean_score``. The scenario's ``artifact_evaluation`` settings evaluate each
   new artifact.
 
-A scenario can set its own rule (``ScenarioSettings.activation``) with one of the built-in rules above, in the
-mapping form. It replaces the deployment's rule for that scenario. The setting comes from an HTTP client, so it
-never names a ``package.module:ClassName``: the client must not choose which code the service imports.
+A scenario can select one of the built-in rules above for itself, in the mapping form
+(``ScenarioSettings.activation``). This rule replaces the deployment's rule for that scenario. The setting comes
+from an HTTP client. Thus it cannot name a ``package.module:ClassName``, because a client must not choose the code
+that the service imports.
 """
 
 from __future__ import annotations
@@ -145,9 +146,9 @@ def activation_reference(value: object) -> PluginReference:
 def scenario_activation_reference(value: object) -> PluginReference:
     """The built-in rule that a scenario's ``activation`` setting names, with its config.
 
-    ``value`` is a mapping ``{"module": <built-in name>, "config": {...}}``; ``config`` is optional. Raise
-    ``PluginConfigError`` for any other value, a ``package.module:ClassName`` included, and for a config that the
-    rule refuses.
+    ``value`` is a mapping ``{"module": <built-in name>, "config": {...}}``, and ``config`` is optional. Raise
+    ``PluginConfigError`` for any other value, also for a ``package.module:ClassName``. Raise it also when the rule
+    refuses the config.
     """
     if not isinstance(value, Mapping) or value.get("module") not in BUILT_IN_RULES:
         raise PluginConfigError(f"activation must be an object whose module is one of {', '.join(BUILT_IN_RULES)}")
@@ -155,8 +156,11 @@ def scenario_activation_reference(value: object) -> PluginReference:
 
 
 def activation_setting(reference: PluginReference | None) -> dict[str, object]:
-    """The JSON form of the rule ``reference`` names: ``{"module", "config"}``, where ``module`` is a built-in name or
-    the ``package.module:ClassName`` of a plugin class. None names ``always``, the default."""
+    """The JSON form ``{"module", "config"}`` of the rule that ``reference`` names.
+
+    ``module`` is the name of a built-in rule, or the ``package.module:ClassName`` of a rule class of your own.
+    A None ``reference`` is ``always``, the default rule.
+    """
     if reference is None:
         return {"module": "always", "config": {}}
     plugin_class = ActivationRule.referenced_class(reference)

@@ -1315,7 +1315,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
-    assert scenario.trainer.state == JobLoopState().to_dict()
+    assert scenario.trainer.state == JobLoopState(scenario.trainer.job_loop_required().component.base_start).to_dict()
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     assert len(scenario.store.history()) == 1
@@ -1347,7 +1347,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
-    activation_target = original.current_artifact_ref().release_id
+    # The creation carries the base artifact, whose artifact_id is the repository base release's.
+    activation_target = original.repository.backend.resolve_release("base").release_id
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()

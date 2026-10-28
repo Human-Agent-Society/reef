@@ -35,9 +35,9 @@ class ScenarioSettings:
     selects the recipe's default). ``artifact_evaluation`` is the
     ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
     artifact with (``None`` evaluates none). ``activation`` is the scenario's
-    own activation rule as JSON, ``{"module": <built-in rule>, "config": {...}}``
-    (``None`` follows the deployment's ``activation`` section); the scenario
-    registry checks it before it stores it.
+    own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
+    ``None`` follows the deployment's ``activation`` section. The scenario
+    registry checks the rule before it stores it.
     """
 
     model_config: Mapping[str, object] | None = None

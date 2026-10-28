@@ -941,7 +941,7 @@ def test_an_activation_of_the_creation_after_a_rejected_first_step(dispatchers: 
         assert _commit_step(scenario, HARNESS) is not None
     assert scenario.current_artifact_ref().release_id != creation
     assert next(row for row in scenario.releases() if row["operation"] == "creation")["restorable"] is True
-    scenario.activate(f"{creation}:{HARNESS}", HARNESS)
+    scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS)
     assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness seed"
 
 
@@ -1070,7 +1070,9 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_releases(headers)["releases"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
-    assert [row["artifact_id"] for row in catalog] == [f"{row['release_id']}:{HARNESS}" for row in catalog]
+    # The creation carries the base artifact; the harness step made its own.
+    base = scenario.repository.backend.resolve_release("base").release_id
+    assert [row["artifact_id"] for row in catalog] == [f"{base}:{HARNESS}", f"{harness_release}:{HARNESS}"]
     assert [row["active"] for row in catalog] == [False, True]
 
 
@@ -1183,17 +1185,19 @@ def test_a_training_step_carries_the_active_release_and_keeps_an_activated_compo
     """After an older weights artifact is activated, a harness step carries the active weights, not the chain tip's."""
     dispatcher, _ = dispatchers.open()
     scenario = _scenario(dispatcher, 1)
-    base = scenario.current_artifact_ref().release_id
     assert _commit_step(scenario, WEIGHTS) is not None
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
-    scenario.activate(f"{base}:{WEIGHTS}", WEIGHTS)
+    scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
     assert _commit_step(scenario, HARNESS) is not None
     assert component_files(scenario, scenario.current_artifact_ref()) == {
         WEIGHTS: "weights seed",
         HARNESS: "harness step 1",
     }
     active = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
-    assert active == {WEIGHTS: f"{base}:{WEIGHTS}", HARNESS: f"{scenario.current_artifact_ref().release_id}:{HARNESS}"}
+    assert active == {
+        WEIGHTS: f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}",
+        HARNESS: f"{scenario.current_artifact_ref().release_id}:{HARNESS}",
+    }
 
 
 @pytest.mark.unit
@@ -1301,7 +1305,7 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
 
     # Back to the base's harness: the seed tree is served again, named by the base release.
-    scenario.activate(f"{base}:{HARNESS}", HARNESS)
+    scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS)
     assert service.harness_head(headers) == base
     assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
@@ -1518,7 +1522,6 @@ def test_experiment_events_remain_ordered_across_reload(tmp_path, monkeypatch, n
 
     tracker = _RecordingTracker()
     value, backends = _dispatcher(tmp_path, experiment_tracker=tracker)
-    initial = _scenario(value).current_artifact_ref()
     update = tmp_path / "updated-harness"
     update.mkdir()
     (update / "harness.txt").write_text("updated shipped content")
@@ -1554,7 +1557,9 @@ def test_experiment_events_remain_ordered_across_reload(tmp_path, monkeypatch, n
         if next_operation == "reload":
             value.registry.reload("agent")
         elif next_operation == "train_from":
-            value.train_from("agent", f"{initial.release_id}:{HARNESS}", HARNESS)
+            value.train_from(
+                "agent", f"{_scenario(value).repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS
+            )
         else:
             current = value.registry.reload("agent")
             _append_records(current, 1)
@@ -1713,7 +1718,7 @@ def test_a_restart_whose_component_lost_the_running_job_ends_it_failed(
     scenario = _scenario(restarted)
     assert _wait_for(lambda: _job_events(scenario) == ["submitted", "failed"])
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert (state.job, state.start, state.finished_jobs) == (None, None, 1)
+    assert (state.job, state.start, state.finished_jobs) == (None, "stub:base", 1)
     assert state.last_job is not None and "no such job" in state.last_job.error
 
 
@@ -1726,7 +1731,6 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     training = HeldJobs(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _scenario(dispatcher, 1)
-    base = scenario.current_artifact_ref().release_id
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     training.finish(training.submitted[0])
     _settle_weights_job(scenario)
@@ -1736,7 +1740,7 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     assert running.start == str(tmp_path / "checkpoints" / "1")
 
     served = scenario.current_artifact_ref()
-    scenario.train_from(f"{base}:{WEIGHTS}", WEIGHTS)
+    scenario.train_from(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
     assert training.statuses[running.job_id].error == "cancelled"
     [imported] = training.imported
     assert scenario.current_artifact_ref() == served
@@ -1760,12 +1764,11 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     factory = _seeded_repository(tmp_path)
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
     scenario = _scenario(dispatcher, 1)
-    base = scenario.current_artifact_ref().release_id
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     training.finish(training.submitted[0])
     _settle_weights_job(scenario)
     served = scenario.current_artifact_ref()
-    scenario.train_from(f"{base}:{WEIGHTS}", WEIGHTS)
+    scenario.train_from(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
     assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start == str(training.imported[0])
     dispatcher.close()
 

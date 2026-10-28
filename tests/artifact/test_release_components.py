@@ -416,8 +416,15 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert activator.activated[served_before:] == []
         assert service.harness_head(headers) == after_harness.ref.release_id
 
-        # Activating the base's weights loads them and keeps the served harness; the chain tip stays.
-        scenario.activate(f"{base.ref.release_id}:{WEIGHTS}", WEIGHTS)
+        # Activating the base's weights loads them and keeps the served harness; the chain tip stays. The creation
+        # carried the base artifact forward, so its artifact_id is the base release's.
+        base_weights_id = base.components.artifact_ids(base.ref.release_id)[WEIGHTS]
+        assert base_weights_id == f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}"
+        trained_weights = scenario.artifact_status()[WEIGHTS]["training_start"]
+        scenario.activate(base_weights_id, WEIGHTS)
+        # The activation moves the weights' active artifact; their training start stays on the trained weights.
+        assert scenario.artifact_status()[WEIGHTS] == {"active": base_weights_id, "training_start": trained_weights}
+        assert trained_weights != base_weights_id
         served = scenario.repository.materialize(scenario.current_artifact_ref())
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == base_weights

@@ -13,7 +13,9 @@ and its selection policy into the candidate evaluator executed by ``Trainer``.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.model_metadata import ModelMetadata
@@ -34,6 +37,7 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.rollouts.requests import request_entries
 from reef.harness.rollouts.version_check import version_check_entry
+from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -662,7 +666,6 @@ class CordisRecipe(Recipe):
         else:
             served_metadata = None
         return create_harness_surface(
-            seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             model_metadata=self.model_metadata,
@@ -670,13 +673,26 @@ class CordisRecipe(Recipe):
             client_models=client_models,
         )
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The seed rendered for the adapter, with its entries list where the adapter carries one: a fresh scenario serves it before any step publishes."""
-        if not self.seed:
-            return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The seed as the base harness, which a new scenario serves before any step publishes.
+
+        The files are the seed rendered for the adapter, with the entries list
+        where the adapter keeps one. The metadata holds the entries for every
+        adapter. Without a seed, the base harness is empty. The input is the
+        checksum of the seed without Reef's own entries
+        (``RESERVED_ENTRY_IDS``). Each Reef version ships its own copy of
+        those entries, and a step publishes the new copy
+        (``CordisBackend.shipped_content_update``). Thus a Reef upgrade keeps
+        the base.
+        """
+        configured = [dict(entry) for entry in self.seed if entry.get("id") not in RESERVED_ENTRY_IDS]
         descriptor = get_adapter(self.adapter)
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
-        return {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)}
+        return BaseArtifactSource(
+            files={**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)} if self.seed else {},
+            metadata={"entries": [dict(entry) for entry in self.seed]},
+            inputs={"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()},
+        )
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's proposal inbox and its step records: what a delete archives beside the record store."""

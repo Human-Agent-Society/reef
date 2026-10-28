@@ -161,7 +161,6 @@ def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_compl
     dispatcher = _dispatcher(tmp_path)
     try:
         scenario = _scenario(dispatcher, runtime)
-        base = scenario.current_artifact_ref()
         trained = _step(scenario, WEIGHTS, 1)
         commit_step = scenario.store.commit_step
 
@@ -170,12 +169,14 @@ def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_compl
 
         monkeypatch.setattr(scenario.store, "commit_step", store_away)
         with pytest.raises(OSError, match="commit storage away"):
-            scenario.activate(f"{base.release_id}:{WEIGHTS}", WEIGHTS)
+            scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
         assert scenario.current_artifact_ref().release_id == trained
         assert scenario.store.history()[-1].operation == "training"
         monkeypatch.setattr(scenario.store, "commit_step", commit_step)
 
-        activated = scenario.activate(f"{base.release_id}:{WEIGHTS}", WEIGHTS)
+        activated = scenario.activate(
+            f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS
+        )
         assert scenario.current_artifact_ref().release_id == activated.release_id
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
         record = scenario.store.history()[-1]
@@ -204,7 +205,7 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
         steps = scenario.scenario_step
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights job 1"
         with pytest.raises(TrainingStartRefused, match="cannot train from these weights"):
-            scenario.train_from(f"{base}:{WEIGHTS}", WEIGHTS)
+            scenario.train_from(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
         with pytest.raises(ValueError, match="name the component"):
             scenario.train_from(base)
         assert scenario.current_artifact_ref().release_id == served
@@ -236,13 +237,13 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         trainer = scenario.trainer_for(WEIGHTS)
         assert trainer.pending_job_data is None and trainer.has_pending_commit
         with pytest.raises(CommitPending, match="waits for its commit"):
-            scenario.activate(f"{base}:{WEIGHTS}", WEIGHTS)
+            scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
         with pytest.raises(CommitPending, match="waits for its commit"):
-            scenario.train_from(f"{base}:{WEIGHTS}", WEIGHTS)
+            scenario.train_from(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
         assert scenario.current_artifact_ref().release_id == served
         scenario.commit(decided, component=WEIGHTS)
         assert not trainer.has_pending_commit
-        scenario.activate(f"{base}:{WEIGHTS}", WEIGHTS)
+        scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
     finally:
         dispatcher.close()

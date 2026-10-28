@@ -39,13 +39,13 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 class ReleaseHandler(InferenceHandler):
-    """Answers every chat call with the release that it was asked to answer from."""
+    """Answers every chat call, and records the artifact that it was asked to answer from."""
 
     def __init__(self) -> None:
         self.releases: list[str] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self.releases.append(artifact.ref.release_id)
+        self.releases.append(artifact.artifact_id)
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
 
@@ -66,7 +66,7 @@ class ReleaseRuntime(InferenceRuntime):
         return "model_adapter"
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
-        return PolicyModel("base", f"sampler:{artifact.ref.release_id}") if self.serves_any_release else None
+        return PolicyModel("base", f"sampler:{artifact.artifact_id}") if self.serves_any_release else None
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"

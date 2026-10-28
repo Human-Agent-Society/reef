@@ -128,9 +128,9 @@ a person activates a release. No trainer holds a serving engine.
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. After it serves a release, it cannot return to the base model,
-  because the engines do not keep the base model's files. Activate a saved
-  release instead.
+  weights. The engines start with the base model. Activating the base
+  artifact after another release loads its files from the artifact
+  repository.
 
 Each load gets a new runtime load ID, and every engine reports it afterwards.
 The IDs of one runtime belong to a fresh incarnation, so a restart never

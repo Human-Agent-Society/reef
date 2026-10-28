@@ -97,7 +97,7 @@ class WeightInferenceHooks(InferenceHooks):
         if self._scenario is None:
             return None
         version = scenario_adapter_version(self._scenario, self._runtime)
-        # A scenario served no adapter samples the base model, as a release without weights does.
+        # A scenario that serves no adapter samples the base model, as the base artifact does.
         return None if version is None else adapter_name(self._scenario, version)
 
     def _address_adapter(self, payload: dict[str, Any], served: str | None) -> dict[str, Any]:

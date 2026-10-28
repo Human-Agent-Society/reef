@@ -12,6 +12,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef, is_local_release
 from reef.artifact.release_chain import ArtifactReleaseChain
+from reef.core.components import made_artifact_id
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
 
@@ -34,6 +35,8 @@ class ScenarioReleases:
         self.publication_lock = publication_lock
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
         self.recorded_creation_components: Mapping[str, str] | None = None
+        #: The harness entries that the creation's component manifest carries, from the base's metadata.
+        self.recorded_creation_entries: tuple[Mapping[str, Any], ...] | None = None
         self.creation_components_read = False
         self.creation_read_failed_at: int | None = None
 
@@ -42,7 +45,7 @@ class ScenarioReleases:
         return self._creation_artifact
 
     def creation_components(self, scenario_step: int, *, retry: bool = False) -> Mapping[str, str] | None:
-        """The content id of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
+        """The ``artifact_id`` of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
 
         The creation artifact has no commit record to carry its manifest, so
         it is read from the release once and kept. A read that failed is
@@ -60,7 +63,14 @@ class ScenarioReleases:
                 return None
             self.creation_components_read = True
             if manifest is not None:
-                self.recorded_creation_components = manifest.content_ids
+                self.recorded_creation_components = manifest.artifact_ids(self._creation_artifact.release_id)
+                for entry in manifest.entries.values():
+                    # A base harness keeps its seed's entries in its component's metadata.
+                    entries = entry.metadata.get("entries")
+                    if isinstance(entries, Sequence) and not isinstance(entries, str):
+                        self.recorded_creation_entries = tuple(
+                            dict(item) for item in entries if isinstance(item, Mapping)
+                        )
         return self.recorded_creation_components
 
     def records(self) -> tuple[CommitRecord, ...]:
@@ -127,7 +137,7 @@ class ScenarioReleases:
             return tuple(reversed(rows))
 
     def manifests(self, scenario_step: int) -> dict[str, Mapping[str, str]]:
-        """The content id of each component, by release, for every release whose manifest is known.
+        """The ``artifact_id`` of each component, by release, for every release whose manifest is known.
 
         A training record that made a release and an activation that
         published one carry their manifest; the creation's is read from the
@@ -143,7 +153,7 @@ class ScenarioReleases:
         return known
 
     def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
-        """The content id of each component the active release binds; ``None`` for a flat release or when unknown."""
+        """The ``artifact_id`` of each component the active release binds; ``None`` for a flat release or when unknown."""
         record = active_record(self.records())
         if record is None:
             return self.creation_components(scenario_step)
@@ -152,55 +162,73 @@ class ScenarioReleases:
     def artifacts(self, scenario_step: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
         """List the artifacts of each component in ``components``, newest first, with each component's active one.
 
-        An artifact is one component's content. In a scenario of one
-        component each release a training step made, and the creation, is
-        one artifact whose ``artifact_id`` is its ``release_id``. In a
-        scenario of several components a release mints an artifact of a
-        component when no earlier release binds that component's content id
-        (the creation mints one of each), and the ``artifact_id`` is
-        ``<release_id>:<component>``. When the release's manifest is unknown,
-        it mints an artifact of the component its trainer named, with
-        ``content_id`` ``None``.
-        ``activated`` marks an artifact that has been active at some point.
+        An artifact is the content of one component. Each row lists an
+        artifact under the release that made it.
+
+        - With one component, each release that a training step made is one
+          artifact. Its ``artifact_id`` is its ``release_id``.
+        - With several components, a release made the artifact of a component
+          when its manifest gives the component the ``artifact_id`` that the
+          release makes (``made_artifact_id``). The row's ``content_id`` is
+          ``None``, because the records name the artifact, not its content.
+        - The creation makes no artifact. Its row lists the artifact that the
+          scenario started from, such as the base artifact, under the
+          ``artifact_id`` of that artifact.
+        - When the manifest of a release is unknown, the row lists the
+          artifact of the component that the release's trainer named.
+
+        ``activated`` marks an artifact that has been active at some time.
         """
         with self.publication_lock:
             made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
+            creation = self.creation_components(scenario_step) or {}
             if len(components) == 1:
+                (component,) = components
                 return tuple(
                     self.artifact_row(
-                        row, components[0], row["release_id"], row["content_id"], row["active"], row["activated"]
+                        row,
+                        component,
+                        (
+                            creation.get(component, row["release_id"])
+                            if row["operation"] == "creation"
+                            else row["release_id"]
+                        ),
+                        row["content_id"],
+                        row["active"],
+                        row["activated"],
                     )
                     for row in made
                 )
             manifests = self.manifests(scenario_step)
             active = self.active_components(scenario_step) or {}
-            activated = {name: self.activated_contents(name, scenario_step) for name in components}
-            seen: dict[str, set[str]] = {name: set() for name in components}
+            activated = {name: self.activated_artifacts(name, scenario_step) for name in components}
             listed: list[dict[str, Any]] = []
             for row in reversed(made):
                 manifest = manifests.get(row["release_id"])
                 for component in components:
-                    content_id = None if manifest is None else manifest.get(component)
-                    if content_id is None:
-                        minted = row["operation"] == "creation" or row.get("component") in (None, component)
+                    made_here = made_artifact_id(row["release_id"], component, single=False)
+                    if manifest is None or component not in manifest:
+                        if row["operation"] != "creation" and row.get("component") not in (None, component):
+                            continue
+                        artifact_id = made_here
+                    elif row["operation"] == "creation" or manifest[component] == made_here:
+                        artifact_id = manifest[component]
                     else:
-                        minted = content_id not in seen[component]
-                        seen[component].add(content_id)
-                    if minted:
-                        listed.append(
-                            self.artifact_row(
-                                row,
-                                component,
-                                f"{row['release_id']}:{component}",
-                                content_id,
-                                content_id is not None and active.get(component) == content_id,
-                                content_id in activated[component],
-                            )
+                        continue
+                    listed.append(
+                        self.artifact_row(
+                            row,
+                            component,
+                            artifact_id,
+                            None,
+                            active.get(component) == artifact_id,
+                            artifact_id in activated[component],
                         )
+                    )
             return tuple(reversed(listed))
 
-    def activated_contents(self, component: str, scenario_step: int) -> set[str]:
-        """The content ids that ``component`` has served: the creation's, and each activating record's."""
+    def activated_artifacts(self, component: str, scenario_step: int) -> set[str]:
+        """The ``artifact_id`` values that ``component`` has served: the creation's, and each activating record's."""
         creation = self.creation_components(scenario_step) or {}
         served = {record.components[component] for record in self.records() if record.activates and record.components}
         return served | ({creation[component]} if component in creation else set())
@@ -299,14 +327,25 @@ class ScenarioReleases:
                 return record.metrics
         return None
 
-    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
-        """The composition entries of the training step that made ``release_id``, if logged; ``None`` for the creation."""
+    def entries_for_version(self, release_id: str, scenario_step: int) -> tuple[Mapping[str, Any], ...] | None:
+        """The composition entries of ``release_id``; ``None`` when nothing records them.
+
+        The record of a training step holds the entries of the release that
+        the step made. The creation holds the entries of the artifact that the
+        scenario started from, in its component manifest; ``scenario_step``
+        controls when a failed read of that manifest is tried again
+        (``creation_components``). The base artifact keeps its seed's entries
+        there.
+        """
         record = next(
             (item for item in self.records() if item.made_artifact and item.artifact_ref.release_id == release_id),
             None,
         )
         if record is None:
-            return None
+            if release_id != self._creation_artifact.release_id:
+                return None
+            self.creation_components(scenario_step)
+            return self.recorded_creation_entries
         entries = (record.algorithm_state or {}).get("entries")
         if isinstance(entries, Sequence) and not isinstance(entries, str):
             return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))

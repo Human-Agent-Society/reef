@@ -67,6 +67,29 @@ def restart(tmp_path: Path, backend_factory) -> tuple[Dispatcher, ImportingCompo
 
 
 @pytest.mark.unit
+def test_the_status_names_each_components_active_artifact_and_training_start(tmp_path) -> None:
+    """Both start at the base artifact; training moves both, activation moves only the active one, and train-from
+    moves only the training start."""
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    base = scenario.repository.backend.resolve_release("base").release_id
+    (component,) = scenario.artifact_status()
+
+    def artifacts() -> dict:
+        return value.build_training_status()["scenarios"]["math"]["artifacts"][component]
+
+    assert artifacts() == {"active": base, "training_start": base}
+    train(value, 1)
+    trained = value.list_artifacts("math")[0]["artifact_id"]
+    assert artifacts() == {"active": trained, "training_start": trained}
+    value.activate("math", base)
+    assert artifacts() == {"active": base, "training_start": trained}
+    value.train_from("math", base)
+    assert artifacts() == {"active": base, "training_start": base}
+    value.close()
+
+
+@pytest.mark.unit
 def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) -> None:
     value, runtime, _ = dispatcher(tmp_path)
     train(value, 1)
@@ -78,7 +101,12 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     # Each job commits its submission, its checkpoint and its end; only the checkpoint is an artifact.
     assert [row["operation"] for row in before] == ["training", "training", "training", "creation"]
     assert [row["active"] for row in before] == [True, False, False, False]
-    assert all(row["artifact_id"] == row["release_id"] and row["component"] for row in before)
+    # A training step's release made its artifact; the creation made none and carries the base artifact.
+    assert all(row["artifact_id"] == row["release_id"] and row["component"] for row in before[:-1])
+    assert (
+        before[-1]["artifact_id"]
+        == value.get_or_create_scenario("math").repository.backend.resolve_release("base").release_id
+    )
     target = before[-2]
     last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
     checkpoint = scenario.repository.checkpoint_artifact
@@ -207,7 +235,9 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     train(value, 1)
     train(value, 2)
-    created, target_version = (row["artifact_id"] for row in value.list_artifacts("math")[:-3:-1])
+    creation, target = value.list_artifacts("math")[:-3:-1]
+    # The creation carries the base artifact: its artifact_id is the base release's, its release is the creation.
+    created, target_version = creation["artifact_id"], target["artifact_id"]
 
     value.activate("math", target_version)
     value.train_from("math", created)
@@ -223,9 +253,9 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     ]
     (start,) = tracker.starts
     assert (start.step, start.run_segment) == (8, 0)
-    assert start.start_artifact_ref.release_id == created
+    assert start.start_artifact_ref.release_id == creation["release_id"]
     # The steps after the new start name the training start as their source, not the active release.
-    assert {event.context.source_artifact_ref.release_id for event in tracker.events[6:7]} == {created}
+    assert {event.context.source_artifact_ref.release_id for event in tracker.events[6:7]} == {creation["release_id"]}
     value.close()
 
 
@@ -426,7 +456,6 @@ def test_experiment_events_follow_settled_state_and_a_new_training_start(
     tracker = RecordingExperimentTracker()
     value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
-    initial = scenario.current_artifact_ref()
     observed = []
 
     def record(event) -> None:
@@ -447,7 +476,8 @@ def test_experiment_events_follow_settled_state_and_a_new_training_start(
         assert all(scenario_step >= event_step for event_step, scenario_step, _ in observed)
         assert observed[-1] == (3, 3, trained)
         observed.clear()
-        value.train_from("math", initial.release_id)
+        # The creation carries the base artifact, named by the repository base release.
+        value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained release still serves.
         assert observed == [(4, 4, trained), True]
@@ -462,7 +492,6 @@ def test_a_slow_tracker_holds_up_neither_the_training_start_nor_scenario_resolut
     tracker = RecordingExperimentTracker()
     value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
-    initial = scenario.current_artifact_ref()
     entered, release = Event(), Event()
     record_train_from = tracker.record_train_from
 
@@ -474,7 +503,7 @@ def test_a_slow_tracker_holds_up_neither_the_training_start_nor_scenario_resolut
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_train_from", record)
-        start = value.train_from("math", initial.release_id)
+        start = value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
         assert entered.wait(5), "the tracker was not called"
         assert runtime.inference.inference_admission_status["open"]
         assert value.get_or_create_scenario("math") is scenario
@@ -597,7 +626,7 @@ def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, monkeypatch
         state = JobLoopState.from_dict(scenario.trainer.state)
         assert state.finished_jobs == runtime.trained == 2
         # Training is linear: the second job starts from the first job's last checkpoint.
-        expected_start = str(runtime.checkpoint_root / f"1-{checkpoints - 1}") if checkpoints else None
+        expected_start = str(runtime.checkpoint_root / f"1-{checkpoints - 1}") if checkpoints else runtime.base_start
         assert runtime.submitted[1].start == expected_start
     finally:
         value.close()

@@ -1255,23 +1255,25 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )
-    files = built.base_artifact_files()
-    assert files is not None
+    files = built.base_artifact_source().files
     assert {"native/tools/read_file.py", "native/graphs/main.json", "native/skills/answer-style/SKILL.md"} <= set(
         files
     )
     assert "upstream" not in files["native/models.json"]  # the seed carries no provider
     info = built.build_surface("demo").harness
     assert info is not None
-    assert [entry["id"] for entry in info.seed_entries][:3] == ["read_file", "write_file", "run_bash"]
+    base_entries = built.base_artifact_source().metadata["entries"]
+    assert [entry["id"] for entry in base_entries][:3] == ["read_file", "write_file", "run_bash"]
     assert info.served_model == "qwen3-8b"
     assert (
         CordisRecipe.from_environment(
             {},
             config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},
             runtime=_upstream_runtime(service),
-        ).base_artifact_files()
-        is None
+        )
+        .base_artifact_source()
+        .files
+        == {}
     )
 
 

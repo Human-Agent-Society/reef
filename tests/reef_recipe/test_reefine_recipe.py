@@ -114,7 +114,7 @@ assert isinstance(recipe, ReefineRecipe)
 assert recipe.training_mode == 'manual' and recipe.propose.reads_requests
 assert len(recipe.tasks) == 1 and recipe.tasks[0].startswith('[health] ')
 assert recipe.selection.plugin_class.__name__ == 'FloorPlugin'
-assert recipe.base_artifact_files()
+assert recipe.base_artifact_source().files
 assert recipe.model_binding().model == 'test-model'
 """
     result = subprocess.run(

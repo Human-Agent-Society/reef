@@ -70,7 +70,10 @@ def _recipe(
 def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    # The base artifact's metadata holds the seed's entries, as the service assembly imports it.
+    factory = InMemoryRepositoryBackend.factory(
+        initial, root=tmp_path / "repository", base_metadata=recipe.base_artifact_source().metadata
+    )
     return Dispatcher(
         recipe,
         factory,
@@ -380,7 +383,7 @@ def test_the_route_admits_against_the_head_commits_entries_not_the_live_state(tm
         assert result is not None
         scenario.commit(result)
         head = scenario.repository.require_current_artifact().release_id
-        logged = scenario.release_queries.entries_for_version(head)
+        logged = scenario.release_queries.entries_for_version(head, scenario.scenario_step)
         assert logged is not None and [entry["id"] for entry in logged] == ["models", "settings", "r1"]
         state = scenario.trainer.state
         assert isinstance(state, dict)

@@ -147,7 +147,7 @@ class JobLoopState:
     """The state a weight trainer commits: where the next job starts, the running job, and the jobs that ended.
 
     ``start`` is the start of the next job as the training component reads
-    it (a non-empty string), or ``None`` for the base model. ``job`` is the
+    it, a non-empty string; a new trainer starts at ``TrainingComponent.base_start``. ``job`` is the
     running job, or ``None``. ``finished_jobs`` is the number of jobs that
     ended, finished or failed, a non-negative int. ``last_job`` is the outcome
     of the last of them, and it is ``None`` exactly when ``finished_jobs`` is
@@ -155,14 +155,14 @@ class JobLoopState:
     reads it back.
     """
 
-    start: str | None = None
+    start: str
     job: RunningJob | None = None
     finished_jobs: int = 0
     last_job: JobOutcome | None = None
 
     def __post_init__(self) -> None:
-        if self.start is not None and (not isinstance(self.start, str) or not self.start):
-            raise ValueError("JobLoopState.start must be a non-empty string or None")
+        if not isinstance(self.start, str) or not self.start:
+            raise ValueError("JobLoopState.start must be a non-empty string")
         if self.job is not None and not isinstance(self.job, RunningJob):
             raise TypeError("JobLoopState.job must be a RunningJob or None")
         require_count(self.finished_jobs, "JobLoopState.finished_jobs")
@@ -186,13 +186,7 @@ class JobLoopState:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> JobLoopState:
-        """Read ``to_dict``'s object; an empty mapping is the state of a trainer that has committed nothing.
-
-        ``ValueError`` for any other key set or a malformed value: a state that cannot be read must not be
-        taken for an untrained scenario.
-        """
-        if not value:
-            return cls()
+        """Read ``to_dict``'s object; ``ValueError`` for any other key set or a malformed value."""
         keys = {"start", "job", "finished_jobs", "last_job"}
         if set(value) != keys:
             raise ValueError(f"a job loop state has the keys {sorted(keys)}, not {sorted(value)}")
@@ -252,7 +246,7 @@ class JobLoop:
         self.plan = plan
         self.scenario = scenario
 
-    def job_id(self, state: JobLoopState, start: str | None, data: JobData, parameters: Mapping[str, Any]) -> str:
+    def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
         (``state.finished_jobs``), the component, the start, the data's rows and request, and the parameters.
 
@@ -384,11 +378,11 @@ class JobLoop:
         if state.job is not None:
             self.component.cancel(state.job.job_id)
 
-    def started_from(self, state: JobLoopState, start: str | None) -> JobLoopState:
+    def started_from(self, state: JobLoopState, start: str) -> JobLoopState:
         """The state after the training start is set to ``start``, which the component imported of a release.
 
-        The running job is cancelled, and the next job starts from ``start``
-        (``None``: the base model). The jobs that ended stay counted.
+        The running job is cancelled, and the next job starts from ``start``.
+        The jobs that ended stay counted.
         """
         self.cancel(state)
         return JobLoopState(start, None, state.finished_jobs, state.last_job)

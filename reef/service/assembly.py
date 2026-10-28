@@ -350,12 +350,11 @@ def build_dispatcher(
             artifact_backend, setting="storage.artifact_backend"
         )
         factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
-        # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
+        # Every scenario starts from the recipe's base artifact: the base model, the base harness, or both.
         context = RepositoryBackendContext(
             work_dir=Path(settings.artifact_work_dir),
             cache_dir=Path(settings.artifact_cache_dir),
-            bootstrap_files=recipe.base_artifact_files() or {},
-            bootstrap_component=recipe.bootstrap_artifact_component(),
+            base=recipe.base_artifact_source(),
         )
         try:
             backend_factory = factory_class.from_config(reference.config, context=context)

@@ -10,13 +10,12 @@ from reef.artifact import (
     ArtifactRef,
     ArtifactReleaseChain,
     CachedRepositoryBackendFactory,
-    GitVersionSource,
     HuggingFaceSource,
     InMemoryRepositoryBackend,
     Repository,
     RepositoryBackend,
     download_huggingface_snapshot,
-    parse_artifact_source,
+    parse_huggingface_source,
 )
 
 
@@ -219,11 +218,10 @@ def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> No
         ("org/model", HuggingFaceSource("org/model", None)),
         ("hf://org/model", HuggingFaceSource("org/model", None)),
         ("hf://org/model@version", HuggingFaceSource("org/model", "version")),
-        ("git+lfs://abc123", GitVersionSource("abc123")),
     ],
 )
-def test_parse_artifact_source(value, expected) -> None:
-    assert parse_artifact_source(value) == expected
+def test_parse_huggingface_source(value, expected) -> None:
+    assert parse_huggingface_source(value) == expected
 
 
 @pytest.mark.unit
