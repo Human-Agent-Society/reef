@@ -128,9 +128,9 @@ The same path supports CLI-only training with
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
 ``training.backend`` defaults to ``slime``. The optional ``tinker`` backend
 trains LoRA adapters remotely without local GPUs. Tinker's sampler serves
-them by default. Reef's SGLang engines serve them instead when Tinker exports
-each adapter (``training.options.export-adapter``) and the ``inference``
-section configures engines; see `Train with Tinker <../user-guide/tinker.rst>`__.
+them by default. Reef's SGLang engines serve them instead when the
+``inference`` section configures engines: the control plane downloads each
+release's adapter from its sampler path; see `Train with Tinker <../user-guide/tinker.rst>`__.
 ``training.backend`` also accepts an installed ``reef.training_backends``
 entry-point name or an importable ``package.module:Deployment`` class. The
 selected definition validates its settings. It names the services that the
@@ -186,8 +186,10 @@ The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.prefix-sharing``. Another serving mode refuses them. The engines
 start with the release format: an adapter format enables SGLang's adapter
 table with the adapter's rank and target modules. Releases without weight
-files, such as Tinker's without ``export-adapter``, cannot be served by
-engines; the HTTP service refuses that pairing when it starts.
+files, such as Tinker's, are served by engines only when the training backend
+names how to fetch their weights (``TrainingDeployment.engine_weights``);
+Tinker's does. Otherwise the HTTP service refuses that pairing when it
+starts.
 
 The control plane checks the inference component every 30 seconds. When the
 component has restarted, or an engine has failed, the control plane pauses
@@ -310,7 +312,7 @@ instead) and enables prefix caching only under a retracting pause.
 
 vLLM engines serve full-weight releases only. The HTTP service refuses
 adapter releases, such as Slime's with ``training.options.megatron-lora-rank``
-or Tinker's with ``export-adapter``, when it starts. Reef starts no vLLM
+or Tinker's, when it starts. Reef starts no vLLM
 router, so one engine serves the stack: ``inference.num-gpus`` must equal
 ``inference.tensor-parallel-size``. Engine options come from
 ``inference.options`` in vLLM's own names.

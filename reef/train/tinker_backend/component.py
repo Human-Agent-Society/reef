@@ -19,7 +19,6 @@ import fcntl
 import hashlib
 import json
 import math
-import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -28,16 +27,15 @@ from typing import Any
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
+from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, roll_out, task_name
@@ -112,10 +110,10 @@ class TinkerTrainingComponent(LocalJobComponent):
     ``config.state_dir`` holds ``base/`` (the base checkpoint),
     ``imported/<digest>/`` (starts taken from releases) and ``jobs/`` (see
     ``LocalJobComponent``); a saved checkpoint is ``jobs/<job_id>/<step>/``,
-    with its manifest and, with ``config.export_adapter``, its PEFT adapter in
-    ``adapter/`` and Tinker's adapter as Tinker saved it in ``tinker-adapter/``
-    (``TinkerClient.download``). A checkpoint directory is both the start of a later job and
-    the release Reef publishes.
+    which holds its manifest alone. A checkpoint directory is both the start
+    of a later job and the release Reef publishes. The weights stay on the
+    service: a serving runtime that loads them into its own engines downloads
+    them from the manifest's ``sampler_path`` (``TinkerSamplerWeights``).
     """
 
     def __init__(
@@ -139,9 +137,6 @@ class TinkerTrainingComponent(LocalJobComponent):
             if not (self._base / MANIFEST).exists():
                 # The untrained adapter is the base checkpoint: the base artifact holds it as a release.
                 untrained = client.initialize()
-                if config.export_adapter:
-                    shutil.rmtree(self._base, ignore_errors=True)
-                    client.download(untrained, self._base)
                 untrained.write(self._base)
             self._validated(TinkerCheckpoint.read(self._base))
         except BaseException:
@@ -154,11 +149,9 @@ class TinkerTrainingComponent(LocalJobComponent):
         return "tinker"
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
-        """The exported PEFT adapter of the configured rank, or ``None`` when releases hold only the manifest."""
-        if not self._config.export_adapter:
-            return None
-        return ReleaseFormat("adapter", self._config.lora_rank, ("all",))
+    def release_format(self) -> None:
+        """``None``: a release holds only its manifest, and the weights stay on the service."""
+        return None
 
     @property
     def state_dir(self) -> Path:
@@ -173,12 +166,10 @@ class TinkerTrainingComponent(LocalJobComponent):
         return True
 
     def base_artifact_source(self) -> BaseArtifactSource:
-        """The untrained adapter's release: its manifest, and with ``export_adapter`` the exported adapter."""
+        """The untrained adapter's release: its manifest."""
         inputs = {"model": self._model, "lora_rank": str(self._config.lora_rank)}
         if self._config.base_url is not None:
             inputs["service"] = self._config.base_url
-        if self._config.export_adapter:
-            inputs["export_adapter"] = "true"
         return BaseArtifactSource(model_directory=self._base, inputs=inputs)
 
     @property
@@ -186,14 +177,9 @@ class TinkerTrainingComponent(LocalJobComponent):
         return str(self._base)
 
     def check_release(self, directory: Path) -> None:
-        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there.
-
-        With ``export_adapter``, the release also holds the PEFT adapter that ``release_format`` names.
-        """
+        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         if not (directory / MANIFEST).is_file():
             raise ValueError(f"a Tinker release holds {MANIFEST}")
-        if self.release_format is not None:
-            super().check_release(directory)
         try:
             checkpoint = TinkerCheckpoint.read(directory)
         except (TypeError, ValueError) as exc:
@@ -342,7 +328,6 @@ class TinkerTrainingComponent(LocalJobComponent):
                 prepared.loss,
                 learning_rates[first:last],
                 kl_coef=parameters.kl_coef,
-                export_adapter=self._config.export_adapter,
             )
             schedule_state = None if schedule is None else schedule.advanced(last)
             # Only the job's last checkpoint has trained all the data that the objective's next state is for.
@@ -354,11 +339,6 @@ class TinkerTrainingComponent(LocalJobComponent):
                 objective=(method.objective if prepared.next_algorithm_state else None) if final else start.objective,
             )
             target = directory / str(last)
-            if self._config.export_adapter:
-                # An earlier attempt may have left part of the adapter.
-                for adapter in (ADAPTER_DIR, TINKER_ADAPTER_DIR):
-                    shutil.rmtree(target / adapter, ignore_errors=True)
-                self._client.download(current, target)
             current.write(target)
             self.save_checkpoint(
                 directory,

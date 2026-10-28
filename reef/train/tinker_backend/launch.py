@@ -4,22 +4,24 @@ Tinker trains in the HTTP service's process: ``TinkerTrainingComponent`` runs
 each job. Serving is the deployment's ``inference`` section
 (``reef.service.deploy.serving``). By default Tinker samples too
 (``inference.serving: trainer``, ``reef.inference.tinker``). Reef's engines can
-serve the checkpoints instead when ``training.options.export-adapter`` saves
-each checkpoint's PEFT adapter.
+serve the checkpoints instead: they load each release's adapter, which
+``reef.tinker.weights.TinkerSamplerWeights`` downloads from the manifest's
+sampler path.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import TrainingComponentFactory
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.jobs import TrainingComponent
-from reef.train.deployment import InProcessTrainingDeployment
+from reef.runtime.jobs import ReleaseFormat, TrainingComponent
+from reef.train.deployment import EngineWeights, InProcessTrainingDeployment
 from reef.train.tinker_backend.config import TinkerConfig
 
 
@@ -57,6 +59,23 @@ class TinkerDeployment(InProcessTrainingDeployment):
             "base_url": tinker.base_url,
             "timeout_s": tinker.inference_timeout_s,
         }
+
+    def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights:
+        """Each release's adapter at its sampler path, downloaded into ``state_dir/sampler-weights``."""
+        tinker = tinker_settings(settings["training_backend_options"])
+        return EngineWeights(
+            ReleaseFormat("adapter", tinker.lora_rank, ("all",)),
+            {
+                "module": "reef.tinker.weights:TinkerSamplerWeights",
+                "config": {
+                    "cache_dir": str(Path(tinker.state_dir).expanduser() / "sampler-weights"),
+                    "api_key_env": tinker.api_key_env,
+                    "base_url": tinker.base_url,
+                    "project_id": tinker.project_id,
+                    "timeout_s": tinker.inference_timeout_s,
+                },
+            },
+        )
 
 
 class TinkerComponentFactory(TrainingComponentFactory):
