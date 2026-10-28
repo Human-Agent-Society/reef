@@ -1809,9 +1809,9 @@ loop:
        release holds, ``layout`` ``full`` (a Hugging Face checkpoint) or
        ``adapter`` (a PEFT adapter in ``adapter/``, with ``adapter_rank`` and
        ``adapter_target_modules``). ``None`` when the releases hold no weight
-       files that an engine loads, such as Tinker's without
-       ``export_adapter``. The serving assembly configures the engines from
-       it and refuses a serving runtime that cannot load it.
+       files that an engine loads, such as Tinker's manifests. The serving
+       assembly configures the engines from it and refuses a serving runtime
+       that cannot load it.
    * - ``base_artifact_source()``
      - The component's untrained checkpoint as a ``BaseArtifactSource``, laid
        out as one of its releases, with the ``inputs`` that decide its
@@ -1930,19 +1930,23 @@ Harbor tasks also takes ``rollout``, the rollouts of each task.
 ``trainer_serving_config`` selects ``reef.inference.tinker.TinkerInferenceRuntime``
 (runtime kind ``tinker``), which reads each release's
 ``tinker-checkpoint.json`` manifest and samples from the immutable sampler it
-names. With ``TinkerConfig.export_adapter``, the component also exports each
-checkpoint's PEFT adapter into ``adapter/``, and Tinker's adapter as Tinker
-saved it into ``tinker-adapter/`` (``TinkerClient.download``); its ``release_format`` is
-``ReleaseFormat("adapter", lora_rank, ("all",))``; without it, the release
-format is ``None``. Reef's engines can then serve the adapters
-(``inference.serving: engines``). Train-from works: the component imports
-the release's manifest as a start.
+names. A release holds that manifest alone, so the component's
+``release_format`` is ``None``. Reef's engines can still serve the adapters
+(``inference.serving: engines``): ``TinkerDeployment.engine_weights`` names
+``reef.tinker.weights.TinkerSamplerWeights``, which downloads the adapter at
+each release's ``sampler_path`` and converts it into a PEFT adapter.
+Train-from works: the component imports the release's manifest as a start.
 
 ``TrainingDeployment`` (``reef.train.deployment``) is a training backend's
 deployment definition. ``default_serving`` (``engines`` unless the backend
 says otherwise) is the serving of a deployment that names none and sets no
 engine setting, and ``trainer_serving_config(settings)`` the runtime config
-of the backend's own serving, or ``None`` without one. ``requires_local_model``
+of the backend's own serving, or ``None`` without one.
+``engine_weights(settings)`` is an ``EngineWeights`` for a backend whose
+releases hold no weight files: the ``ReleaseFormat`` that Reef's engines load
+and the ``ReleaseWeights`` plugin (``reef.runtime.serving``) that gives each
+release's files. The default is ``None``: engines cannot serve such
+releases. ``ReleaseFiles``, the default plugin, reads a release's own files. ``requires_local_model``
 defaults to true; hosted integrations set it to false to preserve remote
 model identifiers during deployment resolution.
 

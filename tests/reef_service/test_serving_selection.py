@@ -101,13 +101,31 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
         "inference_timeout_s": 60.0,
         "inference_handler_config": {"tool_call_parser": "qwen25"},
         "inference_handler_factory": SGLangInferenceHandler,
+        "weights": None,
+    }
+
+
+def test_engines_load_tinker_releases_from_their_sampler_paths():
+    resolved = tinker(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
+    config = serving_runtime_config(resolved, TinkerDeployment(), None)
+    # A Tinker release holds only its manifest: the engines load the adapter that TinkerSamplerWeights downloads.
+    assert config["release_format"] == ReleaseFormat("adapter", 32, ("all",)).to_dict()
+    assert config["weights"] == {
+        "module": "reef.tinker.weights:TinkerSamplerWeights",
+        "config": {
+            "cache_dir": "state/sampler-weights",
+            "api_key_env": "TINKER_API_KEY",
+            "base_url": None,
+            "project_id": None,
+            "timeout_s": 300.0,
+        },
     }
 
 
 def test_engines_cannot_serve_releases_without_weight_files_or_unresolved_engine_sizes():
-    resolved = tinker(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
-    with pytest.raises(DeployConfigError, match=r"training\.options\.export-adapter: true"):
-        serving_runtime_config(resolved, TinkerDeployment(), None)
+    resolved = slime(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
+    with pytest.raises(DeployConfigError, match="names no way to fetch them"):
+        serving_runtime_config(resolved, SlimeDeployment(), None)
     with pytest.raises(DeployConfigError, match=r"resolved inference\.backend, inference\.num-gpus"):
         serving_runtime_config(tinker(inference_backend="sglang"), TinkerDeployment(), ADAPTER)
     with pytest.raises(DeployConfigError, match=r"resolved inference\.backend"):
