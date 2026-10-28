@@ -163,12 +163,9 @@ class Client(TinkerClient):
     def initialize(self):
         return TinkerCheckpoint(MODEL, 32, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef, export_adapter):
+    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef):
         self.trained.append(sum(len(batch) for batch in batches))
         return TinkerCheckpoint(MODEL, 32, "tinker://update/state", "tinker://update/sampler"), {"loss": 0.5}
-
-    def download(self, checkpoint, directory):
-        raise AssertionError("no adapter export")
 
     def check_remote(self, checkpoint):
         raise AssertionError("no import")
