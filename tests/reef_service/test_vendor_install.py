@@ -243,9 +243,8 @@ def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch
     backend = _backend(tmp_path, None, worker_executor=ExecutorSettings(workers=workers))
     assert calls == ["pi"]
 
-    result = _step(backend)
+    _step(backend)
     assert calls == ["pi"]
-    assert result.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 0}
 
     _step(backend)
     assert calls == ["pi"]
@@ -352,8 +351,7 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     original = SandboxExecutor(egress_hosts=("localhost",))
     backend = _backend(tmp_path, None, executor=original)
-    result = _step(backend)
-    assert result.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 0}
+    _step(backend)
     assert len(seen) == 2
     assert binary.resolve() == source.resolve()
     assert str(prefix) not in original.base_paths

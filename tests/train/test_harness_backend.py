@@ -32,7 +32,7 @@ import reef.evaluation.harness.runner as harness_runner
 from reef.core.job_data import TaskSample
 from reef.core.tasks import HarborTask, write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import EpisodeRecord, FailureObservation, FloorPolicy
+from reef.evaluation.harness import EpisodeRecord, FloorPolicy
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
@@ -40,7 +40,6 @@ from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.inbox import ProposalInbox
-from reef.train.harness_backend.manifest import advance
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput
 from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication, TrainStepResult
@@ -642,7 +641,6 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
         "episode_repeats",
         "episodes_run",
         "episodes_cached",
-        "candidate_failures",
         "candidate_residue",
         "candidate_score",
         "candidate_agents",
@@ -666,7 +664,6 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
     assert result.metrics["evaluation_sides"] == ["candidate"] and result.metrics["candidate_score"] == 1.0
     # The current side ran nothing, so the commit has no current metric; the scores themselves are in the history.
     assert not [key for key in result.metrics if key.startswith("current_") or key == "candidate_scores"]
-    assert result.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 0}
     assert isinstance(result.publication, SavedArtifactPublication)
     # The published artifact is the candidate's source tree.
     assert result.artifact is not None
@@ -674,12 +671,10 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
     json.loads(json.dumps(result.metrics, allow_nan=False))  # valid commit record data
 
 
-def test_a_candidate_that_misses_the_floor_is_rejected_and_carries_the_manifest_untouched(tmp_path: Path) -> None:
-    """The retained tree was not run, so nothing was observed of it: the manifest carries over as through a
-    skip, no failures count is written, and the rejection still joins the history."""
-    previous = advance(None, 1, (FailureObservation(task="task one", stage="launch", cause="boom"),)).to_state()
+def test_a_candidate_that_misses_the_floor_is_rejected_and_joins_the_history(tmp_path: Path) -> None:
+    """A rejection counts toward the failure streak, publishes nothing, and still joins the history."""
     backend, _ = harness_backend(tmp_path, lambda workspace, tools: PLAIN)
-    prepared = backend.prepare_step(data(2), {"failure_manifest": previous}, 1)
+    prepared = backend.prepare_step(data(2), backend.initial_state(), 1)
     candidate = prepared.candidate
     assert candidate is not None
     policy = FloorPolicy(backend)
@@ -688,19 +683,10 @@ def test_a_candidate_that_misses_the_floor_is_rejected_and_carries_the_manifest_
     assert result.metrics["selected"] is False and result.metrics["failed"] == 1
     assert decision.reason == "candidate missed the floor on 1 of 1 tasks"
     assert result.state["failure_streak"] == 1
-    assert result.state["failure_manifest"] == previous and "failures" not in result.metrics
     assert [(record.step, record.selected, record.reason) for record in backend.history.decisions] == [
         (2, False, decision.reason)
     ]
     assert isinstance(result.publication, NoArtifactPublication)
-
-    # Without a previous manifest, absence stays unknown, never an empty manifest.
-    fresh, _ = harness_backend(tmp_path, lambda workspace, tools: PLAIN, scenario="fresh")
-    prepared = fresh.prepare_step(data(1), fresh.initial_state(), 0)
-    assert prepared.candidate is not None
-    floor = FloorPolicy(fresh)
-    result = fresh.settle_step(prepared, floor.decide(prepared.candidate, floor.evaluate(prepared.candidate)))
-    assert result.state["failure_manifest"] is None and result.metrics["selected"] is False
 
 
 # -- step progress, for the request page -----------------------------------------------------------------------------

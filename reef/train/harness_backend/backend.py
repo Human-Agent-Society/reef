@@ -42,7 +42,6 @@ from reef.evaluation.harness import (
     DecisionRecord,
     EpisodeRecord,
     EvaluationTasks,
-    FailureObservation,
     HarnessCandidate,
     HarnessCandidateEvaluator,
     HarnessEpisodeEvaluator,
@@ -58,7 +57,6 @@ from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.capabilities import PatchAdmission, StepProgress, StepProgressReader, StepRecords
 from reef.train.harness_backend.contract import Method, StepContext
 from reef.train.harness_backend.inbox import ProposalInbox
-from reef.train.harness_backend.manifest import advance
 from reef.train.harness_backend.records import CALLS_FILE, StepRecord, bounded
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.tools import StepTools
@@ -276,7 +274,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
                 samples=samples,
                 rollouts=rollouts,
                 request=data.request,
-                manifest=state.manifest,
                 state_files=state.method_files,
             )
             output = self.run_method(workspace, head_record.tree, metrics, calls)
@@ -382,24 +379,9 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         state = HarnessState.from_json(prepared.state)
         metrics = dict(prepared.metrics)
         evaluation = dict(decision.evaluation.metrics)
-        # The history holds every episode: the commit keeps the evaluation's sums, not its score and failure vectors.
+        # The history holds every episode: the commit keeps the evaluation's sums, not its score vectors.
         evaluation.pop("candidate_scores", None)
         evaluation.pop("current_scores", None)
-        candidate_failures = evaluation.pop("candidate_failures", ())
-        current_failures = evaluation.pop("current_failures", ())
-        # The manifest describes the tree this step commits: the candidate when selected, else the current tree.
-        committed_side = "candidate" if decision.selected else "current"
-        manifest = state.manifest
-        if committed_side in evaluation.get("evaluation_sides", EVALUATION_SIDES):
-            observed = candidate_failures if decision.selected else current_failures
-            manifest = advance(
-                state.manifest, candidate.step, tuple(FailureObservation.from_dict(v) for v in observed)
-            )
-            metrics["failures"] = {
-                "new": len(manifest.new),
-                "persisting": len(manifest.persisting),
-                "fixed": len(manifest.fixed),
-            }
         context = self.context_key()
         # A publish keeps the tree it replaced as the recheck's target; a recheck that rolls back consumes it.
         rollback_release_id, rollback_context = state.rollback_release_id, state.rollback_context
@@ -420,7 +402,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         state = replace(
             state,
             failure_streak=failure_streak,
-            manifest=manifest,
             rollback_release_id=rollback_release_id,
             rollback_context=rollback_context,
         )

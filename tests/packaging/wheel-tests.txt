@@ -24,7 +24,6 @@ tests/harness/test_e2b_executor.py
 tests/harness/test_e2b_tunnel.py
 tests/harness/test_episode_executor.py
 tests/harness/test_evolution_executor_ray.py
-tests/harness/test_failure_manifest.py
 tests/harness/test_harbor_tasks.py
 tests/harness/test_harness_contracts.py
 tests/harness/test_harness_episode.py

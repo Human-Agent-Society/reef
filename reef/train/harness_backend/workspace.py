@@ -8,7 +8,6 @@ Each step gets one directory, which is kept afterwards as the step record::
                     traces/<n>/trajectory.json   the ATIF trajectory of a client's request
                     request.json                 the instruction the step answers (instruction steps only)
                     evaluation.json              the step's evaluation tasks and repeats
-                    failures.json                the head tree's failure manifest (after its first evaluation)
                     host.json                    the adapter, the parts of its tree, and its config targets
     state/        the method's own files, committed with the step
     scratch/      temporary files, removed when the step ends
@@ -43,7 +42,6 @@ from reef.evaluation.harness import EpisodeRecord, History
 from reef.evaluation.harness.tasks import client_of, prompt_of
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tree import HarnessTree
-from reef.train.harness_backend.manifest import FailureManifest
 
 HARNESS_DIR = "harness"
 MATERIAL_DIR = "material"
@@ -55,7 +53,6 @@ TRACE_FILE = "trace.json"
 TRAJECTORY_FILE = "trajectory.json"
 REQUEST_FILE = "request.json"
 EVALUATION_FILE = "evaluation.json"
-FAILURES_FILE = "failures.json"
 HOST_FILE = "host.json"
 #: In ``output/``: what a method says about its step. Each file is optional.
 SUMMARY_FILE = "summary.md"
@@ -216,7 +213,6 @@ class Workspace:
         samples: Sequence[TrajectorySample] = (),
         rollouts: Sequence[EpisodeRecord] = (),
         request: TrainingRequest | None = None,
-        manifest: FailureManifest | None = None,
         state_files: Mapping[str, str] | None = None,
     ) -> Workspace:
         """Write a step's workspace under ``root``, which must be absent or empty.
@@ -224,8 +220,8 @@ class Workspace:
         ``tree`` goes to ``harness/`` and ``state_files`` (relative path to
         text) to ``state/``. ``material/`` gets one traffic trace per sample,
         then one rollout trace per episode of ``rollouts``, the request, the
-        evaluation's ``tasks`` and ``repeats`` (0 when no episode can run), the
-        manifest and the host facts.
+        evaluation's ``tasks`` and ``repeats`` (0 when no episode can run), and
+        the host facts.
         """
         workspace = cls(Path(root), Path(history_dir), step)
         for directory in (workspace.harness, workspace.material, workspace.state, workspace.scratch, workspace.output):
@@ -240,8 +236,6 @@ class Workspace:
         if request is not None:
             write_json(material / REQUEST_FILE, {"id": request.id, **request.to_dict()})
         write_json(material / EVALUATION_FILE, {"tasks": list(tasks), "repeats": repeats})
-        if manifest is not None:
-            write_json(material / FAILURES_FILE, manifest.to_state())
         write_json(material / HOST_FILE, host_facts(descriptor))
         return workspace
 

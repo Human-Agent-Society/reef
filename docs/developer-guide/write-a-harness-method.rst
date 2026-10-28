@@ -156,8 +156,6 @@ after the step as the step record.
 - ``evaluation.json`` (``tasks()``, ``evaluation_repeats()``): the step's
   evaluation tasks, the seed tasks first, and the episodes per task and tree
   (0 when the deployment configured no scorer).
-- ``failures.json``: the failure manifest of the head tree, after the first
-  evaluation.
 - ``host.json`` (``host()``): the ``adapter``; the ``parts`` of its tree,
   each with its tree ``path``, its ``format``, the path it ``renders`` to and
   what it ``holds``; its ``config_targets``; and ``tasks_are_directories``. A

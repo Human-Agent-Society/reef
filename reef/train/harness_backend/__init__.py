@@ -14,8 +14,7 @@ and holds ``AgentMethod``, a method that is a folder of prompts.
 ``reef.recipe.harness.HarnessEvolutionRecipe`` builds; methods never
 subclass it. ``tools`` implements the tools of a step, ``calls`` its model
 budget, ``state`` the committed algorithm state, ``inbox`` the clients'
-pending patches, ``records`` the step records, ``manifest`` the failure
-manifest, and ``capabilities`` what the service routes may ask a backend.
+pending patches, ``records`` the step records, and ``capabilities`` what the service routes may ask a backend.
 The tree itself is ``reef.harness.tree``; the evaluation, the history and the
 publication policies are ``reef.evaluation.harness``.
 """
@@ -23,14 +22,11 @@ publication policies are ``reef.evaluation.harness``.
 from reef.harness.gateway import ModelCalls
 from reef.train.harness_backend.agent.method import AgentMethod
 from reef.train.harness_backend.contract import AgentOutcome, Method, StepContext, Tools
-from reef.train.harness_backend.manifest import FailureManifest, FailureRecord
 from reef.train.harness_backend.workspace import Trace, Workspace
 
 __all__ = [
     "AgentMethod",
     "AgentOutcome",
-    "FailureManifest",
-    "FailureRecord",
     "Method",
     "ModelCalls",
     "StepContext",

@@ -9,7 +9,7 @@ the deployment's policy selects it. Leave `harness/` unchanged to skip the step.
 | Path | Access | What it holds |
 | --- | --- | --- |
 | `harness/` | read-write | the harness tree; `material/host.json` names the files it may hold |
-| `material/` | read-only | what the step learns from: `traces/<n>/trace.json` with its `trajectory.json`, `request.json` (the request the step answers, when there is one), `evaluation.json` (the step's evaluation tasks), `failures.json` and `host.json` |
+| `material/` | read-only | what the step learns from: `traces/<n>/trace.json` with its `trajectory.json`, `request.json` (the request the step answers, when there is one), `evaluation.json` (the step's evaluation tasks) and `host.json` |
 | `state/` | read-write | your files for later steps; Reef keeps at most 16 MiB of them |
 | `output/` | read-write | files Reef keeps with the step's record |
 | `scratch/` | read-write | temporary files; Reef removes them when the step ends |

@@ -3,8 +3,8 @@
 The tree itself is not here: it is the git release the commit recorded, and
 the trees a step tried are in the scenario's history. The state keeps what
 crosses steps and must commit with them: the failure streak the budget reads, the
-collected evaluation tasks, the failure manifest, the recheck's rollback
-target, and the method's own files.
+collected evaluation tasks, the recheck's rollback target, and the method's
+own files.
 """
 
 from __future__ import annotations
@@ -14,17 +14,13 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from reef.train.harness_backend.manifest import FailureManifest
-
 
 @dataclass(frozen=True)
 class HarnessState:
     """The harness backend's state after one step.
 
     Values: ``failure_streak`` ≥ 0 counts the candidates rejected since the latest
-    selected one. ``manifest`` is the failure manifest of the tree the latest
-    evaluated step committed, ``None`` before the first. ``collected_tasks``
-    are the prompts collected into the evaluation tasks, in collection order,
+    selected one. ``collected_tasks`` are the prompts collected into the evaluation tasks, in collection order,
     without duplicates. ``collected_clients`` counts, per tagged client, the
     prompts collected from its traffic; every count is positive.
     ``rollback_release_id`` names the release the latest publish replaced,
@@ -40,7 +36,6 @@ class HarnessState:
     """
 
     failure_streak: int = 0
-    manifest: FailureManifest | None = None
     collected_tasks: tuple[str, ...] = ()
     collected_clients: Mapping[str, int] = field(default_factory=dict)
     rollback_release_id: str | None = None
@@ -73,7 +68,6 @@ class HarnessState:
         """The commit record's form of this state; ``from_json`` reads it back as an equal value."""
         return {
             "failure_streak": self.failure_streak,
-            "failure_manifest": None if self.manifest is None else self.manifest.to_state(),
             "collected_tasks": list(self.collected_tasks),
             "collected_clients": dict(self.collected_clients),
             "rollback_release_id": self.rollback_release_id,
@@ -84,10 +78,8 @@ class HarnessState:
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> HarnessState:
         """The state a commit record holds; a key ``to_json`` writes and ``value`` lacks takes its default."""
-        manifest = value.get("failure_manifest")
         return cls(
             failure_streak=int(value.get("failure_streak", 0)),
-            manifest=None if manifest is None else FailureManifest.from_state(manifest),
             collected_tasks=tuple(str(task) for task in value.get("collected_tasks", ())),
             collected_clients={
                 str(name): int(count) for name, count in dict(value.get("collected_clients", {})).items()

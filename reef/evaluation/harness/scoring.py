@@ -94,8 +94,8 @@ class FailureObservation:
     Values: ``task`` is the task the episode ran; ``stage`` names where it
     failed (``launch``, ``trajectory``, ``residue``, ``trial``, ``graph``,
     ``loop`` or ``exit``); ``cause`` is the error text.
-    Purpose: the evaluation makes one per failed episode; the failure
-    manifest folds them into fingerprints.
+    Purpose: the evaluation makes one per failed episode; the history keeps
+    it with the episode's record.
     """
 
     task: str

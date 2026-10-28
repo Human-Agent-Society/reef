@@ -353,11 +353,6 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             "episodes_cached": len(records) - ran,
         }
         for side in sides:
-            # Failure observations ride the evaluation so settlement can
-            # build the committed side's manifest from the decision alone.
-            metrics[f"{side}_failures"] = tuple(
-                record.failure.to_dict() for record in runs[side] if record.failure is not None
-            )
             metrics[f"{side}_residue"] = sum(record.residue for record in runs[side])
             metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
             # Per agent sums over the side's episodes, so a result says which agent did the work.
