@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.core.evaluation import RolloutScores, mean_score
+from reef.core.evaluation import PolicyEvaluation
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
@@ -111,9 +111,9 @@ class TinkerTrainingComponent(LocalJobComponent):
     rollouts that ran (``rollout_rewards``, by task name).
 
     A task job with ``evaluation_of`` is an evaluation job: it rolls its tasks out on the sampler of its start
-    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of``, the score
-    of each rollout by task (``evaluation_scores``, ``RolloutScores.to_json``), and their ``mean_score``
-    (``evaluation_mean_score``, None when no rollout ran).
+    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of`` and
+    ``policy_evaluation`` (``PolicyEvaluation.to_json``): the Harbor agent, the start's model with its adapter,
+    and the score of each rollout by task.
 
     A job's last checkpoint carries the objective's state after the job's
     data; an intermediate checkpoint (``save_interval``) carries the state of
@@ -254,7 +254,7 @@ class TinkerTrainingComponent(LocalJobComponent):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data.data_id, samples)), PolicyEvaluation.from_json(kept["evaluation"])
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
@@ -272,7 +272,7 @@ class TinkerTrainingComponent(LocalJobComponent):
             record,
             {
                 "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
-                "scores": rollouts.scores.to_json(),
+                "evaluation": rollouts.evaluation.to_json(),
             },
         )
         return rollouts
@@ -294,8 +294,7 @@ class TinkerTrainingComponent(LocalJobComponent):
                 return {
                     **rollout_metrics,
                     "evaluation_of": parameters.evaluation_of,
-                    "evaluation_scores": rollouts.scores.to_json(),
-                    "evaluation_mean_score": mean_score(rollouts.scores.rollouts()),
+                    "policy_evaluation": rollouts.evaluation.to_json(),
                 }
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.

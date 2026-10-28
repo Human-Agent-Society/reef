@@ -23,6 +23,7 @@ from typing import Any
 
 from reef.artifact.artifact import REPOSITORY_FILES, Artifact
 from reef.core.errors import ReefError
+from reef.core.evaluation import ArtifactKind
 from reef.runtime.deployment import InferenceService
 from reef.runtime.interfaces import (
     AdapterEngine,
@@ -220,6 +221,10 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
             inference_timeout_s=inference_timeout_s,
             health_interval_s=health_interval_s,
         )
+
+    @property
+    def served_weight_kind(self) -> ArtifactKind:
+        return "model_adapter"
 
     @property
     def per_scenario_adapters(self) -> bool:

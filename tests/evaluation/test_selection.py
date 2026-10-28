@@ -225,7 +225,7 @@ def test_a_checkpoint_candidate_names_the_saved_checkpoint_it_offers(tmp_path) -
             return super().evaluate(candidate)
 
     component = StubTrainingComponent(tmp_path)
-    loop = JobLoop(component, FixedJobPlan(JobRequest()), RecordingPlugin(), scenario="math")
+    loop = JobLoop(component, FixedJobPlan(JobRequest()), RecordingPlugin(), scenario="math", model_kind="model")
     trajectory = policy_trajectory("s", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
     submitted = JobLoopState.from_dict(loop.submit(JobLoopState(), JobData("b", (trajectory,))).result.state)
     job_id = submitted.job.job_id

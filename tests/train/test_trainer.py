@@ -854,7 +854,9 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
                 scenario,
                 records,
                 pipeline_factory=grouped_policy_pipeline,
-                job_loop=JobLoop(component, self.job_plan(), AlwaysSelectCheckpointPlugin(), scenario=scenario),
+                job_loop=JobLoop(
+                    component, self.job_plan(), AlwaysSelectCheckpointPlugin(), scenario=scenario, model_kind="model"
+                ),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
                 default_job_samples=1,

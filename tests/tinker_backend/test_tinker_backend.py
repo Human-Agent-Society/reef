@@ -397,6 +397,7 @@ def test_import_start_copies_a_release_manifest_and_takes_the_base_tree_as_the_b
 
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):
+    assert inference.served_weight_kind == "model_adapter", "a Tinker sampler serves a LoRA adapter"
     with pytest.raises(ValueError, match="already owned"):
         TinkerTrainingComponent(MODEL, config, RemoteClient())
     other = TinkerCheckpoint("other/model", 32, "tinker://other/state", "tinker://other/sampler")

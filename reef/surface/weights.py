@@ -7,6 +7,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
+from reef.core.evaluation import ArtifactKind
 from reef.surface.adapter import adapter_name
 from reef.surface.base import (
     AcceptAnyArtifact,
@@ -146,21 +147,26 @@ WEIGHTS_COMPONENT = "weights"
 def create_weight_surface(
     *,
     scenario: str | None = None,
+    kind: ArtifactKind,
     runtime: AdapterWeightRuntime | None = None,
     validator: ArtifactValidator | None = None,
 ) -> Surface:
     """Build weight loading and inference capabilities as the ``weights`` component.
 
-    ``scenario`` selects per-scenario adapter routing on ``runtime``, which
-    several scenarios share. ``validator`` admits
-    published weights; the default accepts any.
+    ``kind`` is the kind of the weights, ``model`` or ``model_adapter``: the
+    serving runtime's ``served_weight_kind``. ``scenario`` selects
+    per-scenario adapter routing on ``runtime``, which several scenarios
+    share. ``validator`` admits published weights; the default accepts any.
     """
+    if kind not in ("model", "model_adapter"):
+        raise ValueError(f"the weights component is a model or a model_adapter, not {kind!r}")
     return Surface(
         components={
             WEIGHTS_COMPONENT: ComponentSurface(
                 validator=AcceptAnyArtifact() if validator is None else validator,
                 loader=WeightLoader(scenario),
                 inference=WeightInferenceHooks(scenario=scenario, runtime=runtime),
+                kind=kind,
             )
         }
     )
