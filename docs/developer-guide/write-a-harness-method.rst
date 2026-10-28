@@ -271,21 +271,21 @@ the scores and decides whether the candidate is published.
 ``candidate_scores`` and ``current_scores``, as
 ``reef.core.evaluation.RolloutScores`` in JSON: one entry for each task, in
 task order, each with the scores of its rollouts in run order. Read them with
-``RolloutScores.from_json``. Each rollout's ``RolloutScore`` has one of three
-kinds:
+``RolloutScores.from_json``. Each rollout's ``RolloutScore`` is one of two
+cases:
 
-- ``scored``: the rollout ran, and the scorer gave its ``value``.
-- ``no_answer``: the rollout ran, but the tree gave no answer: an error ended
-  its turn, or ``forbid_residue`` refused its residue. The candidate caused it.
-- ``not_run``: the environment could not run the rollout: the launch failed,
-  the trial never ran, or its trajectory could not be read. The candidate did
-  not cause it.
+- A score: the rollout ran, and ``value`` is the scorer's value. A rollout
+  where the tree gave no answer scores 0: an error ended its turn, or
+  ``forbid_residue`` refused its residue. The candidate caused it.
+- Failed: ``value`` is ``None`` (``"failed"`` in JSON). The environment could
+  not run the rollout: the launch failed, the trial never ran, or its
+  trajectory could not be read. The candidate did not cause it.
 
 The built-in policies use ``reef.evaluation.evaluators.compare_scores`` and
 ``check_floor``. ``compare_scores`` pairs the two sides rollout by rollout,
-ranks ``no_answer`` below every ``scored`` rollout, and drops a pair with a
-``not_run`` side; ``score_comparison`` reports the dropped pairs as
-``dropped``. The policy below selects a candidate only when at least one
+compares their values, and drops a pair with a failed side;
+``score_comparison`` reports the dropped pairs as ``dropped``. ``check_floor``
+passes a task when every rollout that did not fail reaches the floor. The policy below selects a candidate only when at least one
 rollout improves and none regresses.
 
 .. code:: python
@@ -307,15 +307,12 @@ rollout improves and none regresses.
            return self._candidate_backend.evaluate(candidate)
 
        def decide(self, candidate, evaluation):
-           def rank(score):
-               return float("-inf") if score.value is None else score.value
-
            candidate_scores = RolloutScores.from_json(evaluation.metrics["candidate_scores"])
            current_scores = RolloutScores.from_json(evaluation.metrics["current_scores"])
            pairs = [
-               (rank(mine), rank(theirs))
+               (mine.value, theirs.value)
                for mine, theirs in zip(candidate_scores.rollouts(), current_scores.rollouts(), strict=True)
-               if "not_run" not in (mine.kind, theirs.kind)
+               if not (mine.is_failed or theirs.is_failed)
            ]
            selected = all(c >= k for c, k in pairs) and any(c > k for c, k in pairs)
            return SelectionDecision(

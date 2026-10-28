@@ -1355,7 +1355,9 @@ def make_waiting_pi(tmp_path: Path) -> Path:
                 sys.exit(0)
             signal.signal(signal.SIGHUP, note)
             signal.signal(signal.SIGTERM, note)
-            (here / "agent.json").write_text(json.dumps({"dir": str(agent_dir)}))
+            # The test waits for agent.json to exist and reads it, so it appears whole: written aside, then renamed.
+            (here / "agent.json.part").write_text(json.dumps({"dir": str(agent_dir)}))
+            os.replace(here / "agent.json.part", here / "agent.json")
             # A test that fails before it signals must not leave this process running for good.
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:

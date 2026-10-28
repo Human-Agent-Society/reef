@@ -122,9 +122,9 @@ class TaskJobRollouts:
             raise ValueError("a task's group trains only with two or more samples")
 
     def rewards(self) -> dict[str, tuple[float, ...]]:
-        """Each task's rewards of the rollouts that ran, in run order, with each ``no_answer`` as 0."""
+        """Each task's rewards of the rollouts that did not fail, in run order."""
         return {
-            task: tuple(0.0 if score.value is None else score.value for score in scores if score.kind != "not_run")
+            task: tuple(score.value for score in scores if score.value is not None)
             for task, scores in self.scores.tasks
         }
 
