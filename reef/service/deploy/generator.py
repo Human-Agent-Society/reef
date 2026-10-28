@@ -37,7 +37,7 @@ class GeneratorSettings(Settings):
     Values: ``tasks_root`` is a directory path that is not blank. ``port`` is an int in 1..65535. ``concurrency``
     is an int of at least 1. ``designer_timeout_s`` and ``ready_timeout`` are positive. ``designer_api`` is None,
     ``openai`` or ``responses``. ``agent`` is None or a Harbor agent config with a ``name`` or an ``import_path``.
-    ``environment`` is a name in ``HARBOR_ENVIRONMENTS``, the Harbor environment of every check and episode.
+    ``environment`` is a name in ``HARBOR_ENVIRONMENTS``, the Harbor environment of every check and rollout.
     ``host`` is a bind address; ``work_dir``, ``agent_host``, ``harbor``, ``designer_url``, ``designer_token`` and
     ``designer_model`` are strings or None, and ``designer_options`` is a mapping or None.
     Purpose: ``generator_service`` reads the deployment's ``generator`` section into it to start the process;

@@ -791,13 +791,15 @@ def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
     assert run_with(built, body) == (200, {"ok": True, "tasks_root": str(tmp_path / "tasks")})
 
 
-def test_the_checks_and_the_episodes_refuse_an_environment_the_generator_cannot_probe(tmp_path: Path) -> None:
+def test_the_checks_and_the_rollouts_refuse_an_environment_the_generator_cannot_probe(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
         HarborChecks(environment="modal")
     with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
         ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="modal")
     assert HarborChecks(environment="e2b").environment == "e2b"
-    assert ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b").environment == "e2b"
+    assert (
+        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b").environment == "e2b"
+    )
 
 
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:

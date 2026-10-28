@@ -177,7 +177,7 @@ def test_the_designer_asks_in_the_api_the_section_names_or_the_upstreams(
         ({"environment": "e2b"}, "e2b", ["reef_eval", "harbor", "E2B_API_KEY", "e2b"]),
     ],
 )
-def test_the_generator_environment_reaches_the_checks_the_episodes_and_the_readiness(
+def test_the_generator_environment_reaches_the_checks_the_rollouts_and_the_readiness(
     tmp_path: Path, section: dict[str, str], environment: str, needs: list[str]
 ) -> None:
     deployment = {

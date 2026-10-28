@@ -85,7 +85,7 @@ from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 logger = logging.getLogger(__name__)
 
 DOCKER_PROBE_TIMEOUT_S = 5.0
-#: The Harbor environments the generator runs its checks and episodes in: local Docker, or E2B cloud sandboxes.
+#: The Harbor environments the generator runs its checks and rollouts in: local Docker, or E2B cloud sandboxes.
 HARBOR_ENVIRONMENTS = ("docker", "e2b")
 #: The names Harbor's e2b environment imports from the e2b package (harbor/environments/e2b.py); without one of them
 #: Harbor marks the environment missing and every check fails.
