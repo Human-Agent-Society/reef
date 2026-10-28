@@ -17,8 +17,12 @@ ENTRIES_FILE = "reef-entries.json"
 
 
 def entries_file(entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """``entries`` as the ``ENTRIES_FILE`` of a harness artifact."""
-    return {ENTRIES_FILE: json.dumps([dict(entry) for entry in entries], indent=2, sort_keys=True) + "\n"}
+    """``entries`` as the ``ENTRIES_FILE`` of a harness artifact.
+
+    The keys keep their order, so ``read_entries`` gives back entries that render to the same bytes: a native
+    module's header writes its parameters in their order.
+    """
+    return {ENTRIES_FILE: json.dumps([dict(entry) for entry in entries], indent=2) + "\n"}
 
 
 def read_entries(tree: Path) -> tuple[dict[str, Any], ...]:

@@ -20,6 +20,7 @@ from typing import Any
 from aiohttp import web
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
+from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
@@ -34,6 +35,7 @@ from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
+from reef.service.artifact_imports import ArtifactImports
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
@@ -443,6 +445,10 @@ def build_app(
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
             evaluations=ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts),
+            artifact_imports=ArtifactImports(
+                ArtifactSources.from_setting(settings.artifact_sources),
+                Path(settings.artifact_cache_dir) / "imports",
+            ),
         )
     except BaseException:
         with suppress(Exception):

@@ -33,10 +33,11 @@ from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
 from reef.evaluation.harness import FloorPlugin, RolloutScorer, ScoreComparisonPlugin, evaluation_selection
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.rollouts.requests import request_entries
 from reef.harness.rollouts.version_check import version_check_entry
+from reef.harness.tree.mutations import entries_refusal, nodes_from_entries
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
@@ -50,8 +51,8 @@ from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executo
 from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import Surface
-from reef.surface.files import entries_file
+from reef.surface.base import ArtifactLayout, Surface
+from reef.surface.files import ENTRIES_FILE, entries_file, read_entries
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
 from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
@@ -123,6 +124,51 @@ def proposer_agent_settings(
         )
         return None, timeouts[0], timeouts[1]
     return executor, timeouts[0], timeouts[1]
+
+
+def harness_files(descriptor: AdapterDescriptor, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The files of a harness artifact whose entries are ``entries``, by relative path.
+
+    The files are ``ENTRIES_FILE`` and, for non-empty ``entries``, their
+    render for ``descriptor`` with the entries list where the adapter keeps
+    one. Raise ``RenderError`` for entries that do not render.
+    """
+    if not entries:
+        return entries_file(entries)
+    return {
+        **render_composition(nodes_from_entries(entries), descriptor),
+        **tree_files(descriptor, entries),
+        **entries_file(entries),
+    }
+
+
+@dataclass(frozen=True)
+class HarnessLayout(ArtifactLayout):
+    """The layout of a harness artifact for the adapter ``descriptor``, which an import must meet (RFC #980).
+
+    A directory meets it when its ``ENTRIES_FILE`` holds entries that the
+    seed's admission takes (``entries_refusal``) and its other files are
+    exactly the other files of ``harness_files`` for those entries, byte for
+    byte. ``ENTRIES_FILE`` itself may have any JSON formatting.
+    """
+
+    descriptor: AdapterDescriptor
+
+    def check(self, directory: Path) -> None:
+        entries = read_entries(directory)
+        refusal = entries_refusal(entries, self.descriptor)
+        if refusal is not None:
+            raise ValueError(f"the harness entries are refused: {refusal}")
+        expected = harness_files(self.descriptor, entries)
+        actual = {path.relative_to(directory).as_posix(): path for path in directory.rglob("*") if path.is_file()}
+        missing, extra = sorted(set(expected) - set(actual)), sorted(set(actual) - set(expected))
+        if missing or extra:
+            raise ValueError(
+                f"a harness artifact holds exactly the render of its entries: missing {missing}, extra {extra}"
+            )
+        for relative, path in actual.items():
+            if relative != ENTRIES_FILE and path.read_bytes() != expected[relative].encode("utf-8"):
+                raise ValueError(f"{relative} differs from the render of the harness entries")
 
 
 @dataclass(frozen=True)
@@ -667,6 +713,7 @@ class CordisRecipe(Recipe):
         else:
             served_metadata = None
         return create_harness_surface(
+            layout=HarnessLayout(get_adapter(self.adapter)),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             model_metadata=self.model_metadata,
@@ -688,11 +735,8 @@ class CordisRecipe(Recipe):
         the base.
         """
         configured = [dict(entry) for entry in self.seed if entry.get("id") not in RESERVED_ENTRY_IDS]
-        descriptor = get_adapter(self.adapter)
-        nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
-        rendered = {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)} if self.seed else {}
         return BaseArtifactSource(
-            files={**rendered, **entries_file(self.seed)},
+            files=harness_files(get_adapter(self.adapter), self.seed),
             inputs={"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()},
         )
 
