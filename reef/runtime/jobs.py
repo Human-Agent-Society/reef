@@ -270,8 +270,8 @@ class TrainingComponent(ABC):
         Reef calls this when a trainer starts training from an artifact
         (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
-        discarded later. A release without weights is the base model, whose
-        start is ``None``. Raise ``ValueError``, and change nothing, when the
+        discarded later. The start of the base artifact is ``None``: a job
+        then starts from the base model. Raise ``ValueError``, and change nothing, when the
         component cannot start from these weights; a component may refuse
         every release.
         """
