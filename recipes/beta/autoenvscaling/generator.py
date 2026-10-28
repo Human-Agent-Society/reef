@@ -573,11 +573,11 @@ def calibration_check(
             raise ValueError(f"{label} must be an integer")
         counts[label] = count
     numbers: dict[str, float] = {}
-    for label, default in (
+    for label, fallback in (
         ("calibration_margin", DEFAULT_CALIBRATION_MARGIN),
         ("calibration_min_std", DEFAULT_CALIBRATION_MIN_STD),
     ):
-        number = config.get(label, default)
+        number = config.get(label, fallback)
         if isinstance(number, bool) or not isinstance(number, (int, float)):
             raise ValueError(f"{label} must be a number")
         numbers[label] = float(number)
