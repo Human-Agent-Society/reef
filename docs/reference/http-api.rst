@@ -68,7 +68,9 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``                                       | update the scenario training mode                 |
+| ``POST /reef/scenarios/{scenario}/update``                                       | update a scenario's settings                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/settings``                                      | read a scenario's settings                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``                                      | what this scenario accepts                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -183,8 +185,7 @@ Scenario model settings
 scenario. Existing scenarios retain their settings on repeated creation.
 The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
-existing ``training_mode`` field, and ``artifact_evaluation`` (`Automatic
-evaluation`_). Send ``model: null`` to restore deployment
+other `scenario settings <#scenario-updates>`__. Send ``model: null`` to restore deployment
 defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
@@ -717,9 +718,17 @@ adapter residency evicts it.
 Scenario updates
 ~~~~~~~~~~~~~~~~
 
-``POST /reef/scenarios/{scenario}/update`` updates an existing scenario.
-Currently, only ``training_mode`` is supported; unknown fields are rejected.
-To change the data processor's mode:
+``POST /reef/scenarios/{scenario}/update`` updates an existing scenario. The
+body holds one or more of these settings. Reef rejects other fields:
+
+- ``training_mode``: the mode of the data processor, below.
+- ``model``: the scenario's model (`Scenario model settings`_).
+- ``artifact_evaluation``: the settings that Reef evaluates each new artifact
+  with (`Automatic evaluation`_).
+- ``activation``: the scenario's activation rule, below.
+
+The response holds the scenario name and each setting that the request
+changed. To change the data processor's mode:
 
 .. code:: json
 
@@ -745,10 +754,69 @@ return ``400``. A processor that does not support the requested mode returns
 ``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
 require a proposer that explicitly accepts ``requests``.
 
-``GET /reef/status`` reports the selected ``training_mode``. This selector
-is runtime state, not persisted scenario configuration: a service restart
-uses the recipe's configured mode again, while a scenario reload after a
-failed step keeps the selected mode.
+``GET /reef/status`` reports the selected ``training_mode``. Reef stores the
+mode with the scenario's settings, so a reload and a restart keep it.
+
+The ``activation`` setting selects the rule that decides whether Reef
+activates each new artifact of this scenario. It replaces the deployment's
+`activation section <configuration.rst#the-activation-section>`__ for this
+scenario. Send one of the built-in rules:
+
+.. code:: json
+
+   {"activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}}
+
+The ``module`` is one of these rules:
+
+- ``always``: ``config`` takes ``review_kinds``.
+- ``never``: there is no ``config``.
+- ``evaluated``: ``config`` takes ``min_mean_score``.
+
+The response holds the stored rule. Send ``"activation": null`` to follow the
+deployment's rule again. The setting names only built-in rules. Reef answers
+HTTP 400 for a ``package.module:ClassName`` rule, because a client must not
+choose the code that the service imports. Set such a rule in the deployment's
+``activation`` section.
+
+The ``evaluated`` rule activates an artifact only after an evaluation of it.
+Thus it needs ``artifact_evaluation``. Reef checks the two settings together,
+and stores both or neither. Reef answers HTTP 400 when, after the request, the
+rule that applies is ``evaluated`` and the scenario has no
+``artifact_evaluation``. Thus a request can set both at once, or set
+``artifact_evaluation`` first. Reef also refuses a request that clears
+``artifact_evaluation`` under ``evaluated``.
+
+A new rule applies to the artifacts that training makes after the change. It
+never activates an existing artifact. Under ``evaluated``, Reef activates an
+artifact when an evaluation of it finishes after the change with a
+``mean_score`` of at least ``min_mean_score``.
+
+Read the settings
+~~~~~~~~~~~~~~~~~
+
+``GET /reef/scenarios/{scenario}/settings`` returns the settings of an existing
+scenario:
+
+.. code:: json
+
+   {
+     "scenario": "agents",
+     "training_mode": "auto",
+     "model": null,
+     "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
+     "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
+     "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}
+   }
+
+- ``training_mode`` and ``model`` are what the scenario runs. ``model`` is the
+  redacted view of `Scenario model settings`_, or null for the deployment's
+  model.
+- ``artifact_evaluation`` and ``activation`` are the stored settings, or null.
+- ``effective_activation`` is the rule that applies: the scenario's
+  ``activation``, else the deployment's. When the deployment names a rule
+  class of its own, ``module`` is the ``package.module:ClassName`` of that class.
+
+An unknown scenario returns ``404``.
 
 Inference
 ---------
@@ -1111,14 +1179,20 @@ An artifact is the content of one component of a release, such as a
 checkpoint's weights or a harness tree. Training makes artifacts: each
 checkpoint that a weight trainer saves, and each tree that a harness trainer
 keeps. The release that created a scenario holds the creation artifact of each
-component. ``artifact_id`` names an artifact:
+component: the artifact the scenario started from, by default the base
+artifact that Reef imported from the deployment's model or seed (`The base
+artifact <../user-guide/operate.rst#the-base-artifact>`__). ``artifact_id``
+names an artifact:
 
 - In a scenario of one component, it is the ``release_id`` of the release
   that made the artifact. Every shipped recipe serves one component, so there
-  ``artifact_id`` and ``release_id`` are equal.
-- In a scenario of several components, it is ``<release_id>:<component>``. A
-  release that carries a component forward keeps that component's
-  ``artifact_id``.
+  ``artifact_id`` and ``release_id`` are equal for every artifact that a
+  training step made.
+- In a scenario of several components, it is ``<release_id>:<component>``.
+- A release that carries a component forward keeps that component's
+  ``artifact_id``. The creation makes no artifact, so the creation artifact
+  keeps the ``artifact_id`` of the release that made it. For the base
+  artifact, that is the ID of the repository's base release.
 
 ``GET /reef/scenarios/{scenario}/artifacts`` answers ``{scenario,
 artifacts}``, **newest first**. Each row is one artifact of one component:
@@ -1134,7 +1208,8 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 +-----------------------+------------------------------------------------------+
 | ``parent_release_id`` | the parent of that release                           |
 +-----------------------+------------------------------------------------------+
-| ``content_id``        | its content                                          |
+| ``content_id``        | its content in a scenario of one component;          |
+|                       | ``null`` in a scenario of several components         |
 +-----------------------+------------------------------------------------------+
 | ``operation``         | ``creation`` for the creation artifact,              |
 |                       | ``training``, or ``recovery`` for the artifact that  |
@@ -1189,8 +1264,8 @@ component, ``release_id`` is the active release afterwards, and
   <../advanced_topics/state-model.rst#the-release-chain>`__.
 
 Activating the active artifact changes nothing. Activation never changes a
-trainer's training start. A full-weight serving runtime cannot activate the
-creation artifact after it served a checkpoint, and answers an error.
+trainer's training start. A full-weight serving runtime that activates the
+base artifact after it served a checkpoint loads the base artifact's files.
 
 Train from an artifact
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -1223,7 +1298,7 @@ Whether a trainer can start from an artifact depends on the trainer:
 - A harness trainer starts its next evolve step from the entries of the
   artifact's tree.
 
-A weight artifact without optimizer state, such as the creation artifact,
+A weight artifact without optimizer state, such as the base artifact,
 starts training with a new optimizer state.
 
 Both routes answer these statuses:
@@ -1254,12 +1329,11 @@ explains how to go back to an older one for good.
 Inactive artifacts
 ~~~~~~~~~~~~~~~~~~
 
-With ``evolution.publish: review``, the step makes the winning tree as a
-release but does not activate it. When a successful evaluation touches a node
-kind listed in ``evolution.review_kinds``, the step does the same. Its row
-carries ``active: false`` and ``activated: false``. The manifest and install
-routes keep serving the active release, and ``?release_id=`` can pull the
-inactive tree for a trial install. To make it serve, send the row's
+The deployment's activation rule can leave a new tree inactive, for example
+a tree that touches a node kind in the ``always`` rule's ``review_kinds``.
+The step then makes the tree as a release but does not activate it. Its row carries ``active: false`` and ``activated: false``. The manifest
+and install routes keep serving the active release, and ``?release_id=`` can
+pull the inactive tree for a trial install. To make it serve, send the row's
 ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.
 
 In a scenario with several components, ``GET /reef/harness/releases``, the
@@ -1487,6 +1561,7 @@ a training job runs or an update is being published.
          "training_mode": "auto",
          "processor": {"...": "..."},
          "inference_admission": {"...": "..."},
+         "artifacts": {"weights": {"active": "5e1c...", "training_start": "5e1c..."}},
          "training_job": {"job_id": "9c41...", "backend": "slime", "checkpoints_handled": 0},
          "finished_jobs": 2
        }
@@ -1497,6 +1572,10 @@ a training job runs or an update is being published.
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 ``job_data_ready`` says whether the processor has a job's data waiting.
+``artifacts`` gives two ``artifact_id`` values for each component: its
+active artifact and its trainer's training start. A value is ``null`` when
+Reef does not know it. Both values start at the creation artifact.
+
 ``processor`` includes ``ready_samples``, the samples of the held record sets
 and uploaded trajectories; ``job_samples``, the samples that automatic job
 data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
@@ -1635,17 +1714,16 @@ query parameter to filter commits whose recorded ``consumed_ids`` contain
 any requested ID (at most 100 IDs of 1–256 characters). This is exact set
 membership, not an eligibility decision. Each row exposes ``step``,
 ``operation``, ``operation_verified``, ``recorded_at``, ``artifact_ref``,
-``pending``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
+``activated``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
 private checkpoint recovery data are excluded. Commit metadata remains
 available when trace bodies expire.
 
 ``operation`` is one of three values:
 
 - ``training``: a training step. ``artifact_ref`` is the release the step
-  made, or the active release when the step made none. ``pending`` is true
-  for an artifact that the step made but did not activate. The field keeps
-  this name until the activation rule moves out of training (RFC #965,
-  step 3).
+  made, or the active release when the step made none. ``activated`` is true
+  when the activation rule activated the artifact that the step made; it is
+  false for every other row.
 - ``activate``: an activation. ``artifact_ref`` is the release that serves
   afterwards.
 - ``train_from``: a new training start. ``artifact_ref`` names the artifact

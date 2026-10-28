@@ -25,12 +25,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.serving import ADAPTER_DIR, holds_weights
+from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
@@ -134,13 +135,15 @@ class TinkerTrainingComponent(LocalJobComponent):
             raise ValueError("Tinker state_dir is already owned by another runtime") from None
         try:
             super().__init__(self._root / "jobs")
-            base = self._root / "base"
-            if (base / MANIFEST).exists():
-                self._base = TinkerCheckpoint.read(base)
-            else:
-                self._base = client.initialize()
-                self._base.write(base)
-            self._base.check_compatible(base_model, service=config.base_url, lora_rank=config.lora_rank)
+            self._base = self._root / "base"
+            if not (self._base / MANIFEST).exists():
+                # The untrained adapter is the base checkpoint: the base artifact holds it as a release.
+                untrained = client.initialize()
+                if config.export_adapter:
+                    shutil.rmtree(self._base, ignore_errors=True)
+                    client.download(untrained, self._base)
+                untrained.write(self._base)
+            self._validated(TinkerCheckpoint.read(self._base))
         except BaseException:
             self._state_lock.close()
             raise
@@ -169,9 +172,20 @@ class TinkerTrainingComponent(LocalJobComponent):
     def shares_scenarios(self) -> bool:
         return True
 
-    def import_start(self, release: Path) -> str | None:
-        if not holds_weights(release):
-            return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The untrained adapter's release: its manifest, and with ``export_adapter`` the exported adapter."""
+        inputs = {"model": self._model, "lora_rank": str(self._config.lora_rank)}
+        if self._config.base_url is not None:
+            inputs["service"] = self._config.base_url
+        if self._config.export_adapter:
+            inputs["export_adapter"] = "true"
+        return BaseArtifactSource(model_directory=self._base, inputs=inputs)
+
+    @property
+    def base_start(self) -> str:
+        return str(self._base)
+
+    def import_start(self, release: Path) -> str:
         if not (release / MANIFEST).exists():
             raise ValueError(f"artifact is missing {MANIFEST}")
         checkpoint = self._validated(TinkerCheckpoint.read(release))
@@ -265,7 +279,7 @@ class TinkerTrainingComponent(LocalJobComponent):
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
-        start = self._base if job.start is None else self._validated(TinkerCheckpoint.read(Path(job.start)))
+        start = self._validated(TinkerCheckpoint.read(Path(job.start)))
         method = parameters.method
         data = job.data
         rollout_metrics: dict[str, Any] = {}

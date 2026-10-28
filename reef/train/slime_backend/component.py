@@ -30,6 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.job_data import TaskSample
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.executor import resolve
@@ -300,6 +301,10 @@ class SlimeTrainingComponent(LocalJobComponent):
         # The workers loaded the checkpoint of the rollout before the next one, or the startup weights. A job
         # that a restart stopped after Megatron saved that rollout writes that rollout's start when it resumes.
         self.loaded_rollout_id: int | None = self.next_rollout_id - 1 if self.next_rollout_id > 0 else None
+        # The start of the startup weights, the untrained checkpoint that the base artifact holds.
+        self.base_start_dir = self.starts_root / "base"
+        if not (self.base_start_dir / "start.json").exists():
+            SlimeStart(None, None, {}, None).write(self.base_start_dir)
         super().__init__(root / "reef-jobs")
         self.start_jobs()
 
@@ -318,15 +323,46 @@ class SlimeTrainingComponent(LocalJobComponent):
             "adapter", int(self.args.megatron_lora_rank), tuple(sglang_lora_target_modules(self.args))
         )
 
-    def import_start(self, release: Path) -> str | None:
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The startup weights as a release: the model directory, or with LoRA an adapter whose weights are zero.
+
+        Full-weight releases are Hugging Face checkpoints, so the base artifact
+        is ``hf_checkpoint`` itself. LoRA releases hold the adapter in
+        ``adapter/``, so the base artifact holds the untrained adapter there:
+        every LoRA weight is zero, so it serves the startup weights unchanged.
+        """
+        model = Path(self.args.hf_checkpoint).expanduser().resolve()
+        if not self.lora:
+            return BaseArtifactSource(model_directory=model, inputs={"model": str(model)})
+        from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
+        from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
+
+        release = self.base_start_dir / "release"
+        if not (release / ADAPTER_DIR).is_dir():
+            save_untrained_lora_adapter(self.args, release / ADAPTER_DIR)
+        return BaseArtifactSource(
+            model_directory=release,
+            inputs={
+                "model": str(model),
+                "lora_rank": str(self.args.megatron_lora_rank),
+                "lora_alpha": str(self.args.megatron_lora_alpha),
+                "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
+            },
+        )
+
+    @property
+    def base_start(self) -> str:
+        return str(self.base_start_dir)
+
+    def import_start(self, release: Path) -> str:
         raise ValueError(
             "Slime continues training from its own latest checkpoint; it cannot load a published release "
             "into its workers"
         )
 
-    def fresh_start(self, start: str | None) -> str | None:
+    def fresh_start(self, start: str) -> str:
         """A start of the weights ``start`` names, with no training state; ``check_job`` checks the workers hold them."""
-        rollout_id = None if start is None else SlimeStart.read(Path(start)).rollout_id
+        rollout_id = SlimeStart.read(Path(start)).rollout_id
         directory = self.starts_root / ("fresh_startup" if rollout_id is None else f"fresh_rollout_{rollout_id}")
         SlimeStart(rollout_id, None, {}, None, fresh=True).write(directory)
         return str(directory)
@@ -341,9 +377,9 @@ class SlimeTrainingComponent(LocalJobComponent):
         if interval is not None and (isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0):
             raise ValueError("save_interval must be a positive int")
         job_training(job.parameters)
-        self.check_held_weights(None if job.start is None else SlimeStart.read(Path(job.start)).rollout_id, job.start)
+        self.check_held_weights(SlimeStart.read(Path(job.start)).rollout_id, job.start)
 
-    def check_held_weights(self, rollout_id: int | None, start: str | None) -> None:
+    def check_held_weights(self, rollout_id: int | None, start: str) -> None:
         """Raise ``ValueError`` unless the workers hold the weights of ``rollout_id``, which ``start`` names.
 
         ``None`` names the weights the workers loaded at startup, which they
@@ -377,7 +413,7 @@ class SlimeTrainingComponent(LocalJobComponent):
     # -- One job
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
-        start = None if job.start is None else SlimeStart.read(Path(job.start))
+        start = SlimeStart.read(Path(job.start))
         method, scheduling = job_training(job.parameters)
         saved = self.saved(directory)
         started = read_json(directory / ROLLOUT_FILE)
@@ -385,8 +421,8 @@ class SlimeTrainingComponent(LocalJobComponent):
         # stopped the job once Megatron saved a rollout, they hold that rollout, which the loop below records.
         if started is None or started["rollout_id"] != self.loaded_rollout_id:
             held = SlimeStart.read(Path(saved[-1].path)) if saved else start
-            self.check_held_weights(None if held is None else held.rollout_id, job.start)
-        start_state = {} if start is None else start.state_for(method.objective)
+            self.check_held_weights(held.rollout_id, job.start)
+        start_state = start.state_for(method.objective)
         prepared = prepare_slime_job(
             job.data,
             method,
@@ -406,9 +442,7 @@ class SlimeTrainingComponent(LocalJobComponent):
             # A resumed job continues after its last saved checkpoint, with that checkpoint's schedule progress.
             schedule_state = SlimeStart.read(Path(saved[-1].path)).schedule_state
         else:
-            schedule_state = resolve_learning_rate_schedule_state(
-                None if start is None else start.schedule_state, method.learning_rate_schedule
-            )
+            schedule_state = resolve_learning_rate_schedule_state(start.schedule_state, method.learning_rate_schedule)
         if schedule_state is not None and self.args.decoupled_lr is not None:
             raise RuntimeError("a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups")
         step_count = len(payload["external_step_sizes"])
@@ -416,7 +450,7 @@ class SlimeTrainingComponent(LocalJobComponent):
         done = saved[-1].step if saved else 0
         runs = [(first, min(first + interval, step_count)) for first in range(done, step_count, interval)]
         # Until the job saves its first rollout, the workers hold the start's training state: a fresh job resets it.
-        fresh = start is not None and start.fresh and not saved
+        fresh = start.fresh and not saved
         metrics: dict[str, Any] = dict(prepared.metrics)
         for first, last in runs:
             if self.stopping(directory):
@@ -424,10 +458,8 @@ class SlimeTrainingComponent(LocalJobComponent):
             # Only the job's last rollout has trained all the data that the objective's next state is for.
             if last == step_count:
                 objective, state = (method.objective if next_state else None), next_state
-            elif start is not None:
-                objective, state = start.objective, dict(start.algorithm_state)
             else:
-                objective, state = None, {}
+                objective, state = start.objective, dict(start.algorithm_state)
             # Optimizer steps advance only a recipe-selected schedule.
             next_schedule = None if schedule_state is None else schedule_state.advanced(last - first)
             training = (algorithm, slime_payload_steps(payload, first, last))

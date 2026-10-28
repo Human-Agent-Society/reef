@@ -333,9 +333,8 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    repository = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    # The base artifact is the component's untrained adapter release, which the component writes when it starts.
+    repository = InMemoryRepositoryBackend.factory(tmp_path / "tinker" / "base", root=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":
             monkeypatch.delenv(key)

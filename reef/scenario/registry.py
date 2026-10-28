@@ -29,7 +29,14 @@ from reef.artifact.repository import (
     EnumerableRepositoryBackendFactory,
     RepositoryBackendFactory,
 )
+from reef.core.activation import ActivationRule
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.evaluation.activation import (
+    EvaluatedActivation,
+    activation_setting,
+    build_activation_rule,
+    scenario_activation_reference,
+)
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
@@ -37,7 +44,7 @@ from reef.recipe.base import Recipe
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
-from reef.storage.scenario import ScenarioStorage
+from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 
 logger = logging.getLogger(__name__)
 
@@ -308,16 +315,57 @@ class ScenarioRegistry:
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current
 
-    def set_artifact_evaluation(self, scenario: str, settings: Mapping[str, object] | None) -> None:
-        """Store the settings that Reef evaluates each new artifact of an existing scenario with; ``None`` stops it."""
-        with self.lock_for(scenario):
-            self.require(scenario)
-            stored = self._storage.read_settings(scenario)
-            self._storage.write_settings(scenario, replace(stored, artifact_evaluation=settings))
+    def set_evaluation_and_activation(
+        self,
+        scenario: str,
+        *,
+        artifact_evaluation: Mapping[str, object] | None,
+        activation: object,
+    ) -> Mapping[str, object] | None:
+        """Store how Reef evaluates and activates each new artifact of an existing scenario, together.
 
-    def artifact_evaluation(self, scenario: str) -> Mapping[str, object] | None:
-        """The stored settings that Reef evaluates each new artifact of ``scenario`` with, or ``None``."""
-        return self._storage.read_settings(scenario).artifact_evaluation
+        ``artifact_evaluation`` is the checked ``ArtifactEvaluationSettings`` as JSON, or None to evaluate none.
+        ``activation`` is the scenario's own rule, a built-in rule in the mapping form, or None to follow the
+        deployment's rule. Return the rule as stored. Raise ``PluginConfigError`` for an ``activation`` that names
+        no built-in rule. Raise ``ValueError`` when the rule that would apply is ``evaluated`` and
+        ``artifact_evaluation`` is None, because then no new artifact activates. A refused pair stores nothing.
+        The loaded instance applies the rule to the artifacts that training makes from now on.
+        """
+        stored_activation = (
+            None if activation is None else activation_setting(scenario_activation_reference(activation))
+        )
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = replace(
+                self._storage.read_settings(scenario),
+                artifact_evaluation=artifact_evaluation,
+                activation=stored_activation,
+            )
+            rule = self.activation_rule(settings)
+            if artifact_evaluation is None and isinstance(rule, EvaluatedActivation):
+                raise ValueError(
+                    "the evaluated activation activates an artifact only after its evaluation: "
+                    "set artifact_evaluation, or select another activation"
+                )
+            self._storage.write_settings(scenario, settings)
+            current.set_activation_rule(rule)
+        return stored_activation
+
+    def stored_settings(self, scenario: str) -> ScenarioSettings:
+        """The settings stored for ``scenario``; defaults when none are stored."""
+        return self._storage.read_settings(scenario)
+
+    def activation_rule(self, settings: ScenarioSettings) -> ActivationRule:
+        """The rule that applies to a scenario with ``settings``: its own rule, else the recipe's rule
+        (``Recipe.activation_rule``)."""
+        if settings.activation is None:
+            return self._recipe.activation_rule()
+        return build_activation_rule(scenario_activation_reference(settings.activation))
+
+    def effective_activation(self, settings: ScenarioSettings) -> Mapping[str, object]:
+        """The JSON form of the rule that applies to a scenario with ``settings``: its own ``activation``, else the
+        deployment's ``activation`` section."""
+        return activation_setting(self._recipe.activation) if settings.activation is None else settings.activation
 
     def configure_model(
         self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
@@ -351,7 +399,7 @@ class ScenarioRegistry:
             recovered = self._scenario_factory.load_or_create(
                 scenario, None, model_config=self._model_config(scenario)
             )
-            self._apply_stored_training_mode(recovered)
+            self.apply_stored_settings(recovered)
             with self._lock:
                 dropped = self._scenarios.get(scenario)
                 self._scenarios[scenario] = recovered
@@ -414,28 +462,38 @@ class ScenarioRegistry:
             self._model_configs[scenario] = ModelConfig.from_value(value)
         return self._model_configs[scenario]
 
-    def _apply_stored_training_mode(self, instance: Scenario) -> None:
-        """Select the mode a person stored for the scenario on a newly built instance.
+    def apply_stored_settings(self, instance: Scenario) -> None:
+        """Select the training mode and the activation rule a person stored for the scenario on a newly built
+        instance.
 
         A mode the recipe no longer supports keeps the recipe's default, so the
-        scenario still loads and a person can select another mode. Any other
-        failure closes the instance.
+        scenario still loads and a person can select another mode. A scenario
+        whose rule is ``evaluated`` without ``artifact_evaluation`` loads with a
+        warning: it activates no new artifact. Any other failure closes the
+        instance.
         """
-        training_mode = self._storage.read_settings(instance.name).training_mode
-        if training_mode is None or instance.training_mode == training_mode:
-            return
+        settings = self._storage.read_settings(instance.name)
         try:
-            instance.set_training_mode(training_mode)
-        except NotImplementedError as exc:
-            logger.warning(
-                "Scenario %r keeps its default training mode: the stored mode %r is not supported (%s)",
-                instance.name,
-                training_mode,
-                exc,
-            )
+            if settings.training_mode is not None and instance.training_mode != settings.training_mode:
+                try:
+                    instance.set_training_mode(settings.training_mode)
+                except NotImplementedError as exc:
+                    logger.warning(
+                        "Scenario %r keeps its default training mode: the stored mode %r is not supported (%s)",
+                        instance.name,
+                        settings.training_mode,
+                        exc,
+                    )
+            rule = self.activation_rule(settings)
+            instance.set_activation_rule(rule)
         except BaseException:
             instance.close()
             raise
+        if settings.artifact_evaluation is None and isinstance(rule, EvaluatedActivation):
+            logger.warning(
+                "Scenario %r activates no new artifact: its activation is evaluated, and it has no artifact_evaluation",
+                instance.name,
+            )
 
     def _resolve(
         self,
@@ -455,7 +513,7 @@ class ScenarioRegistry:
             current = self._scenario_factory.load_or_create(
                 scenario, release_id, model_config=self._model_config(scenario)
             )
-            self._apply_stored_training_mode(current)
+            self.apply_stored_settings(current)
         finally:
             with self._lock:
                 self.loading.discard(scenario)

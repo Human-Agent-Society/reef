@@ -32,7 +32,6 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
     new_runtime_load_id_incarnation,
 )
-from reef.runtime.serving import holds_weights
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 
@@ -40,23 +39,21 @@ from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 TINKER_URL = "https://tinker.thinkingmachines.ai"
 
 
-def checkpoint_sampler_path(artifact: Artifact, base_model: str, service: str | None) -> str | None:
-    """The sampler a materialized release names, or None for Reef's empty base tree.
+def checkpoint_sampler_path(artifact: Artifact, base_model: str, service: str | None) -> str:
+    """The sampler that a release's checkpoint manifest names.
 
-    ``ValueError``: the release is not materialized; its manifest names another model or another service than
-    ``service``; or it holds files but no manifest.
+    The base artifact holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
+    ``ValueError``: the release is not materialized; it has no manifest; or its manifest names another model or
+    another service than ``service``.
     """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
-    if (path / MANIFEST).exists():
-        checkpoint = TinkerCheckpoint.read(path)
-        checkpoint.check_compatible(base_model, service=service)
-        return checkpoint.sampler_path
-    # Reef's empty base tree is the base model; an arbitrary uploaded weight directory must not become it.
-    if holds_weights(path):
+    if not (path / MANIFEST).exists():
         raise ValueError(f"artifact is missing {MANIFEST}")
-    return None
+    checkpoint = TinkerCheckpoint.read(path)
+    checkpoint.check_compatible(base_model, service=service)
+    return checkpoint.sampler_path
 
 
 class TinkerInferenceRuntime(InferenceRuntime):

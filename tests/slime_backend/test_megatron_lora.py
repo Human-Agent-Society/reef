@@ -22,6 +22,7 @@ from reef.train.slime_backend.reef_adapters.megatron.lora import (
 from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import (
     export_lora_adapter_tensors,
     save_lora_adapter_to_path,
+    save_untrained_lora_adapter,
 )
 
 
@@ -63,6 +64,32 @@ def test_lora_checkpoint_is_readable_by_peft_without_base_weights(tmp_path) -> N
     from peft.utils.save_and_load import load_peft_weights
 
     assert set(load_peft_weights(output, device="cpu")) == set(saved)
+
+
+def test_the_untrained_adapter_is_zero_and_shaped_as_the_model_and_passes_admission(tmp_path) -> None:
+    transformers = pytest.importorskip("transformers")
+    safetensors = pytest.importorskip("safetensors.torch")
+    from reef.artifact import Artifact, PEFTValidator
+
+    model = tmp_path / "tiny-llama"
+    transformers.LlamaConfig(
+        hidden_size=16, intermediate_size=32, num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2
+    ).save_pretrained(model)
+    output = tmp_path / "release" / "adapter"
+    args = _args(megatron_lora_rank=4, megatron_lora_alpha=8, hf_checkpoint=str(model))
+
+    save_untrained_lora_adapter(args, output)
+
+    saved = safetensors.load_file(output / "adapter_model.safetensors")
+    targets = sglang_lora_target_modules(args)
+    assert len(saved) == 2 * 2 * len(targets)
+    assert all(not tensor.any() for tensor in saved.values())
+    query_a = saved["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"]
+    query_b = saved["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"]
+    assert (tuple(query_a.shape), tuple(query_b.shape)) == ((4, 16), (16, 4))
+    metadata = json.loads((output / "reef-adapter.json").read_text(encoding="utf-8"))
+    assert metadata["source"] == {"rollout_id": None}
+    PEFTValidator(base_model=str(model), require_metadata=True).validate(Artifact.local(output))
 
 
 def test_lora_checkpoint_records_auditable_metadata(tmp_path) -> None:

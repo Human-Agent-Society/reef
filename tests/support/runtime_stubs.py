@@ -6,10 +6,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.artifact import Artifact
+from reef.artifact import Artifact, BaseArtifactSource
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
-from reef.runtime.serving import holds_weights
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.
@@ -66,9 +65,17 @@ class StubTrainingComponent(TrainingComponent):
         if not isinstance(parameters.get("rollout"), Mapping):
             raise ValueError("a task job needs the rollout parameter as an object")
 
-    def import_start(self, release: Path) -> str | None:
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """An empty base: a stub checkpoint is any directory."""
+        return BaseArtifactSource(inputs={"model": self.backend_name})
+
+    @property
+    def base_start(self) -> str:
+        return f"{self.backend_name}:base"
+
+    def import_start(self, release: Path) -> str:
         self.imported.append(release)
-        return str(release) if holds_weights(release) else None
+        return str(release)
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         """The checkpoints that ``job`` saves; raising fails the job."""

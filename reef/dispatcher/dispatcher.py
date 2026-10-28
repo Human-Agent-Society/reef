@@ -31,7 +31,7 @@ from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
-from reef.storage.scenario import ScenarioStorage
+from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
 
 logger = logging.getLogger(__name__)
@@ -437,13 +437,36 @@ class Dispatcher(ScenarioLifecycle):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             yield current
 
-    def set_artifact_evaluation(self, scenario: str, settings: Mapping[str, object] | None) -> None:
-        """Store the settings that Reef evaluates each new artifact of ``scenario`` with; ``None`` stops it."""
-        self.registry.set_artifact_evaluation(scenario, settings)
+    def set_evaluation_and_activation(
+        self, scenario: str, *, artifact_evaluation: Mapping[str, object] | None, activation: object
+    ) -> Mapping[str, object] | None:
+        """Store how Reef evaluates and activates each new artifact of ``scenario``; see
+        :meth:`ScenarioRegistry.set_evaluation_and_activation`."""
+        return self.registry.set_evaluation_and_activation(
+            scenario, artifact_evaluation=artifact_evaluation, activation=activation
+        )
 
-    def artifact_evaluation(self, scenario: str) -> Mapping[str, object] | None:
-        """The stored settings that Reef evaluates each new artifact of ``scenario`` with, or ``None``."""
-        return self.registry.artifact_evaluation(scenario)
+    def stored_settings(self, scenario: str) -> ScenarioSettings:
+        """The settings stored for ``scenario``; defaults when none are stored."""
+        return self.registry.stored_settings(scenario)
+
+    def scenario_settings(self, scenario: str) -> dict[str, Any]:
+        """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
+
+        ``training_mode`` and ``model`` are what the loaded scenario runs. ``artifact_evaluation`` and
+        ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
+        scenario's ``activation``, else the deployment's. Raise ``UnknownScenario`` for an unknown scenario.
+        """
+        with self.locked_scenario(scenario) as current:
+            settings = self.registry.stored_settings(scenario)
+            return {
+                "scenario": scenario,
+                "training_mode": current.training_mode,
+                "model": current.model_config.view(),
+                "artifact_evaluation": settings.artifact_evaluation,
+                "activation": settings.activation,
+                "effective_activation": self.registry.effective_activation(settings),
+            }
 
     def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
         """The scenario's imported tasks in publication order, each with whether it trained."""

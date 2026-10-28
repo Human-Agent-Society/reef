@@ -195,15 +195,16 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
         store=storage.open("math"),
     )
     store = observer.store
-    pending = replace(training_record(), pending=True)
-    rejected = replace(training_record(2), artifact_ref=seed, checkpoint=False, metrics={"selected": False})
+    # The activation rule did not activate the artifact, but the next step trains from it.
+    held = training_record()
+    rejected = replace(training_record(2), checkpoint=False, artifact_ref=seed, metrics={"selected": False})
     try:
-        store.commit_step(expected_step=0, commit=pending)
+        store.commit_step(expected_step=0, commit=held)
         store.commit_step(expected_step=1, commit=rejected)
         observer.reports.flush()
-        assert [event.produced_artifact_ref for event in tracker.events] == [pending.artifact_ref] * 2
+        assert [event.produced_artifact_ref for event in tracker.events] == [held.artifact_ref, held.artifact_ref]
         assert tracker.events[-1].outcome == "rejected"
-        assert tracker.events[-1].context.source_artifact_ref == pending.artifact_ref
+        assert tracker.events[-1].context.source_artifact_ref == held.artifact_ref
     finally:
         store.close()
     inner = storage.open("math")

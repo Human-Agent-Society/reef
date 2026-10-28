@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
@@ -157,7 +157,8 @@ class Trainer:
         if candidate_backend is not None:
             default_state: Mapping[str, Any] = candidate_backend.initial_state()
         elif job_loop is not None:
-            default_state = JobLoopState().to_dict()
+            # A new trainer starts from the untrained checkpoint that the base artifact holds.
+            default_state = JobLoopState(job_loop.component.base_start).to_dict()
         else:
             default_state = {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
@@ -755,12 +756,10 @@ class Trainer:
             state = JobLoopState.from_dict(self._state)
         self._job_loop.cancel(state)
 
-    def start_from(self, artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None) -> None:
+    def start_from(self, artifact: Artifact) -> None:
         """Set the training start to ``artifact``, and cancel the running job.
 
-        ``artifact`` is the trainer's component of a release, materialized.
-        ``entries`` is the harness composition that the commit which made
-        the release recorded, or ``None`` when no commit recorded one. A
+        ``artifact`` is the trainer's component of a release, materialized. A
         weight trainer's next job starts from what its training component
         imports of ``artifact`` (``TrainingComponent.import_start``). A
         harness trainer's next step starts from the state its backend gives
@@ -781,14 +780,14 @@ class Trainer:
         # An import copies weights, which can take minutes: the trainer lock stays free meanwhile.
         try:
             imported = None if job_loop is None else job_loop.component.import_start(tree)
-            started = None if backend is None else backend.started_from(observed_state, artifact, entries)
+            started = None if backend is None else backend.started_from(observed_state, artifact)
         except ValueError as exc:
             raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
         with self._lock:
             if self._pending is not None or self._state is not observed_state:
                 raise CommitPending("a training result reached its commit while the training start was being set")
             # The running job is cancelled only once the new start is sure to apply.
-            if job_loop is not None:
+            if job_loop is not None and imported is not None:
                 self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
             elif started is not None:
                 self._state = dict(started)

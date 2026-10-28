@@ -18,7 +18,8 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
-from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
+from reef.core.activation import MadeArtifact
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
@@ -30,6 +31,7 @@ from reef.storage.commits import (
     CommitRecord,
     RecordProgress,
     active_artifact_ref,
+    active_record,
     scenario_metadata_for,
     to_json_value,
 )
@@ -45,8 +47,9 @@ class ComponentArtifact:
     """One component's artifact, as an activation or a new training start names it, and a release that binds it.
 
     Values: ``component`` is a component the scenario names (``ScenarioCommitter.component_names``).
-    ``artifact_id`` is the artifact's identity: ``release_id`` of the release that made it in a scenario of one
-    component, ``<release_id>:<component>`` in a scenario of several. ``content_id`` is the artifact's content id:
+    ``artifact_id`` is the artifact's identity (``ReleaseComponents.artifact_ids``): ``release_id`` of the release
+    that made it in a scenario of one component, ``<release_id>:<component>`` in a scenario of several; a release
+    that carries the artifact forward, such as the creation, keeps it. ``content_id`` is the artifact's content id:
     the release's own with one component, the component entry's with several. ``release_id`` names a release that
     binds the artifact as ``component``: the active release after an activation, and the release that minted the
     artifact for a new training start. Every field is a non-empty string.
@@ -95,6 +98,8 @@ class ScenarioCommitter:
             raise ValueError("a scenario commits through at least one trainer")
         self._name = name
         self._binding = binding
+        #: Decides whether a training step's artifact serves. It starts as the binding's rule.
+        self.activation_rule = binding.activation_rule
         self._artifacts = artifacts
         self.trainers = trainers
         self._step = scenario_step
@@ -190,6 +195,55 @@ class ScenarioCommitter:
         """
         return record.operation == "training" and record.component == component
 
+    def artifact_status(self) -> dict[str, dict[str, str | None]]:
+        """Each component's active artifact and training start, by ``artifact_id``; ``None`` where none is known.
+
+        The active artifact is the component's artifact in the active
+        release. A trainer's training start is the artifact of its newest
+        ``"train_from"`` record or the newest artifact it made, whichever is
+        later, and the creation's artifact before either. A component whose
+        artifact the records do not name, or that no trainer trains, reads
+        ``None``.
+        """
+        names = self.component_names()
+        queries = self.release_queries
+        records = queries.records()
+        manifests = queries.manifests(self._step)
+        creation = queries.creation_artifact.release_id
+        creation_ids = queries.creation_components(self._step) or {}
+
+        def bound(release_id: str, name: str) -> str | None:
+            """The ``artifact_id`` of ``name`` in the release ``release_id``, as the records name it."""
+            if len(names) > 1:
+                return (manifests.get(release_id) or {}).get(name)
+            return creation_ids.get(name, release_id) if release_id == creation else release_id
+
+        active = active_record(records)
+        active_release = creation if active is None else active.artifact_ref.release_id
+        trainers = {component_trainer.component: component_trainer for component_trainer in self.trainers}
+        status: dict[str, dict[str, str | None]] = {}
+        for name in names:
+            start: str | None = None
+            if name in trainers:
+                on_record = self.component_on_record(name)
+                latest = next(
+                    (
+                        record
+                        for record in reversed(records)
+                        if (record.operation == "train_from" and record.component == on_record)
+                        or (self.own_record(record, on_record) and record.made_artifact)
+                    ),
+                    None,
+                )
+                if latest is None:
+                    start = bound(creation, name)
+                elif latest.operation == "train_from":
+                    start = bound(latest.artifact_ref.release_id, name)
+                else:
+                    start = made_artifact_id(latest.artifact_ref.release_id, name, single=len(names) == 1)
+            status[name] = {"active": bound(active_release, name), "training_start": start}
+        return status
+
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable training commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
@@ -229,11 +283,11 @@ class ScenarioCommitter:
                 f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
             )
 
-    def recorded_components(self, artifact: Artifact) -> dict[str, str] | None:
-        """The content id of each component a release binds, for its commit record; ``None`` for a flat release."""
+    def recorded_components(self, artifact: Artifact, release_id: str) -> dict[str, str] | None:
+        """The ``artifact_id`` of each component that ``artifact``, published as ``release_id``, binds; ``None`` for a flat release."""
         if self._binding.surface.single:
             return None
-        return self.release_manifest(artifact).content_ids
+        return self.release_manifest(artifact).artifact_ids(release_id)
 
     def component_names(self) -> tuple[str, ...]:
         """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
@@ -301,7 +355,7 @@ class ScenarioCommitter:
             surface = self._binding.surface
             current_ref = self._artifacts.current
             served = Artifact(current_ref, self._artifacts.repository)
-            if surface.component_artifact(served, selected.component).ref.content_id == selected.content_id:
+            if surface.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return replace(selected, release_id=current_ref.release_id)
             self.require_no_pending_commit("activate an artifact")
             if surface.single:
@@ -313,7 +367,7 @@ class ScenarioCommitter:
                     self._step + 1, served, selected.component, release.component(selected.component)
                 )
                 manifest = self.release_manifest(staged)
-                # Published beside the chain, as an inactive release is: the chain tip and the backend head stay.
+                # Published beside the chain: the chain tip and the backend head stay.
                 published_ref = self._artifacts.publish(
                     staged,
                     expected_parent=self._artifacts.checkpoint,
@@ -323,7 +377,7 @@ class ScenarioCommitter:
                 target, recorded_component, components = (
                     self._artifacts.resolve(published_ref),
                     selected.component,
-                    manifest.content_ids,
+                    manifest.artifact_ids(published_ref.release_id),
                 )
             surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
@@ -383,11 +437,9 @@ class ScenarioCommitter:
                 self.start_trainer(component_trainer, self._artifacts.resolve(start.artifact_ref))
 
     def start_trainer(self, component_trainer: ComponentTrainer, release: Artifact) -> None:
-        """Start ``component_trainer`` from its component of ``release``, with the entries its commit recorded."""
+        """Start ``component_trainer`` from its component of ``release``."""
         artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
-        component_trainer.trainer.start_from(
-            artifact, self.release_queries.entries_for_version(release.ref.release_id)
-        )
+        component_trainer.trainer.start_from(artifact)
 
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Commit the backend's update of the content this Reef ships, when the active release is stale.
@@ -415,12 +467,13 @@ class ScenarioCommitter:
             if result is None:
                 return None
             publication = result.publication
-            if not isinstance(publication, SavedArtifactPublication) or result.pending or result.state is None:
+            if not isinstance(publication, SavedArtifactPublication) or result.state is None:
                 raise ReefError("a shipped content update must publish durable bytes at once, with its state")
             prepared = replace(
                 trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
             )
-            self.commit_saved_artifact(result, publication, prepared, trainer, component)
+            # The content that this Reef ships replaces the served tree whatever the activation rule says.
+            self.commit_saved_artifact(publication, prepared, trainer, component, activated=True)
             trainer.apply_committed_state(result.state)
             return self._artifacts.current
 
@@ -445,7 +498,11 @@ class ScenarioCommitter:
                 result = self.prepare_experiment(result, trainer, next_step, component)
             with self._publication_lock:
                 prepared = trainer.prepare_commit(result)
-                recorded = self.recorded_retry(prepared, next_step, pending=result.pending, component=component)
+                # The activation rule decides whether the step's artifact serves. The training record keeps the result.
+                activated = not isinstance(result.publication, NoArtifactPublication) and (
+                    self.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
+                )
+                recorded = self.recorded_retry(prepared, next_step, activated=activated, component=component)
                 if recorded is not None:
                     self.finish_recorded_retry(recorded, prepared, trainer)
                     return result.state
@@ -457,7 +514,7 @@ class ScenarioCommitter:
                     self.commit_without_artifact(prepared, trainer, component)
                     return result.state
 
-                self.commit_saved_artifact(result, publication, prepared, trainer, component)
+                self.commit_saved_artifact(publication, prepared, trainer, component, activated=activated)
                 return result.state
 
     def prepare_experiment(
@@ -508,7 +565,6 @@ class ScenarioCommitter:
         return result
 
     def commit_without_artifact(self, prepared: PreparedCommit, trainer: Trainer, component: str | None) -> None:
-        # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
         record = self._append_commit_record(
             step=next_step,
@@ -523,44 +579,55 @@ class ScenarioCommitter:
 
     def commit_saved_artifact(
         self,
-        result: TrainStepResult,
         publication: SavedArtifactPublication,
         prepared: PreparedCommit,
         trainer: Trainer,
         component: str | None,
+        *,
+        activated: bool,
     ) -> None:
+        """Publish a training step's artifact on the chain and record it. When ``activated`` is true, serve it too.
+
+        Every artifact that training makes becomes the chain tip, the parent of the next publication. Only an
+        ``activated`` artifact becomes the active artifact. Any other artifact stays inactive until an activation.
+        """
         artifacts = self._artifacts
         next_step = self._step + 1
         checkpoint = artifacts.checkpoint
         head = artifacts.current
-        pending = result.pending
         durable = self._store.durable
         if publication.component is None:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # A pending release is recorded as an inactive artifact and moves no head.
             # The engine must confirm the new revision before anything moves
             # the active release: the staged bytes load first, and the version
             # minted by publication then aliases them.
-            if not pending:
+            if activated:
                 self._activate(local_artifact)
             published_ref = artifacts.publish(
                 local_artifact,
                 expected_parent=checkpoint,
-                metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
-                advance_heads=not pending and not durable,
+                metadata=self.release_metadata(
+                    local_artifact,
+                    prepared,
+                    next_step,
+                    component=component,
+                    active_artifact=None if activated else head,
+                ),
+                advance_heads=not durable,
+                activate=activated,
             )
-            if not pending:
+            if activated:
                 self._activate(artifacts.resolve(published_ref), source=local_artifact)
             record = self._append_commit_record(
                 step=next_step,
                 artifact_ref=published_ref,
                 checkpoint=True,
                 prepared=prepared,
-                pending=pending,
+                activated=activated,
                 component=component,
-                components=self.recorded_components(local_artifact),
+                components=self.recorded_components(local_artifact, published_ref.release_id),
             )
         except Exception:
             # A lost append acknowledgment can leave a committed local release.
@@ -578,6 +645,7 @@ class ScenarioCommitter:
         scenario_step: int,
         *,
         component: str | None = None,
+        active_artifact: ArtifactRef | None = None,
     ) -> dict[str, Any]:
         """The metadata a committed release carries.
 
@@ -598,6 +666,7 @@ class ScenarioCommitter:
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
             component=self.component_on_record(component),
+            active_artifact=active_artifact,
         )
         return {
             **dict(artifact.metadata),
@@ -606,10 +675,12 @@ class ScenarioCommitter:
         }
 
     def _install_committed_checkpoint(
-        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
     ) -> None:
         """Install the refs already committed in the store, then synchronize artifact storage."""
-        self._artifacts.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+        self._artifacts.install_checkpoint(
+            ref, expected=expected, expected_checkpoint=expected_checkpoint, activate=activate
+        )
         self._refresh_committed_checkpoint()
 
     def _refresh_committed_checkpoint(self) -> None:
@@ -697,16 +768,20 @@ class ScenarioCommitter:
 
         Install heads and settle the trainer before advancing the scenario step.
         Failed completion retries the same record. A step that made no
-        artifact records the active one, and a pending artifact is not
-        activated: neither moves a head.
+        artifact records the active one and moves no head. A made artifact
+        becomes the chain tip. It also becomes the active artifact when the
+        record is ``activated``.
         """
-        if record.made_artifact and not record.pending:
-            if self._artifacts.current == record.artifact_ref:
+        if record.made_artifact:
+            if self._artifacts.checkpoint == record.artifact_ref:
                 if self._store.durable:
                     self._refresh_committed_checkpoint()
             else:
                 self._install_committed_checkpoint(
-                    record.artifact_ref, expected=expected, expected_checkpoint=expected_checkpoint
+                    record.artifact_ref,
+                    expected=expected,
+                    expected_checkpoint=expected_checkpoint,
+                    activate=record.activated,
                 )
         trainer.commit_applied(prepared.algorithm_state)
         trainer.commit(prepared)
@@ -730,7 +805,7 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         next_step: int,
         *,
-        pending: bool = False,
+        activated: bool,
         component: str | None = None,
     ) -> CommitRecord | None:
         """The training record an earlier attempt of this commit left at ``next_step``, or ``None`` when there is none."""
@@ -739,7 +814,7 @@ class ScenarioCommitter:
             return None
         record = records[-1]
         if (
-            record.pending != pending
+            record.activated != activated
             or not self.own_record(record, self.component_on_record(component))
             or not self._record_matches_prepared(record, prepared)
         ):
@@ -792,7 +867,7 @@ class ScenarioCommitter:
         artifact_ref: ArtifactRef,
         checkpoint: bool,
         prepared: PreparedCommit,
-        pending: bool = False,
+        activated: bool = False,
         component: str | None = None,
         components: Mapping[str, str] | None = None,
     ) -> CommitRecord:
@@ -801,7 +876,7 @@ class ScenarioCommitter:
             step=step,
             artifact_ref=artifact_ref,
             checkpoint=checkpoint,
-            pending=pending,
+            activated=activated,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,

@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import ReefError
+from reef.core.components import made_artifact_id
+from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -55,6 +56,10 @@ MAX_RUNNING_EVALUATIONS = 2
 ROLLOUT_CONCURRENCY = 4
 #: The error of an evaluation that was queued or running when the service that held it stopped.
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
+#: How often Reef tries to activate an artifact that passed its evaluation while training results wait to commit,
+#: and the seconds it waits after the first attempt, growing with each.
+ACTIVATION_ATTEMPTS = 5
+ACTIVATION_RETRY_SECONDS = 1.0
 #: The scenario name that an evaluation's model calls carry; the artifact endpoint serves no scenario.
 EVALUATION_SCENARIO = "artifact-evaluation"
 
@@ -84,8 +89,8 @@ class EvaluationRun:
 
 @dataclass(frozen=True)
 class NewArtifact:
-    """An artifact that a commit published: the scenario, the artifact's ID, and the component whose trainer
-    committed it, or None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
+    """An artifact that a commit made: the scenario, the artifact's ID, and the component whose artifact it is, or
+    None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
     evaluates it with the scenario's settings."""
 
     scenario: str
@@ -107,8 +112,16 @@ class NewArtifacts(RecordObserver):
 
     def record_committed(self, commit: CommitRecord) -> None:
         # An activation or a new training start names an artifact that exists already: it reports none.
-        if commit.made_artifact:
+        if not commit.made_artifact:
+            return
+        if commit.components is None:
             self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
+            return
+        # With several components, the release made the artifact of each component that it gave a new artifact_id.
+        release_id = commit.artifact_ref.release_id
+        for name, artifact_id in commit.components.items():
+            if artifact_id == made_artifact_id(release_id, name, single=False):
+                self.queue.put(NewArtifact(commit.scenario, artifact_id, name))
 
     def close(self) -> None:
         self.queue.put(None)
@@ -195,7 +208,7 @@ class ArtifactEvaluations:
 
     def evaluate_new(self, new: NewArtifact) -> StoredEvaluation | None:
         """Queue the evaluation of ``new`` with its scenario's settings; None when the scenario has none."""
-        stored = self.dispatcher.artifact_evaluation(new.scenario)
+        stored = self.dispatcher.stored_settings(new.scenario).artifact_evaluation
         if stored is None:
             return None
         settings = ArtifactEvaluationSettings.from_json(stored)
@@ -216,29 +229,45 @@ class ArtifactEvaluations:
         artifact_id, settings = request_settings(body)
         return self.accept(scenario, artifact_id, settings, state="running")
 
-    def configure(self, scenario: str, value: object) -> Mapping[str, object] | None:
-        """Store the settings ``value`` that Reef evaluates each new artifact of ``scenario`` with, and return them
-        as stored; None stops the automatic evaluations.
+    def configure(self, scenario: str, changes: Mapping[str, object]) -> dict[str, object]:
+        """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed
+        setting as stored.
 
-        The settings are checked against the scenario's current artifact as a client's request would be, except
-        that the eval tasks may still be missing. Raise ``ValueError`` or ``ReefError`` for settings that the
-        scenario cannot run.
+        ``changes`` holds ``artifact_evaluation``, ``activation``, or both:
+
+        - ``artifact_evaluation`` is the settings that Reef evaluates each new artifact with, or None to evaluate
+          none. Reef checks them against the scenario's active artifact, as it checks a client's request. The eval
+          tasks can still be missing.
+        - ``activation`` is the scenario's own built-in activation rule, or None to follow the deployment's rule.
+
+        A setting that ``changes`` leaves out keeps its stored value. Reef checks the two settings together, and
+        stores both or neither (``Dispatcher.set_evaluation_and_activation``). Raise ``ValueError`` or
+        ``ReefError`` for settings that the scenario cannot run.
         """
-        if value is None:
-            self.dispatcher.set_artifact_evaluation(scenario, None)
-            return None
-        settings = ArtifactEvaluationSettings.from_json(value)
         with self.dispatcher.locked_scenario(scenario) as current:
-            self.checked(current, current.current_artifact_ref().release_id, settings)
-        stored = settings.to_json()
-        self.dispatcher.set_artifact_evaluation(scenario, stored)
-        return stored
+            stored = self.dispatcher.stored_settings(scenario)
+            artifact_evaluation = stored.artifact_evaluation
+            value = changes.get("artifact_evaluation")
+            if value is not None:
+                settings = ArtifactEvaluationSettings.from_json(value)
+                self.checked(current, None, settings)
+                artifact_evaluation = settings.to_json()
+            elif "artifact_evaluation" in changes:
+                artifact_evaluation = None
+            activation = self.dispatcher.set_evaluation_and_activation(
+                scenario,
+                artifact_evaluation=artifact_evaluation,
+                activation=changes.get("activation", stored.activation),
+            )
+        changed = {"artifact_evaluation": artifact_evaluation, "activation": activation}
+        return {key: changed[key] for key in changed if key in changes}
 
     def checked(
-        self, current: Scenario, artifact_id: str, settings: ArtifactEvaluationSettings
+        self, current: Scenario, artifact_id: str | None, settings: ArtifactEvaluationSettings
     ) -> tuple[ArtifactEvaluationRequest, Artifact, PolicyModel]:
-        """The request of ``settings`` for ``artifact_id``, the materialized artifact, and the model that the
-        runtime serves for it; ``ValueError`` or ``ReefError`` when ``current`` cannot run it."""
+        """The request of ``settings`` for ``artifact_id`` (None: the component's active artifact), the materialized
+        artifact, and the model that the runtime serves for it; ``ValueError`` or ``ReefError`` when ``current``
+        cannot run it."""
         kinds = {name: component.kind for name, component in current.surface.components.items()}
         component = settings.component
         if component is None:
@@ -248,6 +277,9 @@ class ArtifactEvaluations:
             component = named[0]
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
+        if artifact_id is None:
+            active = Artifact(current.current_artifact_ref(), current.repository)
+            artifact_id = current.surface.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind == "harness_plugin":
@@ -258,7 +290,8 @@ class ArtifactEvaluations:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
         if any(other == "harness_plugin" for other in kinds.values()):
             raise ReefError("Reef evaluates a model artifact only in a scenario whose artifacts hold no harness")
-        artifact = current.release_queries.artifact_for_version(artifact_id).materialize()
+        _, release = current.resolve_artifact(artifact_id, component)
+        artifact = release.materialize()
         runtime = current.runtime
         model = None if runtime is None else runtime.artifact_model(artifact)
         if model is None:
@@ -383,12 +416,15 @@ class ArtifactEvaluations:
             self.launch_waiting()
 
     def end(self, run: EvaluationRun, *, result: PolicyEvaluation | None, error: str | None) -> None:
-        """Store the end of ``run``: its ``result``, or its ``error`` when ``result`` is None."""
+        """Store the end of ``run``: its ``result``, or its ``error`` when ``result`` is None. A finished run
+        activates its artifact when the scenario's activation rule says so (``activates_evaluated``)."""
+        activates = False
         try:
             with self.dispatcher.locked_scenario(run.scenario) as current:
                 evaluations = current.store.evaluations
                 if result is not None:
                     evaluations.finish(run.evaluation_id, result=result, finished_at=time.time())
+                    activates = current.activation_rule.activates_evaluated(run.request.artifact_id, result)
                 else:
                     evaluations.fail(
                         run.evaluation_id, error=error or "the evaluation failed", finished_at=time.time()
@@ -396,6 +432,26 @@ class ArtifactEvaluations:
         except (ReefError, ValueError) as exc:
             # The scenario was deleted, or the evaluation ended already: nothing is left to record it in.
             logger.warning("could not store the end of evaluation %s: %s", run.evaluation_id, exc)
+            return
+        if activates:
+            self.activate(run)
+
+    def activate(self, run: EvaluationRun) -> None:
+        """Activate the artifact of ``run``, waiting while a training result waits for its commit."""
+        for attempt in range(ACTIVATION_ATTEMPTS):
+            try:
+                self.dispatcher.activate(run.scenario, run.request.artifact_id, run.request.component)
+                return
+            except CommitPending:
+                time.sleep(ACTIVATION_RETRY_SECONDS * (attempt + 1))
+            except (ReefError, ValueError) as exc:
+                logger.warning("could not activate artifact %s of %s: %s", run.request.artifact_id, run.scenario, exc)
+                return
+        logger.warning(
+            "artifact %s of %s passed its evaluation but stayed inactive: training kept committing",
+            run.request.artifact_id,
+            run.scenario,
+        )
 
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None; one that another service left is failed."""

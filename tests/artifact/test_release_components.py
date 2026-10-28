@@ -15,9 +15,11 @@ from reef.artifact import Artifact, ArtifactNotFound, ArtifactPublicationError, 
 from reef.artifact.artifact import ArtifactRef, ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import RequestType
+from reef.core.activation import ActivationRule
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, release_components
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import AlwaysActivate
 from reef.recipe.base import Recipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
@@ -40,6 +42,8 @@ from reef.train.types import TrainStepResult
 
 WEIGHTS = "weights"
 HARNESS = "harness"
+#: The changed kinds of a step held for review: the test recipe's activation rule does not activate it.
+HELD = frozenset({"held"})
 
 
 def _tree(root: Path, files: Mapping[str, str]) -> Path:
@@ -265,6 +269,9 @@ class _TwoComponentRecipe(Recipe):
 
     activator = _RecordingActivator()
 
+    def activation_rule(self) -> ActivationRule:
+        return AlwaysActivate(HELD)
+
     def build_surface(self, scenario: str) -> Surface:
         return Surface(
             components={
@@ -409,8 +416,15 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert activator.activated[served_before:] == []
         assert service.harness_head(headers) == after_harness.ref.release_id
 
-        # Activating the base's weights loads them and keeps the served harness; the chain tip stays.
-        scenario.activate(f"{base.ref.release_id}:{WEIGHTS}", WEIGHTS)
+        # Activating the base's weights loads them and keeps the served harness; the chain tip stays. The creation
+        # carried the base artifact forward, so its artifact_id is the base release's.
+        base_weights_id = base.components.artifact_ids(base.ref.release_id)[WEIGHTS]
+        assert base_weights_id == f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}"
+        trained_weights = scenario.artifact_status()[WEIGHTS]["training_start"]
+        scenario.activate(base_weights_id, WEIGHTS)
+        # The activation moves the weights' active artifact; their training start stays on the trained weights.
+        assert scenario.artifact_status()[WEIGHTS] == {"active": base_weights_id, "training_start": trained_weights}
+        assert trained_weights != base_weights_id
         served = scenario.repository.materialize(scenario.current_artifact_ref())
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == base_weights
@@ -421,12 +435,15 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         # A harness step held for review is made on the chain tip; activating its harness binds it to the weights
         # served now.
         held = Artifact.local(_tree(tmp_path / "h3", {"AGENTS.md": "held"}))
-        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
+        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
         assert surface.files.read_files(scenario.repository.materialize(scenario.current_artifact_ref())) == {
             "AGENTS.md": "evolved"
         }
-        held_ref = scenario.store.history()[-1].artifact_ref
+        held_record = scenario.store.history()[-1]
+        held_ref = held_record.artifact_ref
         assert held_ref.parent_release_id == tip.release_id
+        # The held artifact is the chain tip, the parent of the next publication, but does not serve.
+        assert scenario.repository.checkpoint_artifact == held_ref and not held_record.activated
         scenario.activate(f"{held_ref.release_id}:{HARNESS}", HARNESS)
         served = scenario.repository.materialize(scenario.current_artifact_ref())
         assert served.components is not None
@@ -438,7 +455,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         held_weights = Artifact.local(
             _tree(tmp_path / "w3", {"adapter_config.json": '{"r": 32}'}), metadata={"runtime_load_id": "inc:3"}
         )
-        scenario.commit(TrainStepResult(state={}, artifact=held_weights, component=WEIGHTS, pending=True))
+        scenario.commit(TrainStepResult(state={}, artifact=held_weights, component=WEIGHTS, changed_kinds=HELD))
         held_weights_release = scenario.store.history()[-1].artifact_ref.release_id
         newest = Artifact.local(_tree(tmp_path / "h4", {"AGENTS.md": "newest"}))
         scenario.commit(TrainStepResult(state={}, artifact=newest, component=HARNESS))
@@ -481,7 +498,7 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         assert surface.files is not None
         creation = scenario.repository.materialize(scenario.current_artifact_ref())
         held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
-        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
+        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
         held_release = scenario.store.history()[-1].artifact_ref.release_id
         later = Artifact.local(
             _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
@@ -553,7 +570,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
-        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
+        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
         held_release = scenario.store.history()[-1].artifact_ref.release_id
         served = scenario.current_artifact_ref()
         before = {path for path in staged_root.rglob("*") if path.is_dir()}

@@ -208,7 +208,7 @@ def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
         tasks = (harbor_task(tmp_path / "a", "add"), harbor_task(tmp_path / "b", "add"))
         parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
         with pytest.raises(ValueError, match="distinct names"):
-            component.submit(TrainingJob("job-0", "tinker", None, JobData("d", tasks), parameters))
+            component.submit(TrainingJob("job-0", "tinker", component.base_start, JobData("d", tasks), parameters))
     finally:
         component.close()
 
@@ -230,7 +230,9 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
     )
     try:
         parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
-        job = TrainingJob("job-0", "tinker", None, JobData("d", (harbor_task(tmp_path, "add"),)), parameters)
+        job = TrainingJob(
+            "job-0", "tinker", component.base_start, JobData("d", (harbor_task(tmp_path, "add"),)), parameters
+        )
         component.submit(job)
         status = finished(component, "job-0")
         assert status.state == "finished" and len(status.checkpoints) == 1
@@ -259,7 +261,9 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     try:
         with pytest.raises(ValueError, match="no sampler"):
             without_sampler.submit(
-                TrainingJob("j", "tinker", None, JobData("d", (task,)), {**method, "rollout": ROLLOUT})
+                TrainingJob(
+                    "j", "tinker", without_sampler.base_start, JobData("d", (task,)), {**method, "rollout": ROLLOUT}
+                )
             )
     finally:
         without_sampler.close()
@@ -273,6 +277,6 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
             ((trajectory,), {**method, "rollout": ROLLOUT}, "applies only to a job of tasks"),
         ):
             with pytest.raises(ValueError, match=message):
-                component.submit(TrainingJob("j", "tinker", None, JobData("d", items), parameters))
+                component.submit(TrainingJob("j", "tinker", component.base_start, JobData("d", items), parameters))
     finally:
         component.close()

@@ -77,9 +77,9 @@ full elsewhere:
      - `Write a recipe <../developer-guide/write-a-recipe.rst>`__
    * - Record eligibility
      - `Training pipeline <../developer-guide/processors.rst>`__
-   * - Evaluation
-     - `Evaluate a candidate
-       <../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__
+   * - Activation
+     - `Activate an artifact
+       <../developer-guide/write-a-recipe.rst#activate-an-artifact>`__
    * - Release lifecycle
      - `The release chain
        <../advanced_topics/state-model.rst#the-release-chain>`__

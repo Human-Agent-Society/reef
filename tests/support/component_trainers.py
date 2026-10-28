@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,9 +14,10 @@ from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingCompon
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
+from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
+from reef.evaluation.activation import AlwaysActivate
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
@@ -52,9 +53,7 @@ class _ComponentBackend(CandidateBackend):
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0}
 
-    def started_from(
-        self, state: Mapping[str, Any], artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None
-    ) -> Mapping[str, Any]:
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
         """The state whose next step starts from ``artifact``: it records the file the artifact holds."""
         assert artifact.local_path is not None
         return {**state, "start": (artifact.local_path / f"{self.component}.txt").read_text(encoding="utf-8")}
@@ -70,8 +69,12 @@ class _ComponentBackend(CandidateBackend):
         path = self.artifact_dir / self.component / uuid.uuid4().hex
         path.mkdir(parents=True)
         (path / f"{self.component}.txt").write_text(f"{self.component} step {step}", encoding="utf-8")
+        # A held artifact changes the HELD kind, which the test recipe's activation rule reviews.
         self.result = TrainStepResult(
-            {"steps": step}, metrics={"prepared": self.prepared}, artifact=Artifact.local(path), pending=self.hold_next
+            {"steps": step},
+            metrics={"prepared": self.prepared},
+            artifact=Artifact.local(path),
+            changed_kinds=frozenset({HELD}) if self.hold_next else frozenset(),
         )
         self.hold_next = False
         return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
@@ -139,12 +142,19 @@ class HybridThresholdJobData(ThresholdJobData):
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
 
+#: The node kind of a held artifact: the test recipe's activation rule does not activate it.
+HELD = "held"
+
+
 @dataclass(frozen=True)
 class _TwoTrainerRecipe(Recipe):
     """A scenario serving weights and a harness tree, each evolved by its own local backend."""
 
     backends: Mapping[str, CandidateBackend]
     hybrid_components: frozenset[str] = frozenset()
+
+    def activation_rule(self) -> ActivationRule:
+        return AlwaysActivate(frozenset({HELD}))
 
     def build_surface(self, scenario: str) -> Surface:
         return Surface(
@@ -196,7 +206,6 @@ class _TwoTrainerRecipe(Recipe):
             job_loop=JobLoop(
                 training,
                 FixedJobPlan(JobRequest()),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_states.get(WEIGHTS),

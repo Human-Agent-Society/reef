@@ -18,12 +18,11 @@ weights or the harness*. This package holds everything a method binds to:
   for one setting (YAML key, env fallback, shared typed parser).
 - ``config`` — recipe-config YAML loading; ``errors`` — the error family.
 
-Candidate evaluation is part of this contract, not a separate subsystem:
-every ``Recipe`` carries ``candidate_evaluation``, built from the top-level
-``evaluation`` section of its config, and the trainer runs it between
-prepare and settle. Shared candidate contracts live in ``reef.core.evaluation``; built-in policies
-and configuration live in ``reef.evaluation``. The recipe chooses and
-configures the policy.
+The activation rule is part of this contract, not a separate subsystem:
+every ``Recipe`` carries ``activation``, built from the top-level
+``activation`` section of its config, and the scenario asks it whether an
+artifact that training makes serves. The contract lives in
+``reef.core.activation``; the built-in rules live in ``reef.evaluation``.
 
 Reefine and supervised fine-tuning (``sft``) are bundled; other learning
 methods live outside the core package. The repository's sibling

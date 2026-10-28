@@ -207,8 +207,8 @@ class CommitHistoryScenarioStore(ScenarioStore):
             if checkpoint is not None:
                 if checkpoint.scenario != self._scenario:
                     raise ReefError(f"checkpoint belongs to scenario {checkpoint.scenario!r}, not {self._scenario!r}")
-                if not checkpoint.checkpoint or checkpoint.pending:
-                    raise ReefError("recovery requires an activated checkpoint commit")
+                if not checkpoint.checkpoint:
+                    raise ReefError("recovery requires a checkpoint commit")
             checkpoint_step = 0 if checkpoint is None else checkpoint.step
             records = self._history()
             history_label = self._commit_history.label

@@ -13,7 +13,7 @@ tests/core/test_plugins.py
 tests/core/test_policy_tensors.py
 tests/core/test_reef_core_package.py
 tests/core/test_task_split.py
-tests/evaluation/test_candidate_evaluation_plugins.py
+tests/evaluation/test_activation_rules.py
 tests/evaluation/test_evaluation_worker_pool.py
 tests/evaluation/test_regression_gate.py
 tests/evaluation/test_selection.py

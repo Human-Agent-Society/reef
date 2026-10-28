@@ -47,19 +47,13 @@ from reef.harness.tree.mutations import (
     admit_mutations,
     nodes_from_entries,
 )
-from reef.harness.tree.nodes import (
-    ALWAYS_REVIEWED_KINDS,
-    NODE_KINDS,
-    RESERVED_ENTRY_IDS,
-    clip_record_text,
-    directive_shaped,
-    secret_shaped,
-)
+from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_text, directive_shaped, secret_shaped
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.storage.tasks import TaskStore
+from reef.surface.files import entries_file, read_entries
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.manifest import FailureManifest, advance
@@ -394,8 +388,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         promote: Promoter | None = None,
         recheck_every: int = 0,
         max_rejected_history: int = 25,
-        publish: str = "auto",
-        review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         proposals_dir: str | Path | None = None,
         max_pending_proposals: int = 8,
@@ -464,10 +456,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._promote_task = promote
         self._recheck_every = recheck_every
         self._max_rejected_history = max_rejected_history
-        if publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
-        self._publish = publish
-        self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
         # Selected compositions render into temporary source trees before the
         # scenario committer copies them into repository-owned storage.
@@ -616,6 +604,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         published = {
             **render_composition(nodes_from_entries(entries), self._descriptor),
             **tree_files(self._descriptor, entries),
+            **entries_file(entries),
         }
         artifact = Artifact.local(_write_rendered_files(published))
         # commit_applied discards the rendered directory once the commit is durable, as it does a step's.
@@ -629,29 +618,16 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
         )
 
-    def started_from(
-        self, state: Mapping[str, Any], artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None
-    ) -> Mapping[str, Any]:
-        """The state whose next step evolves ``entries``, the composition the commit that made ``artifact`` recorded.
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step evolves the entries that ``artifact`` holds (``read_entries``).
 
-        Only the creation artifact has no such commit (``entries`` is
-        ``None``); its tree carries its entries list at the adapter's
-        ``files.tree`` path (``tree_files``), when the adapter declares one.
         The recheck target belongs to the old start, so it is dropped. Raise
-        ``ValueError`` when there are no entries to start from, or when they
-        do not pass the admission a proposal meets.
+        ``ValueError`` when the artifact holds no entries, or when they do not
+        pass the admission a proposal meets.
         """
-        if entries is None:
-            tree_path = self._descriptor.tree_path
-            if tree_path is None or artifact.local_path is None or not (artifact.local_path / tree_path).is_file():
-                raise ValueError(f"release {artifact.ref.release_id!r} records no harness entries to start from")
-            try:
-                listed = json.loads((artifact.local_path / tree_path).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ValueError(f"the entries list at {tree_path} cannot be read: {exc}") from exc
-            if not isinstance(listed, list) or not all(isinstance(entry, Mapping) for entry in listed):
-                raise ValueError(f"the entries list at {tree_path} is not a list of objects")
-            entries = listed
+        if artifact.local_path is None:
+            raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
+        entries = read_entries(artifact.local_path)
         admitted, refusal = admit_mutations(entries, (), self._descriptor)
         if refusal is not None:
             raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
@@ -1056,19 +1032,20 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # The loader writes live changes into the rows it holds, config included; the returned state shares none.
             self._loader.root.update([copy.deepcopy(entry) for entry in entries])
             # The published tree carries its entries list too, so a resident process can mount it entry by entry.
-            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries)}
+            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries), **entries_file(entries)}
             artifact = Artifact.local(_write_rendered_files(published))
             step = int(state["steps"])
             replaced = self._rendered_publications.get(step)
             if replaced is not None:
                 replaced.discard()
             self._rendered_publications[step] = artifact
-            # Under review, or when a reviewed kind is touched, the release waits for an activation; loop code is
-            # reviewed whether or not the deployment listed it.
-            pending = self._publish == "review" or bool(
-                (self._review_kinds | ALWAYS_REVIEWED_KINDS) & self._mutation_kinds(candidate)
+            # The scenario's activation rule decides whether the kept tree serves, from the kinds it changes.
+            return TrainStepResult(
+                {**state, "entries": entries},
+                metrics,
+                artifact=artifact,
+                changed_kinds=frozenset(self._mutation_kinds(candidate)),
             )
-            return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])

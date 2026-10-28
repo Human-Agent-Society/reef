@@ -13,7 +13,9 @@ and its selection policy into the candidate evaluator executed by ``Trainer``.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.model_metadata import ModelMetadata
@@ -34,6 +37,7 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.rollouts.requests import request_entries
 from reef.harness.rollouts.version_check import version_check_entry
+from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -47,6 +51,7 @@ from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
+from reef.surface.files import entries_file
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
 from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
@@ -281,8 +286,6 @@ class CordisRecipe(Recipe):
     max_rejected_history: int = 25
     min_win_margin: int = 0
     floor_score: float = 1.0
-    publish: str = "auto"
-    review_kinds: tuple[str, ...] = ()
     #: Models an installed client may switch to besides the served one, rendered into its config.
     client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
@@ -349,8 +352,6 @@ class CordisRecipe(Recipe):
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
         if self.floor_score <= 0:
             raise ValueError("floor_score must be positive")
-        if self.publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
         if not isinstance(self.selection, PluginReference) or not issubclass(
             self.selection.plugin_class, SelectionPlugin
         ):
@@ -485,14 +486,12 @@ class CordisRecipe(Recipe):
         # A recheck compares two trees; the floor evaluates one.
         if selection_setting == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
-        publish = evolution.get("publish", "auto")
-        if publish not in ("auto", "review"):
-            raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
-        review_kinds = evolution.get("review_kinds", ())
-        if isinstance(review_kinds, str) or not isinstance(review_kinds, Sequence):
-            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
-        if not all(isinstance(kind, str) and kind for kind in review_kinds):
-            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
+        for moved in ("publish", "review_kinds"):
+            if moved in evolution:
+                raise RecipeConfigError(
+                    f"evolution.{moved} is gone: the activation section decides whether a kept tree serves "
+                    "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
+                )
         client_models = evolution.get("client_models", ())
         if isinstance(client_models, str) or not isinstance(client_models, Sequence):
             raise RecipeConfigError("evolution.client_models must be a list of model names")
@@ -591,8 +590,6 @@ class CordisRecipe(Recipe):
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
             "max_promoted_per_client": per_client,
-            "publish": publish,
-            "review_kinds": tuple(review_kinds),
             "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
@@ -670,7 +667,6 @@ class CordisRecipe(Recipe):
         else:
             served_metadata = None
         return create_harness_surface(
-            seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             model_metadata=self.model_metadata,
@@ -678,13 +674,27 @@ class CordisRecipe(Recipe):
             client_models=client_models,
         )
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The seed rendered for the adapter, with its entries list where the adapter carries one: a fresh scenario serves it before any step publishes."""
-        if not self.seed:
-            return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The seed as the base harness, which a new scenario serves before any step publishes.
+
+        The files are the seed rendered for the adapter, with the entries list
+        where the adapter keeps one, and the entries in ``ENTRIES_FILE``, as
+        every harness artifact holds them. Without a seed, the base harness
+        holds only the empty entries list. The input is the
+        checksum of the seed without Reef's own entries
+        (``RESERVED_ENTRY_IDS``). Each Reef version ships its own copy of
+        those entries, and a step publishes the new copy
+        (``CordisBackend.shipped_content_update``). Thus a Reef upgrade keeps
+        the base.
+        """
+        configured = [dict(entry) for entry in self.seed if entry.get("id") not in RESERVED_ENTRY_IDS]
         descriptor = get_adapter(self.adapter)
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
-        return {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)}
+        rendered = {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)} if self.seed else {}
+        return BaseArtifactSource(
+            files={**rendered, **entries_file(self.seed)},
+            inputs={"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()},
+        )
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's proposal inbox and its step records: what a delete archives beside the record store."""
@@ -755,8 +765,6 @@ class CordisRecipe(Recipe):
             "promote": self.promote,
             "recheck_every": self.recheck_every,
             "max_rejected_history": self.max_rejected_history,
-            "publish": self.publish,
-            "review_kinds": self.review_kinds,
             "seed": self.seed,
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,

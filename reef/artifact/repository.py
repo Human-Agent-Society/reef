@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import shutil
 import tempfile
 import uuid
@@ -8,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from time import monotonic
 from typing import Any, Self
@@ -22,6 +24,7 @@ from reef.artifact.artifact import (
     ArtifactRepository,
 )
 from reef.artifact.composite import compose_release
+from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 
 
@@ -29,7 +32,12 @@ class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
 
     @abstractmethod
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef: ...
+    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
+        """The release ``release_id`` names: a release ID, ``"base"`` for the repository's base artifact, or
+        ``"head"`` (also ``None``) for the newest release published in the repository.
+
+        Raise ``ArtifactNotFound`` for a release the repository does not hold.
+        """
 
     @abstractmethod
     def fork(
@@ -93,20 +101,62 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
 
 
 @dataclass(frozen=True)
+class BaseArtifactSource:
+    """The content of a repository's base artifact, and the configuration that the content comes from.
+
+    Values:
+
+    - ``files`` maps relative POSIX paths inside the release to the text of each file.
+    - ``model_directory`` is a directory of model files, or ``None``.
+    - ``model_component`` is the component directory that the model files go into. ``None`` is the release root.
+      It is ``None`` when ``model_directory`` is ``None``.
+    - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
+      configured model and the checksum of the configured seed.
+
+    Purpose: a recipe makes the value (``Recipe.base_artifact_source``). A repository backend imports it as the
+    base artifact of a repository that has none. A repository that has a base opens only when its base came from
+    equal ``inputs``. Thus Reef reads the configuration once, to make the base.
+    """
+
+    files: Mapping[str, str] = field(default_factory=dict)
+    model_directory: Path | None = None
+    model_component: str | None = None
+    inputs: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for relative in self.files:
+            path = PurePosixPath(relative)
+            if not relative or path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"base artifact file {relative!r} must be a relative path inside the release")
+        if self.model_directory is None and self.model_component is not None:
+            raise ValueError("model_component names where model files go, so it requires model_directory")
+        if self.model_directory is not None and not self.model_directory.is_dir():
+            raise ValueError(f"model directory {self.model_directory} does not exist")
+        if self.model_component is not None:
+            validate_component_name(self.model_component)
+        for name, value in self.inputs.items():
+            if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
+                raise ValueError(f"base artifact input {name!r} must map a non-empty name to a non-empty string")
+
+    @property
+    def content_id(self) -> str:
+        """The content ID of the base artifact that this source makes. Equal ``inputs`` give equal content IDs."""
+        digest = hashlib.sha256(json.dumps(dict(self.inputs), sort_keys=True).encode()).hexdigest()
+        return f"content:{digest}"
+
+
+@dataclass(frozen=True)
 class RepositoryBackendContext:
     """The deployment values that a configured factory gets in addition to its own config.
 
     ``work_dir`` and ``cache_dir`` are ``storage.artifact_work_dir`` and
-    ``storage.artifact_cache_dir``. ``bootstrap_files`` are the files of the
-    recipe's base artifact. A new scenario starts from them.
-    ``bootstrap_component`` is the release component of a bootstrap model
-    snapshot, or ``None`` for the release root.
+    ``storage.artifact_cache_dir``. ``base`` is the content of the recipe's
+    base artifact; every new scenario starts from it.
     """
 
     work_dir: Path
     cache_dir: Path
-    bootstrap_files: Mapping[str, str] = field(default_factory=dict)
-    bootstrap_component: str | None = None
+    base: BaseArtifactSource = field(default_factory=BaseArtifactSource)
 
 
 class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
@@ -289,12 +339,16 @@ class Repository(ArtifactRepository):
                 )
             self._current_artifact = ref
 
-    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        """Install already-committed serving and checkpoint refs without storage I/O."""
+    def install_checkpoint(
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
+    ) -> None:
+        """Install an already-committed release as the checkpoint, the chain tip, without storage I/O. When
+        ``activate`` is true, also make it the active artifact (``current``)."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
                 raise ArtifactConflict("repository heads changed before the committed release was installed")
-            self._current_artifact = ref
+            if activate:
+                self._current_artifact = ref
             self._checkpoint_artifact = ref
 
     def synchronize_checkpoint(self) -> None:
@@ -380,14 +434,15 @@ class Repository(ArtifactRepository):
         expected_parent: ArtifactRef,
         metadata: Mapping[str, object] | None = None,
         advance_heads: bool = True,
+        activate: bool = True,
     ) -> ArtifactRef:
         """Publish ``artifact`` as the next release.
 
-        ``advance_heads`` is plural because it covers both heads this
-        repository owns, its current and checkpoint refs, along with the one
+        ``advance_heads`` moves the chain tip, the checkpoint ref, and the one
         storage head the backend owns (``RepositoryBackend.publish``'s
-        ``advance_head``). ``False`` mints a pending release that no head
-        moves to.
+        ``advance_head``); ``activate`` then also makes the release the active
+        artifact (``current``). ``advance_heads=False`` mints a release beside
+        the chain that no head moves to.
         """
         ref = self._backend.publish(
             (
@@ -405,7 +460,8 @@ class Repository(ArtifactRepository):
         )
         if advance_heads:
             with self._head_lock:
-                self._current_artifact = ref
+                if activate:
+                    self._current_artifact = ref
                 self._checkpoint_artifact = ref
         self.discard(artifact)
         return ref

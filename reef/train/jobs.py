@@ -3,14 +3,12 @@
 A weight trainer does not drive training steps. When a job's data is ready, the
 recipe's ``JobPlan`` gives the job's parameters, and the ``JobLoop`` submits
 the job to the trainer's ``TrainingComponent``. The trainer commits the
-submission, which consumes the records of the job's data. While the job runs, each
-checkpoint it saves becomes a ``CheckpointCandidate``: candidate evaluation
-decides whether Reef activates it, and the trainer commits the decision. Every
-checkpoint becomes a release (an artifact): a selected one is activated, and
-any other stays an inactive artifact until a person activates it. The training component
-only trains; it evaluates no artifact. When the job ends, the trainer commits
-its outcome. Training is linear: the next job
-starts from the job's last saved checkpoint, whatever evaluation decided.
+submission, which consumes the records of the job's data. While the job runs, the
+trainer commits each checkpoint that it saves as an artifact. Training never
+activates an artifact: the scenario's activation rule decides whether it
+serves. The training component only trains; it evaluates no artifact. When the
+job ends, the trainer commits its outcome. Training is linear: the next job
+starts from the job's last saved checkpoint, whether or not it serves.
 """
 
 from __future__ import annotations
@@ -23,13 +21,12 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluationPlugin, CheckpointCandidate
 from reef.core.job_data import JobData, JobOutcome
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainStepResult
 
-#: The keys of a checkpoint decision's commit metrics that the job loop writes itself.
-DECISION_KEYS = frozenset({"selected", "selection", "training_job"})
+#: The key of a checkpoint commit's metrics that the job loop writes itself.
+TRAINING_JOB_KEY = "training_job"
 
 
 def require_count(value: object, name: str) -> None:
@@ -150,7 +147,7 @@ class JobLoopState:
     """The state a weight trainer commits: where the next job starts, the running job, and the jobs that ended.
 
     ``start`` is the start of the next job as the training component reads
-    it (a non-empty string), or ``None`` for the base model. ``job`` is the
+    it, a non-empty string; a new trainer starts at ``TrainingComponent.base_start``. ``job`` is the
     running job, or ``None``. ``finished_jobs`` is the number of jobs that
     ended, finished or failed, a non-negative int. ``last_job`` is the outcome
     of the last of them, and it is ``None`` exactly when ``finished_jobs`` is
@@ -158,14 +155,14 @@ class JobLoopState:
     reads it back.
     """
 
-    start: str | None = None
+    start: str
     job: RunningJob | None = None
     finished_jobs: int = 0
     last_job: JobOutcome | None = None
 
     def __post_init__(self) -> None:
-        if self.start is not None and (not isinstance(self.start, str) or not self.start):
-            raise ValueError("JobLoopState.start must be a non-empty string or None")
+        if not isinstance(self.start, str) or not self.start:
+            raise ValueError("JobLoopState.start must be a non-empty string")
         if self.job is not None and not isinstance(self.job, RunningJob):
             raise TypeError("JobLoopState.job must be a RunningJob or None")
         require_count(self.finished_jobs, "JobLoopState.finished_jobs")
@@ -189,13 +186,7 @@ class JobLoopState:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> JobLoopState:
-        """Read ``to_dict``'s object; an empty mapping is the state of a trainer that has committed nothing.
-
-        ``ValueError`` for any other key set or a malformed value: a state that cannot be read must not be
-        taken for an untrained scenario.
-        """
-        if not value:
-            return cls()
+        """Read ``to_dict``'s object; ``ValueError`` for any other key set or a malformed value."""
         keys = {"start", "job", "finished_jobs", "last_job"}
         if set(value) != keys:
             raise ValueError(f"a job loop state has the keys {sorted(keys)}, not {sorted(value)}")
@@ -216,8 +207,8 @@ class JobCommit:
 
     Values: ``result`` is the ``TrainStepResult`` whose ``state`` is the next ``JobLoopState`` as a dict.
     ``ended`` is the outcome of the job whose end the commit records, which is that state's ``last_job``, or
-    None for a commit that submits a job or decides one of its checkpoints. Purpose: ``JobLoop.submit``,
-    ``poll``, ``decide`` and ``end`` make it; the trainer commits ``result`` and, once the commit is durable,
+    None for a commit that submits a job or publishes one of its checkpoints. Purpose: ``JobLoop.submit``,
+    ``poll``, ``publish`` and ``end`` make it; the trainer commits ``result`` and, once the commit is durable,
     gives ``ended`` to its training pipeline.
     """
 
@@ -232,9 +223,9 @@ class JobCommit:
 class JobLoop:
     """Submit a weight trainer's jobs to its training component, and turn their checkpoints into commits.
 
-    ``component`` runs the jobs; ``plan`` gives their parameters;
-    ``evaluator`` decides which checkpoints Reef serves; ``scenario`` is the non-empty name of the trainer's scenario, which is part
-    of each job's identity, so two scenarios never share a job. ``submit`` and
+    ``component`` runs the jobs; ``plan`` gives their parameters; ``scenario``
+    is the non-empty name of the trainer's scenario, which is part of each
+    job's identity, so two scenarios never share a job. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
@@ -242,7 +233,6 @@ class JobLoop:
         self,
         component: TrainingComponent,
         plan: JobPlan,
-        evaluator: CandidateEvaluationPlugin,
         *,
         scenario: str,
     ) -> None:
@@ -250,16 +240,13 @@ class JobLoop:
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(plan, JobPlan):
             raise TypeError(f"plan must be a JobPlan, got {type(plan).__name__}")
-        if not isinstance(evaluator, CandidateEvaluationPlugin):
-            raise TypeError(f"evaluator must be a CandidateEvaluationPlugin, got {type(evaluator).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
         self.plan = plan
-        self.evaluator = evaluator
         self.scenario = scenario
 
-    def job_id(self, state: JobLoopState, start: str | None, data: JobData, parameters: Mapping[str, Any]) -> str:
+    def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
         (``state.finished_jobs``), the component, the start, the data's rows and request, and the parameters.
 
@@ -313,8 +300,8 @@ class JobLoop:
     def poll(self, state: JobLoopState) -> JobCommit | None:
         """The next commit about the running job of ``state``, or ``None`` while it runs with nothing new.
 
-        The result is the decision on the job's next undecided checkpoint
-        (``decide``) while one exists, else the job's end once it ended
+        The result is the publication of the job's next unpublished checkpoint
+        (``publish``) while one exists, else the job's end once it ended
         (``end``). A job the component does not know ends as failed. Raise
         ``ValueError`` when ``state`` has no running job.
         """
@@ -323,52 +310,30 @@ class JobLoop:
             raise ValueError("a weight trainer polls only a running job")
         status = self.job_status(job.job_id)
         if len(status.checkpoints) > job.checkpoints_handled:
-            return self.decide(state, status.checkpoints[job.checkpoints_handled])
+            return self.publish(state, status.checkpoints[job.checkpoints_handled])
         if status.state != "running":
             return self.end(state, status)
         return None
 
-    def decide(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
-        """The commit that decides whether Reef activates ``checkpoint``, the running job's next undecided one.
+    def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
+        """The commit that publishes ``checkpoint``, the running job's next unpublished one, as an artifact.
 
-        The next job starts from ``checkpoint.path`` whether or not the
-        evaluation selects it. The commit publishes the checkpoint's
-        ``release_path``: a selected checkpoint is activated, and any other is
-        an inactive artifact until a person activates it. The commit's metrics are the checkpoint's training
-        metrics with the evaluation's and the decision's own metrics, and
-        ``selected``, ``selection`` (the whole decision) and ``training_job``.
-        Raise ``ValueError`` when ``state`` has no running job, or when two of
-        these share a key: a metric is never overwritten.
+        The next job starts from ``checkpoint.path``. The commit publishes the checkpoint's ``release_path``, and
+        the scenario's activation rule decides whether it serves. The commit's metrics are the checkpoint's
+        training metrics and ``training_job``. Raise ``ValueError`` when ``state`` has no running job, or when a
+        training metric is named ``training_job``: a metric is never overwritten.
         """
         job = state.job
         if job is None:
-            raise ValueError("only a running job's checkpoint is decided")
-        candidate = CheckpointCandidate(
-            candidate_id=f"{job.job_id}:{checkpoint.step}",
-            training_job_id=job.job_id,
-            step=checkpoint.step,
-            release_path=checkpoint.release_path,
-            training_metrics=dict(checkpoint.metrics),
-        )
-        decision = self.evaluator.evaluate_and_decide(candidate)
+            raise ValueError("only a running job's checkpoint is published")
+        if TRAINING_JOB_KEY in checkpoint.metrics:
+            raise ValueError(f"checkpoint {job.job_id}:{checkpoint.step}'s training metrics name {TRAINING_JOB_KEY!r}")
         handled = JobLoopState(
             checkpoint.path, RunningJob(job.job_id, job.checkpoints_handled + 1), state.finished_jobs, state.last_job
         )
-        parts = (dict(checkpoint.metrics), dict(decision.evaluation.metrics), dict(decision.metrics))
-        keys = [key for part in parts for key in part]
-        shared = {key for key in keys if keys.count(key) > 1} | (set(keys) & DECISION_KEYS)
-        if shared:
-            raise ValueError(
-                f"checkpoint {candidate.candidate_id}'s training, evaluation and decision metrics share the keys "
-                f"{sorted(shared)}"
-            )
         metrics = {
-            **parts[0],
-            **parts[1],
-            **parts[2],
-            "selected": decision.selected,
-            "selection": {"candidate_id": candidate.candidate_id, **decision.to_dict()},
-            "training_job": {
+            **dict(checkpoint.metrics),
+            TRAINING_JOB_KEY: {
                 "job_id": job.job_id,
                 "backend": self.component.name,
                 "event": "checkpoint",
@@ -381,7 +346,6 @@ class JobLoop:
                 metrics=metrics,
                 artifact=Artifact.local(Path(checkpoint.release_path)),
                 training_job_id=job.job_id,
-                pending=not decision.selected,
             )
         )
 
@@ -414,11 +378,11 @@ class JobLoop:
         if state.job is not None:
             self.component.cancel(state.job.job_id)
 
-    def started_from(self, state: JobLoopState, start: str | None) -> JobLoopState:
+    def started_from(self, state: JobLoopState, start: str) -> JobLoopState:
         """The state after the training start is set to ``start``, which the component imported of a release.
 
-        The running job is cancelled, and the next job starts from ``start``
-        (``None``: the base model). The jobs that ended stay counted.
+        The running job is cancelled, and the next job starts from ``start``.
+        The jobs that ended stay counted.
         """
         self.cancel(state)
         return JobLoopState(start, None, state.finished_jobs, state.last_job)

@@ -23,6 +23,7 @@ from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 
 from reef.core.requirements import REQUIRE_KINDS
+from reef.evaluation.activation import AlwaysActivate
 from reef.harness.rollouts.model_binding import ModelBindingError
 from reef.harness.rollouts.run import RolloutResult
 from reef.recipe import load_recipe_config
@@ -30,6 +31,7 @@ from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.cordis import CordisRecipe
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
+from reef.surface.files import ENTRIES_FILE
 from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.trainer import Trainer
 
@@ -1181,6 +1183,9 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, CordisRecipe) and built.adapter == "pi"
+    # The preset file's top-level activation section reaches the recipe.
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
@@ -1205,8 +1210,7 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     on the path the deployment's dotted references resolve through."""
     import os
 
-    from reef.recipe.registry import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
+    from reef.service.assembly import _serving_recipe
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
@@ -1216,18 +1220,17 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
     assert config["data"]["training_mode"] == "hybrid"
     assert config["evolution"]["requests"] is True and config["evolution"]["version_check"] is True
-    assert config["evolution"]["review_kinds"] == ["code_extension"]
+    assert config["activation"] == {"module": "always", "config": {"review_kinds": ["code_extension"]}}
     for name in ("serve", "serve-native"):
         demo = load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
         assert demo["data"]["training_mode"] == "auto"
-        assert not {"requests", "version_check", "review_kinds"} & set(demo["evolution"])
-    built = build_named_recipe(
-        "deployment",
-        {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
-        default_runtime=_upstream_runtime(service_config_from_mapping(config)),
-    )
+        assert not {"requests", "version_check"} & set(demo["evolution"]) and "activation" not in demo
+    # The recipe that reef serve builds from the deployment, whose top-level activation section it reads.
+    service = service_config_from_mapping(config)
+    built = _serving_recipe(service.recipe, service, dict(os.environ))
     assert isinstance(built, CordisRecipe)
-    assert built.review_kinds == ("code_extension",)
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
     assert [entry["id"] for entry in built.seed] == [
         "answer-style",
         "reef-version-check",
@@ -1253,24 +1256,21 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )
-    files = built.base_artifact_files()
-    assert files is not None
+    files = built.base_artifact_source().files
     assert {"native/tools/read_file.py", "native/graphs/main.json", "native/skills/answer-style/SKILL.md"} <= set(
         files
     )
     assert "upstream" not in files["native/models.json"]  # the seed carries no provider
     info = built.build_surface("demo").harness
     assert info is not None
-    assert [entry["id"] for entry in info.seed_entries][:3] == ["read_file", "write_file", "run_bash"]
+    base_entries = json.loads(files[ENTRIES_FILE])
+    assert [entry["id"] for entry in base_entries][:3] == ["read_file", "write_file", "run_bash"]
     assert info.served_model == "qwen3-8b"
-    assert (
-        CordisRecipe.from_environment(
-            {},
-            config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},
-            runtime=_upstream_runtime(service),
-        ).base_artifact_files()
-        is None
-    )
+    assert CordisRecipe.from_environment(
+        {},
+        config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},
+        runtime=_upstream_runtime(service),
+    ).base_artifact_source().files == {ENTRIES_FILE: "[]\n"}
 
 
 # -- the replay page --------------------------------------------------------

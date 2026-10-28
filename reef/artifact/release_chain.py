@@ -52,8 +52,12 @@ class ArtifactReleaseChain:
         """Make ``ref`` the active artifact (``current``); the checkpoint, the chain tip, stays."""
         self._repository.activate(ref, expected=expected)
 
-    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        self._repository.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+    def install_checkpoint(
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
+    ) -> None:
+        self._repository.install_checkpoint(
+            ref, expected=expected, expected_checkpoint=expected_checkpoint, activate=activate
+        )
 
     def stage(self, step: int, artifact: Artifact, *, parent: ArtifactRef | None = None) -> Artifact:
         return self._repository.stage(step, artifact, parent=self.checkpoint if parent is None else parent)
@@ -70,12 +74,14 @@ class ArtifactReleaseChain:
         expected_parent: ArtifactRef | None = None,
         metadata: Mapping[str, object] | None = None,
         advance_heads: bool = True,
+        activate: bool = True,
     ) -> ArtifactRef:
         return self._repository.publish(
             artifact,
             expected_parent=self.checkpoint if expected_parent is None else expected_parent,
             metadata=metadata,
             advance_heads=advance_heads,
+            activate=activate,
         )
 
     def discard(self, artifact: Artifact) -> None:

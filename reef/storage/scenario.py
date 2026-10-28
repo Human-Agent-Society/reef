@@ -34,12 +34,16 @@ class ScenarioSettings:
     the recipe's model). ``training_mode`` is the selected mode (``None``
     selects the recipe's default). ``artifact_evaluation`` is the
     ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
-    artifact with (``None`` evaluates none).
+    artifact with (``None`` evaluates none). ``activation`` is the scenario's
+    own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
+    ``None`` follows the deployment's ``activation`` section. The scenario
+    registry checks the rule before it stores it.
     """
 
     model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
     artifact_evaluation: Mapping[str, object] | None = None
+    activation: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.model_config is not None and not isinstance(self.model_config, Mapping):
@@ -48,6 +52,8 @@ class ScenarioSettings:
             raise ValueError("scenario settings training_mode must be a string or null")
         if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
             raise ValueError("scenario settings artifact_evaluation must be an object or null")
+        if self.activation is not None and not isinstance(self.activation, Mapping):
+            raise ValueError("scenario settings activation must be an object or null")
 
 
 class ScenarioStore(ABC):

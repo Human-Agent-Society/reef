@@ -172,10 +172,9 @@ def test_recovery_at_creation_is_empty_and_foreign_checkpoint_is_rejected(store)
         store.recover(checkpoint=commit(scenario="code"))
 
 
-@pytest.mark.parametrize("changes", [{"checkpoint": False}, {"pending": True}])
-def test_recovery_rejects_commits_that_are_not_active_checkpoints(store, changes):
-    with pytest.raises(ReefError, match="activated checkpoint"):
-        store.recover(checkpoint=replace(commit(), **changes))
+def test_recovery_rejects_a_commit_that_is_not_a_checkpoint(store):
+    with pytest.raises(ReefError, match="requires a checkpoint commit"):
+        store.recover(checkpoint=replace(commit(), checkpoint=False))
     assert store.history() == ()
 
 

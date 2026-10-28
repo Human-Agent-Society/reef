@@ -272,7 +272,8 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     assert checkpoint.artifact_ref == head
     assert checkpoint.step == 3
     assert checkpoint.checkpoint is True
-    assert checkpoint.pending is False
+    # Metadata that names no active_artifact belongs to a checkpoint the activation rule activated.
+    assert checkpoint.activated is True
     assert checkpoint.algorithm_state == {"steps": 3}
     assert checkpoint.high_water_sequence == 7
     assert checkpoint.high_water_offset == 5
@@ -309,6 +310,37 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     metadata["metrics"]["loss"] = 99
     assert checkpoint.algorithm_state == {"steps": 3}
     assert checkpoint.metrics == {"loss": 0.25}
+
+
+def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() -> None:
+    """A recovery without the commit history reads from the artifact head which artifact serves."""
+    from reef.core.artifact_ref import ArtifactRef
+    from reef.storage.commits import (
+        RecordProgress,
+        active_artifact_ref,
+        parse_scenario_metadata,
+        scenario_metadata_for,
+        served_artifact_ref,
+    )
+
+    base = ArtifactRef("base-content", "base-release", None)
+    served = ArtifactRef("served-content", "served-release", base.release_id)
+    head = ArtifactRef("held-content", "held-release", served.release_id)
+    progress = RecordProgress(0, 0, frozenset())
+    held = scenario_metadata_for(
+        name="math", base_artifact=base, scenario_step=2, record_progress=progress, active_artifact=served
+    )
+    _, _, checkpoint = parse_scenario_metadata(held, checkpoint_head=head)
+    assert checkpoint is not None and checkpoint.activated is False
+    assert served_artifact_ref(held, checkpoint_head=head) == served
+    assert active_artifact_ref((checkpoint,), served_artifact_ref(held, checkpoint_head=head)) == served
+
+    activated = scenario_metadata_for(name="math", base_artifact=base, scenario_step=2, record_progress=progress)
+    assert served_artifact_ref(activated, checkpoint_head=head) == head
+    with pytest.raises(ValueError, match="active_artifact must be an object"):
+        served_artifact_ref({**held, "active_artifact": "served-release"}, checkpoint_head=head)
+    with pytest.raises(ValueError, match="names no active_artifact"):
+        scenario_metadata_for(name="math", base_artifact=base, active_artifact=served)
 
 
 @pytest.mark.parametrize(

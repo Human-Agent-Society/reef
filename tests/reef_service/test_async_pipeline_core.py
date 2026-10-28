@@ -308,7 +308,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
 
     assert [source_record_id(job.data.samples[0]) for job in component.calls] == ["inference-1", "inference-2"]
     # Training is linear: the second job starts from the first job's checkpoint.
-    assert component.calls[0].start is None
+    assert component.calls[0].start == component.base_start
     assert component.calls[1].start == str(component.checkpoint_root / "1")
     assert scenario.current_artifact_ref().parent_release_id == first.release_id
     with pytest.raises(ReefError, match="already bound"):
@@ -331,8 +331,11 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _, committed = scenario.release_queries.artifact_with_metrics()
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
-    assert committed["selection"]["selected"] is True
     assert committed["training_job"]["event"] == "checkpoint"
+    assert not {"selected", "selection"} & set(committed)
+    # The default activation rule serves the checkpoint at its commit.
+    [checkpoint] = [record for record in scenario.store.history() if record.checkpoint]
+    assert checkpoint.activated and scenario.current_artifact_ref() == checkpoint.artifact_ref
     # The last commit is the job's end.
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 3

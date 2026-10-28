@@ -44,11 +44,11 @@ Read the artifacts
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one. The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact.
+An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one. The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations and train-from operations. ``GET /reef/scenarios/{scenario}/commits`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
-For harness scenarios, ``GET /reef/harness/releases`` lists the release chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. It lists every training step, also a rejected or skipped step, which has ``checkpoint: false`` and carries the active release's ID. Under ``evolution.publish: review``, a new release sits in the catalog with its evaluation metrics, ``active: false`` and ``activated: false``. No session gets it until a person activates it. Clients label such a release ``Waiting for activation``.
+For harness scenarios, ``GET /reef/harness/releases`` lists the release chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. It lists every training step, also a rejected or skipped step, which has ``checkpoint: false`` and carries the active release's ID. A new release that the activation rule did not activate sits in the catalog with its evaluation metrics, ``active: false`` and ``activated: false``. No session gets it until a person activates it. Clients label such a release ``Waiting for activation``.
 
 Read the proposal inbox
 -----------------------
@@ -95,12 +95,29 @@ A request sent to ``POST /reef/train`` may name what its change needs from the p
 
 The install script refuses a release with an item ``setup`` does not meet: it prints the setup list and the newest release in the chain that requires nothing, the one that installs on a machine with nothing set up (``?release_id=<id>``; install it, run ``reef-<adapter> setup`` for the active release's list, then install the active release), and exits 1 before it installs the binary or makes a directory. ``reef-<adapter> setup`` is the only thing that runs a check, after the person read it and confirmed; ``reef-<adapter> setup --mark <name>`` records a check off by hand, and ``reef-<adapter> setup --release <id>`` checks off an inactive release's items before you activate and install it. A release metadata file the stdlib client pull or an older install wrote carries neither key, which reads as nothing required and nothing checked off.
 
+The base artifact
+-----------------
+
+Every scenario starts from the deployment's base artifact. Reef imports it once, when the artifact repository is new, from the configuration:
+
+- A weight recipe imports its training component's untrained checkpoint, with the layout of the component's other checkpoints:
+
+  - The ``slime`` backend with full weights imports the model that ``inference.model-path`` names. The artifact repository keeps a full copy of the model's files, about 2 bytes per parameter in bf16.
+  - The ``slime`` backend with LoRA imports an adapter whose weights are zero. It serves the model unchanged.
+  - The ``tinker`` backend imports the checkpoint of its untrained adapter, which stays on the Tinker service.
+- A harness recipe imports ``evolution.seed``, rendered for the adapter. Without a seed, the base harness is empty.
+- A recipe of several components imports each component's base under its name.
+
+The base artifact's ``artifact_id`` is the ID of the repository's base release. Activate it to serve the base model or the base harness again. Train from it to start training again from the base weights or the seed. The ``slime`` backend refuses this, as it refuses every artifact (`Train from an artifact`_).
+
+Reef reads the model and the seed only to make the base artifact. When a restart configures another model path or another seed, Reef refuses to start and names both values. To change the base, restore the configuration, or start a new deployment with a new artifact repository. The entries that Reef ships itself, such as ``reef-version-check``, do not count. After a Reef upgrade, the harness trainer publishes their new copy as a training step. Reef also refuses an artifact repository that an older Reef made, because its base was not imported. Start such a deployment with a new artifact repository.
+
 Choose a starting release
 -------------------------
 
 Inference always answers from the scenario's active release. No request header keeps a client on an older release.
 
-A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
+A new scenario starts from the base artifact. A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
 
 To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier artifact again, activate it as the next section describes.
 
@@ -123,13 +140,17 @@ The target is any row of the artifact list: an artifact that a training step mad
 
 The answer's ``artifact_id`` names the activated artifact, and its ``release_id`` names the active release. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
 
-A full-weight serving runtime cannot activate the creation artifact after it served a checkpoint. The engines do not keep the files of the model that they started with, so Reef answers an error. Activate a saved checkpoint instead. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
+A full-weight serving runtime that activates the base artifact after it served a checkpoint loads the base artifact's files from the artifact repository. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
 
-A rule in the deployment decides whether Reef activates each new artifact:
+The deployment's `activation section <../reference/configuration.rst#the-activation-section>`__ names the rule that decides whether Reef activates each new artifact:
 
-- By default, Reef activates each new artifact that passes its checks when the training step makes it.
-- With manual activation, Reef makes each new artifact but does not activate it. A person activates it. For weights, name ``reef.evaluation.evaluators:ManualPromotionPlugin`` in the `evaluation section <../reference/configuration.rst#the-evaluation-section>`__; the plugin keeps this name until the activation rule moves out of training (RFC #965, step 3). For a harness, set ``evolution.publish: review``. To leave only the changes that touch some node kinds inactive, list those kinds in ``evolution.review_kinds``.
-- An evaluation plugin that rejects a checkpoint also leaves its artifact inactive.
+- ``always``, the default, activates each new artifact when the training step makes it. Its ``review_kinds`` holds back a harness tree that changes one of the listed node kinds.
+- ``never`` makes each new artifact but does not activate it. A person activates it.
+- ``evaluated`` activates an artifact once an evaluation of it reaches ``min_mean_score``.
+
+A scenario can select one of these rules for itself with ``POST /reef/scenarios/{scenario}/update`` and ``{"activation": {"module": "never"}}``. Send ``"activation": null`` to follow the deployment's rule again. ``GET /reef/scenarios/{scenario}/settings`` reads back the scenario's rule and the rule that applies (`Scenario updates <../reference/http-api.rst#scenario-updates>`__).
+
+An artifact that the rule does not activate still becomes the start of the next training job.
 
 Train from an artifact
 ----------------------
@@ -143,7 +164,7 @@ Each trainer continues from its own newest output: a weight trainer from its new
      -d '{"artifact_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/train-from"
 
-Reef cancels the running job. The next training job, or the next evolve step, starts from the artifact. Train-from never changes the active release. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as the creation artifact, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
+Reef cancels the running job. The next training job, or the next evolve step, starts from the artifact. Train-from never changes the active release. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as the base artifact, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
 
 Whether a trainer can start from an artifact depends on the backend:
 
@@ -254,10 +275,12 @@ Choose the storage backend
 --------------------------
 
 The storage backend keeps the records, commits, and settings of each scenario.
-The settings are the model configuration and the selected training mode. You
-set both with ``POST /reef/scenarios/{scenario}/update``. After a restart, the
-scenario uses its stored training mode. If the recipe does not support that
-mode, the scenario uses the default mode and Reef logs a warning.
+The settings are the model configuration, the selected training mode, the
+automatic evaluation settings and the activation rule. You set them with
+``POST /reef/scenarios/{scenario}/update`` and read them back with
+``GET /reef/scenarios/{scenario}/settings``. After a restart, the scenario uses
+its stored settings. If the recipe does not support the stored training mode,
+the scenario uses the default mode and Reef logs a warning.
 
 Select the backend with ``storage.record-backend``:
 

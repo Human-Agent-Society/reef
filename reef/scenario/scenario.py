@@ -9,6 +9,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
@@ -105,6 +106,18 @@ class Scenario:
     def runtime(self) -> InferenceRuntime | None:
         """The inference runtime that serves this scenario, if any."""
         return self.model_config.runtime or self._binding.runtime
+
+    @property
+    def activation_rule(self) -> ActivationRule:
+        """The rule that decides whether an artifact that training makes serves."""
+        return self._committer.activation_rule
+
+    def set_activation_rule(self, rule: ActivationRule) -> None:
+        """Select the rule for the artifacts that training makes from now on.
+
+        An artifact made before the change keeps the decision it got.
+        """
+        self._committer.activation_rule = rule
 
     @property
     def report_type(self) -> type[ReportBase] | None:
@@ -264,6 +277,16 @@ class Scenario:
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
+
+    def artifact_status(self) -> dict[str, dict[str, str | None]]:
+        """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""
+        with self.release_queries.publication_lock:
+            return self._committer.artifact_status()
+
+    def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
+        """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
+        with self.release_queries.publication_lock:
+            return self._committer.resolve_artifact(artifact_id, component)
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""

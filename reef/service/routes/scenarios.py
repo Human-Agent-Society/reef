@@ -61,8 +61,8 @@ def register_scenario_routes(
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation"}:
-            raise ValueError("expected training_mode, model or artifact_evaluation settings")
+        if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation", "activation"}:
+            raise ValueError("expected training_mode, model, artifact_evaluation or activation settings")
         if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual", "hybrid"):
             raise ValueError("expected training_mode 'auto', 'manual' or 'hybrid'")
         name = request.match_info["scenario"]
@@ -76,11 +76,16 @@ def register_scenario_routes(
             result.update(
                 await asyncio.to_thread(request_service.dispatcher.set_training_mode, name, payload["training_mode"])
             )
-        if "artifact_evaluation" in payload:
-            result["artifact_evaluation"] = await asyncio.to_thread(
-                evaluations.configure, name, payload["artifact_evaluation"]
-            )
+        changes: dict[str, object] = {
+            key: payload[key] for key in ("artifact_evaluation", "activation") if key in payload
+        }
+        if changes:
+            result.update(await asyncio.to_thread(evaluations.configure, name, changes))
         return web.json_response(result)
+
+    async def scenario_settings(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(request_service.dispatcher.scenario_settings, request.match_info["scenario"])
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def delete_scenario(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
@@ -169,6 +174,7 @@ def register_scenario_routes(
     app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_post("/reef/scenarios", create_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
+    app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/records", record_list)

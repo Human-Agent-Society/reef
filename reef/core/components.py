@@ -7,9 +7,15 @@ component's. A release with several components keeps each one in a directory
 named after it, and its ``content_id`` is derived from the component content
 ids, so two releases binding the same combination share one ``content_id``.
 
+Each component is one artifact. A release names a component's artifact by
+``artifact_id``: a release that makes the component's content gives it the
+``artifact_id`` ``<release_id>`` (one component) or ``<release_id>:<name>``
+(several), and a release that carries the component forward keeps that
+``artifact_id``.
+
 The manifest travels in artifact metadata under ``COMPONENTS_METADATA_KEY``.
-A release without a manifest, published before components existed, is read as
-one component at the root.
+A release without a manifest is read as one component at the root, which the
+release made.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -40,16 +46,39 @@ def validate_component_name(name: object) -> str:
     return name
 
 
+def made_artifact_id(release_id: str, component: str, *, single: bool) -> str:
+    """The ``artifact_id`` that the release ``release_id`` gives the artifact of ``component`` that it makes.
+
+    It is ``release_id`` when the release holds one component (``single``), and ``<release_id>:<component>`` when
+    it holds several.
+    """
+    return release_id if single else f"{release_id}:{component}"
+
+
 @dataclass(frozen=True)
 class ComponentEntry:
-    """One component's selected content and its component-scoped metadata."""
+    """One component's artifact in a release manifest: its content, its identity and its metadata.
+
+    Values: ``content_id`` is a non-empty string that names the content.
+    ``artifact_id`` is a non-empty string, the artifact of an earlier release
+    that this release carries forward, or ``None`` when the release that holds
+    the manifest made the artifact (``ReleaseComponents.artifact_ids``).
+    ``metadata`` is the component's own metadata.
+
+    Purpose: the committer and the scenario factory make entries when a
+    release is published or a scenario is created; readers resolve a
+    component's artifact and content from them.
+    """
 
     content_id: str
     metadata: Mapping[str, object] = field(default_factory=dict)
+    artifact_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.content_id, str) or not self.content_id:
             raise ValueError("component content_id must be a non-empty string")
+        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
+            raise ValueError("component artifact_id must be a non-empty string or null")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("component metadata must be a mapping")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
@@ -80,6 +109,25 @@ class ReleaseComponents:
         """The content id of each component, in declaration order."""
         return {name: entry.content_id for name, entry in self.entries.items()}
 
+    def artifact_ids(self, release_id: str) -> dict[str, str]:
+        """The ``artifact_id`` of each component, when the release ``release_id`` holds this manifest.
+
+        A carried-forward entry names its own; an entry the release made is
+        ``release_id`` in a manifest of one component and
+        ``<release_id>:<name>`` in a manifest of several.
+        """
+        return {
+            name: entry.artifact_id or made_artifact_id(release_id, name, single=self.single)
+            for name, entry in self.entries.items()
+        }
+
+    def carried_from(self, release_id: str) -> ReleaseComponents:
+        """This manifest as a later release carries it forward: every entry names its artifact explicitly."""
+        identities = self.artifact_ids(release_id)
+        return ReleaseComponents(
+            {name: replace(entry, artifact_id=identities[name]) for name, entry in self.entries.items()}
+        )
+
     @property
     def single(self) -> bool:
         """True when the release keeps the flat, one-component layout."""
@@ -106,7 +154,11 @@ class ReleaseComponents:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            name: {"content_id": entry.content_id, "metadata": dict(entry.metadata)}
+            name: {
+                "content_id": entry.content_id,
+                "metadata": dict(entry.metadata),
+                **({} if entry.artifact_id is None else {"artifact_id": entry.artifact_id}),
+            }
             for name, entry in self.entries.items()
         }
 
@@ -121,7 +173,9 @@ class ReleaseComponents:
             metadata = raw.get("metadata", {})
             if not isinstance(metadata, Mapping):
                 raise ValueError(f"components manifest entry {name!r} metadata must be an object")
-            entries[str(name)] = ComponentEntry(content_id=raw.get("content_id", ""), metadata=metadata)
+            entries[str(name)] = ComponentEntry(
+                content_id=raw.get("content_id", ""), metadata=metadata, artifact_id=raw.get("artifact_id")
+            )
         return cls(entries)
 
 
@@ -141,6 +195,7 @@ __all__ = [
     "RECORDS_COMPONENT",
     "ComponentEntry",
     "ReleaseComponents",
+    "made_artifact_id",
     "release_components",
     "validate_component_name",
 ]
