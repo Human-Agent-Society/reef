@@ -437,8 +437,8 @@ class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin):
 
 
 def _scores(values: Any) -> list[float]:
-    """Per-rollout scores, task by task, with every rollout that has no value (``no_answer`` or ``not_run``) read
-    as zero, never as missing: GEPA keeps one validation score per task position. An empty list is no rollout."""
+    """Per-rollout scores, task by task, with every failed rollout read as zero, never as missing: GEPA keeps one
+    validation score per task position. An empty list is no rollout."""
     if not values:
         return []
     return [0.0 if score.value is None else score.value for score in RolloutScores.from_json(values).rollouts()]

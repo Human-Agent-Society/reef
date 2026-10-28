@@ -678,7 +678,7 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
 
     error = {"code": "LOAD_ERROR", "message": "tool 'x' cannot load"}
     errored = episode_worker._score_result(result({"kind": "error", "error": error}, 1), "task one")
-    assert errored.score.kind == "no_answer" and errored.failure is not None
+    assert errored.score == RolloutScore.scored(0.0) and errored.failure is not None
     assert errored.failure.stage == "graph" and errored.failure.cause == "LOAD_ERROR: tool 'x' cannot load"
     assert errored.path == {"stages": [], "reason": "error", "error": error}
     crashed = episode_worker._score_result(result({"kind": "completed"}, 1), "task one")
@@ -731,7 +731,7 @@ def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run(
     never_ran = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row("docker build failed"),), residue=())
     scored = episode_worker._score_result(never_ran, "task one")
     # The trial never ran: the environment, not the tree, failed it.
-    assert scored.score.kind == "not_run" and scored.failure is not None
+    assert scored.score.is_failed and scored.failure is not None
     assert scored.failure.stage == "trial" and scored.failure.cause == "docker build failed"
     # A verifier that ran and wrote nothing is the agent's loss: it scores through the scorer.
     wrote_nothing = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
@@ -777,7 +777,7 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
     )
     result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
     scored = episode_worker._score_result(result, "task one")
-    assert scored.score.kind == "no_answer" and scored.failure is not None and scored.failure.stage == "graph"
+    assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "graph"
     assert scored.failure.cause == "agent checker: MODEL_ERROR: the endpoint answered 500"
     assert scored.path == {"stages": ["think"], "reason": None, "error": error, "errored_agent": "checker"}
     # An agent that errored while the root still finished its turn is the root's business: the turn scores.

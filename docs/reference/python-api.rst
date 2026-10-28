@@ -1460,10 +1460,9 @@ builds the class with no arguments and refuses a non-empty ``config``.
 |                        | parsed ``trajectory``                                    |
 +------------------------+----------------------------------------------------------+
 | ``evaluation.metrics`` | guarantees ``candidate_scores`` and ``current_scores``:  |
-|                        | ``RolloutScores`` in JSON, each rollout ``scored``,      |
-|                        | ``no_answer`` or ``not_run``; ``current_scores`` is      |
-|                        | empty under ``selection: floor``, which runs the         |
-|                        | candidate alone                                          |
+|                        | ``RolloutScores`` in JSON, each rollout a number or      |
+|                        | ``"failed"``; ``current_scores`` is empty under          |
+|                        | ``selection: floor``, which runs the candidate alone     |
 +------------------------+----------------------------------------------------------+
 
 Returning ``None`` from ``propose`` skips the step. Reef passes every keyword

@@ -1095,7 +1095,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
-   evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as a rollout that gave no answer (``no_answer``)
+   evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores 0, as a rollout that gave no answer
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
@@ -1464,7 +1464,7 @@ commit metric ``artifact_evaluation``: the ``candidate_id`` of the checkpoint
 (``<training job>:<step>``, the ``selection.candidate_id`` of the release's
 commit), the job's ``event``, and its ``metrics``: ``evaluation_scores``, the
 score of each rollout by task (``RolloutScores`` in JSON), and
-``evaluation_mean_score``, their mean with each ``no_answer`` as 0. The
+``evaluation_mean_score``, the mean of the rollouts that did not fail. The
 evaluation decides nothing: the ``evaluation`` section decides which release
 serves.
 

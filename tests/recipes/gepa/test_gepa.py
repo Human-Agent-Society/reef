@@ -549,10 +549,9 @@ def test_a_tree_the_archive_does_not_recognise_is_reseeded(tmp_path: Path) -> No
 
 
 def rollout_scores(values: tuple) -> list[dict[str, object]]:
-    """``RolloutScores.to_json`` of one task per value, with None as a rollout that gave no answer."""
+    """``RolloutScores.to_json`` of one task per value, with None as a failed rollout."""
     return [
-        {"task": f"t{index}", "scores": ["no_answer" if value is None else value]}
-        for index, value in enumerate(values)
+        {"task": f"t{index}", "scores": ["failed" if value is None else value]} for index, value in enumerate(values)
     ]
 
 

@@ -158,9 +158,9 @@ class FailureObservation:
 class ScoredEpisode:
     """One evaluation episode as the evaluation keeps it: its rollout score, why it has no value, and what the trajectory showed.
 
-    ``score`` is ``not_run`` when the episode could not launch, its trial never ran or its trajectory could not
-    be read, and ``no_answer`` when the tree gave no answer (an error ended its turn, or ``forbid_residue``
-    refused its residue). ``failure`` says why, and is also set for a scored episode that exited nonzero.
+    ``score`` is failed when the episode could not launch, its trial never ran or its trajectory could not be
+    read, and 0 when the tree gave no answer (an error ended its turn, or ``forbid_residue`` refused its
+    residue). ``failure`` says why, and is also set for a scored episode that exited nonzero (stage ``exit``).
     """
 
     score: RolloutScore
@@ -235,13 +235,13 @@ class EpisodeEvaluationWorker:
             )
         except EpisodeError as error:
             scored = ScoredEpisode(
-                RolloutScore.not_run(), FailureObservation(task=task, stage="launch", cause=str(error))
+                RolloutScore.failed(), FailureObservation(task=task, stage="launch", cause=str(error))
             )
             write_episode_record(keep_dir, task, None, scored)
             return scored
         except TrajectoryError as error:
             scored = ScoredEpisode(
-                RolloutScore.not_run(), FailureObservation(task=task, stage="trajectory", cause=str(error))
+                RolloutScore.failed(), FailureObservation(task=task, stage="trajectory", cause=str(error))
             )
             write_episode_record(keep_dir, task, None, scored)
             return scored
@@ -259,7 +259,7 @@ class EpisodeEvaluationWorker:
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return ScoredEpisode(
-                RolloutScore.no_answer(),
+                RolloutScore.scored(0.0),
                 FailureObservation(task=task, stage="residue", cause=cause),
                 residue,
                 agents,
@@ -270,7 +270,7 @@ class EpisodeEvaluationWorker:
             # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
             # start): the environment did not run it, so it counts for neither side.
             return ScoredEpisode(
-                RolloutScore.not_run(),
+                RolloutScore.failed(),
                 FailureObservation(task=task, stage="trial", cause=trial_error),
                 residue,
                 agents,
@@ -278,7 +278,7 @@ class EpisodeEvaluationWorker:
             )
         if path.get("error") is not None:
             # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
-            # agent whose failure ended the run): nothing it wrote is an answer, and the tree caused it.
+            # agent whose failure ended the run): nothing it wrote is an answer, and the tree caused it, so it scores 0.
             error = path["error"]
             cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
             if path.get("errored_agent"):
@@ -286,7 +286,7 @@ class EpisodeEvaluationWorker:
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if root_header(result.trajectory).get("loop") else "graph"
             return ScoredEpisode(
-                RolloutScore.no_answer(),
+                RolloutScore.scored(0.0),
                 FailureObservation(task=task, stage=stage, cause=cause),
                 residue,
                 agents,
@@ -623,7 +623,10 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
             # The rollout scores of each side, by task; ``current_scores`` is empty when the current tree did not run.
             "candidate_scores": scores["candidate"].to_json() if "candidate" in scores else [],
             "current_scores": scores["current"].to_json() if "current" in scores else [],
-            "episode_failures": sum(run.score.kind != "scored" for side in sides for run in runs[side]),
+            # Episodes that failed or gave no answer: every failure except a scored run that exited nonzero.
+            "episode_failures": sum(
+                run.failure is not None and run.failure.stage != "exit" for side in sides for run in runs[side]
+            ),
             "episode_repeats": self.episode_repeats,
         }
         for side in sides:
@@ -763,7 +766,7 @@ class FloorMixin(CandidateEvaluationPlugin):
             metrics={
                 "passed": floor.passed,
                 "failed": floor.failed,
-                "not_run": floor.not_run,
+                "failed_rollouts": floor.failed_rollouts,
                 "floor_score": self._floor_score,
             },
         )

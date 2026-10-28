@@ -123,9 +123,9 @@ class TaskRollouts:
             raise ValueError("a task's group trains only with two or more samples")
 
     def rewards(self) -> dict[str, tuple[float, ...]]:
-        """Each task's rewards of the rollouts that ran, in run order, with each ``no_answer`` as 0."""
+        """Each task's rewards of the rollouts that did not fail, in run order."""
         return {
-            task: tuple(0.0 if score.value is None else score.value for score in scores if score.kind != "not_run")
+            task: tuple(score.value for score in scores if score.value is not None)
             for task, scores in self.scores.tasks
         }
 
@@ -291,8 +291,8 @@ async def roll_out(
 
 
 def rollout_score(episode: TaskEpisode) -> RolloutScore:
-    """The score of one rollout: ``not_run`` when the environment could not run it, ``no_answer`` when it ran
-    without a reward, else its reward."""
+    """The score of one rollout: failed when the environment could not run it, else its reward, 0 when it ran
+    without one."""
     if episode.is_infrastructure_failure:
-        return RolloutScore.not_run()
-    return RolloutScore.no_answer() if episode.reward is None else RolloutScore.scored(episode.reward)
+        return RolloutScore.failed()
+    return RolloutScore.scored(0.0 if episode.reward is None else episode.reward)
