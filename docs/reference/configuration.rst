@@ -1456,7 +1456,9 @@ job; eval tasks never train. The training component must run task jobs, so the
 recipe requires the ``tinker`` training backend with a sampler.
 
 The eval tasks never train. The recipe does not evaluate the artifacts that
-its trainer publishes; the ``evaluation`` section decides which release serves.
+its trainer publishes: a client asks Reef to evaluate one on the eval tasks
+(`Evaluate an artifact <http-api.rst#evaluate-an-artifact>`__). The
+``evaluation`` section decides which release serves.
 
 .. code:: yaml
 
