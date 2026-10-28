@@ -10,7 +10,6 @@ recipe and the generated-task recipe use them.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
 from reef.core.evaluation import CheckpointCandidate
 from reef.core.job_data import JobData, TaskSample
@@ -39,13 +38,13 @@ class ImportedTaskEvaluation(ArtifactEvaluation):
 
     imported_task_splits: frozenset[SplitName] = frozenset({"eval"})
 
-    def __init__(self, task_store: TaskStore, parameters: Mapping[str, Any]) -> None:
+    def __init__(self, task_store: TaskStore, parameters: Mapping[str, object]) -> None:
         self.task_store = task_store
         self.parameters = dict(parameters)
 
     @classmethod
     def for_storage(
-        cls, task_storage: TaskStorage | None, parameters: Mapping[str, Any]
+        cls, task_storage: TaskStorage | None, parameters: Mapping[str, object]
     ) -> ImportedTaskEvaluation | None:
         """The evaluation over ``task_storage``'s imported tasks, or ``None`` without task storage."""
         return None if task_storage is None else cls(task_storage.open(IMPORTED_TASK_STORE), parameters)

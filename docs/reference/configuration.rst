@@ -1435,7 +1435,10 @@ metric are those of the SFT-then-RL recipe's evaluation (`SFT then RL
 k rollouts of every eval task between training jobs. The recipe reads no
 imported train task, so Reef refuses a task upload to the train split, and
 without the key to either split. The eval tasks that the rounds generate are
-not evaluated.
+not evaluated, for two reasons. Each round adds to them, so two checkpoints
+would get scores on different tasks. And the generator of the train tasks also
+makes them, so they do not show how the model does on tasks from another
+source.
 
 .. config::
 
