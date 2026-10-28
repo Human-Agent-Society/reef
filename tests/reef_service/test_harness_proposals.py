@@ -70,7 +70,10 @@ def _recipe(
 def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    # The base artifact's metadata holds the seed's entries, as the service assembly imports it.
+    factory = InMemoryRepositoryBackend.factory(
+        initial, root=tmp_path / "repository", base_metadata=recipe.base_artifact_source().metadata
+    )
     return Dispatcher(
         recipe,
         factory,

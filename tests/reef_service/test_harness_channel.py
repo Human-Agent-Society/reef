@@ -186,13 +186,15 @@ def _dispatcher(
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in {**(recipe.base_artifact_files() or {}), **(bootstrap_files or {})}.items():
+    for relative, text in {**recipe.base_artifact_source().files, **(bootstrap_files or {})}.items():
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(
+            bootstrap, root=tmp_path / "repository", base_metadata=recipe.base_artifact_source().metadata
+        ),
         local_artifact_dir=tmp_path / "local",
         # The commit history is what puts gate metrics on the release catalog.
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),

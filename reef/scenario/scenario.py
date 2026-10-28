@@ -265,6 +265,16 @@ class Scenario:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
 
+    def artifact_status(self) -> dict[str, dict[str, str | None]]:
+        """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""
+        with self.release_queries.publication_lock:
+            return self._committer.artifact_status()
+
+    def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
+        """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
+        with self.release_queries.publication_lock:
+            return self._committer.resolve_artifact(artifact_id, component)
+
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""
         return self._committer.commit(result, component=component)

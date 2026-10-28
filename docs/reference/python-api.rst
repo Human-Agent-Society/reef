@@ -715,9 +715,23 @@ plugin implements one class method:
   an invalid value.
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
-  ``bootstrap_files`` are the files of the recipe's base artifact. A new
-  scenario starts from these files. ``bootstrap_component`` is the release
-  component of a bootstrap model snapshot, or ``None`` for the release root.
+  ``base`` is a ``BaseArtifactSource``: the content of the recipe's base
+  artifact (``files``, and ``model_directory`` under ``model_component``) and
+  the configuration it comes from (``inputs``).
+
+Every repository starts from its base artifact. A backend must:
+
+- Import ``context.base`` as the repository's base release when the
+  repository has none. The release has no parent, and its content ID is
+  ``base.content_id``.
+- Refuse to open a repository whose base was imported from other
+  ``base.inputs``. Name both in the error. Refuse a repository whose base was
+  not imported.
+- Resolve ``resolve_release("base")`` to the base release. A new scenario
+  forks from it unless the request names another release.
+- Keep each component entry's ``artifact_id`` in the manifests it stores. A
+  fork keeps the selected release's entries, so creating a scenario makes no
+  artifact.
 
 The optional capabilities are separate base classes. Inherit only the ones
 that the backend supports:
@@ -1649,9 +1663,17 @@ Neither inherits from the other, and no trainer holds a serving engine.
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. After it serves a release, it cannot return to the base model,
-  because the engines do not keep the base model's files. Activate a saved
-  release instead.
+  weights. The engines start with the base model. Activating the base
+  artifact after another release loads the base artifact's files, which the
+  artifact repository keeps.
+
+``WeightRuntime.activate_checkpoint(artifact, *, scenario, base)`` gets
+``base=True`` exactly when ``artifact`` is the repository's base artifact:
+the component's ``artifact_id`` is the base release's ID, or
+``<base>:<component>`` in a release of several components. The adapter
+runtime serves the base artifact by unloading the scenario's adapter, without
+reading its files. The Tinker runtime reads the base artifact's
+``tinker-base-model.json`` manifest instead, so it does not need ``base``.
 
 Two training scenarios can share a deployment only if its training component
 allows it (``shares_scenarios``) and its runtime serves each scenario its own
@@ -1750,7 +1772,7 @@ loop:
      - Stop a running job, which then reports ``failed``.
    * - ``import_start(release)``
      - Copy a published release into the component's own storage and return
-       it as a start (``None`` for a release without weights). Reef calls it
+       it as a start (``None`` for the base artifact). Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
    * - ``fresh_start(start)``

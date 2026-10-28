@@ -22,6 +22,12 @@ inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend`
 Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
+Every repository starts from a base artifact. A configured backend imports
+``RepositoryBackendContext.base`` (a ``BaseArtifactSource``) into a
+repository that has none, with ``base.content_id`` as its content ID, and
+refuses to open a repository whose base was imported from other
+``base.inputs``.
+
 Backends used with a scenario commit history must subclass
 ``StagedReleaseRepositoryBackend``. ``publish`` must accept
 ``advance_head=False`` and persist resolvable bytes without advancing its head.
@@ -51,6 +57,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
+    BaseArtifactSource,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     EnumerableRepositoryBackendFactory,
@@ -62,12 +69,10 @@ from reef.artifact.repository import (
     StagedReleaseRepositoryBackend,
 )
 from reef.artifact.sources import (
-    ArtifactSource,
     DownloadedSnapshot,
-    GitVersionSource,
     HuggingFaceSource,
     download_huggingface_snapshot,
-    parse_artifact_source,
+    parse_huggingface_source,
 )
 
 __all__ = [
@@ -80,16 +85,15 @@ __all__ = [
     "ArtifactPublicationError",
     "ArtifactRef",
     "ArtifactReleaseChain",
-    "ArtifactSource",
     "ArtifactSourceError",
     "ArtifactValidator",
+    "BaseArtifactSource",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",
     "GitLFSRepositoryBackend",
     "GitLFSRepositoryBackendFactory",
-    "GitVersionSource",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
     "PEFTValidator",
@@ -102,6 +106,6 @@ __all__ = [
     "StagedReleaseRepositoryBackend",
     "compose_release",
     "download_huggingface_snapshot",
-    "parse_artifact_source",
+    "parse_huggingface_source",
     "read_peft_config",
 ]

@@ -58,6 +58,7 @@ def scenario_double(
         trainer_for=lambda component: trainer,
         runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
+        artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
     )
 
 

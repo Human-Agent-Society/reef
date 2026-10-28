@@ -1347,7 +1347,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
-    activation_target = original.current_artifact_ref().release_id
+    # The creation carries the base artifact, whose artifact_id is the repository base release's.
+    activation_target = original.repository.repository_base.release_id
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()

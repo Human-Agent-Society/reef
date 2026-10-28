@@ -1111,14 +1111,20 @@ An artifact is the content of one component of a release, such as a
 checkpoint's weights or a harness tree. Training makes artifacts: each
 checkpoint that a weight trainer saves, and each tree that a harness trainer
 keeps. The release that created a scenario holds the creation artifact of each
-component. ``artifact_id`` names an artifact:
+component: the artifact the scenario started from, by default the base
+artifact that Reef imported from the deployment's model or seed (`The base
+artifact <../user-guide/operate.rst#the-base-artifact>`__). ``artifact_id``
+names an artifact:
 
 - In a scenario of one component, it is the ``release_id`` of the release
   that made the artifact. Every shipped recipe serves one component, so there
-  ``artifact_id`` and ``release_id`` are equal.
-- In a scenario of several components, it is ``<release_id>:<component>``. A
-  release that carries a component forward keeps that component's
-  ``artifact_id``.
+  ``artifact_id`` and ``release_id`` are equal for every artifact that a
+  training step made.
+- In a scenario of several components, it is ``<release_id>:<component>``.
+- A release that carries a component forward keeps that component's
+  ``artifact_id``. The creation makes no artifact, so the creation artifact
+  keeps the ``artifact_id`` of the release that made it: the base artifact's
+  is the ID of the repository's base release.
 
 ``GET /reef/scenarios/{scenario}/artifacts`` answers ``{scenario,
 artifacts}``, **newest first**. Each row is one artifact of one component:
@@ -1134,7 +1140,8 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 +-----------------------+------------------------------------------------------+
 | ``parent_release_id`` | the parent of that release                           |
 +-----------------------+------------------------------------------------------+
-| ``content_id``        | its content                                          |
+| ``content_id``        | its content in a scenario of one component;          |
+|                       | ``null`` in a scenario of several components         |
 +-----------------------+------------------------------------------------------+
 | ``operation``         | ``creation`` for the creation artifact,              |
 |                       | ``training``, or ``recovery`` for the artifact that  |
@@ -1189,8 +1196,8 @@ component, ``release_id`` is the active release afterwards, and
   <../advanced_topics/state-model.rst#the-release-chain>`__.
 
 Activating the active artifact changes nothing. Activation never changes a
-trainer's training start. A full-weight serving runtime cannot activate the
-creation artifact after it served a checkpoint, and answers an error.
+trainer's training start. A full-weight serving runtime that activates the
+base artifact after it served a checkpoint loads the base artifact's files.
 
 Train from an artifact
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -1223,7 +1230,7 @@ Whether a trainer can start from an artifact depends on the trainer:
 - A harness trainer starts its next evolve step from the entries of the
   artifact's tree.
 
-A weight artifact without optimizer state, such as the creation artifact,
+A weight artifact without optimizer state, such as the base artifact,
 starts training with a new optimizer state.
 
 Both routes answer these statuses:
@@ -1487,6 +1494,7 @@ a training job runs or an update is being published.
          "training_mode": "auto",
          "processor": {"...": "..."},
          "inference_admission": {"...": "..."},
+         "artifacts": {"weights": {"active": "5e1c...", "training_start": "5e1c..."}},
          "training_job": {"job_id": "9c41...", "backend": "slime", "checkpoints_handled": 0},
          "finished_jobs": 2
        }
@@ -1497,7 +1505,9 @@ a training job runs or an update is being published.
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 ``job_data_ready`` says whether the processor has a job's data waiting.
-``processor`` includes ``ready_samples``, the samples of the held record sets
+``artifacts`` names, for each component, the ``artifact_id`` of its active
+artifact and of its trainer's training start, or ``null`` where Reef knows
+none. Both start at the creation artifact. ``processor`` includes ``ready_samples``, the samples of the held record sets
 and uploaded trajectories; ``job_samples``, the samples that automatic job
 data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
 the most samples the held record sets keep.

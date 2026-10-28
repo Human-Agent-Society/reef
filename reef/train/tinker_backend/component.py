@@ -30,8 +30,8 @@ from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.serving import ADAPTER_DIR, holds_weights
-from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
+from reef.runtime.serving import ADAPTER_DIR
+from reef.tinker.checkpoint import BASE_MANIFEST, MANIFEST, TinkerBaseModel, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
@@ -169,8 +169,13 @@ class TinkerTrainingComponent(LocalJobComponent):
     def shares_scenarios(self) -> bool:
         return True
 
+    def base_files(self) -> Mapping[str, str]:
+        """The base artifact holds the manifest of the base model on this component's service."""
+        return {BASE_MANIFEST: TinkerBaseModel(self._model, self._config.base_url).text()}
+
     def import_start(self, release: Path) -> str | None:
-        if not holds_weights(release):
+        if (release / BASE_MANIFEST).exists():
+            TinkerBaseModel.read(release).check_compatible(self._model, service=self._config.base_url)
             return None
         if not (release / MANIFEST).exists():
             raise ValueError(f"artifact is missing {MANIFEST}")

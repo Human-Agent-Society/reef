@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact
+from reef.artifact.artifact import REPOSITORY_FILES
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
-from reef.runtime.serving import holds_weights
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.
@@ -68,7 +68,8 @@ class StubTrainingComponent(TrainingComponent):
 
     def import_start(self, release: Path) -> str | None:
         self.imported.append(release)
-        return str(release) if holds_weights(release) else None
+        holds_files = any(entry.name not in REPOSITORY_FILES for entry in release.iterdir())
+        return str(release) if holds_files else None
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         """The checkpoints that ``job`` saves; raising fails the job."""
@@ -118,7 +119,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     def current_runtime_load_id(self) -> str | None:
         return self.served
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool = False) -> str:
         version = self.serve(artifact)
         self.activated.append(version)
         return version

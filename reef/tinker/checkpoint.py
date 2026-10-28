@@ -19,6 +19,47 @@ from reef.runtime.durable_files import write_json
 from reef.runtime.interfaces import LearningRateScheduleState
 
 MANIFEST = "tinker-checkpoint.json"
+#: The manifest of a Tinker component's base artifact (``TinkerBaseModel``).
+BASE_MANIFEST = "tinker-base-model.json"
+
+
+@dataclass(frozen=True)
+class TinkerBaseModel:
+    """The base model on a Tinker-compatible service: the content of a Tinker component's base artifact.
+
+    Values: ``base_model`` is a non-empty model name and ``service`` the service's base URL, or ``None`` for
+    Thinking Machines' hosted Tinker. Tinker keeps checkpoints on the service, so the base artifact keeps the base
+    model there too and holds only this manifest (``BASE_MANIFEST``). The Tinker training component makes it for
+    the base artifact; the component and the Tinker inference runtime read it, sample the base model for it and
+    start a job from the base model for it. ``check_compatible`` refuses one of another model or service.
+    """
+
+    base_model: str
+    service: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base_model, str) or not self.base_model:
+            raise ValueError("a Tinker base model needs a non-empty model name")
+
+    def check_compatible(self, base_model: str, *, service: str | None) -> None:
+        """Raise ``ValueError`` unless this is ``base_model`` on ``service``."""
+        if self.base_model != base_model or self.service != service:
+            raise ValueError(
+                f"the base artifact is {self.base_model} on {self.service or 'hosted Tinker'}, not "
+                f"{base_model} on {service or 'hosted Tinker'}"
+            )
+
+    def text(self) -> str:
+        """The manifest file's text."""
+        return json.dumps({"base_model": self.base_model, "service": self.service}, sort_keys=True) + "\n"
+
+    @classmethod
+    def read(cls, directory: Path) -> TinkerBaseModel:
+        """The manifest in ``directory``; ``ValueError`` for another shape."""
+        value = json.loads((directory / BASE_MANIFEST).read_text())
+        if not isinstance(value, Mapping) or set(value) != {"base_model", "service"}:
+            raise ValueError(f"{BASE_MANIFEST} must be an object of base_model and service")
+        return cls(value["base_model"], value["service"])
 
 
 @dataclass(frozen=True)

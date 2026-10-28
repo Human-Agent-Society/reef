@@ -77,7 +77,7 @@ def test_requests_seeds_the_extension_and_the_skill_after_the_notice(placeholder
     assert files["pi-agent/extensions/reef-requests.ts"] == EXTENSION
     assert files["pi-agent/skills/reef-pi-extension-api/SKILL.md"] == SKILL
     # The base release is the rendered files alone: pi declares no entries list, the extension reads none.
-    base = recipe.base_artifact_files()
+    base = recipe.base_artifact_source().files
     assert base is not None and "pi-agent/tree.json" not in base
     assert base["pi-agent/extensions/reef-requests.ts"] == EXTENSION
 

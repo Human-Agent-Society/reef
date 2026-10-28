@@ -18,10 +18,9 @@ import logging
 import threading
 from abc import abstractmethod
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import REPOSITORY_FILES, Artifact
+from reef.artifact.artifact import Artifact
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
 from reef.runtime.deployment import InferenceService
@@ -44,11 +43,6 @@ logger = logging.getLogger(__name__)
 ADAPTER_DIR = "adapter"
 #: Seconds between two health checks of the serving engines' service.
 HEALTH_INTERVAL_S = 30.0
-
-
-def holds_weights(path: Path) -> bool:
-    """Whether a materialized release holds weights; one with only the repository's files is the base model."""
-    return bool({entry.name for entry in path.iterdir()} - REPOSITORY_FILES)
 
 
 def check_engines_serve(backend: InferenceBackend, version: str) -> None:
@@ -241,13 +235,15 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     def adapter_residency_status(self) -> Mapping[str, Any]:
         return self._residency.status()
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
         """Serve the release ``artifact`` of ``scenario``; return the version that serves it.
 
         A release whose content the engines already serve for the scenario
-        loads nothing. A release without weights unloads the scenario's
-        adapter and returns ``base_version``. Any other release loads its
-        adapter under a new version. Raise ``ReefError`` without ``scenario``.
+        loads nothing. The base artifact (``base``) is the model the engines
+        hold: it unloads the scenario's adapter and returns
+        ``base_version``, without materializing the base. Any other release
+        loads its adapter under a new version. Raise ``ReefError`` without
+        ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
         adapter took the slot of its own previous one; the residency manager
         records that, so requests then sample the base model.
@@ -258,25 +254,25 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         """
         if scenario is None:
             raise ReefError("per-scenario adapters are served for a named scenario")
-        path = artifact.materialize().local_path
-        if path is None:
-            raise ReefError("serving a release requires a materialized artifact")
         content_id = artifact.ref.content_id
         with self._lock:
             current = self._residency.current_adapter(scenario)
             if current is not None and self._content_ids.get(current.runtime_load_id) == content_id:
                 return current.runtime_load_id
             files: WeightFiles | None
-            if holds_weights(path):
+            if base:
+                # Requests for the base artifact sample the base model.
+                version = self.base_version
+                files = None
+            else:
+                path = artifact.materialize().local_path
+                if path is None:
+                    raise ReefError("serving a release requires a materialized artifact")
                 adapter = path / ADAPTER_DIR
                 if not (adapter / "adapter_config.json").is_file():
                     raise ReefError(f"release {artifact.ref.release_id} holds no PEFT adapter in {ADAPTER_DIR}/")
                 version = self.next_version()
                 files = WeightFiles(adapter, "adapter")
-            else:
-                # Requests for a release without weights sample the base model.
-                version = self.base_version
-                files = None
             self._backend.pause()
             try:
                 if files is None:
@@ -328,10 +324,10 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     every engine then reports, and becomes the version Reef records for the
     requests that follow. The runtime serves one scenario, so it ignores
     ``scenario``; the registry refuses a second training scenario on it
-    (``shared_by_training_scenarios`` is False). A release without weights is
-    the base model, which the engines serve when they start. Returning to it
-    after another release needs the base model's files, which the engines do
-    not keep, so it raises ``ReefError``.
+    (``shared_by_training_scenarios`` is False). The engines start with the
+    base model, which is the base artifact (``base``). Activating
+    the base artifact before any other release loads nothing; after another
+    release, it loads the base artifact's files like any release.
     """
 
     def __init__(
@@ -355,18 +351,18 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
             health_interval_s=health_interval_s,
         )
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        path = artifact.materialize().local_path
-        if path is None:
-            raise ReefError("serving a release requires a materialized artifact")
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
         content_id = artifact.ref.content_id
         with self._lock:
             if self._served_content == content_id:
                 return self._version
-            if not holds_weights(path):
-                if self._served_content is not None:
-                    raise ReefError("the serving engines cannot return to the base model; activate a saved release")
+            if self._served_content is None and base:
+                # The engines still hold the base model they started with.
+                self._served_content = content_id
                 return self._version
+            path = artifact.materialize().local_path
+            if path is None:
+                raise ReefError("serving a release requires a materialized artifact")
             version = self.next_version()
             files = WeightFiles(path, "full")
             self._backend.pause()
@@ -383,7 +379,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
             return version
 
     def reload_served(self) -> None:
-        """Load the served release into every engine again under its version; the base model needs no load."""
+        """Load the served release into every engine again under its version; the base the engines start with needs none."""
         if self._served_files is None:
             return
         self._backend.load_weight_files(self._served_files, adapter_name=None, runtime_load_id=self._version)

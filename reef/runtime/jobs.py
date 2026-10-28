@@ -231,6 +231,16 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
+    def base_files(self) -> Mapping[str, str]:
+        """The files of the base artifact, by relative path, for a component whose ``release_format`` is ``None``.
+
+        Such a component keeps checkpoints on its own service, so the base
+        artifact names the base model there, in the component's own manifest.
+        A component whose releases hold weight files gets the base model's
+        files instead, and this is not called. The default is no file.
+        """
+        return {}
+
     @property
     def shares_scenarios(self) -> bool:
         """Whether jobs of several scenarios can run on this component.

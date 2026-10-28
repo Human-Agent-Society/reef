@@ -30,6 +30,7 @@ from reef.storage.commits import (
     CommitRecord,
     RecordProgress,
     active_artifact_ref,
+    active_record,
     scenario_metadata_for,
     to_json_value,
 )
@@ -45,8 +46,9 @@ class ComponentArtifact:
     """One component's artifact, as an activation or a new training start names it, and a release that binds it.
 
     Values: ``component`` is a component the scenario names (``ScenarioCommitter.component_names``).
-    ``artifact_id`` is the artifact's identity: ``release_id`` of the release that made it in a scenario of one
-    component, ``<release_id>:<component>`` in a scenario of several. ``content_id`` is the artifact's content id:
+    ``artifact_id`` is the artifact's identity (``ReleaseComponents.artifact_ids``): ``release_id`` of the release
+    that made it in a scenario of one component, ``<release_id>:<component>`` in a scenario of several; a release
+    that carries the artifact forward, such as the creation, keeps it. ``content_id`` is the artifact's content id:
     the release's own with one component, the component entry's with several. ``release_id`` names a release that
     binds the artifact as ``component``: the active release after an activation, and the release that minted the
     artifact for a new training start. Every field is a non-empty string.
@@ -190,6 +192,56 @@ class ScenarioCommitter:
         """
         return record.operation == "training" and record.component == component
 
+    def artifact_status(self) -> dict[str, dict[str, str | None]]:
+        """Each component's active artifact and training start, by ``artifact_id``; ``None`` where none is known.
+
+        The active artifact is the component's artifact in the active
+        release. A trainer's training start is the artifact of its newest
+        ``"train_from"`` record or the newest artifact it made, whichever is
+        later, and the creation's artifact before either. A component whose
+        artifact the records do not name, or that no trainer trains, reads
+        ``None``.
+        """
+        names = self.component_names()
+        queries = self.release_queries
+        records = queries.records()
+        manifests = queries.manifests(self._step)
+        creation = queries.creation_artifact.release_id
+        creation_ids = queries.creation_components(self._step) or {}
+
+        def bound(release_id: str, name: str) -> str | None:
+            """The ``artifact_id`` of ``name`` in the release ``release_id``, as the records name it."""
+            if len(names) > 1:
+                return (manifests.get(release_id) or {}).get(name)
+            return creation_ids.get(name, release_id) if release_id == creation else release_id
+
+        active = active_record(records)
+        active_release = creation if active is None else active.artifact_ref.release_id
+        trainers = {component_trainer.component: component_trainer for component_trainer in self.trainers}
+        status: dict[str, dict[str, str | None]] = {}
+        for name in names:
+            start: str | None = None
+            if name in trainers:
+                on_record = self.component_on_record(name)
+                latest = next(
+                    (
+                        record
+                        for record in reversed(records)
+                        if (record.operation == "train_from" and record.component == on_record)
+                        or (self.own_record(record, on_record) and record.made_artifact)
+                    ),
+                    None,
+                )
+                if latest is None:
+                    start = bound(creation, name)
+                elif latest.operation == "train_from":
+                    start = bound(latest.artifact_ref.release_id, name)
+                else:
+                    release_id = latest.artifact_ref.release_id
+                    start = release_id if len(names) == 1 else f"{release_id}:{name}"
+            status[name] = {"active": bound(active_release, name), "training_start": start}
+        return status
+
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable training commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
@@ -229,11 +281,11 @@ class ScenarioCommitter:
                 f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
             )
 
-    def recorded_components(self, artifact: Artifact) -> dict[str, str] | None:
-        """The content id of each component a release binds, for its commit record; ``None`` for a flat release."""
+    def recorded_components(self, artifact: Artifact, release_id: str) -> dict[str, str] | None:
+        """The ``artifact_id`` of each component that ``artifact``, published as ``release_id``, binds; ``None`` for a flat release."""
         if self._binding.surface.single:
             return None
-        return self.release_manifest(artifact).content_ids
+        return self.release_manifest(artifact).artifact_ids(release_id)
 
     def component_names(self) -> tuple[str, ...]:
         """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
@@ -301,7 +353,7 @@ class ScenarioCommitter:
             surface = self._binding.surface
             current_ref = self._artifacts.current
             served = Artifact(current_ref, self._artifacts.repository)
-            if surface.component_artifact(served, selected.component).ref.content_id == selected.content_id:
+            if surface.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return replace(selected, release_id=current_ref.release_id)
             self.require_no_pending_commit("activate an artifact")
             if surface.single:
@@ -323,9 +375,9 @@ class ScenarioCommitter:
                 target, recorded_component, components = (
                     self._artifacts.resolve(published_ref),
                     selected.component,
-                    manifest.content_ids,
+                    manifest.artifact_ids(published_ref.release_id),
                 )
-            surface.activate(target, self._binding.runtime, previous=served)
+            surface.activate(target, self._binding.runtime, base=self._artifacts.repository_base, previous=served)
             record = self.append_operation_record(
                 "activate", target.ref, component=recorded_component, components=components
             )
@@ -560,7 +612,7 @@ class ScenarioCommitter:
                 prepared=prepared,
                 pending=pending,
                 component=component,
-                components=self.recorded_components(local_artifact),
+                components=self.recorded_components(local_artifact, published_ref.release_id),
             )
         except Exception:
             # A lost append acknowledgment can leave a committed local release.
@@ -682,7 +734,13 @@ class ScenarioCommitter:
         # harness step never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
-        self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
+        self._binding.surface.activate(
+            artifact,
+            self._binding.runtime,
+            base=self._artifacts.repository_base,
+            source=source,
+            previous=previous,
+        )
 
     def finish_committed_step(
         self,

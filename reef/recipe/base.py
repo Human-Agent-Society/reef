@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.sources import download_huggingface_snapshot, parse_huggingface_source
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError
@@ -341,9 +343,9 @@ class Recipe:
         checks = every_check(component.validator, self.build_artifact_validator())
         return replace(surface, components={name: replace(component, validator=checks)})
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
-        return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The content of the deployment's base artifact, which every new scenario starts from; empty by default."""
+        return BaseArtifactSource()
 
     @property
     def harness_adapter(self) -> str | None:
@@ -353,10 +355,6 @@ class Recipe:
         the process shares it, so the scenario list names it before a
         scenario loads.
         """
-        return None
-
-    def bootstrap_artifact_component(self) -> str | None:
-        """The release component a bootstrap model snapshot belongs to; ``None`` places it at the release root."""
         return None
 
     def serving_status(self) -> Mapping[str, Any] | None:
@@ -472,6 +470,30 @@ class WeightTrainingRecipe(Recipe):
             # Every scenario owns an adapter on the shared base: route by scenario.
             return create_weight_surface(scenario=scenario, runtime=self.runtime, kind=self.runtime.served_weight_kind)
         return create_weight_surface(kind=self.runtime.served_weight_kind)
+
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The base model as the base artifact, stored where the training component's checkpoints are.
+
+        A component whose releases hold weight files (``release_format``)
+        keeps checkpoints in the artifact repository, so the base artifact
+        holds the model's files: the directory ``runtime.model_path`` names,
+        or the Hugging Face snapshot of the model it names. A component whose
+        releases name checkpoints on its own service, as Tinker's do, keeps
+        the base model there too, so the base artifact holds the component's
+        manifest of it (``TrainingComponent.base_files``).
+        """
+        model = self.runtime.model_path
+        if self.training_component.release_format is None:
+            return BaseArtifactSource(files=self.training_component.base_files(), inputs={"model": model})
+        directory = Path(model).expanduser()
+        if directory.is_dir():
+            return BaseArtifactSource(model_directory=directory.resolve(), inputs={"model": str(directory.resolve())})
+        if model.startswith(("/", ".", "~")):
+            raise RecipeConfigError(f"model directory {model} does not exist")
+        snapshot = download_huggingface_snapshot(parse_huggingface_source(model))
+        return BaseArtifactSource(
+            model_directory=snapshot.local_path, inputs={"model": model, "version": snapshot.version}
+        )
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """The engine's adapter residency on a runtime that serves per-scenario adapters."""

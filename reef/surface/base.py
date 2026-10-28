@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
 from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
@@ -54,14 +54,15 @@ class WeightRuntime(ServingRuntime):
         """
 
     @abstractmethod
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
         """Serve the published release ``artifact``; return the runtime load ID that serves it.
 
         Reef calls it at a commit that activates a release, at an activation
         and at a start, before traffic routes to the release. ``scenario`` names
         the release's scenario exactly when the runtime serves a separate
-        adapter per scenario. A raise leaves the runtime serving what it served
-        before.
+        adapter per scenario. ``base`` is true exactly when ``artifact`` is the
+        repository's base artifact: the base model, which serving engines
+        start with. A raise leaves the runtime serving what it served before.
         """
 
 
@@ -76,14 +77,17 @@ class ArtifactLoader(ABC):
     """Make a component's published releases servable on the runtime."""
 
     @abstractmethod
-    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
+    def activate(
+        self, artifact: Artifact, runtime: ServingRuntime | None, *, base: bool, source: Artifact | None = None
+    ) -> str:
         """Make the published release ``artifact`` servable; return the runtime load ID that serves it.
 
         Called once a release is final: after startup recovery has read the
         active artifact from the commit history, after a commit has published
         its release, and at an activation. It runs before the scenario routes
-        traffic to the release. ``source`` names the staged artifact whose
-        bytes a commit published.
+        traffic to the release. ``base`` is true exactly when ``artifact`` is
+        the repository's base artifact. ``source`` names the staged artifact
+        whose bytes a commit published.
         """
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
@@ -129,9 +133,8 @@ class FileTree(ABC):
 
 @dataclass(frozen=True)
 class HarnessInfo:
-    """What the harness routes need beyond the file tree: the seed behind the base release and the served model."""
+    """What the harness routes need beyond the file tree: the served model and the models a client may pick."""
 
-    seed_entries: tuple[Mapping[str, Any], ...] = ()
     served_model: str | None = None
     #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
     served_api: str = "openai"
@@ -416,11 +419,15 @@ class Surface:
         artifact: Artifact,
         runtime: ServingRuntime | None,
         *,
+        base: ArtifactRef,
         source: Artifact | None = None,
         previous: Artifact | None = None,
     ) -> None:
         """Make the runtime-loaded component servable when its loader activates.
 
+        ``base`` is the repository's base release, which made every component
+        it holds: the component is the base artifact when its ``artifact_id``
+        is ``base``'s (with one component) or ``<base>:<component>``.
         ``previous`` is the release served before this one: a component whose
         content it already served is not activated again.
         """
@@ -432,9 +439,12 @@ class Surface:
             return
         if previous is not None and not self.component_changed(artifact, previous, name):
             return
+        component = self.component_artifact(artifact, name)
+        base_artifact_id = base.release_id if self.single else f"{base.release_id}:{name}"
         loader.activate(
-            self.component_artifact(artifact, name),
+            component,
             runtime,
+            base=component.artifact_id == base_artifact_id,
             source=None if source is None else self.component_artifact(source, name),
         )
 

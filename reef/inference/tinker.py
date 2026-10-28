@@ -32,8 +32,7 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
     new_runtime_load_id_incarnation,
 )
-from reef.runtime.serving import holds_weights
-from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
+from reef.tinker.checkpoint import BASE_MANIFEST, MANIFEST, TinkerBaseModel, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 
 #: The hosted Tinker service, which ``service=None`` names.
@@ -41,22 +40,22 @@ TINKER_URL = "https://tinker.thinkingmachines.ai"
 
 
 def checkpoint_sampler_path(artifact: Artifact, base_model: str, service: str | None) -> str | None:
-    """The sampler a materialized release names, or None for Reef's empty base tree.
+    """The sampler a release names, or None for the base artifact, whose manifest names the base model on the service.
 
-    ``ValueError``: the release is not materialized; its manifest names another model or another service than
-    ``service``; or it holds files but no manifest.
+    ``ValueError``: the release is not materialized; it has neither manifest; or its manifest names another model
+    or another service than ``service``.
     """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
-    if (path / MANIFEST).exists():
-        checkpoint = TinkerCheckpoint.read(path)
-        checkpoint.check_compatible(base_model, service=service)
-        return checkpoint.sampler_path
-    # Reef's empty base tree is the base model; an arbitrary uploaded weight directory must not become it.
-    if holds_weights(path):
+    if (path / BASE_MANIFEST).exists():
+        TinkerBaseModel.read(path).check_compatible(base_model, service=service)
+        return None
+    if not (path / MANIFEST).exists():
         raise ValueError(f"artifact is missing {MANIFEST}")
-    return None
+    checkpoint = TinkerCheckpoint.read(path)
+    checkpoint.check_compatible(base_model, service=service)
+    return checkpoint.sampler_path
 
 
 class TinkerInferenceRuntime(InferenceRuntime):
@@ -142,8 +141,12 @@ class TinkerInferenceRuntime(InferenceRuntime):
 
     # -- Serving releases
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Serve the release's sampler; a sampler other than the served one is a new serving update."""
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
+        """Serve the release's sampler; a sampler other than the served one is a new serving update.
+
+        The base artifact's manifest names the base model, so the release alone tells its sampler and ``base`` is
+        not needed.
+        """
         with self._lock:
             sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             if sampler_path != self._active:

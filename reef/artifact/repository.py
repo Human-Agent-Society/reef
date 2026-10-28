@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -22,6 +23,7 @@ from reef.artifact.artifact import (
     ArtifactRepository,
 )
 from reef.artifact.composite import compose_release
+from reef.core.artifact_ref import base_content_id
 from reef.core.plugins import Plugin
 
 
@@ -29,7 +31,12 @@ class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
 
     @abstractmethod
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef: ...
+    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
+        """The release ``release_id`` names: a release ID, ``"base"`` for the repository's base artifact, or
+        ``"head"`` (also ``None``) for the newest release published in the repository.
+
+        Raise ``ArtifactNotFound`` for a release the repository does not hold.
+        """
 
     @abstractmethod
     def fork(
@@ -93,20 +100,53 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
 
 
 @dataclass(frozen=True)
+class BaseArtifactSource:
+    """The content of a repository's base artifact, and the configuration that the content comes from.
+
+    Values: ``files`` maps relative POSIX paths to the text of each file. ``model_directory`` is a directory of
+    model files, or ``None``. ``model_component`` is the release component whose directory the model files go
+    under, ``None`` for the release root; it is ``None`` whenever ``model_directory`` is. ``metadata`` is the base
+    manifest's metadata. ``inputs`` maps non-empty names to non-empty strings: the configuration that the content
+    comes from, such as the configured model and the checksum of the configured seed.
+
+    A recipe makes it (``Recipe.base_artifact_source``). A repository backend imports it as the base artifact of a
+    repository that has none. A repository that has one refuses to open unless the base was imported from equal
+    ``inputs``: the configuration is read once, to make the base.
+    """
+
+    files: Mapping[str, str] = field(default_factory=dict)
+    model_directory: Path | None = None
+    model_component: str | None = None
+    metadata: Mapping[str, object] = field(default_factory=dict)
+    inputs: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.model_directory is None and self.model_component is not None:
+            raise ValueError("model_component names where model files go, so it requires model_directory")
+        if self.model_directory is not None and not self.model_directory.is_dir():
+            raise ValueError(f"model directory {self.model_directory} does not exist")
+        for name, value in self.inputs.items():
+            if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
+                raise ValueError(f"base artifact input {name!r} must map a non-empty name to a non-empty string")
+
+    @property
+    def content_id(self) -> str:
+        """The content ID of the base artifact imported from this source (``base_content_id`` of ``inputs``)."""
+        return base_content_id(self.inputs)
+
+
+@dataclass(frozen=True)
 class RepositoryBackendContext:
     """The deployment values that a configured factory gets in addition to its own config.
 
     ``work_dir`` and ``cache_dir`` are ``storage.artifact_work_dir`` and
-    ``storage.artifact_cache_dir``. ``bootstrap_files`` are the files of the
-    recipe's base artifact. A new scenario starts from them.
-    ``bootstrap_component`` is the release component of a bootstrap model
-    snapshot, or ``None`` for the release root.
+    ``storage.artifact_cache_dir``. ``base`` is the content of the recipe's
+    base artifact; every new scenario starts from it.
     """
 
     work_dir: Path
     cache_dir: Path
-    bootstrap_files: Mapping[str, str] = field(default_factory=dict)
-    bootstrap_component: str | None = None
+    base: BaseArtifactSource = field(default_factory=BaseArtifactSource)
 
 
 class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
@@ -253,6 +293,11 @@ class Repository(ArtifactRepository):
     @property
     def base_artifact(self) -> ArtifactRef:
         return self._base_artifact
+
+    @cached_property
+    def repository_base(self) -> ArtifactRef:
+        """The repository's base release (``resolve_release("base")``), read once: it never changes."""
+        return self.backend.resolve_release("base")
 
     @property
     def current_artifact(self) -> ArtifactRef | None:

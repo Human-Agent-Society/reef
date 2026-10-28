@@ -27,7 +27,7 @@ class ImportingInference(StubInferenceRuntime):
     def serve(self, artifact):
         return super().serve(artifact.materialize())
 
-    def activate_checkpoint(self, artifact, *, scenario=None):
+    def activate_checkpoint(self, artifact, *, scenario=None, base=False):
         self.restore_order.append("inference")
         return super().activate_checkpoint(artifact, scenario=scenario)
 

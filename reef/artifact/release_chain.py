@@ -38,6 +38,11 @@ class ArtifactReleaseChain:
         return self._repository.base_artifact
 
     @property
+    def repository_base(self) -> ArtifactRef:
+        """The repository's base release, which holds the base artifact of every component."""
+        return self._repository.repository_base
+
+    @property
     def current(self) -> ArtifactRef:
         return self._repository.require_current_artifact()
 

@@ -477,7 +477,9 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
     assert started_engines(events[0]) == ("sglang", "Qwen/Qwen3-8B", 1, 2, "placement-2")
     assert events[1:4] == ["health", "pause", "resume"]
     assert runtime.current_runtime_load_id() == runtime.base_version
-    version = runtime.activate_checkpoint(Artifact.local(saved_adapter(tmp_path / "job-1")), scenario="math")
+    version = runtime.activate_checkpoint(
+        Artifact.local(saved_adapter(tmp_path / "job-1")), scenario="math", base=False
+    )
     _, layout, name, loaded, contents, served = events[-2]
     assert (layout, name, loaded, contents) == (
         "adapter",
@@ -509,7 +511,7 @@ def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(
     weights = tmp_path / "hf"
     weights.mkdir()
     (weights / "config.json").write_text("{}")
-    version = runtime.activate_checkpoint(Artifact.local(weights))
+    version = runtime.activate_checkpoint(Artifact.local(weights), base=False)
     _, layout, name, loaded, contents, _ = events[-2]
     assert (layout, name, loaded, contents) == ("full", None, version, {"config.json": "{}"})
     assert runtime.current_runtime_load_id() == version
@@ -542,7 +544,7 @@ def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted
     weights = tmp_path / "hf"
     weights.mkdir()
     (weights / "config.json").write_text("{}")
-    version = runtime.activate_checkpoint(Artifact.local(weights))
+    version = runtime.activate_checkpoint(Artifact.local(weights), base=False)
     restart(server)
     runtime.recover_engines()
     assert len(services) == 2

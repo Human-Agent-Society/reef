@@ -84,8 +84,8 @@ class EvaluationRun:
 
 @dataclass(frozen=True)
 class NewArtifact:
-    """An artifact that a commit published: the scenario, the artifact's ID, and the component whose trainer
-    committed it, or None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
+    """An artifact that a commit made: the scenario, the artifact's ID, and the component whose artifact it is, or
+    None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
     evaluates it with the scenario's settings."""
 
     scenario: str
@@ -107,8 +107,16 @@ class NewArtifacts(RecordObserver):
 
     def record_committed(self, commit: CommitRecord) -> None:
         # An activation or a new training start names an artifact that exists already: it reports none.
-        if commit.made_artifact:
+        if not commit.made_artifact:
+            return
+        if commit.components is None:
             self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
+            return
+        # With several components the release made the artifact of each component whose artifact_id it minted.
+        release_id = commit.artifact_ref.release_id
+        for name, artifact_id in commit.components.items():
+            if artifact_id == f"{release_id}:{name}":
+                self.queue.put(NewArtifact(commit.scenario, artifact_id, name))
 
     def close(self) -> None:
         self.queue.put(None)
@@ -229,16 +237,17 @@ class ArtifactEvaluations:
             return None
         settings = ArtifactEvaluationSettings.from_json(value)
         with self.dispatcher.locked_scenario(scenario) as current:
-            self.checked(current, current.current_artifact_ref().release_id, settings)
+            self.checked(current, None, settings)
         stored = settings.to_json()
         self.dispatcher.set_artifact_evaluation(scenario, stored)
         return stored
 
     def checked(
-        self, current: Scenario, artifact_id: str, settings: ArtifactEvaluationSettings
+        self, current: Scenario, artifact_id: str | None, settings: ArtifactEvaluationSettings
     ) -> tuple[ArtifactEvaluationRequest, Artifact, PolicyModel]:
-        """The request of ``settings`` for ``artifact_id``, the materialized artifact, and the model that the
-        runtime serves for it; ``ValueError`` or ``ReefError`` when ``current`` cannot run it."""
+        """The request of ``settings`` for ``artifact_id`` (None: the component's active artifact), the materialized
+        artifact, and the model that the runtime serves for it; ``ValueError`` or ``ReefError`` when ``current``
+        cannot run it."""
         kinds = {name: component.kind for name, component in current.surface.components.items()}
         component = settings.component
         if component is None:
@@ -248,6 +257,9 @@ class ArtifactEvaluations:
             component = named[0]
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
+        if artifact_id is None:
+            active = Artifact(current.current_artifact_ref(), current.repository)
+            artifact_id = current.surface.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind == "harness_plugin":
@@ -258,7 +270,8 @@ class ArtifactEvaluations:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
         if any(other == "harness_plugin" for other in kinds.values()):
             raise ReefError("Reef evaluates a model artifact only in a scenario whose artifacts hold no harness")
-        artifact = current.release_queries.artifact_for_version(artifact_id).materialize()
+        _, release = current.resolve_artifact(artifact_id, component)
+        artifact = release.materialize()
         runtime = current.runtime
         model = None if runtime is None else runtime.artifact_model(artifact)
         if model is None:
