@@ -1,4 +1,4 @@
-"""Rollout scores: a rollout's score or its failure, and the publication policies that read them."""
+"""Rollout requests and scores: the policy of a rollout, its score or its failure, and the policies that read them."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from reef.core.evaluation import RolloutScore, RolloutScores, mean_score
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore, RolloutScores, mean_score
 from reef.evaluation.evaluators import FloorCheck, ScoreComparison, check_floor, compare_scores
 
 SCORED = RolloutScore.scored
@@ -76,3 +76,19 @@ def test_check_floor_passes_a_task_whose_rollouts_that_did_not_fail_reach_the_fl
     )
     assert check_floor(candidate, 1.0) == FloorCheck(passed=1, failed=3, failed_rollouts=3)
     assert check_floor(scores((SCORED(0.5),)), 0.5) == FloorCheck(passed=1, failed=0, failed_rollouts=0)
+
+
+@pytest.mark.unit
+def test_a_policy_is_a_harness_with_at_most_one_plugin_and_a_model_with_at_most_one_adapter() -> None:
+    assert PolicyHarness("terminus-2").kind == "harness"
+    assert PolicyHarness("pi", {"pi-agent/AGENTS.md": "hint"}).kind == "harness_plugin"
+    assert PolicyModel("qwen").kind == "model" and PolicyModel("qwen", "tinker://run/sampler").kind == "model_adapter"
+    for build, message in (
+        (lambda: PolicyHarness(""), "base harness"),
+        (lambda: PolicyHarness("pi", {"": "text"}), "file paths"),
+        (lambda: PolicyModel(""), "names the model"),
+        (lambda: PolicyModel("qwen", ""), "non-empty location"),
+        (lambda: RolloutRequest(PolicyHarness("pi"), PolicyModel("qwen"), ""), "non-empty task"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            build()

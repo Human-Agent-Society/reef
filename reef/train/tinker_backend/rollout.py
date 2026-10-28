@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import RolloutScores
+from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.client.tasks import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
@@ -263,8 +263,15 @@ def roll_out(
             verifier_timeout_reward=settings.verifier_timeout_reward,
             lab=lab,
             concurrency=settings.concurrency,
+            model_adapter=sampler_path,
         )
-        rollouts = runner.run_rollouts([task.task_path for task in tasks for _ in range(settings.rollouts_per_task)])
+        rollouts = runner.run_rollouts(
+            [
+                RolloutRequest(runner.harness, runner.served_model, str(task.task_path))
+                for task in tasks
+                for _ in range(settings.rollouts_per_task)
+            ]
+        )
     samples: list[TrajectorySample] = []
     for index, task in enumerate(tasks):
         name = task_name(task)

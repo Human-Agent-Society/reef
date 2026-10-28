@@ -37,6 +37,9 @@ from reef.core.evaluation import (
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     EvaluationResult,
+    PolicyHarness,
+    PolicyModel,
+    RolloutRequest,
     RolloutRunner,
     RolloutScore,
     RolloutScores,
@@ -508,14 +511,15 @@ def rollout_record_name(side: str, task_index: int, repeat: int) -> str:
     return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
 
 
-class HarnessRolloutEvaluator(CandidateEvaluator, RolloutRunner[RolloutPairing, ScoredRollout]):
+class HarnessRolloutEvaluator(CandidateEvaluator, RolloutRunner[ScoredRollout]):
     """Measure a :class:`HarnessCandidate` by running its evaluation tasks as rollouts.
 
     Each task runs on the candidate tree and, for a comparison, on the current
     tree, in a worker pool on the selected executor. This is the harness tree
-    runner of ``RolloutRunner``: a request is a :data:`RolloutPairing`. The rollouts render each
-    tree with the served model binding, which never enters the candidate's
-    files. This object owns the worker pool, so the caller must :meth:`close` it.
+    runner of ``RolloutRunner``: a request's harness is the adapter with a
+    rendered tree as its plugin, and its model is the served model. The
+    rollouts render each tree with the served model binding, which never
+    enters the candidate's files. This object owns the worker pool, so the caller must :meth:`close` it.
     """
 
     def __init__(
@@ -566,6 +570,11 @@ class HarnessRolloutEvaluator(CandidateEvaluator, RolloutRunner[RolloutPairing, 
         self._binding_nodes = models.served.compose_nodes(self._descriptor)
         self._models = models
 
+    @property
+    def served_model(self) -> PolicyModel:
+        """The model that every request must name: the served model, which the rollouts call."""
+        return PolicyModel(self._models.served.model)
+
     def render(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
         """The tree plus the model binding, and the entries list beside them where the adapter carries one."""
         files = render_composition((*nodes_from_entries(entries), *self._binding_nodes), self._descriptor)
@@ -604,9 +613,11 @@ class HarnessRolloutEvaluator(CandidateEvaluator, RolloutRunner[RolloutPairing, 
         # worker the pairings run in one pool - a large task set costs one
         # wave instead of a long turn-taking pass - and the results are read
         # back in submission order either way.
-        pairings: list[RolloutPairing] = [
-            (
-                files[side],
+        harnesses = {side: PolicyHarness(self._descriptor.name, files[side]) for side in sides}
+        requests = [
+            RolloutRequest(
+                harnesses[side],
+                self.served_model,
                 task,
                 None if rollouts_dir is None else rollouts_dir / rollout_record_name(side, index, repeat),
             )
@@ -614,9 +625,11 @@ class HarnessRolloutEvaluator(CandidateEvaluator, RolloutRunner[RolloutPairing, 
             for repeat in range(self.rollout_repeats)
             for side in sides
         ]
-        scored = self.run_rollouts(pairings)
+        scored = self.run_rollouts(requests)
         runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
-        tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
+        tasks = {
+            side: [request.task for request in requests][offset :: len(sides)] for offset, side in enumerate(sides)
+        }
         scores = {
             side: RolloutScores.by_task(
                 self.evaluation_tasks(candidate), [self.rollout_score(run) for run in runs[side]]
@@ -664,14 +677,26 @@ class HarnessRolloutEvaluator(CandidateEvaluator, RolloutRunner[RolloutPairing, 
             metrics["evaluation_sides"] = list(sides)
         return EvaluationResult(evaluator="harness_rollout_pairs", evaluator_version="1", metrics=metrics)
 
-    def run_rollouts(self, requests: Sequence[RolloutPairing]) -> list[ScoredRollout]:
-        """Run and score each pairing in the worker pool, in submission order.
+    def run_rollouts(self, requests: Sequence[RolloutRequest]) -> list[ScoredRollout]:
+        """Run and score each request in the worker pool, in submission order.
 
-        A remote worker returns the kept trajectory as an archive; it is
-        extracted here into the pairing's record directory.
+        Raise ``ValueError`` before any rollout runs when a request names another
+        adapter or another model than the served one. A remote worker returns the
+        kept trajectory as an archive; it is extracted here into the request's
+        record directory.
         """
-        scored = self._worker_pool.evaluate(requests, models=self._models)
-        for (_, _, keep_dir), result in zip(requests, scored, strict=True):
+        for request in requests:
+            if request.harness.base != self._descriptor.name:
+                raise ValueError(
+                    f"this runner runs the {self._descriptor.name!r} adapter, not {request.harness.base!r}"
+                )
+            if request.model != self.served_model:
+                raise ValueError(f"this runner serves {self.served_model}, not {request.model}")
+        pairings: list[RolloutPairing] = [
+            (dict(request.harness.plugin), request.task, request.record_dir) for request in requests
+        ]
+        scored = self._worker_pool.evaluate(pairings, models=self._models)
+        for (_, _, keep_dir), result in zip(pairings, scored, strict=True):
             # A worker returns an archive only for a pairing that keeps its record.
             if keep_dir is None or result.record_archive is None:
                 continue

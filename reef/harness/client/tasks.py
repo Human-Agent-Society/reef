@@ -33,7 +33,7 @@ from typing import Any
 
 from reef_client.client import ReefClient, ReefClientError
 
-from reef.core.evaluation import RolloutRunner, RolloutScore
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.harness.client.wrapper import CaptureProxy
 
@@ -270,11 +270,13 @@ def rewards_of(rollouts: tuple[TaskRollout, ...]) -> tuple[float, ...]:
     )
 
 
-class TaskRolloutRunner(RolloutRunner[Path, TaskRollout]):
+class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     """Runs rollouts of task directories with one agent against one Reef scenario, and reports every scored rollout.
 
-    This is the Harbor agent runner of ``RolloutRunner``: a request is a task directory, and ``run_rollouts`` runs
-    up to ``concurrency`` rollouts at a time.
+    This is the Harbor agent runner of ``RolloutRunner``. It runs the harness ``harness``, the Harbor agent with
+    no plugin, and the model ``served_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
+    ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
+    ``concurrency`` rollouts at a time.
     """
 
     def __init__(
@@ -284,6 +286,7 @@ class TaskRolloutRunner(RolloutRunner[Path, TaskRollout]):
         scenario: str,
         model: str,
         work_dir: Path,
+        model_adapter: str | None = None,
         token: str | None = None,
         agent: Mapping[str, object] | None = None,
         agent_host: str | None = None,
@@ -314,6 +317,8 @@ class TaskRolloutRunner(RolloutRunner[Path, TaskRollout]):
         self.reef_url = reef_url.rstrip("/")
         self.scenario = scenario
         self.model = model
+        # The model that reef_url serves, which every request must name.
+        self.served_model = PolicyModel(model, model_adapter)
         self.token = token
         self.work_dir = Path(work_dir)
         self.agent: dict[str, object] = dict(agent) if agent is not None else dict(DEFAULT_AGENT)
@@ -342,26 +347,44 @@ class TaskRolloutRunner(RolloutRunner[Path, TaskRollout]):
     def agent_name(self) -> str:
         return str(self.agent.get("name") or self.agent.get("import_path"))
 
+    @property
+    def harness(self) -> PolicyHarness:
+        """The harness that every request must name: the Harbor agent, with no plugin."""
+        return PolicyHarness(self.agent_name)
+
     def run(self, task_path: Path) -> TaskRollout:
         """Run one rollout of a task directory and report it when the verifier scored it."""
         return asyncio.run(self.run_async(task_path))
 
-    def run_rollouts(self, requests: Sequence[Path]) -> list[TaskRollout]:
-        """Run one rollout of each task directory, ``concurrency`` at a time, in request order."""
+    def run_rollouts(self, requests: Sequence[RolloutRequest]) -> list[TaskRollout]:
+        """Run one rollout of each request's task directory, ``concurrency`` at a time, in request order."""
 
         async def run_all() -> list[TaskRollout]:
             return await self.run_rollouts_async(requests, asyncio.Semaphore(self.concurrency))
 
         return asyncio.run(run_all())
 
-    async def run_rollouts_async(self, requests: Sequence[Path], slots: asyncio.Semaphore) -> list[TaskRollout]:
-        """``run_rollouts`` in a running event loop: each rollout holds one of ``slots`` while it runs."""
+    async def run_rollouts_async(
+        self, requests: Sequence[RolloutRequest], slots: asyncio.Semaphore
+    ) -> list[TaskRollout]:
+        """``run_rollouts`` in a running event loop: each rollout holds one of ``slots`` while it runs.
 
-        async def run_one(task_path: Path) -> TaskRollout:
+        Raise ``ValueError`` before any rollout runs when a request names another harness or model than this
+        runner's, or a record directory: Harbor keeps each trial under ``work_dir``.
+        """
+        for request in requests:
+            if request.harness != self.harness:
+                raise ValueError(f"this runner runs the Harbor agent {self.agent_name!r} with no plugin")
+            if request.model != self.served_model:
+                raise ValueError(f"this runner serves {self.served_model}, not {request.model}")
+            if request.record_dir is not None:
+                raise ValueError("this runner keeps each trial under its work_dir, not in a request's record_dir")
+
+        async def run_one(request: RolloutRequest) -> TaskRollout:
             async with slots:
-                return await self.run_async(task_path)
+                return await self.run_async(Path(request.task))
 
-        return list(await asyncio.gather(*(run_one(task_path) for task_path in requests)))
+        return list(await asyncio.gather(*(run_one(request) for request in requests)))
 
     def rollout_score(self, rollout: TaskRollout) -> RolloutScore:
         """Failed when the environment could not run the rollout, else its reward, 0 when it ran without one."""
