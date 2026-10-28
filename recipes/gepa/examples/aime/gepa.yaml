@@ -1,6 +1,6 @@
 # The recipe the AIME driver boots: run.py loads this file, fills
 # evolution.tasks with the pinned validation split, builds the implementation
-# below, and serves it from its own embedded Reef service. The Pi episodes the
+# below, and serves it from its own embedded Reef service. The Pi rollouts the
 # driver runs point at that service, so the problems it solves are recorded
 # traffic and the method reflects on the composition's own transcripts.
 #
@@ -18,10 +18,10 @@ recipe:
       # The third report closes the minibatch. Both correct and incorrect
       # transcripts contribute to reflection.
       batch_size: 3
-      # The harness binary the evaluation episodes run headless, from the environment.
+      # The harness binary the evaluation rollouts run headless, from the environment.
       binary: ${REEF_PI_BINARY}
       # The task side, in the harness/ package: evaluate is the quickstart's
-      # containment score over one episode, feedback is the wording GEPA's own
+      # containment score over one rollout, feedback is the wording GEPA's own
       # default evaluator writes into the reflective records. run.py binds these
       # hooks to a serializable answer/context snapshot before building the recipe.
       evaluate: harness.aime:AIMEAnswerScorer

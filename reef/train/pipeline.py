@@ -33,7 +33,7 @@ its training sample (``Record2Sample.uploaded_sample``), which counts as one
 sample. Job data takes uploaded trajectories first.
 
 A sample-to-job stage can also make samples itself, from no record, such as
-the generated-task recipe's rollout episodes. While ``Sample2Job.own_job_data``
+the generated-task recipe's rollouts. While ``Sample2Job.own_job_data``
 returns samples, the pipeline is ready, and its next job data holds exactly
 those, unless automatic job data is also ready: held samples, such as
 uploaded trajectories, train first, so a recipe that trains both trains its

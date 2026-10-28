@@ -32,7 +32,7 @@ from reef.train import PipelineContext
 from reef.train.jobs import JobPlanContext, JobRequest
 from reef.train.pipeline import TrainingPipeline
 
-ROLLOUT = {"episodes_per_task": 2}
+ROLLOUT = {"rollouts_per_task": 2}
 RUNTIME = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
 
 

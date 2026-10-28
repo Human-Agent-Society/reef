@@ -1,16 +1,16 @@
-"""Episode lifecycle: render, launch headless, collect, clean up exactly.
+"""Rollout lifecycle: render, launch headless, collect, clean up exactly.
 
-One episode is one process of the harness binary inside a throwaway root:
+One rollout is one process of the harness binary inside a throwaway root:
 the rendered files land under the root, the descriptor's relocation
 environment points the binary's entire composition at it, the binary runs
 headless in an empty ``workspace/`` working directory, and the trajectory is
 read back before the root is removed. Both surveyed harnesses re-read their
 whole composition at process start and accept environment variables that
-relocate their config and session roots, so the inverse of an episode is
+relocate their config and session roots, so the inverse of a rollout is
 exactly "delete the root" - no shared state survives.
 
 Cleanup is audited, not assumed: every file found under the root that the
-episode did not write, is not under ``workspace/`` (the task's own output
+rollout did not write, is not under ``workspace/`` (the task's own output
 area), and does not match the descriptor's cleanup whitelist is reported as
 ``residue``. The whitelist is where adapter traps live - opencode's boot
 mutates its own config directory (npm install, ``.gitignore``), and both
@@ -32,21 +32,21 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.trajectory import reader_for
+from reef.harness.rollouts.trajectory import reader_for
 from reef.sandbox.environment import execute
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor
+from reef.sandbox.process import LocalExecutor, ProgramExecutor, RolloutLaunchError, RolloutTimeout
 
 
-class EpisodeError(ReefError):
-    """The episode could not be launched or torn down."""
+class RolloutError(ReefError):
+    """The rollout could not be launched or torn down."""
 
 
 class TrajectoryKeepError(ReefError):
-    """The episode ran but its trajectory could not be kept, so the step has no record of it."""
+    """The rollout ran but its trajectory could not be kept, so the step has no record of it."""
 
 
 @dataclass(frozen=True)
-class EpisodeResult:
+class RolloutResult:
     """One headless invocation's observable outcome."""
 
     exit_code: int
@@ -56,7 +56,7 @@ class EpisodeResult:
     residue: tuple[str, ...]
 
 
-def _remove_episode_root(root: Path) -> None:
+def _remove_rollout_root(root: Path) -> None:
     """Remove a root, repairing ordinary permission damage once."""
 
     if not root.exists() and not root.is_symlink():
@@ -81,7 +81,7 @@ def _remove_episode_root(root: Path) -> None:
             repair(root)
             shutil.rmtree(root)
         except OSError as exc:
-            raise EpisodeError(f"cannot remove episode root {root}: {exc}") from exc
+            raise RolloutError(f"cannot remove rollout root {root}: {exc}") from exc
 
 
 def _keep_trajectory(source: Path, target: Path) -> None:
@@ -96,7 +96,7 @@ def _keep_trajectory(source: Path, target: Path) -> None:
         # and an existing target is refused so a kept record is never merged over.
         shutil.copytree(source, target, symlinks=True)
     except OSError as exc:
-        raise TrajectoryKeepError(f"cannot keep episode trajectory under {target}: {exc}") from exc
+        raise TrajectoryKeepError(f"cannot keep rollout trajectory under {target}: {exc}") from exc
 
 
 def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
@@ -113,17 +113,17 @@ def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def run_episode(
+def run_rollout(
     descriptor: AdapterDescriptor,
     files: Mapping[str, str],
     prompt: str,
     *,
     binary: str | None = None,
     timeout: float = 600.0,
-    executor: EpisodeExecutor | None = None,
+    executor: ProgramExecutor | None = None,
     keep_dir: Path | None = None,
-) -> EpisodeResult:
-    """Run one headless episode of ``descriptor``'s harness over ``files``.
+) -> RolloutResult:
+    """Run one headless rollout of ``descriptor``'s harness over ``files``.
 
     ``binary`` overrides the descriptor's binary name (the seam hermetic
     tests drive a fake harness through); ``prompt`` substitutes into the
@@ -133,10 +133,10 @@ def run_episode(
     same for every executor. Only an executor that runs on the Reef host
     keeps the descriptor's ``host_env`` from the service and, on macOS, makes
     the root of an adapter with ``is_root_bind_mounted`` under
-    ``~/.reef/episodes`` rather than the temp directory. The episode root is removed before this returns, success
+    ``~/.reef/rollouts`` rather than the temp directory. The rollout root is removed before this returns, success
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
-    fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
+    fails raises ``TrajectoryKeepError`` rather than an ``RolloutError``.
     """
     executor = executor or LocalExecutor()
     # Adapters can validate a conditional boundary (for example, remote task
@@ -145,11 +145,11 @@ def run_episode(
     if descriptor.validate_execution is not None:
         try:
             descriptor.validate_execution(files, executor)
-        except EpisodeLaunchError as exc:
-            raise EpisodeError(str(exc)) from exc
+        except RolloutLaunchError as exc:
+            raise RolloutError(str(exc)) from exc
     elif descriptor.self_isolating and not executor.runs_on_host:
-        raise EpisodeError(
-            f"adapter {descriptor.name!r} isolates episodes in its own container, which runs only on the Reef "
+        raise RolloutError(
+            f"adapter {descriptor.name!r} isolates rollouts in its own container, which runs only on the Reef "
             "host; use evolution.executor: local and let the adapter's container be the boundary"
         )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
@@ -157,26 +157,26 @@ def run_episode(
     # directory, so a root the binary bind-mounts from lives under the home there. Linux Docker shares every path,
     # and an executor off the Reef host runs no local container.
     if descriptor.is_root_bind_mounted and executor.runs_on_host and sys.platform == "darwin":
-        parent = Path.home() / ".reef" / "episodes"
+        parent = Path.home() / ".reef" / "rollouts"
         try:
             parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise EpisodeError(f"cannot create the episode root directory {parent}: {exc}") from exc
+            raise RolloutError(f"cannot create the rollout root directory {parent}: {exc}") from exc
     else:
         parent = None
-    root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-", dir=parent))
+    root = Path(tempfile.mkdtemp(prefix=f"reef-rollout-{descriptor.name}-", dir=parent))
     try:
         written = set()
         for relative, text in files.items():
             relative_path = PurePosixPath(relative)
             if relative_path.is_absolute() or ".." in relative_path.parts:
-                raise EpisodeError(f"render path {relative!r} escapes the episode root")
+                raise RolloutError(f"render path {relative!r} escapes the rollout root")
             target = root / relative_path
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
             except (OSError, UnicodeEncodeError) as exc:
-                raise EpisodeError(f"cannot write render path {relative!r}: {exc}") from exc
+                raise RolloutError(f"cannot write render path {relative!r}: {exc}") from exc
             written.add(str(relative_path))
         workspace = root / "workspace"
         workspace.mkdir()
@@ -185,11 +185,11 @@ def run_episode(
             for path in writable_paths:
                 path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise EpisodeError(f"cannot prepare writable episode state: {exc}") from exc
+            raise RolloutError(f"cannot prepare writable rollout state: {exc}") from exc
         env = {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
         # Point HOME at the root unless the descriptor relocates it itself:
         # config discovery that ignores the relocation vars still lands inside
-        # the episode instead of in the operator's real home.
+        # the rollout instead of in the operator's real home.
         env.setdefault("HOME", str(root))
         if executor.runs_on_host:
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
@@ -210,10 +210,10 @@ def run_episode(
                 writable_paths=writable_paths,
                 readonly_paths=tuple(root / PurePosixPath(relative) for relative in written),
             )
-        except EpisodeLaunchError as exc:
-            raise EpisodeError(str(exc)) from exc
-        except EpisodeTimeout as exc:
-            raise EpisodeError(str(exc)) from exc
+        except RolloutLaunchError as exc:
+            raise RolloutError(str(exc)) from exc
+        except RolloutTimeout as exc:
+            raise RolloutError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
         residue = tuple(
             sorted(
@@ -224,7 +224,7 @@ def run_episode(
                 and not _whitelisted(relative, descriptor.cleanup_whitelist)
             )
         )
-        return EpisodeResult(
+        return RolloutResult(
             exit_code=outcome.exit_code,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
@@ -236,4 +236,4 @@ def run_episode(
             if keep_dir is not None:
                 _keep_trajectory(root / descriptor.trajectory_path, keep_dir)
         finally:
-            _remove_episode_root(root)
+            _remove_rollout_root(root)

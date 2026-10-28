@@ -348,7 +348,7 @@ class Surface:
     def inference_for_evaluation(self, component: str | None) -> InferenceHooks | None:
         """The request hooks of an evaluation call that runs a candidate of ``component``: every other component's.
 
-        The episode renders its own candidate of that component, so the served
+        The rollout renders its own candidate of that component, so the served
         release's hooks for it would mix the served content into the
         candidate's calls (a skill catalog, for one); the rest of the release
         (weights, request defaults) is served as it is. ``None`` names the only

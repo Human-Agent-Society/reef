@@ -3,7 +3,7 @@
 ``harness/`` is the benchmark's bash agent. ``agent.py`` is its loop and
 ``tools.py`` its tools, both the benchmark's call for call; its prompt and
 tool definitions are read from the pinned checkout in the task image when
-the episode starts, so they are the benchmark's byte for byte. This module
+the rollout starts, so they are the benchmark's byte for byte. This module
 is what Reef adds around that agent:
 
 - the task's engine session, started through the task image's
@@ -63,7 +63,7 @@ from the dashboard is the fallback.
 
 ``CEOBENCH_REPORTS`` (default on; ``0`` turns it off) is the untrained
 baseline switch: the weeks are still recorded in the trial metadata, but no
-report is posted, so the stack serves the base model for the whole episode
+report is posted, so the stack serves the base model for the whole rollout
 and trains nothing. The pacer is off with it.
 
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
@@ -114,7 +114,7 @@ from .report import (
 from .tools import DEFAULT_BASH_TIMEOUT_S, ContainerTools
 from .values import JsonValue
 
-#: Episode defaults; ``kwargs`` on the Harbor agent config override them.
+#: Rollout defaults; ``kwargs`` on the Harbor agent config override them.
 DEFAULT_SEED = 42
 DEFAULT_DAYS = 500
 DEFAULT_TOOL_USER = "agent"
@@ -135,7 +135,7 @@ ENGINE_READ_TIMEOUT_S = 180.0
 ENGINE_STOP_TIMEOUT_S = 300.0
 
 #: Runs with the checkout's interpreter: the agent's prompt and tools as the
-#: benchmark's own classes build them, for the episode's length.
+#: benchmark's own classes build them, for the rollout's length.
 CONTRACT_SCRIPT = """
 import json, sys
 from saas_bench.agents.bash_agent.agent import BashAgent
@@ -178,7 +178,7 @@ MRR_FALLBACK_SQL = (
 
 
 class Session(NamedTuple):
-    """The engine session the task started for this episode."""
+    """The engine session the task started for this rollout."""
 
     run_dir: str
     workspace: str
@@ -200,7 +200,7 @@ def forwarded_environment(environ: dict[str, str]) -> dict[str, str]:
 
 
 class TaskContainer:
-    """The task container from the episode thread: its engine session and the checkout it carries."""
+    """The task container from the rollout thread: its engine session and the checkout it carries."""
 
     def __init__(
         self,
@@ -346,7 +346,7 @@ class TaskContainer:
 
 
 class HarborAgent(BaseAgent):
-    """One Harbor trial: one CEO-Bench episode, the benchmark's bash agent served by Reef."""
+    """One Harbor trial: one CEO-Bench rollout, the benchmark's bash agent served by Reef."""
 
     def __init__(self, *args, seed: int = DEFAULT_SEED, days: int = DEFAULT_DAYS, **kwargs):
         super().__init__(*args, **kwargs)
@@ -408,7 +408,7 @@ class HarborAgent(BaseAgent):
         """Nothing to install: the image carries the pinned checkout."""
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
-        # The episode is a blocking loop of model calls and container
+        # The rollout is a blocking loop of model calls and container
         # commands; it runs in a thread so this event loop keeps serving the
         # container commands it issues.
         loop = asyncio.get_running_loop()
@@ -465,7 +465,7 @@ class HarborAgent(BaseAgent):
     def play(
         self, task: TaskContainer, environment: BaseEnvironment, loop: asyncio.AbstractEventLoop, proxy_port: int
     ) -> dict:
-        """The benchmark runner's episode, with the weeks credited as they close."""
+        """The benchmark runner's rollout, with the weeks credited as they close."""
         model = self.model_name or "reef"
         session = task.start_engine(
             seed=self.seed,

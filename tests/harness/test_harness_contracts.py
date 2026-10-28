@@ -5,7 +5,7 @@ import pytest
 from reef.harness.adapters.descriptor import ExecutionValidator
 from reef.harness.client.wrapper import ReleaseObserver
 from reef.harness.compose.registry import ObjectPlugin
-from reef.harness.episodes.model_binding import ModelBindingsResolver
+from reef.harness.rollouts.model_binding import ModelBindingsResolver
 from reef.harness.runners.native import HookListener, Next, ToolRunner
 from reef.harness.runners.native.enforce import Enforcer, Tool
 from reef.harness.runners.native.graph import Host, TurnLoop
@@ -13,7 +13,7 @@ from reef.harness.runners.native.host import TreeOrder
 from reef.harness.runners.native.release_client import EventWriter, ReleaseUpdateListener
 from reef.harness.runners.native.selftools import ServeState
 from reef.harness.runners.native.serve import EventSink
-from reef.sandbox.process import EpisodeExecutor
+from reef.sandbox.process import ProgramExecutor
 
 
 @pytest.mark.parametrize(
@@ -22,7 +22,7 @@ from reef.sandbox.process import EpisodeExecutor
         ExecutionValidator,
         ReleaseObserver,
         ObjectPlugin,
-        EpisodeExecutor,
+        ProgramExecutor,
         ModelBindingsResolver,
         HookListener,
         Next,

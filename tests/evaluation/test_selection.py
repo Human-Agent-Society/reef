@@ -155,7 +155,10 @@ def test_a_policy_mixin_pairs_with_the_backend_evaluate_mixin() -> None:
             return EvaluationResult(
                 evaluator="pairs",
                 evaluator_version="1",
-                metrics={"candidate_scores": (1.0, 1.0), "current_scores": (0.0, 0.0)},
+                metrics={
+                    "candidate_scores": [{"task": "t", "scores": [1.0, 1.0]}],
+                    "current_scores": [{"task": "t", "scores": [0.0, 0.0]}],
+                },
             )
 
     plugin = ScoreComparisonPlugin(Backend())

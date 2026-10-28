@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from tests.reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 import reef.evaluation.harness as reef_evaluation_harness
 from reef.core.plugins import PluginReference
@@ -39,11 +39,16 @@ class DecideOnlyBackend:
         raise AssertionError("this case exercises decide(), not evaluate()")
 
 
-def _evaluation(scores: tuple[float | None, ...]) -> EvaluationResult:
+def _evaluation(scores: tuple[float | str | list[float | str], ...]) -> EvaluationResult:
+    """The candidate's scores, one task per value: a score, ``"failed"``, or a list of runs."""
+    tasks = [
+        {"task": f"t{index}", "scores": value if isinstance(value, list) else [value]}
+        for index, value in enumerate(scores)
+    ]
     return EvaluationResult(
-        evaluator="harness_episode_pairs",
+        evaluator="harness_rollout_pairs",
         evaluator_version="1",
-        metrics={"candidate_scores": scores, "current_scores": ()},
+        metrics={"candidate_scores": tasks, "current_scores": []},
     )
 
 
@@ -56,25 +61,28 @@ def test_floor_selects_only_when_every_task_meets_the_floor() -> None:
 
     met = plugin.decide(candidate, _evaluation((1.0, 1.5)))
     assert met.selected and met.policy == "floor"
-    assert met.metrics == {"passed": 2, "failed": 0, "floor_score": 1.0}
+    assert met.metrics == {"passed": 2, "failed": 0, "failed_rollouts": 0, "floor_score": 1.0}
     assert met.reason == "candidate met the floor on all 2 tasks"
 
-    # An episode that could not run has no score and missed the floor.
-    missed = plugin.decide(candidate, _evaluation((1.0, 0.5, None)))
+    # A rollout that gave no answer scores 0 and misses the floor.
+    missed = plugin.decide(candidate, _evaluation((1.0, 0.5, 0.0)))
     assert not missed.selected
-    assert missed.metrics == {"passed": 1, "failed": 2, "floor_score": 1.0}
+    assert missed.metrics == {"passed": 1, "failed": 2, "failed_rollouts": 0, "floor_score": 1.0}
     assert missed.reason == "candidate missed the floor on 2 of 3 tasks"
+
+    # A failed rollout fails no task, but a task whose rollouts all failed does not pass.
+    partly = plugin.decide(candidate, _evaluation(([1.0, "failed"],)))
+    assert partly.selected and partly.metrics["failed_rollouts"] == 1
+    assert not plugin.decide(candidate, _evaluation(([1.0, 1.0], ["failed", "failed"]))).selected
 
     lowered = FloorPlugin(DecideOnlyBackend(), floor_score=0.5)
     assert lowered.decide(candidate, _evaluation((0.5, 0.75))).selected
     assert lowered.decide(candidate, _evaluation((0.5, 0.25))).metrics == {
         "passed": 1,
         "failed": 1,
+        "failed_rollouts": 0,
         "floor_score": 0.5,
     }
-
-    nothing = plugin.decide(candidate, _evaluation(()))
-    assert not nothing.selected and nothing.reason == "no evaluation task was scored"
 
     for bad in (0, -1.0, True, float("nan"), "1"):
         with pytest.raises(ValueError, match="floor_score must be a positive number"):
@@ -95,15 +103,15 @@ def test_the_floor_plugin_gates_the_candidate_alone() -> None:
     assert calls == [(candidate, ("candidate",))]
 
 
-def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(tmp_path: Path, monkeypatch) -> None:
+def test_a_candidate_only_evaluation_runs_no_current_rollout_and_still_settles(tmp_path: Path, monkeypatch) -> None:
     sides: list[str] = []
-    original = reef_evaluation_harness.run_episode
+    original = reef_evaluation_harness.run_rollout
 
     def spy(descriptor, files, prompt, **kwargs):
         sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
         return original(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(reef_evaluation_harness, "run_episode", spy)
+    monkeypatch.setattr(reef_evaluation_harness, "run_rollout", spy)
     b = backend(tmp_path, lambda n, s, m: MARKER)
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     candidate = prepared.candidate
@@ -114,28 +122,29 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
 
     evaluation = b.evaluate(candidate, sides=("candidate",))
     assert sides == ["candidate"]
-    assert evaluation.metrics["candidate_scores"] == (1.0,) and evaluation.metrics["current_scores"] == ()
+    assert evaluation.metrics["candidate_scores"] == [{"task": "task one", "scores": [1.0]}]
+    assert evaluation.metrics["current_scores"] == []
     assert evaluation.metrics["evaluation_sides"] == ["candidate"]
     assert set(evaluation.metrics) == {
         "candidate_scores",
         "current_scores",
-        "episode_failures",
-        "episode_repeats",
+        "rollout_failures",
+        "rollout_repeats",
         "candidate_failures",
         "candidate_residue",
         "candidate_score",
         "candidate_agents",
         "candidate_paths",
-        # What each candidate episode was graded on, so a rejected step names the task and the reply.
-        "candidate_episodes",
+        # What each candidate rollout was graded on, so a rejected step names the task and the reply.
+        "candidate_rollouts",
         "evaluation_sides",
     }
-    (episode,) = evaluation.metrics["candidate_episodes"]
-    assert set(episode) == {"task", "score", "failure", "reply"} and episode["score"] == 1.0
+    (rollout,) = evaluation.metrics["candidate_rollouts"]
+    assert set(rollout) == {"task", "score", "failure", "reply"} and rollout["score"] == 1.0
     # The default pair is unchanged and records no evaluation_sides.
     paired = b.evaluate(candidate).metrics
     assert sides == ["candidate", "candidate", "current"] and "evaluation_sides" not in paired
-    assert paired["current_scores"] == (0.0,) and paired["current_score"] == 0.0
+    assert paired["current_scores"] == [{"task": "task one", "scores": [0.0]}] and paired["current_score"] == 0.0
 
     plugin = FloorPlugin(b)
     result = b.settle_step(prepared, plugin.decide(candidate, evaluation))
@@ -180,11 +189,11 @@ def test_a_candidate_that_misses_the_floor_reverts_and_carries_the_manifest_unto
 def write_floor_module(tmp_path: Path, monkeypatch) -> None:
     """Make ``demo_floor:Propose`` and ``demo_floor:Evaluate`` importable for a Cordis recipe config."""
     (tmp_path / "demo_floor.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -325,7 +334,7 @@ def _instruction(text: str = "add a rule", request_id: str = "req-1") -> JobData
 
 def test_step_progress_carries_the_proposers_activity_as_it_happens(tmp_path: Path, monkeypatch) -> None:
     """Each model call shows while it waits and once it answers, so the request page can tell a long call."""
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
 
     seen: list[tuple] = []
     held: dict[str, CordisBackend] = {}
@@ -369,12 +378,12 @@ def test_step_progress_names_the_phase_while_a_step_runs_and_clears_when_it_sett
     assert seen == [StepProgress("req-1", "proposing", seen[0].started_at, None)]
     assert before <= seen[0].started_at <= time.time()
     evaluating = b.step_progress
-    assert evaluating == replace(seen[0], phase="evaluating") and evaluating.episodes_total is None
+    assert evaluating == replace(seen[0], phase="evaluating") and evaluating.rollouts_total is None
     candidate = prepared.candidate
     assert candidate is not None
     evaluation = b.evaluate(candidate)
-    # One task, one repeat, both sides: the evaluation's size once the episodes are laid out.
-    assert b.step_progress == replace(evaluating, episodes_total=2)
+    # One task, one repeat, both sides: the evaluation's size once the rollouts are laid out.
+    assert b.step_progress == replace(evaluating, rollouts_total=2)
     b.settle_step(prepared, ScoreComparisonPlugin(b).decide(candidate, evaluation))
     assert b.step_progress is None
 
@@ -401,7 +410,7 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
     recorded = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda n, s, m, requests=(): MARKER),
-        score_episode=resolve_episode_scorer(evaluate),
+        score_rollout=resolve_rollout_scorer(evaluate),
         tasks=("task one",),
         models=MODEL,
         binary=str(make_binary(tmp_path)),
@@ -417,7 +426,7 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
 
 @pytest.mark.unit
 def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path, monkeypatch) -> None:
-    """Told where Reef answers inference, episodes sample the release the scenario serves through it."""
+    """Told where Reef answers inference, rollouts sample the release the scenario serves through it."""
     from reef.recipe.base import ServedEndpoint
 
     write_floor_module(tmp_path, monkeypatch)

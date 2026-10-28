@@ -1,4 +1,4 @@
-"""The model bindings Reef hands to harness-evolution methods and episodes.
+"""The model bindings Reef hands to harness-evolution methods and rollouts.
 
 A :class:`ModelBinding` is one model endpoint as a value: where it is, which
 model to request, how to authenticate, and which API dialect it speaks. The
@@ -8,12 +8,12 @@ own environment reads; a method's auxiliary models (a stronger proposer, a
 judge) are declared in the recipe config and resolved the same way.
 
 :class:`ModelBindings` is the set a method receives: ``served`` is the model
-under test - what the HTTP service proxies to and what evaluation episodes
+under test - what the HTTP service proxies to and what evaluation rollouts
 run against - and the named ones are the method's own. Methods call
 :meth:`ModelBinding.chat`; the evolution backend renders
-:meth:`ModelBinding.compose_nodes` into each evaluation episode. A served
+:meth:`ModelBinding.compose_nodes` into each evaluation rollout. A served
 binding points at this Reef's own evaluation route for the scenario when the
-service is known, so an episode samples the release the scenario serves;
+service is known, so a rollout samples the release the scenario serves;
 such calls are served without being recorded, so none of this traffic
 becomes a scenario record either way.
 """
@@ -40,11 +40,11 @@ from reef.runtime.interfaces import InferenceRuntime
 #: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.
 MODEL_APIS = ("openai", "responses", "anthropic")
 
-#: What an episode's rendered config carries where the key goes when the
+#: What a rollout's rendered config carries where the key goes when the
 #: endpoint needs none (a local vllm or ollama, the tutorial's case). Agent
 #: binaries read the rendered key to decide a provider is usable and refuse
 #: to start on an empty one - pi exits 1 with "No API key found for the
-#: selected model" before it ever reaches the endpoint, so every episode
+#: selected model" before it ever reaches the endpoint, so every rollout
 #: fails and no gate can publish. Endpoints without auth ignore the value.
 NO_KEY_PLACEHOLDER = "no-key"
 
@@ -346,7 +346,7 @@ class ModelBinding:
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ModelBindingError(f"model endpoint unreachable: {exc}") from exc
 
-    # -- Episode-side rendering ----------------------------------------------
+    # -- Rollout-side rendering ----------------------------------------------
 
     def compose_nodes(
         self, descriptor: AdapterDescriptor, *, models: Sequence[str] = ()
@@ -371,7 +371,7 @@ class ModelBinding:
             )
             raise ModelBindingError(
                 f"adapter {descriptor.name!r} declares no model_binding for the {self.api!r} api "
-                f"(declared: {known}); episodes cannot reach a model{hint}"
+                f"(declared: {known}); rollouts cannot reach a model{hint}"
             )
         metadata = {}
         if self.metadata is not None:
@@ -398,7 +398,7 @@ class ModelBindings(Mapping[str, ModelBinding]):
     """The models a method may call: ``served`` plus the method's named ones.
 
     ``served`` is the model under test - the one the HTTP service proxies to
-    and evaluation episodes run against. The named bindings come from the
+    and evaluation rollouts run against. The named bindings come from the
     recipe's ``evolution.models`` section; ``models["teacher"]`` looks one up
     and raises :class:`KeyError` naming what is declared when it is missing.
     """

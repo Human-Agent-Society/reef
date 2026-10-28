@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutations, write_workspace
@@ -24,7 +24,7 @@ from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, repl
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
 from reef.sandbox.e2b import E2BSession
-from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome
+from reef.sandbox.process import LocalExecutor, ProcessOutcome, RolloutTimeout
 from reef.sandbox.remote import pack
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
@@ -222,7 +222,7 @@ FAKE_PI = textwrap.dedent(
     assert "PI_OFFLINE" not in os.environ, "an agent or a trial runs online"
     assert pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "extensions", "{tools}.ts").exists() == (
         "REEF_PROPOSER_URL" in os.environ)
-    # The episode environment is minimal, so the test sets the mode in a file beside the binary.
+    # The rollout environment is minimal, so the test sets the mode in a file beside the binary.
     mode_file = pathlib.Path(sys.argv[0]).with_name("mode")
     mode = mode_file.read_text() if mode_file.exists() else ""
     if "REEF_PROPOSER_URL" in os.environ:
@@ -649,7 +649,7 @@ def test_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, mo
 
     def launch(*args, timeout, **kwargs):
         timeouts.append(timeout)
-        raise EpisodeTimeout("trial deadline")
+        raise RolloutTimeout("trial deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     try:
@@ -677,7 +677,7 @@ def test_timeout_keeps_candidate_and_progress_without_publishing(tmp_path, upstr
         assert "pi.getActiveTools()" in reference and "**replaces**" in reference
         (root / "workspace/harness/rules/tone.md").write_text("Unfinished candidate")
         (root / "workspace/progress.md").write_text("API confirmed; tool isolation remains unchecked.")
-        raise EpisodeTimeout("deadline")
+        raise RolloutTimeout("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     proposal = AgentProposer().propose(

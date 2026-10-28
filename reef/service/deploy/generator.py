@@ -48,12 +48,12 @@ class GeneratorSettings(Settings):
     host: str = config_option("127.0.0.1", help="The generator's bind address.")
     port: int = config_option(DEFAULT_PORT, help="The generator's bind port.")
     work_dir: str | None = config_option(
-        None, help="Where the episode runner keeps trials; <tasks-root>/.episodes by default."
+        None, help="Where the rollout runner keeps trials; <tasks-root>/.rollouts by default."
     )
     agent: Mapping[str, Any] | None = dataclasses.field(
         default=None,
         metadata=config_metadata(
-            "The Harbor agent each episode runs, with {model}, {base_url} and {api_key} placeholders; "
+            "The Harbor agent each rollout runs, with {model}, {base_url} and {api_key} placeholders; "
             "terminus-2 by default."
         ),
     )
@@ -65,9 +65,9 @@ class GeneratorSettings(Settings):
     )
     environment: str = config_option(
         "docker",
-        help="The Harbor environment of the checks and episodes: docker, or e2b on a host without Docker.",
+        help="The Harbor environment of the checks and rollouts: docker, or e2b on a host without Docker.",
     )
-    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight across all episode requests.")
+    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Rollouts in flight across all rollout requests.")
     designer_url: str | None = config_option(
         None, help="A Reef service the designer calls go to instead of this deployment's."
     )

@@ -17,7 +17,7 @@ import reef.sandbox.modal as modal_sandbox
 import reef.sandbox.remote as remote
 from reef.sandbox.config import build_executor, remote_executor
 from reef.sandbox.modal import ModalExecutor, ModalSession
-from reef.sandbox.process import EpisodeLaunchError, EpisodeTimeout, SandboxProgram, SandboxUnavailable
+from reef.sandbox.process import RolloutLaunchError, RolloutTimeout, SandboxProgram, SandboxUnavailable
 from reef.sandbox.remote import REMOTE_BASE, TUNNEL_PORT_BASE, deployment_owner
 
 
@@ -190,7 +190,7 @@ def test_a_session_starts_a_tagged_sandbox_with_a_tunnel_for_each_forwarded_port
     assert len(relays) == 2 and "--tunnel-port 21081" in relays[1]
     session.close()
     assert sandbox.terminated
-    with pytest.raises(EpisodeLaunchError, match="lives at most 86400 s"):
+    with pytest.raises(RolloutLaunchError, match="lives at most 86400 s"):
         ModalExecutor(npm_package="pi@1.0.0", timeout_s=86400).open()
 
 
@@ -205,8 +205,8 @@ class TaggedSandbox(Sandbox):
 
 @pytest.mark.unit
 def test_a_restart_stops_only_the_sandboxes_its_deployment_left(monkeypatch) -> None:
-    mine, theirs = TaggedSandbox({"reef": "episode", "reef_owner": "team"}), TaggedSandbox(
-        {"reef": "episode", "reef_owner": "other"}
+    mine, theirs = TaggedSandbox({"reef": "sandbox", "reef_owner": "team"}), TaggedSandbox(
+        {"reef": "sandbox", "reef_owner": "other"}
     )
     fake_modal(monkeypatch, [mine, theirs])
     assert ModalExecutor(owner="team").reap() == 1
@@ -216,7 +216,7 @@ def test_a_restart_stops_only_the_sandboxes_its_deployment_left(monkeypatch) -> 
 
 @pytest.mark.unit
 def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environment(tmp_path, monkeypatch) -> None:
-    root = tmp_path / "episode"
+    root = tmp_path / "rollout"
     (root / "workspace").mkdir(parents=True)
     sandbox = Sandbox(Process(0, "done", "note"))
     session = ModalSession(sandbox, env={"DEPLOYMENT": "yes"})
@@ -234,14 +234,14 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
     command = shlex.split(args[-1])
     assert command[:4] == ["timeout", f"--kill-after={modal_sandbox.KILL_AFTER_S}", "30", "/bin/sh"]
     jailed = command[-1]
-    assert jailed.startswith("exec bwrap") and f"{REMOTE_BASE}/episode/workspace/out.txt" in jailed
-    assert options["workdir"] == f"{REMOTE_BASE}/episode/workspace"
+    assert jailed.startswith("exec bwrap") and f"{REMOTE_BASE}/rollout/workspace/out.txt" in jailed
+    assert options["workdir"] == f"{REMOTE_BASE}/rollout/workspace"
     assert options["env"] == {"CALLER": "1", "DEPLOYMENT": "yes"}
 
 
 @pytest.mark.unit
 def test_a_process_past_its_limit_is_a_timeout_and_a_failed_command_is_a_launch_error(tmp_path, monkeypatch) -> None:
-    root = tmp_path / "episode"
+    root = tmp_path / "rollout"
     (root / "workspace").mkdir(parents=True)
     clock = iter([0.0, 31.0])
     monkeypatch.setattr(modal_sandbox.time, "monotonic", lambda: next(clock))
@@ -249,10 +249,10 @@ def test_a_process_past_its_limit_is_a_timeout_and_a_failed_command_is_a_launch_
     monkeypatch.setattr(session, "push", lambda path: None)
     pulled: list[Path] = []
     monkeypatch.setattr(session, "pull", lambda path, relative="": pulled.append(path))
-    with pytest.raises(EpisodeTimeout, match="past its 30 s limit"):
+    with pytest.raises(RolloutTimeout, match="past its 30 s limit"):
         session.launch(["pi"], root=root, workspace=root / "workspace", env={}, timeout=30)
     assert pulled == [root], "what the process wrote before its limit still comes back"
-    with pytest.raises(EpisodeLaunchError, match="exited with 2: no such file"):
+    with pytest.raises(RolloutLaunchError, match="exited with 2: no such file"):
         ModalSession(Sandbox(Process(2, stderr="no such file"))).run("false")
 
 
@@ -278,13 +278,13 @@ def test_a_root_is_copied_in_and_back_through_the_sandboxs_files(tmp_path) -> No
                 self.filesystem.files[f"/tmp/{archive.name}"] = archive.read_bytes()
             return Process()
 
-    root = tmp_path / "host" / "episode"
+    root = tmp_path / "host" / "rollout"
     (root / "workspace").mkdir(parents=True)
     (root / "workspace" / "task.md").write_text("solve it")
     sandbox = LocalSandbox(tmp_path / "sandbox")
     session = ModalSession(sandbox)
     session.push(root)
-    remote_copy = tmp_path / "sandbox" / REMOTE_BASE.lstrip("/") / "episode"
+    remote_copy = tmp_path / "sandbox" / REMOTE_BASE.lstrip("/") / "rollout"
     assert (remote_copy / "workspace" / "task.md").read_text() == "solve it"
     (remote_copy / "workspace" / "answer.md").write_text("42")
     session.pull(root, "workspace")

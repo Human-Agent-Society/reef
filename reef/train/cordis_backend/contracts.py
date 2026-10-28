@@ -38,8 +38,8 @@ class StepProgress:
     ``request_id`` names the instruction the step answers, ``None`` for an
     automatic step or an agent's proposal. ``phase`` is ``proposing`` from
     the moment the step claims its directory until a candidate exists, then
-    ``evaluating`` while the episodes run; ``episodes_total`` is the evaluation's
-    episode count once ``evaluate`` has laid the episodes out, else ``None``.
+    ``evaluating`` while the rollouts run; ``rollouts_total`` is the evaluation's
+    rollout count once ``evaluate`` has laid the rollouts out, else ``None``.
     ``activity`` is what the proposer has done so far, oldest first, each
     ``{at, kind, text}`` with ``failed`` on a line that went wrong: the model
     calls, and an agent's tool calls, checks and trials as they happen.
@@ -49,7 +49,7 @@ class StepProgress:
     phase: str
     started_at: float
     step_record: str | None
-    episodes_total: int | None = None
+    rollouts_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
 
 

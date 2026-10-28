@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reef.record2sample.generator import HarborChecks, ReefTaskEpisodes
+from reef.record2sample.generator import HarborChecks, ReefGeneratorRollouts
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.service.deploy import generator_process as generator_main
 from reef.service.deploy.config_utils import DeployConfigError
@@ -138,7 +138,7 @@ def test_the_spade_example_selects_the_generated_task_recipe_and_the_spade_gener
     assert pipeline is not None
     assert pipeline["sample2job"]["config"]["tasks_per_step"] == 2
     # Tinker rolls each task job out itself, with the recipe's rollout job parameter.
-    assert settings.recipe_settings["job_parameters"]["rollout"]["episodes_per_task"] == 4
+    assert settings.recipe_settings["job_parameters"]["rollout"]["rollouts_per_task"] == 4
     assert pipeline["record2sample"]["config"]["rounds"] == 20
     generator = pipeline["record2sample"]["config"]["generator"]
     assert generator["module"] == "recipes.beta.spade:SpadeTaskGenerator"
@@ -190,8 +190,8 @@ def test_the_generator_environment_reaches_the_checks_the_episodes_and_the_readi
     built = generator_main.generator_service(
         settings, GeneratorSettings.from_config(settings.generator_settings, setting="generator")
     )
-    assert isinstance(built.checks, HarborChecks) and isinstance(built.episodes, ReefTaskEpisodes)
-    assert built.checks.environment == built.episodes.environment == environment
+    assert isinstance(built.checks, HarborChecks) and isinstance(built.rollouts, ReefGeneratorRollouts)
+    assert built.checks.environment == built.rollouts.environment == environment
     assert [probe.name for probe in built.probes] == needs
 
 

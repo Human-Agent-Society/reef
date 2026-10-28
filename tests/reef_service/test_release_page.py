@@ -22,12 +22,12 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
 from tests.reef_service.test_harness_requests import _post, _request
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.step_result import design_sections
 from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
@@ -59,7 +59,7 @@ ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: (TWO_MARKERS, EXTENSION)}
 SCENARIO = "agents"
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
+def evaluate(task: str, result: RolloutResult) -> float:
     # Marker count, so a second marker still beats a head that carries one.
     return float(result.trajectory[-1]["rules"].count("marker"))
 
@@ -71,7 +71,7 @@ def _propose(nodes, samples, models, *, requests=()):
 def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
     recipe = CordisRecipe(
         resolve_proposer(_propose),
-        resolve_episode_scorer(evaluate),
+        resolve_rollout_scorer(evaluate),
         ("task one",),
         binary=str(make_binary(tmp_path)),
         seed=SEED,
@@ -229,7 +229,7 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
             "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
             and "<dt>Current score</dt><dd>0.0</dd>" in selection_result
         )
-        assert "<dt>Episode failures</dt><dd>0</dd>" in selection_result
+        assert "<dt>Rollout failures</dt><dd>0</dd>" in selection_result
         assert "nothing to set up" in _section(page, "Setup")
         chain = _section(page, "Chain")
         assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
@@ -471,7 +471,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             "ties": 1,
             "current_score": 1.0,
             "candidate_score": 3.0,
-            "episode_failures": 1,
+            "rollout_failures": 1,
             "proposer_input_tokens": 1200,
             "proposer_output_tokens": 80,
             "candidate_agents": {
@@ -521,7 +521,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "caf&#233;" in page
     assert "<pre>&lt;b&gt;bold&lt;/b&gt;</pre>" in page
     selection_result = _section(page, "Result")
-    assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Episode failures</dt><dd>1</dd>" in selection_result
+    assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Rollout failures</dt><dd>1</dd>" in selection_result
     assert (
         "<dt>Proposer input tokens</dt><dd>1200</dd>" in selection_result
         and "<dt>Proposer output tokens</dt><dd>80</dd>" in selection_result
@@ -901,7 +901,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
             "floor_score": 1.0,
             "evaluation_sides": ["candidate"],
             "candidate_score": 1.0,
-            "episode_failures": 0,
+            "rollout_failures": 0,
             "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},
             "selection": {
                 "policy": "floor",
@@ -920,7 +920,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
     )
     assert (
         "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
-        and "<dt>Episode failures</dt><dd>0</dd>" in selection_result
+        and "<dt>Rollout failures</dt><dd>0</dd>" in selection_result
     )
     for absent in ("Current score", "Wins", "Losses", "Ties"):
         assert f"<dt>{absent}</dt>" not in selection_result

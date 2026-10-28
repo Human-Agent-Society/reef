@@ -27,7 +27,7 @@ harness/              agent harness (PUCT search + Reef adapter)
   harbor_agent.py       Harbor BaseAgent (imports harbor package)
 serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config
 serve-tinker.yaml     the same method on Tinker's hosted LoRA training, no local GPU
-run.py                one reef-eval episode owning the complete TTT trajectory
+run.py                one reef-eval rollout owning the complete TTT trajectory
 run.sh                starts the reef training stack, then runs run.py
 pyproject.toml        makes the harness importable
 results/              formal result data, generated programs, and plots

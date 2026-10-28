@@ -1,7 +1,7 @@
 """Update-channel guarantees of the harness read routes: the release catalog
 with its gate metrics, version-addressed pulls, the byte identity of a
 pulled tree with the composition the gate measured, and the one-command
-install script. Hermetic like test_harness_recipe.py (episodes run a fake
+install script. Hermetic like test_harness_recipe.py (rollouts run a fake
 pi binary through the real adapter path); pulls go through the real HTTP
 app with the stdlib client, and the install-script tests execute the
 generated script under ``sh`` with the vendor tools shimmed on PATH."""
@@ -25,7 +25,7 @@ import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import ReefClient
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.train.test_harness_evolve_processor import harness_stages
 
 import reef.harness.adapters
@@ -36,9 +36,9 @@ from reef.core.model_metadata import ModelMetadata
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, DescriptorError, load_descriptor
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.version_check import version_check_entry
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
@@ -143,7 +143,7 @@ class _ReleaseClient(ReefClient):
 _ASYNC_UPDATE_POLL_S = 0.01
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
+def evaluate(task: str, result: RolloutResult) -> float:
     del task
     return float(result.trajectory[-1]["rules"].count("marker"))
 
@@ -173,7 +173,7 @@ def _dispatcher(
     binary.chmod(0o755)
     recipe = CordisRecipe(
         resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
-        resolve_episode_scorer(evaluate),
+        resolve_rollout_scorer(evaluate),
         ("task one",),
         binary=str(binary),
         adapter=adapter,
@@ -2415,7 +2415,7 @@ def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) ->
     data["writable_paths"] = [path]
     target = tmp_path / "descriptor.yaml"
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+    with pytest.raises(DescriptorError, match=r"writable_paths.*rollout root"):
         load_descriptor(target)
 
 
@@ -3302,7 +3302,7 @@ def test_codex_install_resolves_same_model_on_changed_endpoint(
             return ModelMetadata(640_000, True)
         return ModelMetadata(32_000, False)
 
-    monkeypatch.setattr("reef.harness.episodes.model_binding.provider_model_metadata", metadata)
+    monkeypatch.setattr("reef.harness.rollouts.model_binding.provider_model_metadata", metadata)
     seed = ({"id": "style", "name": "rules", "config": {"text": "Answer briefly."}},)
     dispatcher = _dispatcher(tmp_path, (), seed=seed, api="responses", adapter="codex")
     scenario = dispatcher.get_or_create_scenario("delivery")

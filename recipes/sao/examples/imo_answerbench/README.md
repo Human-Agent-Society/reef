@@ -189,7 +189,7 @@ serving never share a GPU: Reef reserves the actor's GPUs, and the inference
 component takes the engine's GPUs.
 
 `run.py` is the loop, written out. For each task in order, reef-eval's `Lab.run`
-executes one episode: the agent runs its six rollouts, reporting each one as
+executes one rollout: the agent runs its six rollouts, reporting each one as
 it is scored, then Harbor's verifier scores the last completion. The ordering
 is the experiment: task `N+1` is served by the weights task `N` produced.
 
@@ -445,7 +445,7 @@ Three of four runs ended in engine watchdog kills. Two followed publication paus
 
 ### Attempts that produced no result
 
-**SWE-Bench Verified.** All three arms scored 0.0 on every episode. The
+**SWE-Bench Verified.** All three arms scored 0.0 on every rollout. The
 minimal bash scaffold (at most 12 turns of at most 8192 tokens in a 32k
 window) cannot resolve the target astropy instances end to end, and the paper
 uses OpenHands with up to 300 turns and 128k context. The results were

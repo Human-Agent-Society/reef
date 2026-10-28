@@ -155,7 +155,7 @@ class Population:
     served_id: str | None = None
     pending_id: str | None = None
     proposer_calls: int = 0
-    episode_calls: int = 0
+    rollout_calls: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -172,7 +172,7 @@ class Population:
             raise ValueError("population pending candidate is missing")
         if self.pending_id is not None and self.by_id(self.pending_id).outcome != "pending":
             raise ValueError("population pending candidate must have pending outcome")
-        for label, value in (("proposer_calls", self.proposer_calls), ("episode_calls", self.episode_calls)):
+        for label, value in (("proposer_calls", self.proposer_calls), ("rollout_calls", self.rollout_calls)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"population {label} must be a non-negative integer")
 
@@ -203,7 +203,7 @@ class Population:
             served_id=None if served is None else str(served),
             pending_id=None if pending is None else str(pending),
             proposer_calls=int(value.get("proposer_calls", 0)),
-            episode_calls=int(value.get("episode_calls", 0)),
+            rollout_calls=int(value.get("rollout_calls", 0)),
             attempts=normalized_attempts,
         )
 
@@ -214,7 +214,7 @@ class Population:
             "served_id": self.served_id,
             "pending_id": self.pending_id,
             "proposer_calls": self.proposer_calls,
-            "episode_calls": self.episode_calls,
+            "rollout_calls": self.rollout_calls,
             "attempts": [dict(attempt) for attempt in self.attempts],
         }
 
@@ -331,7 +331,7 @@ class Population:
         if selected:
             self.served_id = candidate.candidate_id
         self.pending_id = None
-        self.episode_calls += len(candidate_scores) + len(current_scores)
+        self.rollout_calls += len(candidate_scores) + len(current_scores)
         return candidate
 
     def record_attempt(self, **values: Any) -> None:

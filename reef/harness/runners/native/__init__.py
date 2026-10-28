@@ -1,6 +1,6 @@
 """Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
 
-One episode is one process and one turn. The rendered composition root
+One rollout is one process and one turn. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
 ``graphs/``, ``agents/``, ``loops/`` and ``models.json``; the loop reads them once into a
 ``NativeHost`` (``reef.harness.runners.native.host``), talks to the served model
@@ -32,7 +32,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError, usage_of
 from reef.harness.runners.native.enforce import (
     Enforcer,
     InProcessEnforcer,
@@ -44,7 +44,7 @@ from reef.harness.runners.native.enforce import (
 from reef.harness.runners.native.graph import TurnLoop
 from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
-#: Step and tool result budgets; an episode also runs under the executor's wall clock.
+#: Step and tool result budgets; a rollout also runs under the executor's wall clock.
 MAX_STEPS = 12
 MAX_RESULT_CHARS = 20_000
 #: A result over the cap is saved whole to this directory under the workspace; the model reads the head, a
@@ -80,7 +80,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
 
 
 class LoadError(Exception):
-    """A rendered tool or hook module the loop cannot use; the episode ends in error instead of running without it."""
+    """A rendered tool or hook module the loop cannot use; the rollout ends in error instead of running without it."""
 
 
 class ToolRunner(ABC):
@@ -227,7 +227,7 @@ def import_module_file(path: Path, prefix: str) -> ModuleType:
 
 
 def _modules(directory: Path, prefix: str) -> Iterator[tuple[Path, ModuleType]]:
-    """Import every ``*.py`` in name order (hooks: they run in this process); a module that fails to import fails the episode, so the tree that carries it loses."""
+    """Import every ``*.py`` in name order (hooks: they run in this process); a module that fails to import fails the rollout, so the tree that carries it loses."""
     for path in sorted(directory.glob("*.py")):
         yield path, import_module_file(path, prefix)
 
@@ -840,7 +840,7 @@ class _Loop:
         return session, self.turns
 
     def before_step(self, run: Any) -> None:
-        """Called at the top of every model stage; the episode form has nothing to land between steps."""
+        """Called at the top of every model stage; the rollout form has nothing to land between steps."""
 
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)

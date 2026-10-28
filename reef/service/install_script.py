@@ -51,7 +51,7 @@ from typing import Any
 
 from reef.core.requirements import parse_requires
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, DescriptorError, InstallSpec
-from reef.harness.episodes.vendor_install import DEFAULT_PREFIX_ROOT, PREFIX_ENV
+from reef.harness.rollouts.vendor_install import DEFAULT_PREFIX_ROOT, PREFIX_ENV
 
 #: The script's install-prefix root in shell spelling, the same root reef's
 #: own server-side vendor install uses, honouring the same environment

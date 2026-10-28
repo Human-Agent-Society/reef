@@ -23,7 +23,7 @@ from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.observability.operations import OperationMeasurement, OperationMetrics
@@ -129,7 +129,7 @@ class PreparedInference:
     #: lease); called exactly once when the attempt ends.
     lease: InferenceLease | None = None
     #: The request hooks this attempt runs: the surface's, or on an evaluation
-    #: call every component's but the one the episode evaluates.
+    #: call every component's but the one the rollout evaluates.
     hooks: InferenceHooks | None = None
 
     def release(self) -> None:
@@ -242,15 +242,15 @@ class RequestService:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
         ``evaluated`` component (see ``Surface.inference_for_evaluation``).
 
-        ``rollout`` True serves a call of a rollout episode that Reef runs itself: the served release with its
+        ``rollout`` True serves a call of a rollout that Reef runs itself: the served release with its
         hooks, as for a recorded call, but no record is kept, and the response keeps its ``training`` block
-        with the runtime load ID that answered, so the caller assembles the episode's samples.
+        with the runtime load ID that answered, so the caller assembles the rollout's samples.
         """
         if rollout and record:
             raise ValueError("a rollout call keeps no record")
         family = request_family(record, rollout=rollout)
         operations = await self.inference_operations(headers, record=record)
-        # Evaluation and rollout traffic is measured apart, so Reef's own episodes do not read as served requests.
+        # Evaluation and rollout traffic is measured apart, so Reef's own rollouts do not read as served requests.
         measurement = operations.start(f"{family}/request")
         succeeded = False
         try:
@@ -515,7 +515,7 @@ class RequestService:
         (headers, scenario, artifact, handler, surface) and let the surface
         transform the request payload. ``record`` names the measurement family;
         an evaluation call (``record`` False) runs every component's hooks but
-        the ``evaluated`` one's, whose candidate the episode runs."""
+        the ``evaluated`` one's, whose candidate the rollout runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
         if evaluated is not None and evaluated not in initial.surface.names:
@@ -998,7 +998,7 @@ class RequestService:
                 "state": result_of(rows[step], rows),
                 "meaning": None,
                 "started_at": None,
-                "episodes_total": None,
+                "rollouts_total": None,
                 "step_record": None,
                 "activity": [],
             }
@@ -1016,7 +1016,7 @@ class RequestService:
             "meaning": STATE_WORDS.get(state),
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
-            "episodes_total": None if mine is None else mine.episodes_total,
+            "rollouts_total": None if mine is None else mine.rollouts_total,
             "step_record": None if mine is None else mine.step_record,
             # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],

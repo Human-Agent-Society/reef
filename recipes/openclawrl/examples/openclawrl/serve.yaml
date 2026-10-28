@@ -90,7 +90,7 @@ training:
   backend: slime
   ready-timeout: 900
   ray-namespace: reef
-  # A step with long assembled episodes can exceed the 300 s default; a
+  # A step with long assembled rollouts can exceed the 300 s default; a
   # timed-out worker retry then collides with the still-running job's
   # RUNNING marker (observed live as "operator recovery required").
   timeout-s: 7200

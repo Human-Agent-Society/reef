@@ -1,6 +1,6 @@
 """Shared process execution and isolation through Harbor's environment contract.
 
-``process`` owns the ``EpisodeExecutor`` interface, local execution, resource
+``process`` owns the ``ProgramExecutor`` interface, local execution, resource
 limits and process cleanup. Callers bind an executor to a ``SandboxProgram``
 and open sessions through that interface, without knowing the sandbox kind.
 ``config`` builds the executor a deployment's ``executor`` setting selects; it is

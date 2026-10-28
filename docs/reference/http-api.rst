@@ -39,11 +39,11 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
 |                                                                                  | the named scenario and kept by nobody: what a     |
-|                                                                                  | recipe's evaluation episodes call; a flat         |
+|                                                                                  | recipe's evaluation rollouts call; a flat         |
 |                                                                                  | release's request hooks stay out, since the       |
-|                                                                                  | episode runs a candidate of it. It serves a       |
+|                                                                                  | rollout runs a candidate of it. It serves a       |
 |                                                                                  | scenario loaded in this process and never creates |
-|                                                                                  | one: 404 for a scenario deleted under its episode |
+|                                                                                  | one: 404 for a scenario deleted under its rollout |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
 |                                                                                  | composed release: every other component's hooks   |
@@ -140,8 +140,8 @@ Headers
 |                                   | ``metadata.tags``. The ``release`` tag can select the   |
 |                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout episode that |
-|                                   | Reef runs itself. It is served from the scenario's      |
+| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
+|                                   | runs itself. It is served from the scenario's           |
 |                                   | release like any other call, but no record is kept, and |
 |                                   | the response keeps its ``training`` block with the      |
 |                                   | runtime load ID that answered. The call must not        |
@@ -694,7 +694,7 @@ A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
 The evaluation calls do not present a service token. When auth is configured,
 the service issues a random token at startup that opens the evaluation routes
-alone, and hands it to the recipe: the episodes and proposer run candidate
+alone, and hands it to the recipe: the rollouts and proposer run candidate
 code, which can then sample the served release but reach no other route. A
 restart issues a new one.
 
@@ -748,7 +748,7 @@ data inside ``metadata`` or ``feedback``.
      - no
      - Recipe metadata; ``training.eligible`` is not supported. ``metadata.task``
        (``name``, with ``path`` and ``digest`` when known) or
-       ``metadata.harbor.task_name`` names the Harbor task the episode ran;
+       ``metadata.harbor.task_name`` names the Harbor task the rollout ran;
        the assembled training sample carries it as ``task``, so a recipe can
        group samples by task.
 
@@ -905,7 +905,7 @@ Use ``?release_id=`` on the manifest or install route to request a specific
 catalog release. An unknown or unrestorable release returns HTTP 404.
 
 Catalog and manifest reads do not wait for an evolve step's proposer or
-evaluation episodes: they continue serving the existing releases while a
+evaluation rollouts: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
 rollback so a manifest's artifact and evaluation metrics come from the same
 release: reads do not interleave with head movement and its commit-history
@@ -916,7 +916,7 @@ Proposals
 
 An agent running on the served tree can propose a change to it. The
 proposal enters the same evaluation as the method's own: nothing it says is served
-until paired episodes settle it.
+until paired rollouts settle it.
 
 .. code:: bash
 
@@ -1065,7 +1065,7 @@ only when the row carries a review or that list), Result (the result and what
 it means, then the evaluation's numbers: ``wins``, ``losses``, ``ties``,
 ``passed``, ``failed``,
 ``floor_score``, ``evaluation_sides``, ``current_score``, ``candidate_score`` and
-``episode_failures``, each when the row carries it, so a ``floor`` evaluation,
+``rollout_failures``, each when the row carries it, so a ``floor`` evaluation,
 which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
 and no ``current_score``, then the skip reason, the selection reason, the step
 record directory when ``evolution.step_record_dir`` is set, and
@@ -1125,7 +1125,7 @@ time and machine requirements are available in expandable details.
 Progress shows
 the request's state and what it means: ``queued`` while no step has taken
 the request, ``proposing`` while the served model writes the change,
-``evaluating`` while the candidate's episodes run (with their count and the
+``evaluating`` while the candidate's rollouts run (with their count and the
 step record directory when the backend reports them, and the time into the
 step), ``running`` while the trainer holds the request and the backend
 reports no phase, and ``settling`` while the row that consumed the record
@@ -1156,7 +1156,7 @@ row landed as once it settles, else null), ``state`` (the page's own
 the settled row's result once a row answers the request, including ``failed``
 when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total``,
+step holds this request, ``started_at``, ``rollouts_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
 ``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
 ``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
@@ -1168,7 +1168,7 @@ an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 naming it.
 
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
-``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
+``evaluation_task_count`` and ``evaluation_context``. Running rollouts use the
 phase ``evaluating``. Reviews and settled proposals store their outcome under
 ``result``. A harness manifest carries the evaluation metrics under
 ``evaluation`` only.
@@ -1204,7 +1204,7 @@ Retained step files
 for the same catalog step, authenticated and scenario-scoped like the version
 page. The response is ``{"status": "retained", "files": [{"path": "proposer.json",
 "bytes": 123}]}``. Add ``?path=proposer.json`` (or an inventory path under
-``episodes/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
+``rollouts/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
 The service does not interpret proposer replies or agent events. A console can
 render those persisted formats without changing their learning semantics.
 

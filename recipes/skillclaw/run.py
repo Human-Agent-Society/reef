@@ -616,7 +616,7 @@ def main() -> None:
 
 
 def solve() -> None:
-    """One reef-eval episode on the bundled ``harbor/`` task: the sibling
+    """One reef-eval rollout on the bundled ``harbor/`` task: the sibling
     examples' smoke idiom (``lab.run(harbor_dir, agent)``), against the same
     embedded service the campaign runs, so the recorded exchange carries the
     served pool's catalog. The task is self-contained (plain base image plus
@@ -647,7 +647,7 @@ def solve() -> None:
     try:
         lab = Lab(run_dir / "lab")
         row = asyncio.run(lab.run(str(HERE / "harbor"), agent))
-        print(f"episode reward: {row.rewards}")
+        print(f"rollout reward: {row.rewards}")
     finally:
         service.stop()
 
