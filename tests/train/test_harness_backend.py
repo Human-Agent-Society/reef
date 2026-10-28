@@ -353,52 +353,6 @@ def test_a_win_waits_for_review_under_publish_review_or_when_it_changes_a_review
     assert result.metrics["selected"] is True and result.artifact is not None and result.pending is pending
 
 
-def test_a_recheck_rolls_back_when_the_replaced_tree_wins(tmp_path: Path) -> None:
-    prefer_marker = [True]
-
-    def score(task, result):
-        return 1.0 if ("marker" in result.trajectory[-1]["rules"]) == prefer_marker[0] else 0.0
-
-    backend, releases = harness_backend(
-        tmp_path,
-        lambda workspace, tools: MARKER,
-        score=score,
-        evaluation={"recheck_every": 2},
-        review_parts=("rules",),
-    )
-    first = backend_step(backend, data(1), backend.initial_state())
-    assert first.metrics["selected"] is True and first.pending is True
-    assert state_of(first).rollback_release_id == "base"
-    published(releases, "r1", first)
-    prefer_marker[0] = False
-    second = backend_step(backend, data(2), first.state)
-    # A recheck runs fresh episodes: the cached scores of both trees are not reused.
-    assert second.metrics["recheck"] is True and second.metrics["recheck_reason"] == "cadence"
-    assert second.metrics["episodes_run"] == 2 and second.metrics["rolled_back"] is True
-    assert HarnessTree.read(second.artifact.local_path) == PI_SEED
-    # The rollback serves a tree published before, so only publish: review holds it.
-    assert second.pending is False
-    state = state_of(second)
-    assert state.rollback_release_id is None and state.failure_streak == 0
-
-
-def test_a_recheck_whose_replaced_tree_fails_the_checks_skips_and_drops_it(tmp_path: Path) -> None:
-    """The checks can grow stricter than when a release was published: a replaced tree they refuse cannot be
-    rolled back to, so the recheck skips with their message, and the next step runs the method."""
-    stepped: list[int] = []
-    backend, releases = harness_backend(
-        tmp_path, lambda workspace, tools: stepped.append(workspace.step), evaluation={"recheck_every": 2}
-    )
-    releases.publish("refused", HarnessTree({**PI_SEED.files, "notes.txt": "x"}))
-    releases.publish("r1", PI_SEED.apply(MARKER))
-    state = HarnessState(rollback_release_id="refused", rollback_context=backend.context_key()).to_json()
-    recheck = backend_step(backend, data(2), state, scenario_step=1)
-    assert recheck.metrics["recheck"] is True and recheck.metrics["skipped"].startswith("notes.txt: not a path")
-    assert state_of(recheck).rollback_release_id is None and stepped == []
-    backend_step(backend, data(3), recheck.state)
-    assert stepped == [3]
-
-
 def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> None:
     seen: list[tuple[str, str | None, int | None]] = []
     holder: dict = {}
@@ -436,12 +390,9 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
         seen["phases"].append(phase())
         return marker_score(task, result)
 
-    backend, _ = harness_backend(tmp_path, step, score=score, evaluation={"recheck_every": 1})
+    backend, _ = harness_backend(tmp_path, step, score=score)
     tasks = (TaskSample(Path("train one")), TaskSample(Path("train two")))
-    state = HarnessState(rollback_release_id="base", rollback_context="drifted").to_json()
-    result = backend_step(backend, data(2, *tasks), state)
-    # The method ran on the rollouts, although a recheck was due.
-    assert "recheck" not in result.metrics
+    result = backend_step(backend, data(2, *tasks), backend.initial_state())
     assert result.metrics["rollouts"] == 2 and result.metrics["selected"] is True
     assert seen["phases"] == [
         ("rolling out", 2),

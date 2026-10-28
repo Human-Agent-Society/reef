@@ -43,8 +43,6 @@ from reef.storage.tasks import files_digest
 #: The trees a candidate evaluation runs, in pairing order; a policy that evaluates the candidate alone names the
 #: first.
 EVALUATION_SIDES: tuple[str, ...] = ("candidate", "current")
-#: Where a candidate tree comes from: a subset of ``history.ORIGINS``, since the seed is never a candidate.
-CANDIDATE_ORIGINS = ("method", "release")
 #: How many candidate episodes an evaluation summarizes, and how much of each text it keeps: a summary for the
 #: pages, never the traffic.
 EPISODE_SUMMARIES = 8
@@ -68,7 +66,7 @@ class EvaluationContext:
     are the episode settings.
     Purpose: the evaluator makes one for the current models; ``key`` is the
     context part of every cache key, so a score is never reused across
-    contexts, and a recheck runs when the context of the latest publish changed.
+    contexts.
     """
 
     model: str
@@ -104,10 +102,7 @@ class HarnessCandidate(UpdateCandidate):
     Values: ``candidate_tree`` is the tree under evaluation, and
     ``current_tree`` is the head tree the step started from.
     ``evaluation_tasks`` are the tasks both sides run, the seed tasks first.
-    ``step`` ≥ 1 is the step that made it. ``origin`` is where the tree came
-    from: ``method``, the step's method, or ``release``, the tree the latest publish
-    replaced, which a recheck evaluates again with fresh episodes, so that
-    selecting it rolls back.
+    ``step`` ≥ 1 is the step that made it.
     Purpose: ``HarnessBackend.prepare_step`` makes it; the evaluator scores
     both trees and the publication policy decides on it.
     """
@@ -116,14 +111,11 @@ class HarnessCandidate(UpdateCandidate):
     current_tree: HarnessTree
     evaluation_tasks: tuple[str, ...]
     step: int
-    origin: str = "method"
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if isinstance(self.step, bool) or not isinstance(self.step, int) or self.step < 1:
             raise ValueError("HarnessCandidate.step must be a positive integer")
-        if self.origin not in CANDIDATE_ORIGINS:
-            raise ValueError(f"HarnessCandidate.origin must be one of {', '.join(CANDIDATE_ORIGINS)}")
 
     @property
     def patch(self) -> TreePatch:
@@ -247,15 +239,13 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             self.task_keys[task] = key
         return key
 
-    def run(
-        self, requests: Sequence[tuple[HarnessTree, str, int]], *, step: int, fresh: bool = False
-    ) -> list[EpisodeRecord]:
+    def run(self, requests: Sequence[tuple[HarnessTree, str, int]], *, step: int) -> list[EpisodeRecord]:
         """One episode record per ``(tree, task, repeat)`` request, in request order.
 
         Every tree must be a candidate of the history. A request that the
-        cache holds takes the cached record unless ``fresh`` is set. The other
-        requests run as one wave in the worker pool, in request order, and
-        their records join the history.
+        cache holds takes the cached record. The other requests run as one
+        wave in the worker pool, in request order, and their records join the
+        history.
         """
         context = self.context().key()
         checksums = [tree.checksum() for tree, _, _ in requests]
@@ -264,7 +254,7 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         for index, (checksum, key, (_, _, repeat)) in enumerate(zip(checksums, keys, requests, strict=True)):
             if checksum not in self.history.candidates:
                 raise ValueError(f"tree {checksum} is not a candidate of the history")
-            cached = None if fresh else self.history.cached(checksum, key, repeat, context)
+            cached = self.history.cached(checksum, key, repeat, context)
             if cached is not None:
                 records[index] = cached
         missing = [index for index in range(len(requests)) if index not in records]
@@ -339,7 +329,7 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             for side in sides
         ]
         known = len(self.history.episodes)
-        records = self.run(requests, step=candidate.step, fresh=candidate.origin == "release")
+        records = self.run(requests, step=candidate.step)
         ran = len(self.history.episodes) - known
         runs = {side: records[offset :: len(sides)] for offset, side in enumerate(sides)}
         scores = {side: tuple(record.score for record in runs[side]) for side in sides}

@@ -7,8 +7,7 @@ the module that owns it:
     Read the head tree from git through ``ComponentReleases`` and the step's
     evaluation tasks. The step's job data is its material: the traces of
     traffic, and on an offline step the train tasks, which the step rolls
-    out on the head tree first. Then either the recheck's candidate
-    (``evolve.Evolution.recheck``) or the method's
+    out on the head tree first. Then the method's candidate
     (``evolve.Evolution.propose``) in a fresh ``Workspace``.
 ``evaluate``
     Score the sides that the publication policy names with
@@ -196,18 +195,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             started_at=time.time(),
             step_record=str(step_dir),
         )
-        # A recheck waits for a step without rollouts: the method reads every rolled-out chunk.
-        if automatic and not rollout_tasks and self.evolution.recheck_due(state, step, self.context_key()):
-            return self.evolution.recheck(
-                releases=self.releases,
-                head=head_tree,
-                evaluation_tasks=step_tasks.tasks,
-                data=data,
-                state=state,
-                step=step,
-                context=self.context_key(),
-                metrics=metrics,
-            )
         rollouts = self.roll_out(head_tree, rollout_tasks, step) if rollout_tasks else ()
         workspace = Workspace.create(
             step_dir,
@@ -267,31 +254,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         """
         self.progress = None
         candidate = require_harness_candidate(prepared.candidate)
-        context = self.context_key()
         state = HarnessState.from_json(prepared.state)
-        recheck = candidate.origin == "release"
-        # A publish keeps the tree it replaced as the recheck's target; a recheck that rolls back consumes it.
-        rollback_release_id, rollback_context = state.rollback_release_id, state.rollback_context
-        if recheck and decision.selected:
-            rollback_release_id, rollback_context = None, None
-        elif recheck:
-            # The head held in this context, so the next recheck waits for the cadence or another context change.
-            rollback_context = context
-        elif decision.selected and self.evolution.recheck_every and context is not None:
-            rollback_release_id, rollback_context = str(prepared.metrics["head_release_id"]), context
-        # A recheck is not a candidate the method made, so it leaves the failure streak alone.
-        if recheck:
-            failure_streak = state.failure_streak
-        elif decision.selected:
-            failure_streak = 0
-        else:
-            failure_streak = state.failure_streak + 1
-        state = replace(
-            state,
-            failure_streak=failure_streak,
-            rollback_release_id=rollback_release_id,
-            rollback_context=rollback_context,
-        )
+        state = replace(state, failure_streak=0 if decision.selected else state.failure_streak + 1)
         self.history.add_decision(
             DecisionRecord(
                 step=candidate.step,
@@ -309,10 +273,9 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         }
         metrics = {
             **prepared.metrics,
-            **({"rolled_back": decision.selected} if recheck else {}),
             **evaluation,
             **decision.metrics,
-            "evaluation_context": context,
+            "evaluation_context": None if self.evaluator is None else self.evaluator.context().key(),
             "patch": bounded(candidate.patch.to_json()),
             "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
         }
@@ -327,8 +290,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             state=state.to_json(),
             metrics=metrics,
             artifact=artifact,
-            # A rollback serves a tree that was published before, so only publish: review holds it.
-            held=not recheck and self.reviewed(candidate.patch),
+            held=self.reviewed(candidate.patch),
         )
         if result.artifact is not None:
             if self.pending_artifact is not None:
@@ -383,10 +345,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             if location is not None and (location.part.review or location.part.name in self.review_parts):
                 return True
         return False
-
-    def context_key(self) -> str | None:
-        """The key of the current evaluation context; ``None`` when no episode can run."""
-        return None if self.evaluator is None else self.evaluator.context().key()
 
 
 def require_harness_candidate(candidate: UpdateCandidate | None) -> HarnessCandidate:

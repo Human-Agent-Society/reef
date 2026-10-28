@@ -322,21 +322,6 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     assert read_json(first / "calls.json") == []
 
 
-def test_a_recheck_step_asks_the_method_nothing_and_runs_fresh_episodes(tmp_path: Path) -> None:
-    backend, releases = native_backend(tmp_path, evaluation={"recheck_every": 1})
-    first = step(backend)
-    assert first.metrics["selected"] is True
-    releases.publish("r1", HarnessTree.read(first.artifact.local_path))
-    second = step(backend, first.state)
-    assert second.metrics["recheck"] is True and "model_calls" not in second.metrics
-    # The step claimed its record directory and wrote nothing into it: no method ran.
-    record = steps_dir(tmp_path) / "2"
-    assert second.metrics["step_record"] == str(record) and list(record.iterdir()) == []
-    # Both trees ran again, though the history held scores of each.
-    rerun = [record.tree for record in backend.history.episodes if record.step == 2]
-    assert sorted(rerun) == sorted((NATIVE_SEED.checksum(), NATIVE_SEED.apply(MARKER).checksum()))
-
-
 def test_an_episode_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
     backend, _ = native_backend(tmp_path)
     prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)

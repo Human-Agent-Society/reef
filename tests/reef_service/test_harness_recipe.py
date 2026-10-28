@@ -69,7 +69,6 @@ from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
@@ -162,7 +161,6 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "repeats": 2,
         "episode_timeout_s": 5,
         "forbid_residue": True,
-        "recheck_every": 3,
         "collect_failures": True,
         "max_collected_tasks": 10,
         "max_collected_per_client": 0,
@@ -195,7 +193,6 @@ INVALID_SETTINGS = {
     "repeats": ({"evaluation": {"repeats": 0}}, r"evaluation\.repeats must be at least 1"),
     "timeout": ({"evaluation": {"episode_timeout_s": 0}}, r"evaluation\.episode_timeout_s must be positive"),
     "residue-type": ({"evaluation": {"forbid_residue": "maybe"}}, r"evaluation\.forbid_residue must be a valid bool"),
-    "recheck-floor": ({"evaluation": {"policy": "floor", "recheck_every": 2}}, "recheck_every compares two trees"),
     "collector-alone": (
         {"evaluation": {"collector": f"{SUPPORT}:NoCollection"}},
         r"collector applies only with evaluation\.collect_failures",
@@ -1003,43 +1000,7 @@ def test_untrusted_text_fences_with_a_delimiter_the_text_cannot_forge() -> None:
     assert match.group(1) not in untrusted_text(forged)[: len("[BEGIN recorded traffic ") + 8]
 
 
-# -- recheck and review ----------------------------------------------------------------------------
-
-
-def test_a_recheck_runs_at_once_when_the_served_model_changes(tmp_path: Path) -> None:
-    """A publish is evaluated against one served model. When the scenario serves a different one, the recheck runs
-    at once instead of waiting for its cadence. A recheck that keeps the head adopts the new model, so the next
-    step runs the method again."""
-    patches = iter((MARKER,))
-    stepped: list[int] = []
-
-    def method(workspace, tools):
-        stepped.append(workspace.step)
-        return next(patches, None)
-
-    def endpoint(model: str) -> dict:
-        return {"url": MODEL.base_url, "model": model, "api_key": "scoped"}
-
-    config_value = ModelConfig.from_value(endpoint("qwen3-8b"))
-    recipe = harness_recipe(tmp_path, method, evaluation={"recheck_every": 100})
-    releases = TreeReleases(recipe.seed)
-    backend = recipe.with_model_config(config_value).build_backend(
-        "demo", ComponentReleases(releases, COMPONENT), None
-    )
-    first = step(backend)
-    assert first.metrics["selected"] is True
-    assert HarnessState.from_json(first.state).rollback_context == backend.context_key()
-    releases.publish("r1", HarnessTree.read(first.artifact.local_path))
-    # Same model, step 2 of a 100 step cadence: no recheck.
-    same = step(backend, first.state)
-    assert "recheck" not in same.metrics and same.metrics["skipped"] == UNCHANGED
-    config_value.runtime = ModelConfig.from_value(endpoint("qwen3-32b")).runtime
-    drift = step(backend, same.state)
-    assert drift.metrics["recheck"] is True and drift.metrics["recheck_reason"] == "drift"
-    # The published tree still wins under the new model: the head stays, and the next step runs the method.
-    assert drift.metrics["rolled_back"] is False and stepped == [1, 2]
-    after = step(backend, drift.state)
-    assert "recheck" not in after.metrics and stepped == [1, 2, 4]
+# -- review ----------------------------------------------------------------------------------------
 
 
 def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_path: Path) -> None:

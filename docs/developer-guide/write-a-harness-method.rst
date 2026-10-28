@@ -126,9 +126,6 @@ After ``step`` returns, Reef reads the tree in ``harness/``:
 If ``step`` raises, the step fails and publishes nothing. The step record
 keeps the model calls made before the failure.
 
-A recheck and a client's proposal take an automatic step without calling the
-method. A step that answers a training request always calls it.
-
 The workspace
 -------------
 

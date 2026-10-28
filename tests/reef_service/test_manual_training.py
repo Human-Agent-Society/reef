@@ -451,31 +451,6 @@ def test_factory_cannot_silently_change_the_processor_mode():
     records.close()
 
 
-def test_manual_instruction_cannot_be_consumed_by_recheck(tmp_path):
-    seen = []
-
-    def method(workspace, tools):
-        seen.append(workspace.request())
-
-    recipe = recipe_in("manual", tmp_path, method, evaluation={"recheck_every": 1})
-    records = SQLiteRecordStore()
-    trainer = _trainer(recipe, records)
-    backend = trainer.candidate_backend
-    # A recheck is due on every automatic step: the latest publish replaced the base.
-    state = HarnessState(rollback_release_id="base", rollback_context=backend.context_key()).to_json()
-    batch = JobData(
-        "manual-request",
-        (),
-        request=TrainingRequest("Follow the request", "session", "r", "request-id"),
-    )
-    prepared = backend.prepare_step(batch, state, 0)
-    assert prepared.outcome == "skip"
-    assert seen[0].id == "request-id"
-    assert "recheck" not in prepared.metrics
-    trainer.close()
-    records.close()
-
-
 @pytest.mark.parametrize("mode", ["auto", "manual"])
 def test_switch_during_reserved_batch_keeps_original_acknowledgement(mode):
     records, backend = SQLiteRecordStore(), CaptureBackend()

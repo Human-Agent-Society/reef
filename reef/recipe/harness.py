@@ -500,7 +500,6 @@ class HarnessEvolutionRecipe(Recipe):
                 # Only a method that runs the agent through its tools gets it bound here.
                 agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
                 max_episodes=self.evolution.max_episodes_per_step,
-                recheck_every=self.evaluation.recheck_every,
             ),
             evaluator=evaluator,
             tasks=EvaluationTasks(

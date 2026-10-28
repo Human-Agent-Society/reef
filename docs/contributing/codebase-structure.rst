@@ -349,8 +349,7 @@ The extension points those packages expose are in `Python API
     backend only reads job data.
   - Evolve: ``reef/train/harness_backend/evolve.py`` makes the step's
     candidate. It runs the method in the step's workspace
-    (``workspace.py``) and reads back the tree, or on a recheck takes the
-    release the head replaced.
+    (``workspace.py``) and reads back the tree.
     ``contract.py`` is the method contract. ``agent/`` runs the deployment's
     coding agent for a method (``evolution.agent``, ``AgentMethod``,
     ``protocol.md``), and ``reef/harness/gateway.py`` is the loopback

@@ -34,8 +34,7 @@ class EvaluationSettings(Settings):
     ``policy`` is ``none``. ``policy`` is one of ``POLICIES`` and ``statistic`` one of
     ``STATISTICS``. ``min_margin`` ≥ 0, ``floor_score`` > 0 and
     ``episode_timeout_s`` > 0 are finite numbers, ``repeats`` ≥ 1, and every
-    count ≥ 0. ``recheck_every`` needs the ``compare`` policy, and
-    ``collector`` needs ``collect_failures``.
+    count ≥ 0. ``collector`` needs ``collect_failures``.
     Purpose: the harness recipe parses it and builds the evaluator, the task
     source and the publication policy from it.
     """
@@ -54,9 +53,6 @@ class EvaluationSettings(Settings):
     repeats: int = config_option(1, help="The episodes per task and tree.")
     episode_timeout_s: float = config_option(600.0, help="The seconds one episode may run.")
     forbid_residue: bool = config_option(False, help="Score an episode that leaves files behind as not run.")
-    recheck_every: int = config_option(
-        0, help="Every this many steps, compare the latest publish with the tree it replaced. 0 turns it off."
-    )
     collect_failures: bool = config_option(False, help="Add failing traffic prompts to the evaluation tasks.")
     collector: str | Mapping[str, Any] | None = config_option(None, help="The TaskCollector that picks the prompts.")
     max_collected_tasks: int = config_option(50, help="The most prompts collection adds in total; 0 adds none.")
@@ -100,14 +96,11 @@ class EvaluationSettings(Settings):
         if self.episode_timeout_s <= 0:
             raise ValueError("evaluation.episode_timeout_s must be positive")
         for label, value in (
-            ("recheck_every", self.recheck_every),
             ("max_collected_tasks", self.max_collected_tasks),
             ("max_collected_per_client", self.max_collected_per_client),
         ):
             if value < 0:
                 raise ValueError(f"evaluation.{label} must be at least 0")
-        if self.recheck_every and self.policy != "compare":
-            raise ValueError("evaluation.recheck_every compares two trees, so it needs the compare policy")
         if self.collector is not None and not self.collect_failures:
             raise ValueError("evaluation.collector applies only with evaluation.collect_failures")
 

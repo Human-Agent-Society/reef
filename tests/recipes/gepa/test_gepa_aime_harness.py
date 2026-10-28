@@ -143,7 +143,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
             assert [record.score for record in evaluator.run(requests, step=1)] == [1.0, 1.0]
             # A later registration does not reach the snapshot the recipe scores with.
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert evaluator.run(requests[:1], step=1, fresh=True)[0].score == 1.0
+            assert evaluator.run([(recipe.seed, "problem", 2)], step=1)[0].score == 1.0
         finally:
             trainer.close()
 

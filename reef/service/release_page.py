@@ -421,8 +421,6 @@ def what_changed_html(
         return "".join(changed_file_html(path, after, row, before_files) for path, after in sorted(patch.items()))
     if metrics.get("skipped"):
         return f'<p class="empty">nothing: the step skipped ({escape(metrics["skipped"])})</p>'
-    if metrics.get("recheck"):
-        return '<p class="empty">nothing new: a recheck of the last good tree against the published one</p>'
     if row.get("operation") == "training":
         return '<p class="empty">no patch on record</p>'
     if row.get("operation") == "creation":

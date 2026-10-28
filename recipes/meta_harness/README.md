@@ -132,14 +132,14 @@ mean, and a tie keeps the current choice. The seed runs once with the first
 candidate, and then each candidate runs once.
 
 The budgets count the history: `max_candidates` counts the trees the method
-proposed, and `max_target_episodes` counts the evaluation episodes that ran,
-the episodes of a client's proposal included. A spent budget ends the search
-before the model call; the last evaluation may pass `max_target_episodes`.
-Zero turns a budget off. Reef's own `max_steps`, `max_model_calls_per_step`,
-executor, timeout, and residue options apply as usual.
+proposed, and `max_target_episodes` counts the evaluation episodes that ran.
+A spent budget ends the search before the model call; the last evaluation may
+pass `max_target_episodes`. Zero turns a budget off. Reef's own `max_steps`,
+`max_model_calls_per_step`, executor, timeout, and residue options apply as
+usual.
 
 Keep the evaluation suite fixed, so that the scores of all candidates stay
-comparable: do not combine this method with task collection or rechecks.
+comparable: do not combine this method with task collection.
 
 ## State and commits
 

@@ -10,8 +10,7 @@ The history is one directory::
     episodes/<id>/     the record of each episode: its trajectory files and episode.json
 
 The episodes are the score cache. An episode of the same tree, task, repeat
-and evaluation context runs again only when the earlier one could not run, or
-when a recheck asks for fresh episodes; the latest scored one is the cached one.
+and evaluation context runs again only when the earlier one could not run.
 Methods read the history. Only the harness backend writes it, from the
 training thread. The history keeps what happened, also in a step that did not
 commit (its method, its evaluation or its commit failed): such a step runs
@@ -254,8 +253,7 @@ class History:
     Values: ``root`` is the directory. ``candidates`` maps each tree's
     checksum to its record; ``episodes`` and ``decisions`` hold the records
     of their JSONL files in file order; ``scored`` maps (tree, task key,
-    repeat, context) to the latest scored episode of that key, so a recheck's
-    fresh episode replaces the one it measured again. ``next_episode``
+    repeat, context) to the latest scored episode of that key. ``next_episode``
     is above the number of every episode directory and record, so a new
     episode never reuses the directory of one that a crash left behind.
     Purpose: the harness backend opens one per scenario and writes it during

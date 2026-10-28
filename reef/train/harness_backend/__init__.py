@@ -12,7 +12,7 @@ One step goes from the head tree to a release in two modules of this package:
     it; methods never subclass it.
 ``evolve``
     The step's candidate: the tree the method leaves in the step's
-    workspace, or on a recheck the release the head replaced.
+    workspace.
 
 The evaluation and the release are Reef's, shared with weight training:
 ``reef.evaluation`` decides whether a candidate is served, and

@@ -1,4 +1,4 @@
-"""Where a step's candidate comes from: the tree the method leaves, or on a recheck the release the head replaced.
+"""A step's candidate: the tree the method leaves in the step's workspace.
 
 ``Evolution.propose`` runs the method:
 
@@ -13,10 +13,6 @@
 
 On an instruction step the method's ``requires`` join the request's, after the
 screens a person's items pass.
-
-``Evolution.recheck`` runs no method: every ``recheck_every`` steps, or when
-the evaluation context changed, the tree that the latest publish replaced is
-the candidate again, so that selecting it rolls back.
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, directive_shaped, secret_shaped
-from reef.train.backend import ComponentReleases, PreparedStep
+from reef.train.backend import PreparedStep
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.contract import Method, StepContext
@@ -52,10 +48,8 @@ class Evolution:
     scenario's history and step records; ``agent`` is the deployment's
     coding agent, ``None`` when it configured none; ``max_episodes`` ≥ 0
     caps the episodes the method's ``tools.evaluate`` runs in one step, 0 for
-    no cap; ``recheck_every`` ≥ 0 rechecks the latest publish every that many
-    steps, 0 for never.
-    Purpose: ``HarnessBackend`` makes one, asks ``recheck_due`` in every
-    automatic step, and calls ``recheck`` or ``propose``.
+    no cap.
+    Purpose: ``HarnessBackend`` makes one and calls ``propose`` in each step.
     """
 
     method: Method
@@ -64,62 +58,11 @@ class Evolution:
     records: StepRecord
     agent: AgentExecution | None
     max_episodes: int
-    recheck_every: int = 0
 
     def __post_init__(self) -> None:
-        for label, value in (("max_episodes", self.max_episodes), ("recheck_every", self.recheck_every)):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{label} must be an integer of at least 0 (0 turns it off)")
-
-    def recheck_due(self, state: HarnessState, step: int, context: str | None) -> bool:
-        """Whether automatic step ``step`` rechecks the latest publish against the tree it replaced: on the
-        cadence, or at once when the evaluation context is no longer the one the publish was decided in."""
-        if not self.recheck_every or state.rollback_release_id is None:
-            return False
-        return step % self.recheck_every == 0 or state.rollback_context != context
-
-    def recheck(
-        self,
-        *,
-        releases: ComponentReleases,
-        head: HarnessTree,
-        evaluation_tasks: tuple[str, ...],
-        data: JobData,
-        state: HarnessState,
-        step: int,
-        context: str | None,
-        metrics: dict[str, Any],
-    ) -> PreparedStep:
-        """The step whose candidate is the tree the latest publish replaced; it wins only when the head got worse.
-
-        ``state.rollback_release_id`` names that tree. When today's checks refuse it, no recheck can roll back to
-        it: the step drops the target and skips.
-        """
-        if state.rollback_release_id is None:
-            raise ValueError("a recheck needs the release the latest publish replaced")
-        target = releases.release(state.rollback_release_id)
-        target_tree = HarnessTree(target.files)
-        metrics.update(
-            {
-                "recheck": True,
-                "recheck_reason": "drift" if state.rollback_context != context else "cadence",
-                "recheck_release_id": target.release_id,
-            }
-        )
-        validation = validate_tree(target_tree, self.descriptor)
-        if not validation.passed:
-            dropped = replace(state, rollback_release_id=None, rollback_context=None)
-            return skipped(dropped, metrics, validation.message())
-        self.history.add_candidate(target_tree, step=step, origin="release")
-        candidate = HarnessCandidate(
-            candidate_id=f"{data.data_id}:recheck",
-            candidate_tree=target_tree,
-            current_tree=head,
-            evaluation_tasks=evaluation_tasks,
-            step=step,
-            origin="release",
-        )
-        return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
+        value = self.max_episodes
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("max_episodes must be an integer of at least 0 (0 turns it off)")
 
     def propose(
         self,
@@ -193,7 +136,6 @@ class Evolution:
             current_tree=head,
             evaluation_tasks=evaluation_tasks,
             step=workspace.step,
-            origin="method",
         )
         return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
 

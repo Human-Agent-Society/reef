@@ -247,9 +247,6 @@ the tree is unchanged or fails validation for the adapter; there is no retry.
 `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
 documents the workspace, the tools, and the method's state.
 
-A recheck (see `Rechecking a published tree`_) is the one kind of step that
-does not run the method.
-
 Evaluation: the publication policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -360,18 +357,6 @@ adds at most ``max_collected_per_client`` tasks (default 5), and
 to collect, for example only those of failing traces, name a
 ``TaskCollector`` in ``evolution.evaluation.collector`` (see `Collect traffic
 prompts <../developer-guide/write-a-harness-method.rst#collect-traffic-prompts>`__).
-
-Rechecking a published tree
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-A tree passed the evaluation as the suite stood when it was published. A
-grown suite can later show it as a regression. With
-``evolution.evaluation.recheck_every: N`` (``compare`` only; 0, off, by
-default), every ``N`` steps the loop runs fresh episodes of the last published
-tree against the tree it replaced, instead of running the method. It also
-rechecks at once when the evaluation context changed since the publish. If
-the older tree now wins, the loop publishes it again, which rolls the
-deployment back. Only the most recent publish can be rolled back this way.
 
 History
 ~~~~~~~
