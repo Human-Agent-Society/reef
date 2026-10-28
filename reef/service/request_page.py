@@ -106,7 +106,7 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 STATE_WORDS = {
     "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
     "proposing": "the proposer is writing the change; the activity shows what it has done so far",
-    "evaluating": "the evaluation is running the candidate through its episodes",
+    "evaluating": "the evaluation is running the candidate through its rollouts",
     "running": "the step holds the request and reports no phase; its row follows",
     "settling": "the step that consumed the request is committing its row",
 }
@@ -212,9 +212,9 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
         lines.append(
             f"<div><dt>Step time</dt><dd>{escape(elapsed(now - progress.started_at))} into the step</dd></div>"
         )
-        if progress.episodes_total is not None:
+        if progress.rollouts_total is not None:
             lines.append(
-                f"<div><dt>Evaluation episodes</dt><dd>{progress.episodes_total} in the evaluation</dd></div>"
+                f"<div><dt>Evaluation rollouts</dt><dd>{progress.rollouts_total} in the evaluation</dd></div>"
             )
         if progress.step_record:
             lines.append(f'<div><dt>Step record</dt><dd class="id">{escape(progress.step_record)}</dd></div>')

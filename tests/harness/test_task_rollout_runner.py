@@ -1,8 +1,7 @@
-"""The task episode runner: an agent's calls through the capture proxy, the verifier reward reported against the receipts."""
+"""The task rollout runner: an agent's calls through the capture proxy, the verifier reward reported against the receipts."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import threading
@@ -14,20 +13,20 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
-
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
 from reef.harness.client.tasks import (
     DEFAULT_AGENT,
-    EpisodeRow,
-    TaskEpisode,
-    TaskEpisodeError,
-    TaskEpisodeRunner,
+    RolloutRow,
     TaskLab,
+    TaskRollout,
+    TaskRolloutError,
+    TaskRolloutRunner,
     bound_agent,
-    episode_reward,
     main,
     rewards_of,
+    rollout_reward,
     task_identity,
 )
 
@@ -108,7 +107,7 @@ class StandInLab(TaskLab):
         self.trial_uri = trial_uri
         self.calls: list[dict[str, object]] = []
 
-    async def run(self, task_path, agent, *, key, tags, overrides) -> EpisodeRow:
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         self.calls.append(
             {"task_path": task_path, "agent": agent, "key": key, "tags": dict(tags), "overrides": dict(overrides)}
         )
@@ -123,10 +122,10 @@ class StandInLab(TaskLab):
                 headers={"Content-Type": "application/json", "Authorization": "Bearer agent-side"},
                 method="POST",
             )
-            # An agent that is refused keeps going, like terminus after its retries; the episode still ends.
+            # An agent that is refused keeps going, like terminus after its retries; the rollout still ends.
             with contextlib.suppress(urllib.error.HTTPError), urllib.request.urlopen(request, timeout=10) as response:
                 response.read()
-        return EpisodeRow(
+        return RolloutRow(
             rewards=self.rewards, error=self.error, trial_uri=self.trial_uri or f"trials/{task_path.name}"
         )
 
@@ -149,7 +148,7 @@ def written_task(root: Path, name: str, record_id: str = "rec-source") -> Path:
     return write_harbor_task(task, root)
 
 
-def runner(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object) -> TaskEpisodeRunner:
+def runner(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object) -> TaskRolloutRunner:
     fields: dict[str, object] = {
         "reef_url": reef.url,
         "scenario": "guess",
@@ -159,7 +158,7 @@ def runner(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object)
         "lab": lab,
     }
     fields.update(overrides)
-    return TaskEpisodeRunner(**fields)  # type: ignore[arg-type]
+    return TaskRolloutRunner(**fields)  # type: ignore[arg-type]
 
 
 # ------------------------------------------------------------------------------------------------ pure parts
@@ -196,8 +195,8 @@ def test_bound_agent_fills_the_placeholders_wherever_they_sit() -> None:
         ({"reward": True}, None),
     ],
 )
-def test_episode_reward_reads_the_reward_entry_first(rewards, expected) -> None:
-    assert episode_reward(rewards) == expected
+def test_rollout_reward_reads_the_reward_entry_first(rewards, expected) -> None:
+    assert rollout_reward(rewards) == expected
 
 
 def test_task_identity_carries_the_reef_digest_only_when_the_task_has_one(tmp_path: Path) -> None:
@@ -213,7 +212,7 @@ def test_task_identity_carries_the_reef_digest_only_when_the_task_has_one(tmp_pa
 # ------------------------------------------------------------------------------------------------ running
 
 
-def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tmp_path: Path) -> None:
+def test_a_scored_rollout_is_reported_against_its_receipts(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     hint = tmp_path / "hint.md"
     hint.write_text("Count with ls | wc -l.\n")
@@ -222,11 +221,11 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
 
     assert ran.reward == 1.0 and ran.receipts == ("rec-1", "rec-2") and ran.error == ""
     assert ran.report_agent_record_ids == ("rep-1",) and ran.is_reported
-    assert ran.trial_uri == "trials/t1" and len(ran.episode_id) == 32
+    assert ran.trial_uri == "trials/t1" and len(ran.rollout_id) == 32
 
     call = lab.calls[0]
-    assert call["task_path"] == task_path and call["key"] == ran.episode_id
-    assert call["tags"] == {"task": "t1", "episode": ran.episode_id, "arm": "hint"}
+    assert call["task_path"] == task_path and call["key"] == ran.rollout_id
+    assert call["tags"] == {"task": "t1", "rollout": ran.rollout_id, "arm": "hint"}
     assert call["overrides"] == {"environment": {"type": "docker"}, "extra_instruction_paths": [str(hint)]}
     agent = call["agent"]
     assert agent["name"] == "terminus-2" and agent["model_name"] == "openai/qwen3.8:27b"
@@ -237,7 +236,7 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-scenario"] == "guess" and headers["authorization"] == "Bearer tok"
     assert headers["x-reef-tag-task"] == "t1" and headers["x-reef-tag-arm"] == "hint"
-    assert headers["x-reef-tag-episode"] == ran.episode_id
+    assert headers["x-reef-tag-rollout"] == ran.rollout_id
 
     report = reef.reports[0]
     assert report["headers"]["x-reef-scenario"] == "guess" and report["headers"]["authorization"] == "Bearer tok"
@@ -245,8 +244,8 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     assert body["score"] == 1.0 and body["references"] == ["rec-1", "rec-2"]
     assert body["feedback"] == "verifier reward 1.0 on t1"
     assert body["metadata"]["task"] == task_identity(task_path)
-    assert body["metadata"]["episode"] == {
-        "id": ran.episode_id,
+    assert body["metadata"]["rollout"] == {
+        "id": ran.rollout_id,
         "agent": "terminus-2",
         "labels": {"arm": "hint"},
         "rewards": {"reward": 1.0},
@@ -254,39 +253,39 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     }
 
 
-def test_a_rollout_episode_keeps_its_calls_and_reports_nothing(reef: StandInReef, tmp_path: Path) -> None:
+def test_an_unrecorded_rollout_keeps_its_calls_and_reports_nothing(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False, is_rollout=True).run(task_path)
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False, is_unrecorded=True).run(task_path)
     assert ran.reward == 1.0 and ran.error == "" and ran.failed_calls == 0
-    assert ran.receipts == () and not ran.is_reported and reef.reports == [], "a rollout episode is not a record"
+    assert ran.receipts == () and not ran.is_reported and reef.reports == [], "an unrecorded rollout keeps no record"
     assert [turn.request["messages"][0]["content"] for turn in ran.turns] == ["turn 0", "turn 1"]
     assert all(turn.response["choices"][0]["message"]["content"] == "ls" for turn in ran.turns)
     headers = reef.inferences[0]["headers"]
     assert headers[ROLLOUT_HEADER] == "1" and headers["x-reef-scenario"] == "guess"
-    with pytest.raises(TaskEpisodeError, match="reports nothing"):
-        runner(reef, tmp_path, StandInLab({}), is_rollout=True)
+    with pytest.raises(TaskRolloutError, match="reports nothing"):
+        runner(reef, tmp_path, StandInLab({}), is_unrecorded=True)
 
 
-def test_a_rollout_episode_whose_calls_all_fail_names_the_first_answer(tmp_path: Path) -> None:
+def test_an_unrecorded_rollout_whose_calls_all_fail_names_the_first_answer(tmp_path: Path) -> None:
     refusing = StandInReef(refuse_inference=True)
     try:
         task_path = written_task(tmp_path / "tasks", "t1")
         lab = StandInLab({"reward": 0.0})
-        ran = runner(refusing, tmp_path, lab, is_reporting=False, is_rollout=True).run(task_path)
+        ran = runner(refusing, tmp_path, lab, is_reporting=False, is_unrecorded=True).run(task_path)
         assert ran.turns == () and ran.failed_calls == 2
         assert ran.error.startswith("2 model calls failed; the first answered 401")
     finally:
         refusing.close()
 
 
-def test_an_unscored_episode_is_kept_but_not_reported(reef: StandInReef, tmp_path: Path) -> None:
+def test_an_unscored_rollout_is_kept_but_not_reported(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({}, error="the container died")).run(task_path)
     assert ran.reward is None and ran.error == "the container died"
     assert ran.receipts == ("rec-1", "rec-2") and not ran.is_reported and reef.reports == []
 
 
-def test_an_episode_whose_verifier_names_no_primary_reward_says_so(reef: StandInReef, tmp_path: Path) -> None:
+def test_a_rollout_whose_verifier_names_no_primary_reward_says_so(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"correctness": 1.0, "style": 0.0})).run(task_path)
     assert ran.reward is None and ran.error == "the verifier wrote correctness, style and no reward entry"
@@ -310,7 +309,7 @@ def test_a_verifier_timeout_scores_the_configured_reward_and_is_reported(reef: S
     assert runner(reef, tmp_path, lab, verifier_timeout_reward=0.0).run(task_path).reward is None, "harbor was killed"
 
 
-def test_an_episode_without_model_calls_is_not_reported(reef: StandInReef, tmp_path: Path) -> None:
+def test_a_rollout_without_model_calls_is_not_reported(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}, turns=0)).run(task_path)
     assert ran.reward == 1.0 and ran.receipts == () and not ran.is_reported and reef.reports == []
@@ -324,7 +323,7 @@ def test_per_receipt_sends_one_report_per_model_call(reef: StandInReef, tmp_path
     assert {report["body"]["score"] for report in reef.reports} == {0.25}
 
 
-def test_a_refused_report_is_the_episodes_error_and_the_episode_comes_back_unreported(tmp_path: Path) -> None:
+def test_a_refused_report_is_the_rollouts_error_and_the_rollout_comes_back_unreported(tmp_path: Path) -> None:
     reef = StandInReef(refuse_reports=True)
     try:
         task_path = written_task(tmp_path / "tasks", "t1")
@@ -345,37 +344,35 @@ def test_the_agents_own_authorization_passes_through_without_a_token(reef: Stand
     assert "authorization" not in reef.reports[0]["headers"]
 
 
-def test_a_measurement_run_keeps_its_episodes_out_of_the_training_data(reef: StandInReef, tmp_path: Path) -> None:
+def test_a_measurement_run_keeps_its_rollouts_out_of_the_training_data(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False).run(task_path)
     assert ran.reward == 1.0 and ran.receipts == ("rec-1", "rec-2")
     assert not ran.is_reported and reef.reports == []
 
 
-def test_concurrent_episodes_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
+def test_concurrent_rollouts_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2", "t3")]
     lab = StandInLab({"reward": 1.0})
-    running = runner(reef, tmp_path, lab)
-
-    async def run_all() -> tuple[TaskEpisode, ...]:
-        return tuple(await asyncio.gather(*(running.run_async(path) for path in paths)))
-
-    episodes = asyncio.run(run_all())
-    assert [episode.name for episode in episodes] == ["t1", "t2", "t3"] and all(
-        episode.is_reported for episode in episodes
+    running = runner(reef, tmp_path, lab, concurrency=3)
+    rollouts = running.run_rollouts(
+        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths]
     )
-    assert len({episode.episode_id for episode in episodes}) == 3 and len(reef.reports) == 3
+    assert [rollout.name for rollout in rollouts] == ["t1", "t2", "t3"] and all(
+        rollout.is_reported for rollout in rollouts
+    )
+    assert len({rollout.rollout_id for rollout in rollouts}) == 3 and len(reef.reports) == 3
     ports = {call["agent"]["kwargs"]["api_base"] for call in lab.calls}
-    assert len(ports) == 3, "every episode talks to its own proxy, so its receipts are its own"
-    assert sorted(receipt for episode in episodes for receipt in episode.receipts) == [f"rec-{n}" for n in range(1, 7)]
+    assert len(ports) == 3, "every rollout talks to its own proxy, so its receipts are its own"
+    assert sorted(receipt for rollout in rollouts for receipt in rollout.receipts) == [f"rec-{n}" for n in range(1, 7)]
 
 
-def test_two_runs_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
+def test_two_runs_are_two_rollouts(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
-    episode_runner = runner(reef, tmp_path, lab)
-    first, second = episode_runner.run(task_path), episode_runner.run(task_path)
-    assert first.episode_id != second.episode_id and lab.calls[0]["key"] != lab.calls[1]["key"]
+    rollout_runner = runner(reef, tmp_path, lab)
+    first, second = rollout_runner.run(task_path), rollout_runner.run(task_path)
+    assert first.rollout_id != second.rollout_id and lab.calls[0]["key"] != lab.calls[1]["key"]
     assert [report["body"]["references"] for report in reef.reports] == [["rec-1", "rec-2"], ["rec-3", "rec-4"]]
 
 
@@ -392,12 +389,12 @@ def test_two_runs_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
     ],
 )
 def test_a_runner_refuses_an_incomplete_configuration(reef: StandInReef, tmp_path: Path, overrides, message) -> None:
-    with pytest.raises(TaskEpisodeError, match=message):
+    with pytest.raises(TaskRolloutError, match=message):
         runner(reef, tmp_path, StandInLab({"reward": 1.0}), **overrides)
 
 
 def test_a_directory_without_task_toml_is_refused(reef: StandInReef, tmp_path: Path) -> None:
-    with pytest.raises(TaskEpisodeError, match="not a Harbor task directory"):
+    with pytest.raises(TaskRolloutError, match="not a Harbor task directory"):
         runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(tmp_path)
 
 
@@ -406,13 +403,13 @@ def test_a_directory_without_task_toml_is_refused(reef: StandInReef, tmp_path: P
     [
         ({"my arm": "x"}, "label name 'my arm' must be letters"),
         ({"arm/v2": "x"}, "label name 'arm/v2' must be letters"),
-        ({"task": "other"}, "label 'task' is the episode runner's own tag"),
+        ({"task": "other"}, "label 'task' is the rollout runner's own tag"),
         ({"arm": "提示"}, "needs a non-empty printable ASCII value"),
         ({"arm": " "}, "needs a non-empty printable ASCII value"),
     ],
 )
 def test_a_label_that_cannot_ride_as_a_header_is_refused(reef: StandInReef, tmp_path: Path, labels, message) -> None:
-    with pytest.raises(TaskEpisodeError, match=message):
+    with pytest.raises(TaskRolloutError, match=message):
         runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels)
 
 
@@ -420,7 +417,7 @@ def test_labels_are_stored_the_way_the_service_stores_tags(reef: StandInReef, tm
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"Arm": " Hint "}).run(task_path)
     assert reef.inferences[0]["headers"]["x-reef-tag-arm"] == "Hint"
-    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "Hint"} and ran.is_reported
+    assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == {"arm": "Hint"} and ran.is_reported
 
 
 def test_refused_model_calls_are_named_in_the_error(tmp_path: Path) -> None:
@@ -444,7 +441,7 @@ def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: Stan
     assert lab.calls[0]["agent"]["kwargs"]["api_base"].startswith("http://localhost:")
 
 
-def test_a_report_that_does_not_reach_reef_is_the_episodes_error(
+def test_a_report_that_does_not_reach_reef_is_the_rollouts_error(
     reef: StandInReef, tmp_path: Path, monkeypatch
 ) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
@@ -499,7 +496,7 @@ def test_main_runs_one_side_of_a_manifest_and_prints_a_line_per_task(
     assert [line["task"] for line in lines] == train_names and len(train_names) == 2
     assert all(line["reward"] == 1.0 and line["receipts"] == 2 and len(line["reports"]) == 1 for line in lines)
     assert reef.inferences[0]["headers"]["authorization"] == "Bearer env-token"
-    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "plain"}
+    assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == {"arm": "plain"}
     assert [call["task_path"] for call in lab.calls] == [root / name for name in train_names]
 
 
@@ -560,7 +557,7 @@ def test_main_prints_each_line_as_it_finishes_and_keeps_going_after_a_refused_re
     assert all(line["error"].startswith("the report for t") for line in lines)
 
 
-def test_main_checks_every_task_directory_before_the_first_episode(reef: StandInReef, tmp_path: Path, capsys) -> None:
+def test_main_checks_every_task_directory_before_the_first_rollout(reef: StandInReef, tmp_path: Path, capsys) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
     with pytest.raises(SystemExit):
@@ -594,15 +591,50 @@ def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef:
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels).run(task_path)
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-tag-batch"] == "tasks:generated-tasks:1" and headers["x-reef-tag-task_use"] == "use-t1-0"
-    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == labels and ran.is_reported
+    assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == labels and ran.is_reported
 
 
-def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
-    def episode(reward: float | None, error: str = "") -> TaskEpisode:
-        return TaskEpisode(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
+def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_a_rollout_that_never_ran() -> None:
+    def rollout(reward: float | None, error: str = "") -> TaskRollout:
+        return TaskRollout(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
 
-    assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
-    assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)
+    assert rewards_of((rollout(1.0), rollout(None), rollout(None, "the trial raised"))) == (1.0, 0.0)
+    assert rewards_of((rollout(0.5, "a late error"),)) == (0.5,)
     assert (
-        episode(None, "the sandbox is gone").is_infrastructure_failure and not episode(0.0).is_infrastructure_failure
+        rollout(None, "the sandbox is gone").is_infrastructure_failure and not rollout(0.0).is_infrastructure_failure
     )
+
+
+def test_a_rollout_that_could_not_run_fails_and_one_without_a_reward_scores_zero(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    def rollout(reward: float | None, error: str = "") -> TaskRollout:
+        return TaskRollout(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
+
+    scorer = runner(reef, tmp_path, StandInLab({}))
+    assert scorer.rollout_score(rollout(None, "the sandbox is gone")) == RolloutScore.failed()
+    assert scorer.rollout_score(rollout(None)) == RolloutScore.scored(0.0)
+    assert scorer.rollout_score(rollout(0.5, "a late error")) == RolloutScore.scored(0.5)
+    with pytest.raises(TaskRolloutError, match="concurrency"):
+        runner(reef, tmp_path, StandInLab({}), concurrency=0)
+
+
+def test_run_rollouts_refuses_a_harness_a_model_or_a_record_dir_it_cannot_use(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    task = str(written_task(tmp_path / "tasks", "t1"))
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab, model_adapter="tinker://start/sampler")
+    assert running.served_model.kind == "model_adapter" and running.harness.kind == "harness"
+    refused = (
+        (
+            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.served_model, task),
+            "agent",
+        ),
+        (RolloutRequest(running.harness, PolicyModel(running.model), task), "serves"),
+        (RolloutRequest(running.harness, running.served_model, task, tmp_path / "keep"), "work_dir"),
+    )
+    for request, message in refused:
+        with pytest.raises(ValueError, match=message):
+            running.run_rollouts([RolloutRequest(running.harness, running.served_model, task), request])
+    assert lab.calls == [], "a refused request runs no rollout"

@@ -311,7 +311,7 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
 
 
 @pytest.mark.unit
-def test_pairing_processor_raises_for_forked_multi_turn_episode() -> None:
+def test_pairing_processor_raises_for_forked_multi_turn_rollout() -> None:
     processor = threshold_pipeline(PipelineContext("math"), accept_multi_turn=True)
     processor.push(training_inference("i1", [1, 2, 3], [1], [-0.1]))
     processor.push(training_inference("i2", [1, 9, 3, 4], [1], [-0.2]))
@@ -895,8 +895,8 @@ if __name__ == "__main__":
 
 
 @pytest.mark.unit
-def test_sao_processor_defaults_action_mask_for_assembled_episodes() -> None:
-    """A multi-turn episode reaches SAO through the shared assembly path,
+def test_sao_processor_defaults_action_mask_for_assembled_rollouts() -> None:
+    """A multi-turn rollout reaches SAO through the shared assembly path,
     which fills no SAO-only fields; the processor must apply its documented
     single-turn default (action mask = loss mask) instead of rejecting the
     assembled sample on an empty action mask."""

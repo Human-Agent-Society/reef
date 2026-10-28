@@ -38,7 +38,7 @@ from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.component import (
     ROLLOUT_FILE,
     START_STATE,
-    SlimeRollout,
+    SlimeRound,
     SlimeSettings,
     SlimeStart,
     SlimeTrainingComponent,
@@ -1053,9 +1053,9 @@ def test_a_slime_rollout_checks_its_values(values, error, message) -> None:
         "objective": "sft",
         "algorithm_state": {"steps": 1},
     }
-    SlimeRollout(**rollout)
+    SlimeRound(**rollout)
     with pytest.raises(error, match=message):
-        SlimeRollout(**{**rollout, **values})
+        SlimeRound(**{**rollout, **values})
 
 
 @pytest.mark.unit

@@ -1,6 +1,6 @@
 """Compatibility entrypoints for the evolve-your-harness tutorial.
 
-Proposals and the reading of an episode's final answer live in the built-in
+Proposals and the reading of a rollout's final answer live in the built-in
 Reefine recipe; the grader and its three arithmetic answers are this
 tutorial's own, since its deployments keep those tasks. The small client
 grader stays dependency-free so run.py still needs only reef-client.
@@ -57,7 +57,7 @@ def propose(nodes, samples, models, *, requests=(), entries=(), adapter="pi"):
 
 
 def evaluate(task: str, result) -> float:
-    """Grade the episode's final assistant text, read as the built-in recipe reads it, against this tutorial's
+    """Grade the rollout's final assistant text, read as the built-in recipe reads it, against this tutorial's
     own answers."""
     from reef.recipe.reefine.evolution import final_assistant_text
 

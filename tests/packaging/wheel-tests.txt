@@ -23,12 +23,12 @@ tests/harness/test_compose_loader.py
 tests/harness/test_cordis_floor.py
 tests/harness/test_e2b_executor.py
 tests/harness/test_e2b_tunnel.py
-tests/harness/test_episode_executor.py
+tests/harness/test_program_executor.py
 tests/harness/test_evolution_executor_ray.py
 tests/harness/test_failure_manifest.py
 tests/harness/test_harbor_tasks.py
 tests/harness/test_harness_contracts.py
-tests/harness/test_harness_episode.py
+tests/harness/test_harness_rollout.py
 tests/harness/test_harness_evolve_runner.py
 tests/harness/test_harness_model_route.py
 tests/harness/test_harness_read.py
@@ -43,9 +43,9 @@ tests/harness/test_node_credential_scan.py
 tests/harness/test_node_directive_scan.py
 tests/harness/test_requests_extension.py
 tests/harness/test_requests_requires.py
-tests/harness/test_task_episode_runner.py
+tests/harness/test_task_rollout_runner.py
 tests/harness/test_terminus_agent.py
-tests/harness/test_terminus_episode.py
+tests/harness/test_terminus_rollout.py
 tests/harness/test_terminus_tree.py
 tests/harness/test_version_check.py
 tests/inference/test_inference_control.py

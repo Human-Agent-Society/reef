@@ -2,7 +2,7 @@
 
 The interpreter reads a ``NativeHost`` at every use instead of holding the
 tools, hooks, agents, graphs, loop and prompt it was built with, so a change to the
-registries between two steps is what the next step runs on. The episode form
+registries between two steps is what the next step runs on. The rollout form
 fills one at boot and never changes it: from the root's ``tree.json`` through
 the node plugins in ``reef.harness.runners.native.plugins`` when the render carried
 one, else from the rendered files; the plugins fill one entry by entry and
@@ -62,7 +62,7 @@ class NativeHost(Host):
     """The registries the loop reads; every ``add`` returns the call that takes the item out again."""
 
     def __init__(self, mount_dir: Path | None = None, order: TreeOrder | None = None) -> None:
-        #: Where ``mount_module`` writes tool, hook and loop modules; the episode form loads the rendered files instead.
+        #: Where ``mount_module`` writes tool, hook and loop modules; the rollout form loads the rendered files instead.
         self.mount_dir = mount_dir
         #: Where rules and windows take their order from; without one, the order they were added in.
         self.order = order
@@ -160,7 +160,7 @@ class NativeHost(Host):
         return remove
 
     def add_graph(self, graph: Graph) -> Remover:
-        """Keyed by ``source``: the file stem in the episode form, the node name in the live one."""
+        """Keyed by ``source``: the file stem in the rollout form, the node name in the live one."""
         if graph.source in self._graphs:
             raise GraphError(f"graph {graph.source!r} is already installed; one name, one graph")
         self._graphs[graph.source] = graph
@@ -269,14 +269,14 @@ class NativeHost(Host):
         return uninstall
 
     def dispose(self) -> None:
-        """Take every entry out and remove the mount directory; the episode form calls it when the turn ends."""
+        """Take every entry out and remove the mount directory; the rollout form calls it when the turn ends."""
         if self.loader is not None:
             self.loader.root.update([])
         self._loop = None
         if self.mount_dir is not None:
             shutil.rmtree(self.mount_dir, ignore_errors=True)
 
-    # -- the episode form ----------------------------------------------------------------------------------------
+    # -- the rollout form ----------------------------------------------------------------------------------------
 
     @classmethod
     def from_root(cls, root: Path, mount_dir: Path | None = None) -> NativeHost:
@@ -316,7 +316,7 @@ class NativeHost(Host):
     @classmethod
     def _from_tree(cls, tree: Path, mount_dir: Path | None) -> NativeHost:
         """One fresh compose context over the entries list; the loader stays on the host for later mounts."""
-        # Late: the training package imports the harness, and the episode form pays for it only on a tree boot.
+        # Late: the training package imports the harness, and the rollout form pays for it only on a tree boot.
         from reef.harness.compose import Context
         from reef.harness.compose.loader import Loader
         from reef.harness.runners.native.plugins import NATIVE_PLUGINS

@@ -13,7 +13,7 @@ The map, one subpackage per job:
     ``descriptor``) plus quirks, and the ``harness_facts.yaml`` a text proposer
     reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
     the two programs Reef ships, native and terminus.
-``episodes/``
+``rollouts/``
     one headless run and its reading: launch on a rendered root through any
     ``reef.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
@@ -39,12 +39,12 @@ log, recovery and rollback) is reef's artifact stack (``reef.artifact``,
 
 Vocabulary note: ``reef.surface.harnesses`` delivers a *harness artifact* to
 a client program; this package evolves the *harness composition itself* by
-driving a real coding agent binary per episode.
+driving a real coding agent binary per rollout.
 """
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError, read_opencode_session, read_pi_session
+from reef.harness.rollouts.run import RolloutError, RolloutResult, TrajectoryKeepError, run_rollout
+from reef.harness.rollouts.trajectory import TrajectoryError, read_opencode_session, read_pi_session
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 
@@ -53,14 +53,14 @@ __all__ = [
     "AdapterDescriptor",
     "ConfigTarget",
     "DescriptorError",
-    "EpisodeError",
-    "EpisodeResult",
     "RenderError",
+    "RolloutError",
+    "RolloutResult",
     "TrajectoryError",
     "TrajectoryKeepError",
     "load_descriptor",
     "read_opencode_session",
     "read_pi_session",
     "render_composition",
-    "run_episode",
+    "run_rollout",
 ]

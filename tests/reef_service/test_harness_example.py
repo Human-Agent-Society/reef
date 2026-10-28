@@ -1,5 +1,5 @@
 """Guarantees of the tutorials/evolve-your-harness cookbook example, hermetic: the
-model binding is stubbed, episodes never run, and the boot test drives the
+model binding is stubbed, rollouts never run, and the boot test drives the
 same serve.yaml materialization run.sh performs."""
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 
 from reef.core.requirements import REQUIRE_KINDS
-from reef.harness.episodes.model_binding import ModelBindingError
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBindingError
+from reef.harness.rollouts.run import RolloutResult
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.cordis import CordisRecipe
@@ -800,8 +800,8 @@ def test_propose_lists_the_variables_an_extension_reads_that_no_requires_item_na
 # -- evaluate: exact last-line grading ------------------------------------
 
 
-def episode(trajectory: tuple[dict, ...]) -> EpisodeResult:
-    return EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
+def rollout(trajectory: tuple[dict, ...]) -> RolloutResult:
+    return RolloutResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
 
 
 def pi_message(text: str) -> dict:
@@ -811,17 +811,17 @@ def pi_message(text: str) -> dict:
 def test_evaluate_grades_exact_final_lines(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
-    assert evolution.evaluate(task, episode((pi_message(f"Working...\n\n{answer}"),))) == 1.0
-    assert evolution.evaluate(task, episode(({"role": "assistant", "content": answer},))) == 1.0
+    assert evolution.evaluate(task, rollout((pi_message(f"Working...\n\n{answer}"),))) == 1.0
+    assert evolution.evaluate(task, rollout(({"role": "assistant", "content": answer},))) == 1.0
 
 
 def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
-    assert evolution.evaluate(task, episode((pi_message(f"{answer}!"),))) == 0.0
-    assert evolution.evaluate(task, episode((pi_message(f"The answer is {answer}"),))) == 0.0
-    assert evolution.evaluate(task, episode(())) == 0.0
-    assert evolution.evaluate("no such prefix", episode((pi_message(answer),))) == 0.0
+    assert evolution.evaluate(task, rollout((pi_message(f"{answer}!"),))) == 0.0
+    assert evolution.evaluate(task, rollout((pi_message(f"The answer is {answer}"),))) == 0.0
+    assert evolution.evaluate(task, rollout(())) == 0.0
+    assert evolution.evaluate("no such prefix", rollout((pi_message(answer),))) == 0.0
 
 
 HEALTH_TASK = (
@@ -837,11 +837,11 @@ def test_the_builtin_grades_the_health_task_and_the_tutorial_keeps_its_own_answe
     tutorial = _method(monkeypatch, "evolution")
     assert builtin.ANSWERS == {"[health]": "reef-ok"}
     assert set(tutorial.ANSWERS) == {"[sieve]", "[fib]", "[csv]"}
-    assert builtin.evaluate(HEALTH_TASK, episode((pi_message("$ echo reef-ok\nreef-ok"),))) == 1.0
-    assert builtin.evaluate(HEALTH_TASK, episode((pi_message("reef-ok is the output."),))) == 0.0
-    assert tutorial.evaluate(HEALTH_TASK, episode((pi_message("reef-ok"),))) == 0.0
-    assert tutorial.evaluate("[sieve] count the primes", episode((pi_message("Sieving...\n\n9592"),))) == 1.0
-    assert builtin.evaluate("[sieve] count the primes", episode((pi_message("9592"),))) == 0.0
+    assert builtin.evaluate(HEALTH_TASK, rollout((pi_message("$ echo reef-ok\nreef-ok"),))) == 1.0
+    assert builtin.evaluate(HEALTH_TASK, rollout((pi_message("reef-ok is the output."),))) == 0.0
+    assert tutorial.evaluate(HEALTH_TASK, rollout((pi_message("reef-ok"),))) == 0.0
+    assert tutorial.evaluate("[sieve] count the primes", rollout((pi_message("Sieving...\n\n9592"),))) == 1.0
+    assert builtin.evaluate("[sieve] count the primes", rollout((pi_message("9592"),))) == 0.0
     assert builtin.final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 
@@ -943,7 +943,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
-    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no rollouts
 
 
 # -- the native variant: skills, tools, and hooks --------------------------
@@ -1107,11 +1107,11 @@ def test_native_evaluate_reads_the_last_assistant_message_with_content(native_ev
         "time": 0,
         "data": {"content": "", "tool_calls": [{}], "finish": "x"},
     }
-    assert native_evolution.evaluate(task, episode((call, native_message("Sieving...\n\n9592")))) == 1.0
+    assert native_evolution.evaluate(task, rollout((call, native_message("Sieving...\n\n9592")))) == 1.0
     # A tool-call message carries no text; the last text answer is the one graded.
-    assert native_evolution.evaluate(task, episode((native_message("9592"), call))) == 1.0
-    assert native_evolution.evaluate(task, episode((native_message("The count is 9592"),))) == 0.0
-    assert native_evolution.evaluate(task, episode(())) == 0.0
+    assert native_evolution.evaluate(task, rollout((native_message("9592"), call))) == 1.0
+    assert native_evolution.evaluate(task, rollout((native_message("The count is 9592"),))) == 0.0
+    assert native_evolution.evaluate(task, rollout(())) == 0.0
 
 
 def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolution, tmp_path, monkeypatch) -> None:
@@ -1141,7 +1141,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
         "answer-style",
     ]
     assert "upstream" not in yaml.safe_dump(list(built.seed))
-    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no rollouts
 
 
 @pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])

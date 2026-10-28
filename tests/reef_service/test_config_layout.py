@@ -274,18 +274,18 @@ def test_declared_recipe_sections_support_leaf_overrides():
         "reef": {
             "recipe": "reef.recipe.cordis:CordisRecipe",
             "data": {"training_mode": "auto"},
-            "evolution": {"adapter": "pi", "tasks": ["one"], "episode_repeats": 2},
+            "evolution": {"adapter": "pi", "tasks": ["one"], "rollout_repeats": 2},
         }
     }
     arguments = component_config_arguments(config)
     result = _apply_overrides(
         config,
-        {"recipe.config.evolution.episode_repeats": "4", "recipe.config.training-mode": "manual"},
+        {"recipe.config.evolution.rollout_repeats": "4", "recipe.config.training-mode": "manual"},
         arguments=arguments,
     )
-    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_repeats": 4}
+    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "rollout_repeats": 4}
     assert result["reef"]["data"]["training_mode"] == "manual"
-    assert config["reef"]["evolution"]["episode_repeats"] == 2
+    assert config["reef"]["evolution"]["rollout_repeats"] == 2
 
 
 @pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])

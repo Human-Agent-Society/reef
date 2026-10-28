@@ -49,7 +49,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         default=None,
         help=(
             "Megatron checkpoint directory the critic starts from when its own save root holds no "
-            "checkpoint yet: a value model trained on earlier episodes instead of a cold value head. "
+            "checkpoint yet: a value model trained on earlier rollouts instead of a cold value head. "
             "Ignored once the critic has saved, and when the directory holds no checkpoint."
         ),
     )

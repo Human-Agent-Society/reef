@@ -184,7 +184,7 @@ class TaskStore(ABC):
 
     @abstractmethod
     def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
-        """Save a copy of each candidate task directory of a generation, in order, before validation or episodes.
+        """Save a copy of each candidate task directory of a generation, in order, before validation or rollouts.
 
         The name of a candidate is the name of its directory. Raises
         ``TaskStoreError`` if the generation does not exist or has other

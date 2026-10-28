@@ -10,7 +10,7 @@ from pathlib import Path
 from reef.core.errors import ReefError
 from reef.sandbox.e2b import E2BExecutor
 from reef.sandbox.modal import ModalExecutor
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxLimits, SandboxUnavailable
+from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxLimits, SandboxUnavailable
 from reef.sandbox.remote import RemoteExecutor, deployment_owner
 
 #: The cloud sandbox providers, by the name a deployment selects.
@@ -47,15 +47,15 @@ def remote_executor(
 
 def build_executor(
     config: Mapping[str, object] | None, *, environ: Mapping[str, str] | None = None
-) -> EpisodeExecutor:
+) -> ProgramExecutor:
     """Build the executor a deployment selected.
 
     ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``); a sandbox reads its
     ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
     variable names from the same section. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
-    fails to start, not at the first episode. The caller binds the result to
-    the program it runs with :meth:`EpisodeExecutor.for_program`.
+    fails to start, not at the first rollout. The caller binds the result to
+    the program it runs with :meth:`ProgramExecutor.for_program`.
     """
     config = config or {}
     kind = config.get("executor", "local")
@@ -71,7 +71,7 @@ def build_executor(
         return remote
     if kind != "sandbox":
         kinds = ", ".join(f"'{name}'" for name in ("local", "sandbox", *sorted(REMOTE_EXECUTORS)))
-        raise ReefError(f"unknown episode executor {kind!r}; use one of {kinds}")
+        raise ReefError(f"unknown rollout executor {kind!r}; use one of {kinds}")
     sandbox_config = config.get("sandbox") or {}
     if not isinstance(sandbox_config, Mapping):
         raise ReefError("evolution.sandbox must be a mapping")

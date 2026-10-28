@@ -51,7 +51,7 @@ Rendering
 
 Rendering turns a harness tree into the files one agent reads: the tree's
 entries and an adapter descriptor in, root-relative paths with their text out.
-It touches no disk and starts no agent. Reef renders a tree to run an episode,
+It touches no disk and starts no agent. Reef renders a tree to run a rollout,
 to serve a release, and to check that a proposed mutation is renderable at all.
 
 Reef and the adapter own the rendering process together. The engine processes
@@ -253,7 +253,7 @@ compare a key with the target's default:
            - key: env.DISABLE_TELEMETRY
              match: |-
                Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
-             reason: benchmark episodes keep telemetry off
+             reason: benchmark rollouts keep telemetry off
 
 The render runs each target's checks on the merged target, before any adapter
 step. Reef owns the matchers. If the existing ones are not enough, consider
@@ -319,12 +319,12 @@ or absent key. Only ``IsAbsent``, ``Not`` and ``Each`` match an absent key, so
 Misc
 ^^^^
 
-Rendering is not publication. An episode's files are written into a throwaway
-root that is removed when the episode ends, and harness evolution renders both
+Rendering is not publication. A rollout's files are written into a throwaway
+root that is removed when the rollout ends, and harness evolution renders both
 the candidate and the current tree every step in order to compare them; at most
 one of the two becomes a release.
 
-Restrictions that depend on how an episode runs, rather than on what a tree
+Restrictions that depend on how a rollout runs, rather than on what a tree
 contains, are checked at launch instead. Terminus's requirement for remote
 tasks is one: a tree carrying a ``code_extension`` renders, then fails to
 launch under the wrong executor.
@@ -358,7 +358,7 @@ does not invent a model's context window. Restart the service to refresh cached
 provider metadata. A scenario model override resolves the new model separately.
 
 The binding renders ``codex/models.json`` and a relative ``model_catalog_json``
-reference, so both evaluation episodes and installed clients read the same
+reference, so both evaluation rollouts and installed clients read the same
 capabilities after relocation. Codex retains its own context safety margin and
 compaction policy. Custom-model entries keep the pinned Codex unknown-model
 instructions, standard shell tools, and low/medium/high effort when reasoning
@@ -399,7 +399,7 @@ runner writes the verifier reward and ATIF trajectory under
 
 The runner reaches Harbor through ``reef-eval``, as the examples under
 ``recipes/`` do. Its prompt names a Harbor task directory or registry id;
-the episode does not need a separate dataset location in its environment.
+the rollout does not need a separate dataset location in its environment.
 
 Tree entries map to Terminus 2 configuration as follows:
 
@@ -418,7 +418,7 @@ section. ``GET /reef/harness/install?adapter=terminus`` answers HTTP 400,
 there is no ``reef-terminus`` client wrapper (``reef-terminus evolve`` does
 not exist), and there is no session to type ``/reefine`` into. A request
 reaches a deployment through ``POST /reef/train``. ``GET /reef/harness``
-serves the tree, and each evaluation episode renders it with the model
+serves the tree, and each evaluation rollout renders it with the model
 binding.
 
 Run a published tree
@@ -434,7 +434,7 @@ Before running a declarative Terminus tree locally, prepare:
 - A local tree root containing the ``files`` returned by ``GET /reef/harness``
   for the scenario, saved under their relative paths.
 
-Evaluation episodes call the upstream directly. A tree that you run through
+Evaluation rollouts call the upstream directly. A tree that you run through
 Reef yourself also needs the scenario header in ``llm_kwargs.extra_headers``,
 or Reef answers HTTP 400 ``missing or empty x-reef-scenario``. Write this in
 ``terminus/config.json`` under the tree root, with the service's
@@ -478,22 +478,22 @@ the runner reports a possible mount problem: check that Docker shares
 Evaluation directories and Docker context
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Reef prepares an evaluation episode for Docker itself. On macOS its root is
-made under ``~/.reef/episodes`` (``is_root_bind_mounted``), which colima and
+Reef prepares an evaluation rollout for Docker itself. On macOS its root is
+made under ``~/.reef/rollouts`` (``is_root_bind_mounted``), which colima and
 Docker Desktop share with their VM by default. On Linux, WSL, and Windows
 the root stays in the temp directory, so the service needs no writable
 home. Where Docker there runs in a VM that does not share the temp
-directory, set ``TMPDIR`` for the service to a path it shares. The episode
+directory, set ``TMPDIR`` for the service to a path it shares. The rollout
 keeps the service's ``DOCKER_HOST``, ``DOCKER_CONTEXT``, and
 ``DOCKER_CONFIG`` (``host_env``; ``DOCKER_CONFIG`` defaults to
-``~/.docker``), because ``HOME`` points into the episode and the docker CLI
+``~/.docker``), because ``HOME`` points into the rollout and the docker CLI
 reads its current context (colima, Docker Desktop) and the compose plugin
 from that directory.
 
 Docker or a remote environment
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Evaluation episodes run the Harbor task in local Docker unless the
+Evaluation rollouts run the Harbor task in local Docker unless the
 deployment runs them in a remote Harbor environment: ``e2b`` with
 ``E2B_API_KEY``, or ``modal`` with ``MODAL_TOKEN_ID`` and
 ``MODAL_TOKEN_SECRET``. For a remote environment, use the sandbox executor and
@@ -515,8 +515,8 @@ bubblewrap, Python 3.12+, and Harbor with the environment's extra
 (``harbor[e2b]``, or the ``modal`` package).
 The interpreter and local task directories must be visible inside the
 sandbox, for example under ``/opt``. ``egress_hosts`` currently does not
-enforce a hostname firewall. The episode root under ``~/.reef/episodes`` and
-the ``DOCKER_*`` variables above apply only to local Docker; an episode in a
+enforce a hostname firewall. The rollout root under ``~/.reef/rollouts`` and
+the ``DOCKER_*`` variables above apply only to local Docker; a rollout in a
 remote environment gets neither.
 
 A Python extension (``code_extension``) runs only this way. Reef rejects
@@ -525,10 +525,10 @@ launch.
 
 The Terminus quirk supplies ``validate_execution`` as an
 ``ExecutionValidator``. Its ``__call__(files, executor)`` checks the rendered
-tree and configured executor before Reef writes episode files. It raises
-``EpisodeLaunchError`` for unsupported combinations and replaces the default
+tree and configured executor before Reef writes rollout files. It raises
+``RolloutLaunchError`` for unsupported combinations and replaces the default
 ``self_isolating`` nesting restriction. Execution, timeout, cleanup, and
-trajectory handling still use the shared episode code.
+trajectory handling still use the shared rollout code.
 
 Model binding and provider compatibility
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -643,7 +643,7 @@ Web search
 ^^^^^^^^^^
 
 Interactive ``reef-opencode`` sessions offer the Exa ``websearch`` tool
-without requiring a search API key. Evaluation episodes do not enable this
+without requiring a search API key. Evaluation rollouts do not enable this
 tool.
 
 DeepSeek Harness
@@ -660,7 +660,7 @@ After installing a dsh harness, start its browser interface:
 
 Stop it with Ctrl-C. The wrapper waits for dsh to exit, removes the temporary
 session copy, and exits with dsh's status (130 after Ctrl-C), without a
-traceback. The headless profile is used for evaluation episodes.
+traceback. The headless profile is used for evaluation rollouts.
 
 Rendered files and profiles
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -749,7 +749,7 @@ Hermes Agent
 The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
 ``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``, which
 the render writes as YAML. The descriptor's checks keep these defaults so an
-episode stays self-contained and makes one request:
+rollout stays self-contained and makes one request:
 
 - ``security.tirith_enabled`` disables the terminal scanner download. The
   scanner would also block a command it cannot resolve, such as
@@ -767,7 +767,7 @@ episode stays self-contained and makes one request:
 
 Rendering rejects a tree that changes any of those settings, or that puts a
 value that is not an object where a section holding one belongs. The quirks
-also write ``.no-bundled-skills``, so episodes use the tree's skills instead
+also write ``.no-bundled-skills``, so rollouts use the tree's skills instead
 of the bundled catalog.
 
 Node paths and transformations are:
@@ -792,7 +792,7 @@ Command and plugin configuration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The quirks add the commands root to ``skills.external_dirs`` twice: beside
-the home (``${HERMES_HOME}/../hermes-commands``) for an episode, and under
+the home (``${HERMES_HOME}/../hermes-commands``) for a rollout, and under
 the install root (``${REEF_HARNESS_DEST}/hermes-commands``) for a
 ``reef-hermes`` session, whose home is a temporary copy. Hermes skips an
 entry that names no directory.
@@ -816,7 +816,7 @@ the run wrote. Hermes also writes files of
 its own into ``skills/`` that no config key turns off: the bundled skill
 manifest it rewrites at every start, the one essential skill it seeds
 (``autonomous-ai-agents/hermes-agent``), and the usage counts it updates
-when a skill is loaded (``.usage.json`` and its lock). An episode lists them
+when a skill is loaded (``.usage.json`` and its lock). A rollout lists them
 in ``cleanup_whitelist``; in a ``reef-hermes`` session they are written into
 the installed release's ``skills/``.
 
@@ -835,7 +835,7 @@ Codex CLI
 The ``codex`` adapter runs ``codex exec --json`` headless with its user
 home relocated through ``CODEX_HOME``. Its ``primary`` target is
 ``config.toml``, which the render writes as TOML. The descriptor's checks
-keep these defaults so an episode stays self-contained:
+keep these defaults so a rollout stays self-contained:
 the update check, analytics, feedback, and telemetry are off, and the
 ``workspace-write`` sandbox has no network. Rendering rejects a tree that
 changes them.
@@ -856,9 +856,9 @@ Node paths and transformations are:
 
 The tree may set ``web_search`` (``disabled``, ``cached``, ``indexed``, or
 ``live``) for a person's ``reef-codex`` session, but not
-``approval_policy``. The episode argv pins
+``approval_policy``. The rollout argv pins
 ``--config approval_policy="never"`` and ``--config web_search="disabled"``,
-which win over ``config.toml``, so an episode never waits for an approval
+which win over ``config.toml``, so a rollout never waits for an approval
 and never searches the web.
 
 An interactive ``reef-codex`` session keeps Codex's own ``on-request``
@@ -908,8 +908,8 @@ runs in a child process under a bubblewrap profile based on its capabilities:
   ``/usr/local/bin``. For example, ``subprocess.run(["bash", ...])`` fails
   because Python's fallback search of ``/bin:/usr/bin`` finds neither path.
 
-The profile binds the episode's ``/proc`` read-only because a jail inside
-the episode jail cannot mount a new one. The absent binary directories are
+The profile binds the rollout's ``/proc`` read-only because a jail inside
+the rollout jail cannot mount a new one. The absent binary directories are
 what deny ordinary shell execution; binding either directory would reopen
 it. This is not a complete ban on execution: a tool can still start
 ``sys.executable`` or run a program in a bound library directory or a path
@@ -941,7 +941,7 @@ used for both import and call.
 Hooks do run in the loop process. Each hook module is imported once at
 startup, and its ``listen`` function runs at its event. It can call
 ``next`` to reach the next layer and change the decision that steers the
-loop. Under ``sandbox``, the loop process is the episode jail, with a
+loop. Under ``sandbox``, the loop process is the rollout jail, with a
 writable workspace and session directory, network access to the model
 endpoint, and the executor's base directories and shells. Under ``local``,
 it is the host. Use ``review_kinds: [native_hook]`` to require review before
@@ -971,7 +971,7 @@ so those values win.
 The loop does not execute top-level code while reading declarations. If
 that code raises (including ``SystemExit``) or binds ``run`` to a
 non-callable value, the first call fails with ``TOOL_FAILED`` and the
-episode continues. Under ``local``, the module is imported once, so later
+rollout continues. Under ``local``, the module is imported once, so later
 calls fail the same way without re-running its top level. Under ``sandbox``,
 the child imports it on every call.
 
@@ -993,7 +993,7 @@ of its result.
 If a hook raises or returns a value the log cannot store as a plain object,
 Reef skips it and keeps the next layer's decision. It reads ``messages`` and
 ``contexts`` as lists of text and drops other items. If the hook module
-cannot import, has no ``listen``, or names an unknown event, the episode
+cannot import, has no ``listen``, or names an unknown event, the rollout
 ends with ``LOAD_ERROR``.
 
 Each event takes and returns a plain object:
@@ -1041,7 +1041,7 @@ renders the release's entries into that file as a JSON array of
 ``{id, name, config}`` objects. It is the same list stored in the commit
 log under ``algorithm_state["entries"]``.
 
-The file accompanies evaluation episodes, published artifacts, manifests,
+The file accompanies evaluation rollouts, published artifacts, manifests,
 install scripts, and pulled trees. Before the first evolution step, the
 base release carries the seed entries. Model-binding nodes stay out of the
 file; pinned model fields go in ``native/models.json``.
@@ -1053,7 +1053,7 @@ it using the same effects as a resident process. Tool, hook, and loop
 modules are written under ``sessions/mounts/boot-<pid>/``, the sandbox's
 writable mount path.
 
-If an entry does not reach ACTIVE, the episode ends with ``LOAD_ERROR``.
+If an entry does not reach ACTIVE, the rollout ends with ``LOAD_ERROR``.
 The error names its id, kind, and fiber error; an unsupported kind reports
 ``no plugin for kind X``. This also checks hand-edited lists. Without
 ``tree.json``, the loop reads rendered files as before, so older pulled
@@ -1162,12 +1162,12 @@ the model. The parent graph can then handle the request.
 
 Evaluation results include ``candidate_agents`` and ``current_agents``:
 turns, steps, tool calls and errors, and any reported input and output
-tokens per agent, summed across episodes on each side. They also include
-``candidate_paths`` and ``current_paths``, one per episode in pairing order.
+tokens per agent, summed across rollouts on each side. They also include
+``candidate_paths`` and ``current_paths``, one per rollout in pairing order.
 Each path lists the root session's ``stage/exit`` names and its ``turn/end``
 reason. It includes ``error`` if the turn ended with one, or
 ``errored_agent`` if an agent error stopped the run first. Subagent stages
-do not appear in the root path. An episode that could not run has ``None``;
+do not appear in the root path. A rollout that could not run has ``None``;
 a trajectory format without stage events has an empty path and a ``None``
 reason.
 
@@ -1233,13 +1233,13 @@ The transition guard allows at most ``(max_steps + 1) * 16`` calls to
 ``model``, ``run_tools``, ``agent``, ``say``, and ``log``. Exceeding it, or
 raising an exception from ``run_turn`` (including ``SystemExit``), ends
 the turn with ``LOOP_ERROR`` and exit status 1. Evaluation treats that
-episode as unable to run. ``KeyboardInterrupt`` propagates.
+rollout as unable to run. ``KeyboardInterrupt`` propagates.
 
 The first end is final. After ``max-steps``, ``ctx.end``, or an abort,
 subsequent context actions raise the same end without writing anything.
 This keeps one ``turn/end`` and its exit status even if loop code catches
 the exception. If code never calls the context, or catches the end and
-continues without it, the episode wall clock bounds it in episode mode.
+continues without it, the rollout wall clock bounds it in rollout mode.
 In serve mode, it holds the turn until it returns.
 
 The session header's ``loop`` names the loop that ran, or is null under a
@@ -1290,12 +1290,12 @@ including ``event``, ``step``, ``hook``, ``owned``, and the decision.
 ``hook/error`` records a raised exception. Hook-injected text appears as
 ``user/message`` with ``source.kind: hook`` and the event.
 
-Episode and serve modes
+Rollout and serve modes
 ~~~~~~~~~~~~~~~~~~~~~~
 
 Both modes use the same entries, plugins, and interpreter.
-``reef-native -p`` runs one episode in one process and turn;
-``run_episode`` launches it, and the sandbox executor confines it.
+``reef-native -p`` runs one rollout in one process and turn;
+``run_rollout`` launches it, and the sandbox executor confines it.
 
 ``reef-native serve`` keeps one resident process per installed tree. It
 loads ``native/tree.json`` into a compose ``Loader`` over
@@ -1305,7 +1305,7 @@ follows the served head by polling the catalog and reading the
 ``x-reef-release-id`` header on inference responses.
 
 The interpreter calls ``loop.before_step(run)`` before each model stage.
-In episode mode it does nothing. In serve mode it applies queued mounts
+In rollout mode it does nothing. In serve mode it applies queued mounts
 and checks the turn's wall clock. Tool and hook modules live under
 ``native/mounts/live/``. Unchanged entries keep their modules and memory
 state across mounts; changed entries are reinstalled through their inverse.
@@ -1371,9 +1371,9 @@ Descriptor fields
 - ``trajectory`` specifies the session log's path and reader format.
   ``final_assistant_text`` extracts assistant replies from flat messages,
   pi's ``message`` events, and Codex's ``response_item.payload`` messages,
-  including ``output_text`` parts. Reefine uses this text for episode scoring;
+  including ``output_text`` parts. Reefine uses this text for rollout scoring;
   user messages, tool outputs, and reasoning events are not answers.
-- ``env`` points the agent's state into the episode root, substituting
+- ``env`` points the agent's state into the rollout root, substituting
   ``{root}``. For install scripts and ``reef-<adapter>`` wrappers, one
   variable must relocate a directory above the primary config file using
   ``{root}/<dir>``. Terminus relocates the root itself and has no wrapper.
@@ -1384,7 +1384,7 @@ Descriptor fields
   for ``pi``, and for ``claude`` both ``DISABLE_AUTOUPDATER`` (the background
   updater) and ``DISABLE_UPDATES`` (its ``update``, ``upgrade``, and
   ``install`` commands, which would otherwise install the latest release
-  over the person's own ``claude``). The ``claude`` episode ``env`` sets both
+  over the person's own ``claude``). The ``claude`` rollout ``env`` sets both
   too. A variable the shell sets wins. Claude Code applies the ``env`` block
   of ``settings.json`` over the environment, so the ``claude`` descriptor's
   checks reject a tree that sets either one there.
@@ -1402,20 +1402,20 @@ Descriptor fields
   ``git``), ``package``, ``version`` (as reported by ``--version``), and
   ``binary_path`` below the install prefix. A git install also names
   ``repository`` and ``ref``.
-- ``host_env`` optionally lists service variables that an episode under the
+- ``host_env`` optionally lists service variables that a rollout under the
   local executor keeps, each with a default for when the service has none.
   ``{home}`` is the service's home directory, and an empty default leaves the
   variable unset. It is for a host tool that the relocated ``HOME`` would
   hide. Otherwise the local executor passes only ``PATH``, ``SYSTEMROOT``,
   ``TMPDIR``, and ``CUDA_VISIBLE_DEVICES`` from the service.
 - ``is_root_bind_mounted`` is optional and ``true`` when the binary
-  bind-mounts paths below the episode root into a container. On macOS, where
+  bind-mounts paths below the rollout root into a container. On macOS, where
   Docker runs in a VM that shares the home directory, the local executor
-  then makes the root under ``~/.reef/episodes`` rather than the temp
+  then makes the root under ``~/.reef/rollouts`` rather than the temp
   directory. On other platforms the root stays in the temp directory.
 - ``model_binding`` contains config nodes for each supported API dialect
   (``openai``, ``responses``, or ``anthropic``). Reef adds the matching nodes
-  for evaluation episodes and substitutes ``{base_url}``, ``{api_key}``,
+  for evaluation rollouts and substitutes ``{base_url}``, ``{api_key}``,
   and ``{model}`` in their string values. The ``reef-<adapter>`` wrapper
   points an installed binding at its proxy plus what the template writes
   after ``{base_url}`` in the dialect the tree was installed with. It tells
@@ -1689,11 +1689,11 @@ To connect an agent that has no adapter yet:
       ``argv``.
    #. The path and format of its session log become ``trajectory``. A new
       format subclasses ``TrajectoryReader``
-      (`reef/harness/episodes/trajectory.py
-      <../../reef/harness/episodes/trajectory.py>`__) and registers with
+      (`reef/harness/rollouts/trajectory.py
+      <../../reef/harness/rollouts/trajectory.py>`__) and registers with
       ``@register_trajectory_reader``.
    #. The files its first boot creates go in ``cleanup_whitelist``, so a fresh
-      episode root is treated as clean. ``dir/**`` tolerates a whole subtree
+      rollout root is treated as clean. ``dir/**`` tolerates a whole subtree
       (session storage, ``node_modules``); any other entry is a glob against
       the root-relative path, so anchor a single file with its full path, like
       ``pi-agent/auth.json``. A bare directory name matches nothing under it.
@@ -1746,7 +1746,7 @@ Harness requests on other adapters
 On ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh``,
 ``evolution.requests: true`` seeds one ``agent_command`` named ``reefine``
 under the id ``reef-requests``. Its shared template, ``COMMAND_TEXT`` in
-``reef/harness/episodes/requests.py``, is filled per adapter there. The
+``reef/harness/rollouts/requests.py``, is filled per adapter there. The
 session's model files requests
 with ``reef-<adapter> evolve`` and polls with ``reef-<adapter> wait``.
 
@@ -1830,7 +1830,7 @@ or ``saving the result``), elapsed time, a terminal link to the request
 page, and ``ctrl+q or /reefine to look in``. The animation advances every
 250 ms between polls. The link uses OSC 8 where the terminal supports it.
 
-``ctrl+q`` expands the widget to show the request, id, reported episode
+``ctrl+q`` expands the widget to show the request, id, reported rollout
 count and step record, page link, and a reminder that the step runs in the
 background. Press it again to collapse. ``/reefine`` without an argument
 prints the same detail. Expansion redraws the last poll; it makes no new
@@ -1845,7 +1845,7 @@ settles. Headless sessions do not show it.
 After filing, ``ctx.ui.setStatus`` shows ``reef: request <id> queued``.
 Once the step starts, it shows ``reef: step for request <id> running for
 <Nm SSs>``. Each poll reads ``GET /reef/harness/requests/<id>/progress``
-for the phase, episode count, and step record. Elapsed time starts at the
+for the phase, rollout count, and step record. Elapsed time starts at the
 step's ``started_at`` when supplied. Record reads alone detect only
 requests removed from storage. If the service lacks the progress route,
 the spinner stays at ``queued``; other behavior is unchanged.

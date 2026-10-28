@@ -1,4 +1,4 @@
-"""Run episode processes in a cloud sandbox that reaches the Reef host only through a tunnel.
+"""Run rollout processes in a cloud sandbox that reaches the Reef host only through a tunnel.
 
 A cloud sandbox (an E2B microVM, a Modal Sandbox) has the internet but no route to the machine Reef runs on. A
 :class:`RemoteExecutor` is the deployment's setting for one provider; :meth:`RemoteExecutor.open` starts one
@@ -6,7 +6,7 @@ sandbox and answers a :class:`RemoteSession`, which launches any number of proce
 Each process's root is copied in before it starts and copied back once it ends, so the caller reads what it wrote
 as a local run leaves it; :meth:`RemoteSession.pull` refreshes a directory while a process still runs. Every
 process runs in a bubblewrap jail (:func:`protected_command`) that keeps the sandbox's filesystem read-only except
-the directories the episode declares.
+the directories the rollout declares.
 
 A port in ``forward_ports`` is reachable inside the sandbox at the same loopback address it has on the Reef host,
 so no URL handed to a process changes. The sandbox runs :mod:`reef.sandbox.relay` on that port; a
@@ -47,9 +47,9 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 
 from reef.sandbox.process import (
     ISOLATION_ENV,
-    EpisodeExecutor,
-    EpisodeLaunchError,
     ProcessOutcome,
+    ProgramExecutor,
+    RolloutLaunchError,
     SandboxProgram,
     SandboxUnavailable,
 )
@@ -108,7 +108,7 @@ def protected_command(
     writable_paths: Sequence[Path],
     readonly_paths: Sequence[Path],
 ) -> str:
-    """Keep the sandbox's filesystem read-only except the episode's declared output directories.
+    """Keep the sandbox's filesystem read-only except the rollout's declared output directories.
 
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
@@ -232,7 +232,7 @@ def check_options(provider: str, section: Mapping[str, object], provider_options
 
 
 @dataclass(frozen=True)
-class RemoteExecutor(EpisodeExecutor):
+class RemoteExecutor(ProgramExecutor):
     """Launch each process in a cloud sandbox of one provider; :meth:`open` keeps one sandbox for several.
 
     Values: ``npm_package`` (``<package>@<version>``) is the program a built image installs, or ``""`` for an
@@ -283,7 +283,7 @@ class RemoteExecutor(EpisodeExecutor):
     def reap(self) -> int:
         """Stop this deployment's running sandboxes and answer how many; without an ``owner`` none is touched."""
 
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
         """Resolve the program in the sandbox's image, without installing it on the Reef host."""
         if program.self_isolating:
             raise SandboxUnavailable(
@@ -301,7 +301,7 @@ class RemoteExecutor(EpisodeExecutor):
             )
         return self.with_program(program, remote_binary), remote_binary
 
-    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> EpisodeExecutor:
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
         """One sandbox for the run, each forwarded port reachable inside it through the tunnel.
 
         The sandbox lives at least as long as this executor's own ``timeout_s``: a run may launch several
@@ -312,7 +312,7 @@ class RemoteExecutor(EpisodeExecutor):
 
     def labels(self) -> dict[str, str]:
         """The tags every sandbox this executor starts carries."""
-        return {"reef": "episode", **({"reef_owner": self.owner} if self.owner else {})}
+        return {"reef": "sandbox", **({"reef_owner": self.owner} if self.owner else {})}
 
     def reap_once(self) -> None:
         """Stop this deployment's leftovers the first time this process opens a sandbox; a failed look is
@@ -360,7 +360,7 @@ class RemoteExecutor(EpisodeExecutor):
             session.close()
 
 
-class RemoteSession(EpisodeExecutor):
+class RemoteSession(ProgramExecutor):
     """One running cloud sandbox: launch processes in it, pull what they wrote, close it when done.
 
     ``env`` is the deployment's explicit environment; every process gets it over the caller's. A subclass
@@ -403,7 +403,7 @@ class RemoteSession(EpisodeExecutor):
     def preflight(self) -> None:
         return None
 
-    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> EpisodeExecutor:
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
         """The session itself: it is already open, and its owner closes it."""
         return self
 
@@ -421,7 +421,7 @@ class RemoteSession(EpisodeExecutor):
             )
             url = self.public_url(tunnel_port)
         except Exception as exc:
-            raise EpisodeLaunchError(f"the {self.provider} relay for port {port} did not start: {exc}") from exc
+            raise RolloutLaunchError(f"the {self.provider} relay for port {port} did not start: {exc}") from exc
         pump = TunnelPump(url, secret, port)
         pump.start()
         self.pumps.append(pump)
@@ -457,7 +457,7 @@ class RemoteSession(EpisodeExecutor):
         try:
             self.stop()
         except Exception as exc:
-            raise EpisodeLaunchError(
+            raise RolloutLaunchError(
                 f"could not stop the {self.provider} sandbox; its provider timeout still applies"
             ) from exc
         self.closed = True
@@ -482,7 +482,7 @@ class TunnelPump:
         self.thread.start()
         if not self.ready.wait(timeout) or self.failure is not None:
             self.stop()
-            raise EpisodeLaunchError(f"the sandbox relay did not answer at {self.url}: {self.failure or 'timed out'}")
+            raise RolloutLaunchError(f"the sandbox relay did not answer at {self.url}: {self.failure or 'timed out'}")
 
     def stop(self) -> None:
         task = self.task

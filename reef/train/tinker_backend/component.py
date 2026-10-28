@@ -15,7 +15,6 @@ it. Nothing is shared in process.
 
 from __future__ import annotations
 
-import asyncio
 import fcntl
 import hashlib
 import json
@@ -26,6 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from reef.core.evaluation import RolloutScores, mean_score
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
@@ -39,7 +39,7 @@ from reef.train.local_jobs import LocalJobComponent
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
-from reef.train.tinker_backend.rollout import RolloutSettings, TaskRollouts, roll_out, task_name
+from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, roll_out, task_name
 
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
@@ -56,7 +56,7 @@ class TinkerJobParameters:
     Values: ``method`` and ``scheduling`` as ``job_training`` reads them; ``batch_size`` a positive int, the
     rollouts of one optimizer step; ``learning_rate`` finite and positive; ``kl_coef`` finite and non-negative;
     ``save_interval`` a positive int, the optimizer steps between two saved checkpoints, or None for one
-    checkpoint when the job ends; ``rollout`` the episodes of a task job, or None for a job of trajectories;
+    checkpoint when the job ends; ``rollout`` the rollouts of a task job, or None for a job of trajectories;
     ``evaluation_of`` a non-empty string, the name of what an evaluation job scores, or None for a job that
     trains. An evaluation job is a task job. Purpose: ``TinkerTrainingComponent.job_parameters`` makes it when it checks and when it runs a job; the run
     reads it.
@@ -102,18 +102,18 @@ class TinkerTrainingComponent(LocalJobComponent):
     A job's data is trajectories, which it trains as they are, or Harbor
     tasks (``TaskSample``), a task job. A task job needs the ``rollout``
     parameter (``RolloutSettings``) and a ``sampler``: before it trains, the
-    component runs the tasks' episodes on the sampler of the job's start
+    component runs the tasks' rollouts on the sampler of the job's start
     (``reef.train.tinker_backend.rollout``) and trains the samples of their
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
-    samples, and reports each task's episode rewards in the job's metrics
-    (``rollout_rewards``, by task name).
+    samples, and reports in the job's metrics each task's rewards of the
+    rollouts that ran (``rollout_rewards``, by task name).
 
     A task job with ``evaluation_of`` is an evaluation job: it rolls its tasks out on the sampler of its start
-    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of``, the mean
-    reward of the episodes that ran (``evaluation_reward_mean``, None when none ran), and the number of tasks
-    with an episode that ran (``evaluation_tasks``).
+    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of``, the score
+    of each rollout by task (``evaluation_scores``, ``RolloutScores.to_json``), and their ``mean_score``
+    (``evaluation_mean_score``, None when no rollout ran).
 
     A job's last checkpoint carries the objective's state after the job's
     data; an intermediate checkpoint (``save_interval``) carries the state of
@@ -247,33 +247,32 @@ class TinkerTrainingComponent(LocalJobComponent):
 
     def task_rollouts(
         self, job: TrainingJob, directory: Path, start: TinkerCheckpoint, settings: RolloutSettings
-    ) -> TaskRollouts:
+    ) -> TaskJobRollouts:
         """The rollouts of a task job: those of an earlier attempt, else new ones on the start's sampler."""
         record = directory / ROLLOUTS_FILE
         kept = read_json(record)
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
-            rewards = {name: tuple(values) for name, values in kept["rewards"].items()}
-            return TaskRollouts(trajectories(JobData(job.data.data_id, samples)), rewards)
+            return TaskJobRollouts(
+                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+            )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
-        rollouts = asyncio.run(
-            roll_out(
-                tasks,
-                settings,
-                self._sampler,
-                start.sampler_path,
-                model=self._model,
-                runtime_load_id=f"tinker:{start.sampler_path}",
-                work_dir=directory / "rollouts",
-            )
+        rollouts = roll_out(
+            tasks,
+            settings,
+            self._sampler,
+            start.sampler_path,
+            model=self._model,
+            runtime_load_id=f"tinker:{start.sampler_path}",
+            work_dir=directory / "rollouts",
         )
         write_json(
             record,
             {
                 "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
-                "rewards": {name: list(values) for name, values in rollouts.rewards.items()},
+                "scores": rollouts.scores.to_json(),
             },
         )
         return rollouts
@@ -287,17 +286,16 @@ class TinkerTrainingComponent(LocalJobComponent):
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
             rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards.items()},
+                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
                 "rollout_samples": len(rollouts.samples),
             }
             if parameters.evaluation_of is not None:
                 # An evaluation job scores its start: it trains nothing and saves no checkpoint.
-                rewards = [reward for values in rollouts.rewards.values() for reward in values]
                 return {
                     **rollout_metrics,
                     "evaluation_of": parameters.evaluation_of,
-                    "evaluation_reward_mean": sum(rewards) / len(rewards) if rewards else None,
-                    "evaluation_tasks": sum(1 for values in rollouts.rewards.values() if values),
+                    "evaluation_scores": rollouts.scores.to_json(),
+                    "evaluation_mean_score": mean_score(rollouts.scores.rollouts()),
                 }
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.

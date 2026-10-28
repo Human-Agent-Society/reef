@@ -3,7 +3,7 @@
 Everything the method needs to know about AIME lives here, and nothing here
 knows about GEPA: ``evaluate`` and ``feedback`` are the two hooks
 ``gepa.yaml`` names under ``evolution``, and the mechanism calls them with a
-task prompt and an episode result. The answer table is keyed by the prompt
+task prompt and a rollout result. The answer table is keyed by the prompt
 text because that is all the mechanism carries - ``evolution.tasks`` is a
 list of strings - so the splits are loaded once and indexed by problem
 statement.
@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
 from recipes.gepa.method import Feedback
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.run import RolloutResult
 
 # The Pi release the retained record ran and the example still targets; run.py
 # refuses any other binary version before it spends anything.
@@ -77,12 +77,12 @@ CONTEXTS: dict[str, dict[str, str]] = {}
 
 
 @dataclass(frozen=True)
-class AIMEScorer(Feedback, EpisodeScorer):
+class AIMEScorer(Feedback, RolloutScorer):
     """A pickleable snapshot, independent of any worker's module globals.
 
     The driver registry is only an input at recipe construction time. Later
     registrations do not change a running campaign's scoring or feedback.
-    These labels belong to the scorer, never to an episode's prompt/files.
+    These labels belong to the scorer, never to a rollout's prompt/files.
     """
 
     answers: dict[str, str] = field(repr=False)
@@ -95,17 +95,17 @@ class AIMEScorer(Feedback, EpisodeScorer):
     def answer_for(self, task: str) -> str:
         return _answer_for(self.answers, task)
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return _evaluate(self.answers, task, result)
 
     def feedback(self, task: str, output: str, score: float) -> str:
         return _feedback(self.answers, self.contexts, task, output, score)
 
 
-class AIMEAnswerScorer(EpisodeScorer):
+class AIMEAnswerScorer(RolloutScorer):
     """:func:`evaluate` over the benchmark splits registered in this process, as ``evolution.evaluate`` names it."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return _evaluate(ANSWERS, task, result)
 
 
@@ -181,17 +181,17 @@ def _answer_for(answers: Mapping[str, str], task: str) -> str:
         raise RuntimeError(f"no AIME answer is registered for this task: {task[:120]!r}") from None
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    """The quickstart's containment score over one Pi episode.
+def evaluate(task: str, result: RolloutResult) -> float:
+    """The quickstart's containment score over one Pi rollout.
 
-    A dirty episode - a non-zero exit or a file the adapter did not declare -
+    A dirty rollout - a non-zero exit or a file the adapter did not declare -
     scores zero rather than being read for an answer, so a broken harness can
     never be selected on the strength of stdout it happened to leave behind.
     """
     return _evaluate(ANSWERS, task, result)
 
 
-def _evaluate(answers: Mapping[str, str], task: str, result: EpisodeResult) -> float:
+def _evaluate(answers: Mapping[str, str], task: str, result: RolloutResult) -> float:
     if result.exit_code != 0 or result.residue:
         return 0.0
     response = final_assistant_text(result.trajectory) or result.stdout

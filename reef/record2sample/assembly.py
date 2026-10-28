@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def reported_task(metadata: object) -> dict[str, Any] | None:
     """The task a report names, so a recipe can group samples by task; None when the report names none.
 
-    ``metadata.task`` is a mapping with at least a ``name`` (the episode runner also sends ``path`` and
+    ``metadata.task`` is a mapping with at least a ``name`` (the rollout runner also sends ``path`` and
     ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
     """
     if not isinstance(metadata, Mapping):
@@ -78,7 +78,7 @@ class SampleAssembly:
     def assemble(self, inferences: tuple[AgentRecord, ...], score: float, *, source_id: str) -> TrajectorySample:
         """Assemble ordered model calls and their score into one sample, raising if they cannot be used.
 
-        ``source_id`` names what the calls came from: a report, or a rollout episode, whose calls are
+        ``source_id`` names what the calls came from: a report, or a rollout, whose calls are
         in-memory values that Reef never stored.
         """
         if len(inferences) == 1:

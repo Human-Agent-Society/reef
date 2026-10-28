@@ -3,7 +3,7 @@
 For claude, hermes, dsh, pi and terminus, render refuses every config key the
 pinned harness reads to choose the endpoint, the provider, the credential or
 the model, in the tree alone (as admission renders it) and with the binding
-appended (as an episode or an install renders it). A request body a tree
+appended (as a rollout or an install renders it). A request body a tree
 passes to the bound endpoint may not name a model either. Keys that tune a
 run stay admitted, and the binding itself always renders.
 """
@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.render import RenderError, render_composition
 

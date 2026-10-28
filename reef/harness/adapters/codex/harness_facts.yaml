@@ -17,7 +17,7 @@ conversation_mode:
   toggle: skill
 config_keys: [web_search]
 config_example: >-
-  {"target": "primary", "data": {"web_search": "live"}} gives sessions the web_search tool (evaluation episodes
+  {"target": "primary", "data": {"web_search": "live"}} gives sessions the web_search tool (evaluation rollouts
   keep it off). Web search comes only from this entry: it takes effect in a new reef-codex session after
   reef-codex update, and the person never edits a config file, since every install writes it again. The entry
   turns the hosted search on in every session of the release, not only while a mode is on: How to use says so, and

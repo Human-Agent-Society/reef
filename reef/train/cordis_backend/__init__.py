@@ -1,12 +1,12 @@
-"""Harness evolution backend: candidate selection scored by real episodes.
+"""Harness evolution backend: candidate selection scored by real rollouts.
 
 Per training step, ``propose`` reads the current composition and the job's
 traces and returns one ``Mutation``, a sequence of them, or a ``StepProposal``
 (the mutations plus notes the step records); the backend
 applies the proposal to the compose Entry tree under one snapshot; the
 candidate and current compositions render through the adapter descriptor and
-each run one headless episode per task in ``reef.evaluation.harness``, where
-the method's ``EpisodeScorer`` scores individual results. The recipe picks the
+each run one headless rollout per task in ``reef.evaluation.harness``, where
+the method's ``RolloutScorer`` scores individual results. The recipe picks the
 ``CandidateEvaluationPlugin`` class that pairs this measurement with a
 selection policy and hands it to ``Trainer``. A sequence is one composite
 proposal: it applies atomically and receives one selection decision, never one

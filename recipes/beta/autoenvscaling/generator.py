@@ -9,7 +9,7 @@ solver's episodes on the task and holds their mean reward to the band. ``generat
 adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
 a restart: it places each task that ran against the band ``[band_low, band_high]`` and writes the generation report.
 A second call for a closed generation does nothing.
-Eval tasks run no training episodes and receive no band measurement. A task that could not run is an outage, not a
+Eval tasks run no training rollouts and receive no band measurement. A task that could not run is an outage, not a
 band measurement. The generator reports nothing to the Designer, which is not trained here. A cursor under the state
 directory lets a restart continue with the next session.
 

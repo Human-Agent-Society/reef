@@ -18,8 +18,8 @@ from typing import Any
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.requests import ships_requests
-from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.rollouts.requests import ships_requests
+from reef.harness.rollouts.version_check import ships_version_check
 from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError

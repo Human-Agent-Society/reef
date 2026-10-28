@@ -24,10 +24,10 @@ from tests.reef_service.test_harness_recipe import (
     make_binary,
     run_backend_step,
 )
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.vendor_install import (
+from reef.harness.rollouts.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
     PREFIX_ENV,
@@ -182,7 +182,7 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
         steps.append(list(command))
         _write_executable(binary, "#!/bin/sh\necho 'Hermes Agent v0.21.0'\n")
 
-    monkeypatch.setattr("reef.harness.episodes.vendor_install._run", record)
+    monkeypatch.setattr("reef.harness.rollouts.vendor_install._run", record)
 
     assert resolve_binary(descriptor, prefix=prefix) == str(binary)
     assert [step[0:2] for step in steps] == [
@@ -214,7 +214,7 @@ def _counting_resolver(monkeypatch, result):
             raise result
         return result
 
-    monkeypatch.setattr("reef.harness.episodes.vendor_install.resolve_binary", resolve)
+    monkeypatch.setattr("reef.harness.rollouts.vendor_install.resolve_binary", resolve)
     return calls
 
 
@@ -222,7 +222,7 @@ def _backend(binary, propose, *, executor=None, worker_executor=None):
     return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
-        score_episode=resolve_episode_scorer(evaluate),
+        score_rollout=resolve_rollout_scorer(evaluate),
         tasks=("task one",),
         models=MODEL,
         binary=binary,
@@ -243,7 +243,7 @@ def _propose(nodes, samples, models):
 @pytest.mark.unit
 @pytest.mark.parametrize("workers", [1, 2])
 def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch, tmp_path, workers) -> None:
-    """Startup resolves the agent, and every episode reuses that result."""
+    """Startup resolves the agent, and every rollout reuses that result."""
     calls = _counting_resolver(monkeypatch, str(make_binary(tmp_path)))
 
     backend = _backend(None, _propose, worker_executor=ExecutorSettings(workers=workers))
@@ -402,7 +402,7 @@ def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatc
     binary.parent.mkdir(parents=True)
     binary.symlink_to("../package/cli.sh")
     backend = _backend(None, _propose, executor=sandbox)
-    root = tmp_path / "episode"
+    root = tmp_path / "rollout"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
     outcome = backend._executor.launch(

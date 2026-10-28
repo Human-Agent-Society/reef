@@ -27,17 +27,17 @@ from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
-    EpisodeScorer,
     FailureObservation,
     HarnessCandidate,
-    HarnessEpisodeEvaluator,
+    HarnessRolloutEvaluator,
+    RolloutScorer,
     evaluation_selection,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.mutations import (
     Mutation,
     MutationError,
@@ -58,7 +58,7 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor
+from reef.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.storage.tasks import TaskStore
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
@@ -347,7 +347,7 @@ def eval_task_paths(store: TaskStore) -> tuple[str, ...]:
 
 
 class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgressReader):
-    """Settle one proposal per step through episode pairs.
+    """Settle one proposal per step through rollout pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies
     under one snapshot and settles under one selection decision: the whole set
@@ -376,18 +376,18 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         *,
         descriptor: AdapterDescriptor,
         propose: Proposer,
-        score_episode: EpisodeScorer,
+        score_rollout: RolloutScorer,
         tasks: tuple[str, ...],
         models: ModelBindings | ModelBinding,
         model_resolver: ModelBindingsResolver | None = None,
         binary: str | None = None,
-        episode_timeout_s: float = 600.0,
-        episode_repeats: int = 1,
+        rollout_timeout_s: float = 600.0,
+        rollout_repeats: int = 1,
         forbid_residue: bool = False,
         max_steps: int = 0,
         max_failure_streak: int = 0,
         max_model_calls_per_step: int = 0,
-        executor: EpisodeExecutor | None = None,
+        executor: ProgramExecutor | None = None,
         promote_failures: bool = False,
         max_promoted_tasks: int = 50,
         max_promoted_per_client: int = 5,
@@ -401,7 +401,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         max_pending_proposals: int = 8,
         step_record_dir: str | Path | None = None,
         worker_executor: ExecutorSettings | None = None,
-        agent_executor: EpisodeExecutor | None = None,
+        agent_executor: ProgramExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
         eval_task_store: TaskStore | None = None,
@@ -423,13 +423,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._models = models
         self._model_resolver = model_resolver
         if (
-            isinstance(episode_timeout_s, bool)
-            or not isinstance(episode_timeout_s, (int, float))
-            or episode_timeout_s <= 0
+            isinstance(rollout_timeout_s, bool)
+            or not isinstance(rollout_timeout_s, (int, float))
+            or rollout_timeout_s <= 0
         ):
-            raise ValueError("episode_timeout_s must be a positive number")
-        if isinstance(episode_repeats, bool) or not isinstance(episode_repeats, int) or episode_repeats < 1:
-            raise ValueError("episode_repeats must be an integer of at least 1")
+            raise ValueError("rollout_timeout_s must be a positive number")
+        if isinstance(rollout_repeats, bool) or not isinstance(rollout_repeats, int) or rollout_repeats < 1:
+            raise ValueError("rollout_repeats must be an integer of at least 1")
         if not isinstance(forbid_residue, bool):
             raise ValueError("forbid_residue must be a boolean")
         for label, value in (
@@ -442,7 +442,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
         worker_selection, worker_requirements = evaluation_selection(
-            score_episode, worker_executor or ExecutorSettings()
+            score_rollout, worker_executor or ExecutorSettings()
         )
         Executor.get_class(worker_selection.settings.backend)
         # Proposals that a settlement filed already. A later abort of the same step does not refuse them.
@@ -452,7 +452,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._max_failure_streak = max_failure_streak
         self._max_model_calls_per_step = max_model_calls_per_step
         # Preflighted at build (recipe.build), so a hosted deployment that
-        # requires the sandbox fails to start, not at the first episode.
+        # requires the sandbox fails to start, not at the first rollout.
         self._executor = executor or LocalExecutor()
         if max_promoted_tasks < 0:
             raise ValueError("max_promoted_tasks must be at least 0")
@@ -501,7 +501,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         for label, timeout in (("agent_timeout_s", agent_timeout_s), ("agent_trial_timeout_s", agent_trial_timeout_s)):
             if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
                 raise ValueError(f"{label} must be a positive number")
-        # The agent proposer runs the same harness as the episodes, under its own isolation.
+        # The agent proposer runs the same harness as the rollouts, under its own isolation.
         self._agent_binary = self._binary
         if agent_executor is not None:
             agent_executor, self._agent_binary = agent_executor.for_program(program, binary=binary)
@@ -509,24 +509,24 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._agent_executor = agent_executor
         self._agent_timeout_s = float(agent_timeout_s)
         self._agent_trial_timeout_s = float(agent_trial_timeout_s)
-        # The served binding renders into episodes only. The evaluator resolves
+        # The served binding renders into rollouts only. The evaluator resolves
         # it here, so an adapter without a matching model_binding refuses boot,
         # not the first step.
-        self._episode_evaluator = HarnessEpisodeEvaluator(
+        self._rollout_evaluator = HarnessRolloutEvaluator(
             descriptor=descriptor,
-            scorer=score_episode,
+            scorer=score_rollout,
             tasks=tasks,
             models=models,
             binary=self._binary,
-            episode_timeout_s=float(episode_timeout_s),
-            episode_repeats=episode_repeats,
+            rollout_timeout_s=float(rollout_timeout_s),
+            rollout_repeats=rollout_repeats,
             executor=self._executor,
             forbid_residue=forbid_residue,
             worker_selection=worker_selection,
             worker_requirements=worker_requirements,
         )
         # Direct Python users should close explicitly; GC is a fallback only.
-        self._pool_finalizer = weakref.finalize(self, self._episode_evaluator.close)
+        self._pool_finalizer = weakref.finalize(self, self._rollout_evaluator.close)
 
     def close(self) -> None:
         self._pool_finalizer()
@@ -670,7 +670,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         samples = trajectories(data)
         if self._model_resolver is not None:
             self._models = self._model_resolver.resolve()
-            self._episode_evaluator.use_models(self._models)
+            self._rollout_evaluator.use_models(self._models)
         steps = int(state.get("steps", 0)) + 1
         entries = state.get("entries")
         if entries is not None:
@@ -783,7 +783,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
             metrics["recheck_reason"] = "drift" if drifted else "cadence"
-            # A recheck asks the proposer nothing, so its record holds episodes only.
+            # A recheck asks the proposer nothing, so its record holds rollouts only.
             metrics["proposer_calls"] = 0
             metrics["proposer_seconds"] = 0.0
             metrics["proposer_input_tokens"] = metrics["proposer_output_tokens"] = 0
@@ -912,14 +912,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         )
 
     def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
-        """Run the evaluation episodes of the named ``sides`` with :class:`HarnessEpisodeEvaluator`."""
+        """Run the evaluation rollouts of the named ``sides`` with :class:`HarnessRolloutEvaluator`."""
         candidate = self._require_harness_candidate(candidate)
         progress = self._step_progress
         if progress is not None:
-            # The evaluation's size for the page; the pool answers all at once, so no per-episode count is kept.
-            episodes_total = self._episode_evaluator.episode_count(candidate, len(tuple(sides)))
-            self._step_progress = replace(progress, phase="evaluating", episodes_total=episodes_total)
-        return self._episode_evaluator.evaluate(candidate, sides=sides)
+            # The evaluation's size for the page; the pool answers all at once, so no per-rollout count is kept.
+            rollouts_total = self._rollout_evaluator.rollout_count(candidate, len(tuple(sides)))
+            self._step_progress = replace(progress, phase="evaluating", rollouts_total=rollouts_total)
+        return self._rollout_evaluator.evaluate(candidate, sides=sides)
 
     def settle_step(
         self,
@@ -934,7 +934,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
         # Raw score vectors and failure observations stay inside the
         # structured evaluation record. The policy owns any derived
-        # comparison metrics, while this backend keeps the stable episode
+        # comparison metrics, while this backend keeps the stable rollout
         # totals at the top level of the commit metrics.
         evaluation_metrics = dict(decision.evaluation.metrics)
         evaluation_metrics.pop("candidate_scores", None)

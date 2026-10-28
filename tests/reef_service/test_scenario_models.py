@@ -1,4 +1,4 @@
-"""A real HTTP provider, proposer, judge and subprocess episode share a scenario model setting."""
+"""A real HTTP provider, proposer, judge and subprocess rollout share a scenario model setting."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ScoreComparisonPlugin
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.recipe.cordis import CordisRecipe
@@ -90,7 +90,7 @@ url = provider["baseUrl"] + ("/v1/messages" if anthropic else "/chat/completions
 headers = {"content-type": "application/json"}
 headers["x-api-key" if anthropic else "authorization"] = provider["apiKey"] if anthropic else "Bearer " + provider["apiKey"]
 if anthropic: headers["anthropic-version"] = "2023-06-01"
-body = {"model": provider["models"][0]["id"], "max_tokens": 10, "messages": [{"role": "user", "content": "episode"}]}
+body = {"model": provider["models"][0]["id"], "max_tokens": 10, "messages": [{"role": "user", "content": "rollout"}]}
 with urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)) as response:
     json.load(response)
 sessions = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
@@ -117,7 +117,7 @@ def make_recipe(platform, tmp_path):
     managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key="platform-key", model="platform-model")
     return CordisRecipe(
         resolve_proposer(propose),
-        resolve_episode_scorer(judge),
+        resolve_rollout_scorer(judge),
         ("test task",),
         runtime=InferenceProxyRuntime(base_url=managed.base_url, api_key=managed.api_key, model_path=managed.model),
         models={"teacher": managed, "judge": managed},
@@ -131,8 +131,8 @@ def make_recipe(platform, tmp_path):
 @pytest.mark.parametrize("api", ["openai", "anthropic"])
 @pytest.mark.parametrize("executor", ["uni", "mp"])
 def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch, api, executor):
-    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-episodes")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-episodes")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-rollouts")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-rollouts")
     recipe = replace(make_recipe(platform, tmp_path), worker_executor=ExecutorSettings(backend=executor))
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -168,7 +168,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         calls = platform["calls"]
         assert len(calls) == (
             7 if api == "anthropic" else 6
-        )  # inference, proposer, two episodes, two judges (+ count)
+        )  # inference, proposer, two rollouts, two judges (+ count)
         for path, raw_headers, body in calls:
             headers = {k.lower(): v for k, v in raw_headers.items()}
             assert path.startswith("/alpha/1/")

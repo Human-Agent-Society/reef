@@ -4,7 +4,7 @@ The prompt is composition, not runtime code: seeding the entry makes it part
 of the tree the gate measures, and every pulled or installed copy carries it.
 It offers to run the update or skip in interactive mode, prints the instructions
 in headless mode, and stays silent under ``PI_OFFLINE``, so hermetic benchmark
-episodes make no network calls.
+rollouts make no network calls.
 """
 
 from __future__ import annotations

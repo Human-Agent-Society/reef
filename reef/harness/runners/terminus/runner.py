@@ -1,10 +1,10 @@
-"""Run one Terminal-Bench task for one episode, on behalf of ``run_episode``.
+"""Run one Terminal-Bench task for one rollout, on behalf of ``run_rollout``.
 
 This is the only module that imports the evaluation stack, and nothing on the
 render path imports it, so the adapter registry stays cheap and a deployment
 without the ``terminus`` extra can still load the descriptor.
 
-Reef stays the outer loop. An episode launches ``reef-terminus --task <task>``;
+Reef stays the outer loop. A rollout launches ``reef-terminus --task <task>``;
 this module runs that one task through reef-eval, the same primitive every
 recipe under ``recipes/`` uses to reach Harbor, driving Harbor's own
 ``terminus-2`` agent. A tree may instead supply one Agent(Terminus2) module;
@@ -13,7 +13,7 @@ rules, and skills retain Harbor's native interfaces in either case.
 
 It writes one trial file under ``REEF_TERMINUS_SESSION_DIR`` holding the
 verifier's rewards and the ATIF steps, which the adapter's
-``terminus-atif-json`` reader turns into the episode's trajectory. Harbor's
+``terminus-atif-json`` reader turns into the rollout's trajectory. Harbor's
 own trial tree lands in ``REEF_TERMINUS_TRIALS_DIR``, keeping the session
 directory the reader walks to files Reef wrote.
 """
@@ -61,7 +61,7 @@ def _required_env(name: str) -> str:
 def trial_slug(task: str) -> str:
     """A filename for one task's trial, safe under the session directory.
 
-    The task reaches this runner from the episode prompt, and a promoted task
+    The task reaches this runner from the rollout prompt, and a promoted task
     can originate in recorded traffic, so it never becomes a path component
     unchecked: only the last segment is kept, and only if it is an ordinary
     name. Anything else would let a trial file land outside the directory the
@@ -154,7 +154,7 @@ def own_trial(trials_dir: Path, names_before_run: Collection[str], uri: str | No
 def trial_record(task: str, rewards: Any, trial_dir: Path | None, error: str = "") -> dict[str, Any]:
     """One trial as the ``terminus-atif-json`` reader expects it, its steps read from ``trial_dir`` alone.
 
-    ``error`` is recorded rather than dropped: an episode whose container never
+    ``error`` is recorded rather than dropped: a rollout whose container never
     built scores nothing, and a bare zero would read as a candidate the agent
     failed instead of a run that never happened.
     """
@@ -196,7 +196,7 @@ def write_trial(record: dict[str, Any], sessions: Path) -> Path:
 def run(task: str) -> int:
     """Run one task and return the process exit code.
 
-    Non-zero when the verifier produced no reward: the episode then reports a
+    Non-zero when the verifier produced no reward: the rollout then reports a
     failed run rather than a scoreless success.
     """
     # Lazy: reef-eval pulls Harbor's dependency tree, which the render path

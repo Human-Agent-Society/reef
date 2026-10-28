@@ -20,16 +20,16 @@ from tests.support._trajectories import recorded_trajectory
 
 gepa = pytest.importorskip("gepa")
 
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 
 from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import EpisodeRunner, Feedback, GEPAProposer, GEPASelectorMixin
+from recipes.gepa.method import Feedback, GEPAProposer, GepaRolloutRunner, GEPASelectorMixin
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]
 VAL = [{"input": f"validation problem {i}", "answer": "### 1"} for i in range(45)]
@@ -109,10 +109,10 @@ def run_upstream(run_dir: Path, budget: int):
     return result, log, GEPAState.load(str(run_dir)).i + 1
 
 
-class ReefEpisodes(EpisodeRunner):
+class ReefRollouts(GepaRolloutRunner):
     def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         text = files["pi-agent/AGENTS.md"].rstrip("\n")
-        return EpisodeResult(0, "", "", ({"role": "assistant", "content": output_for(text, prompt)},), ())
+        return RolloutResult(0, "", "", ({"role": "assistant", "content": output_for(text, prompt)},), ())
 
 
 class Reflector:
@@ -120,7 +120,7 @@ class Reflector:
         return reflect(messages[0]["content"])
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
+def evaluate(task: str, result: RolloutResult) -> float:
     return score_of(result.trajectory[-1]["content"])
 
 
@@ -130,7 +130,7 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
         archive=archive,
         descriptor=get_adapter("pi"),
         binary=None,
-        score_episode=resolve_episode_scorer(evaluate),
+        score_rollout=resolve_rollout_scorer(evaluate),
         feedback=ReefFeedback(),
         minibatch_size=3,
         rng_seed=0,
@@ -139,7 +139,7 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
         max_metric_calls=None,
         kinds=("rules",),
         valset_size=len(VAL),
-        episode_runner=ReefEpisodes(),
+        rollout_runner=ReefRollouts(),
     )
     selector = GEPASelectorMixin(archive)
     served = ModelBinding("http://model.test", "m", api_key="k")
