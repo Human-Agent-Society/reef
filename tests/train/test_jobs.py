@@ -314,9 +314,8 @@ def test_the_committed_state_round_trips_and_checks_its_values():
         RunningJob("j", -1)
     with pytest.raises(ValueError, match="job_id"):
         RunningJob("")
-    # An older Reef also kept its training component's evaluation jobs; Reef reads the state and drops them.
-    older = {**state.to_dict(), "evaluations": [{"job_id": "e1", "candidate_id": "j:1"}]}
-    assert JobLoopState.from_dict(older) == state
+    with pytest.raises(ValueError, match="keys"):
+        JobLoopState.from_dict({**state.to_dict(), "evaluations": []})
 
 
 @pytest.mark.unit

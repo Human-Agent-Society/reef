@@ -192,14 +192,12 @@ class JobLoopState:
         """Read ``to_dict``'s object; an empty mapping is the state of a trainer that has committed nothing.
 
         ``ValueError`` for any other key set or a malformed value: a state that cannot be read must not be
-        taken for an untrained scenario. A state that an older Reef wrote also holds ``evaluations``, the
-        evaluation jobs that its training component ran; Reef no longer runs them, so the key is read and
-        dropped.
+        taken for an untrained scenario.
         """
         if not value:
             return cls()
         keys = {"start", "job", "finished_jobs", "last_job"}
-        if set(value) not in (keys, keys | {"evaluations"}):
+        if set(value) != keys:
             raise ValueError(f"a job loop state has the keys {sorted(keys)}, not {sorted(value)}")
         job = value["job"]
         if job is not None and (not isinstance(job, Mapping) or set(job) != {"job_id", "checkpoints_handled"}):
