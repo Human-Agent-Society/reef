@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 
 from .prompts import CREATE_SYSTEM, EVOLVE_SYSTEM, JUDGE_SYSTEM, MERGE_SYSTEM, SUMMARIZE_SYSTEM
 

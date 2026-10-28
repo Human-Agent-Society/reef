@@ -2,13 +2,13 @@ Write a harness method
 ======================
 
 A harness method decides what change to try and how to score an evaluation
-episode. Reef applies the change to a candidate harness, runs the evaluation,
+rollout. Reef applies the change to a candidate harness, runs the evaluation,
 records the result, and follows the selection and publication policies.
 
 See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the
 evolution workflow and a runnable example.
 
-A method provides a ``Proposer`` and an ``EpisodeScorer``. A custom selection
+A method provides a ``Proposer`` and an ``RolloutScorer``. A custom selection
 plugin is optional:
 
 .. code:: python
@@ -16,7 +16,7 @@ plugin is optional:
    class MyProposer(Proposer):
        def propose(self, nodes, samples, models, **keywords) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
 
-   class MyScorer(EpisodeScorer):
+   class MyScorer(RolloutScorer):
        def score(self, task, result) -> float: ...
 
    class MySelection(SelectionPlugin):  # optional
@@ -68,7 +68,7 @@ Reef also passes these keyword arguments on every call:
   property is true and ``evolution.proposer_agent`` is configured; otherwise
   it is ``None``. It provides the agent's adapter,
   installed binary, executor, record directory, timeouts, and ``calls``
-  budget and record. The agent executor is separate from episode execution.
+  budget and record. The agent executor is separate from rollout execution.
   See ``reef.recipe.reefine.agent`` for a use of this argument.
 
 For model calls the agent process makes outside ``models``, use
@@ -91,18 +91,19 @@ empty. These samples are
 scored traces, or unscored records with the inference stages that "Two
 trace sources" below describes.
 
-Reef evaluates request mutations and applies the same ``evolution.publish``
-policy as for other steps. Pending agent proposals and periodic rollback
+Reef evaluates request mutations as it evaluates other mutations. The
+deployment's activation rule decides whether their releases serve, as for
+other steps. Pending agent proposals and periodic
 rechecks cannot take over the step assigned to a request.
 
-Score an episode
+Score a rollout
 ~~~~~~~~~~~~~~~~
 
-``EpisodeScorer.score(task, result)`` scores one completed episode. Reef
+``RolloutScorer.score(task, result)`` scores one completed rollout. Reef
 calls it for each side the selection policy evaluates; ``floor`` evaluates
 only the candidate. The ``result`` contains the exit code, stdout, stderr,
-and parsed ``trajectory``. Episodes that could not run do not reach the
-scorer. ``VerifierRewardScorer`` scores a Harbor task episode by its
+and parsed ``trajectory``. Rollouts that could not run do not reach the
+scorer. ``VerifierRewardScorer`` scores a Harbor task rollout by its
 verifier's reward.
 
 Other method options
@@ -119,8 +120,10 @@ custom promoter, it uses the user prompt from each failing trace.
 the number of task comparisons it wins exceeds the number it loses by more
 than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
 candidate and selects it when every task reaches ``evolution.floor_score``
-(default ``1.0``). An episode that could not run misses the floor. The
-current release does not run under ``floor``, so ``current_scores`` is empty.
+(default ``1.0``). A rollout that gave no answer fails its task. A rollout
+that did not run fails no task, but a task with no rollout that ran does not
+pass (see `Selection policies <#selection-policies>`__). The training start
+does not run under ``floor``, so ``current_scores`` is empty.
 ``always`` selects every applied mutation.
 
 .. warning::
@@ -143,7 +146,7 @@ This method adds a rules node the first time a step's samples contain a failure:
 
 .. code:: python
 
-   from reef.evaluation.harness import EpisodeScorer
+   from reef.evaluation.harness import RolloutScorer
    from reef.train.cordis_backend import Mutation, Proposer
 
    RULE = "State the final answer alone on the last line.\n"
@@ -160,7 +163,7 @@ This method adds a rules node the first time a step's samples contain a failure:
            return Mutation("create", "final-line-rule", {"name": "rules", "config": {"text": RULE}})
 
 
-   class ExactAnswer(EpisodeScorer):
+   class ExactAnswer(RolloutScorer):
        def score(self, task, result):
            """1.0 when the final assistant text ends with the task's expected answer."""
            text = _final_text(result.trajectory) or ""
@@ -263,14 +266,33 @@ tree state takes precedence over ``seed``. See `Harness evolution keys
 Selection policies
 ~~~~~~~~~~~~~~~~~~
 
-A policy reads ``EvaluationResult.metrics``. It contains per-task score lists
-in task order: ``candidate_scores`` and ``current_scores``. A score is
-``None`` when an episode could not run. The policy below selects a candidate
-only when at least one task improves and none regresses.
+An evaluation runs rollouts and gives their scores. A selection policy reads
+the scores and decides whether the candidate is published.
+``EvaluationResult.metrics`` holds the scores of each side,
+``candidate_scores`` and ``current_scores``, as
+``reef.core.evaluation.RolloutScores`` in JSON: one entry for each task, in
+task order, each with the scores of its rollouts in run order. Read them with
+``RolloutScores.from_json``. Each rollout's ``RolloutScore`` is one of two
+cases:
+
+- A score: the rollout ran, and ``value`` is the scorer's value. A rollout
+  where the tree gave no answer scores 0: an error ended its turn, or
+  ``forbid_residue`` refused its residue. The candidate caused it.
+- Failed: ``value`` is ``None`` (``"failed"`` in JSON). The environment could
+  not run the rollout: the launch failed, the trial never ran, or its
+  trajectory could not be read. The candidate did not cause it.
+
+The built-in policies use ``reef.evaluation.evaluators.compare_scores`` and
+``check_floor``. ``compare_scores`` pairs the two sides rollout by rollout,
+compares their values, and drops a pair with a failed side;
+``score_comparison`` reports the dropped pairs as ``dropped``. ``check_floor``
+passes a task when every rollout that did not fail reaches the floor. The policy below selects a candidate only when at least one
+rollout improves and none regresses.
 
 .. code:: python
 
    from reef import CandidateEvaluator, SelectionDecision
+   from reef.core.evaluation import RolloutScores
    from reef.evaluation import SelectionPlugin
 
 
@@ -286,13 +308,14 @@ only when at least one task improves and none regresses.
            return self._candidate_backend.evaluate(candidate)
 
        def decide(self, candidate, evaluation):
-           pairs = zip(
-               evaluation.metrics["candidate_scores"],
-               evaluation.metrics["current_scores"],
-               strict=True,
-           )
-           scores = [(c if c is not None else -1e30, k if k is not None else -1e30) for c, k in pairs]
-           selected = all(c >= k for c, k in scores) and any(c > k for c, k in scores)
+           candidate_scores = RolloutScores.from_json(evaluation.metrics["candidate_scores"])
+           current_scores = RolloutScores.from_json(evaluation.metrics["current_scores"])
+           pairs = [
+               (mine.value, theirs.value)
+               for mine, theirs in zip(candidate_scores.rollouts(), current_scores.rollouts(), strict=True)
+               if not (mine.is_failed or theirs.is_failed)
+           ]
+           selected = all(c >= k for c, k in pairs) and any(c > k for c, k in pairs)
            return SelectionDecision(
                selected=selected,
                policy="pareto",
@@ -346,8 +369,9 @@ control token. The step counts these under ``screened_tasks``. Promotion is
 capped by ``evolution.max_promoted_per_client`` for each tagged client and
 ``evolution.max_promoted_tasks`` overall.
 
-Put code-bearing mutations derived from client text (``code_extension``,
-``native_tool``, and ``native_hook``) behind ``evolution.review_kinds`` so a
-person reviews them before publication. A ``native_graph`` has no code and
-can publish based on evaluation alone. Add it to ``review_kinds`` if every
-loop change should receive human review.
+List code-bearing mutations derived from client text (``code_extension``,
+``native_tool``, and ``native_hook``) in the ``always`` activation rule's
+``review_kinds``, so a person reviews them before they serve (`Configuration
+<../reference/configuration.rst#the-activation-section>`__). A
+``native_graph`` has no code and can serve based on evaluation alone. Add it
+to ``review_kinds`` if every loop change should receive human review.

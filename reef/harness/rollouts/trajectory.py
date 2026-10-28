@@ -3,7 +3,7 @@
 A reader is a pure function from the descriptor's trajectory directory to an
 ordered tuple of event objects; most harnesses keep plain files there, and
 opencode a SQLite database. A missing directory reads as an empty trajectory
-(a crashed episode still yields a result); corruption raises, except for one
+(a crashed rollout still yields a result); corruption raises, except for one
 torn final JSONL line per file, which a mid-write crash legitimately leaves
 behind (the same tolerance the commit history applies).
 
@@ -441,7 +441,7 @@ def agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, i
 
 
 def sum_agents(runs: Iterable[Mapping[str, Mapping[str, int]]]) -> dict[str, dict[str, int]]:
-    """The per-agent counters of several episodes, summed per agent and sorted by agent name."""
+    """The per-agent counters of several rollouts, summed per agent and sorted by agent name."""
     total: dict[str, dict[str, int]] = {}
     for work in runs:
         for agent, counts in work.items():

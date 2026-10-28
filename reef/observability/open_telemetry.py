@@ -151,7 +151,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.step": commit.step,
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
-            "reef.pending": commit.pending,
             "reef.consumed_record_count": len(commit.consumed_ids),
             **_artifact_attributes(commit.artifact_ref),
         }
@@ -159,8 +158,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes["reef.training_job_id"] = commit.training_job_id
         if commit.component is not None:
             attributes["reef.component"] = commit.component
-        if commit.rollback_target_release_id is not None:
-            attributes["reef.rollback_target_release_id"] = commit.rollback_target_release_id
         for key, value in (commit.metrics or {}).items():
             metric = _attribute_value(value)
             if metric is not None:

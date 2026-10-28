@@ -82,7 +82,7 @@ Free disk space, change the limits, or move the extra files out of the checkpoin
 
 **After a restart, a job trains its data again.** Reef keeps each submitted job, and the training component resumes a job that did not end. Slime's workers load their latest saved checkpoint again. A job that stopped after Megatron saved its checkpoint records that checkpoint and does not train again. A job that stopped before the save trains its data again from the latest checkpoint. A Tinker job continues after its last saved checkpoint.
 
-**A rollback is refused on a Slime scenario.** Slime's workers continue from their own latest checkpoint and cannot load a published release, so Reef refuses the rollback. Tinker scenarios can roll back.
+**A train-from is refused on a Slime scenario.** Slime's workers continue from their own latest checkpoint and cannot load a published release, so Reef answers ``train-from`` with HTTP 400. ``activate`` still works: it changes what serves, not where training continues. Tinker scenarios accept both. `Train from an artifact <operate.rst#train-from-an-artifact>`__ describes how to train again from an earlier Slime checkpoint.
 
 Harness evolution
 -----------------
@@ -91,7 +91,7 @@ Harness evolution
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 
-**no skill mutation passed the selection.** A step ran and the candidate did not win. Read the step's episodes in the service log. Both sides scoring nothing means the episodes could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or an episode exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
+**no skill mutation passed the selection.** A step ran and the candidate did not win. Read the step's rollouts in the service log. Both sides scoring nothing means the rollouts could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
 
 **GET /reef/harness returns 404.** Nothing has been published yet, or the scenario's recipe serves no files. The catalog at ``GET /reef/harness/releases`` lists what exists.
 

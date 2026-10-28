@@ -20,7 +20,7 @@ from recipes.meta_harness.recipe import MetaHarnessRecipe
 from reef.artifact import GitLFSRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.harness import render_composition, run_episode
+from reef.harness import render_composition, run_rollout
 from reef.harness.adapters import get_adapter
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
@@ -39,12 +39,12 @@ def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int |
     evolution = sections["evolution"]
     evolution["tasks"] = list(tasks)
     if repeats is not None:
-        evolution["episode_repeats"] = repeats
+        evolution["rollout_repeats"] = repeats
     method = evolution["meta_harness"]
     if iterations is not None:
         method["max_candidates"] = iterations
         evolution["max_steps"] = 2 * iterations
-    method["max_target_episodes"] = 2 * len(tasks) * evolution["episode_repeats"] * method["max_candidates"]
+    method["max_target_rollouts"] = 2 * len(tasks) * evolution["rollout_repeats"] * method["max_candidates"]
     return sections
 
 
@@ -67,7 +67,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> MetaHarnessReci
         model_path=os.environ["REEF_MODEL"],
         base_url=os.environ["REEF_UPSTREAM_URL"],
         api_key=os.environ.get("REEF_UPSTREAM_API_KEY") or None,
-        inference_timeout_s=config["evolution"]["episode_timeout_s"],
+        inference_timeout_s=config["evolution"]["rollout_timeout_s"],
     )
     recipe = build_recipe(config["implementation"], config=config, runtime=runtime)
     if not isinstance(recipe, MetaHarnessRecipe):
@@ -99,10 +99,10 @@ def population(scenario: Scenario) -> Population:
 
 
 def record_rollout(scenario: Scenario, recipe: MetaHarnessRecipe) -> None:
-    """Record one real served-harness episode and its verifier feedback.
+    """Record one real served-harness rollout and its verifier feedback.
 
     Stable ids let a restart finish an interrupted report without rerunning an
-    already recorded episode. The next task is a function of the committed step.
+    already recorded rollout. The next task is a function of the committed step.
     """
     step = scenario.scenario_step
     task = recipe.tasks[step % len(recipe.tasks)]
@@ -113,15 +113,15 @@ def record_rollout(scenario: Scenario, recipe: MetaHarnessRecipe) -> None:
         entries = scenario.trainer.state["entries"]
         nodes = [(entry["name"], entry.get("config")) for entry in entries if not entry.get("disabled")]
         files = render_composition((*nodes, *recipe.model_binding().compose_nodes(descriptor)), descriptor)
-        result = run_episode(
+        result = run_rollout(
             descriptor,
             files,
             task,
             binary=recipe.binary,
-            timeout=recipe.episode_timeout_s,
+            timeout=recipe.rollout_timeout_s,
             executor=recipe.executor,
         )
-        score = 0.0 if recipe.forbid_residue and result.residue else float(recipe.score_episode.score(task, result))
+        score = 0.0 if recipe.forbid_residue and result.residue else float(recipe.score_rollout.score(task, result))
         if not math.isfinite(score):
             raise ValueError("rollout scorer returned a non-finite score")
         inference = scenario.records.append(
@@ -130,10 +130,10 @@ def record_rollout(scenario: Scenario, recipe: MetaHarnessRecipe) -> None:
                 agent_record_id=inference_id,
                 request_type=RequestType.INFERENCE,
                 payload={
-                    "source": "terminus_episode",
+                    "source": "terminus_rollout",
                     "task": task,
                     "composition": entries,
-                    "episode": dataclasses.asdict(result),
+                    "rollout": dataclasses.asdict(result),
                     "score": score,
                 },
             )
@@ -165,7 +165,7 @@ def write_summary(scenario: Scenario, directory: Path) -> dict[str, Any]:
         "served_id": search.served_id,
         "generated_candidates": search.generated_candidates,
         "proposer_calls": search.proposer_calls,
-        "gate_episodes": search.episode_calls,
+        "gate_rollouts": search.rollout_calls,
         "candidates": [
             {
                 "id": candidate.candidate_id,
@@ -188,10 +188,10 @@ def search(scenario: Scenario, recipe: MetaHarnessRecipe, directory: Path) -> di
     summary = write_summary(scenario, directory)
     while scenario.scenario_step < recipe.max_steps:
         committed = population(scenario)
-        gate_cost = 2 * len(recipe.tasks) * recipe.episode_repeats
+        gate_cost = 2 * len(recipe.tasks) * recipe.rollout_repeats
         if committed.generated_candidates >= recipe.max_candidates:
             break
-        if committed.episode_calls + gate_cost > recipe.max_target_episodes:
+        if committed.rollout_calls + gate_cost > recipe.max_target_rollouts:
             break
         # A previous process may have recorded the report but not committed its
         # step. Let Reef replay it before spending on another rollout.
@@ -204,7 +204,7 @@ def search(scenario: Scenario, recipe: MetaHarnessRecipe, directory: Path) -> di
         scenario.commit(result)
         summary = write_summary(scenario, directory)
         print(
-            json.dumps({key: summary[key] for key in ("step", "generated_candidates", "gate_episodes", "served_id")})
+            json.dumps({key: summary[key] for key in ("step", "generated_candidates", "gate_rollouts", "served_id")})
         )
     return summary
 
@@ -239,9 +239,9 @@ def main() -> None:
             {
                 "directory": str(directory),
                 "tasks": len(tasks),
-                "repeats": evolution["episode_repeats"],
+                "repeats": evolution["rollout_repeats"],
                 "candidate_limit": evolution["meta_harness"]["max_candidates"],
-                "gate_episode_limit": evolution["meta_harness"]["max_target_episodes"],
+                "gate_rollout_limit": evolution["meta_harness"]["max_target_rollouts"],
                 "rollout_limit": evolution["max_steps"],
                 "seed_files": sorted(files),
             },

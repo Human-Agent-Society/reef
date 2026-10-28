@@ -1,4 +1,4 @@
-"""The episode executor abstraction: local behavior, sandbox construction,
+"""The rollout executor abstraction: local behavior, sandbox construction,
 and the fail-fast contract when a required sandbox cannot isolate."""
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ import reef
 from reef.core.errors import ReefError
 from reef.sandbox.config import build_executor
 from reef.sandbox.process import (
-    EpisodeLaunchError,
-    EpisodeTimeout,
     LocalExecutor,
+    RolloutLaunchError,
+    RolloutTimeout,
     SandboxExecutor,
     SandboxLimits,
     SandboxUnavailable,
@@ -96,7 +96,7 @@ def test_local_executor_finds_a_runner_beside_the_interpreter_after_path(tmp_pat
 def test_local_executor_maps_a_missing_binary(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
-    with pytest.raises(EpisodeLaunchError):
+    with pytest.raises(RolloutLaunchError):
         LocalExecutor().launch(
             [str(tmp_path / "does-not-exist")], root=root, workspace=root / "workspace", env={}, timeout=10.0
         )
@@ -106,7 +106,7 @@ def test_local_executor_kills_the_tree_on_timeout(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
     prog = _script(tmp_path, "import time; time.sleep(30)")
-    with pytest.raises(EpisodeTimeout):
+    with pytest.raises(RolloutTimeout):
         LocalExecutor().launch(
             [sys.executable, str(prog)], root=root, workspace=root / "workspace", env={}, timeout=0.5
         )
@@ -118,7 +118,7 @@ def test_build_executor_defaults_to_local() -> None:
 
 
 def test_build_executor_rejects_an_unknown_kind() -> None:
-    with pytest.raises(ReefError, match="unknown episode executor"):
+    with pytest.raises(ReefError, match="unknown rollout executor"):
         build_executor({"executor": "vm"})
 
 
@@ -147,16 +147,16 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
     with pytest.raises(SandboxUnavailable, match=r"cannot nest a bubblewrap jail.*No permissions"):
         SandboxExecutor().preflight()
-    # An episode jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
+    # A rollout jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
     argv = seen[0]
-    episode, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
-    assert episode[0] == tool[0] == "/usr/bin/bwrap" and tool[-2:] == ["--", "/bin/true"]
+    rollout, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
+    assert rollout[0] == tool[0] == "/usr/bin/bwrap" and tool[-2:] == ["--", "/bin/true"]
     for flag in ("--unshare-user", "--unshare-pid", "--unshare-net", "--dev", "--clearenv"):
-        assert flag in episode and flag in tool
-    # The episode jail mounts a fresh /proc; the tool jail cannot nest that, so it binds the episode's read only.
-    assert "--proc" in episode and "--proc" not in tool
+        assert flag in rollout and flag in tool
+    # The rollout jail mounts a fresh /proc; the tool jail cannot nest that, so it binds the rollout's read only.
+    assert "--proc" in rollout and "--proc" not in tool
     assert tool[tool.index("/proc") - 1 : tool.index("/proc") + 2] == ["--ro-bind", "/proc", "/proc"]
-    for jail in (episode, tool):
+    for jail in (rollout, tool):
         assert jail[jail.index("/usr") - 1 : jail.index("/usr") + 2] == ["--ro-bind", "/usr", "/usr"]
     _probe_result(monkeypatch, 0)
     SandboxExecutor().preflight()

@@ -15,21 +15,21 @@ from pathlib import Path
 
 import pytest
 from tests.reef_service.test_harness_recipe import MODEL, batch, make_binary, runtime
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
-import reef.harness.episodes.requests as requests
+import reef.harness.rollouts.requests as requests
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.requests import (
+from reef.harness.rollouts.requests import (
     REQUESTS_COMMAND,
     REQUESTS_ENTRY_ID,
     REQUESTS_SKILL_ID,
     command_text,
     request_entries,
 )
-from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
+from reef.harness.rollouts.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
@@ -45,7 +45,7 @@ def _config(**evolution: object) -> dict[str, object]:
     return {
         "evolution": {
             "propose": resolve_proposer(lambda nodes, samples, model: None),
-            "evaluate": resolve_episode_scorer(lambda task, result: 0.0),
+            "evaluate": resolve_rollout_scorer(lambda task, result: 0.0),
             "tasks": ["probe"],
             **evolution,
         }
@@ -77,7 +77,7 @@ def test_requests_seeds_the_extension_and_the_skill_after_the_notice(placeholder
     assert files["pi-agent/extensions/reef-requests.ts"] == EXTENSION
     assert files["pi-agent/skills/reef-pi-extension-api/SKILL.md"] == SKILL
     # The base release is the rendered files alone: pi declares no entries list, the extension reads none.
-    base = recipe.base_artifact_files()
+    base = recipe.base_artifact_source().files
     assert base is not None and "pi-agent/tree.json" not in base
     assert base["pi-agent/extensions/reef-requests.ts"] == EXTENSION
 
@@ -94,14 +94,14 @@ def test_request_entries_pass_the_backends_seed_validation_and_a_recovered_state
     backend = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, models: None),
-        score_episode=resolve_episode_scorer(lambda task, result: 0.0),
+        score_rollout=resolve_rollout_scorer(lambda task, result: 0.0),
         tasks=("probe",),
         models=MODEL,
         seed=seed,
         binary=str(make_binary(tmp_path)),
     )
     entries = [dict(entry) for entry in seed]
-    rendered = backend._episode_evaluator.render(entries)
+    rendered = backend._rollout_evaluator.render(entries)
     assert "pi-agent/tree.json" not in rendered and rendered["pi-agent/extensions/reef-requests.ts"] == EXTENSION
     # A recovered state carrying reef's own entries meets the admission gate and steps on.
     result = backend.prepare_step(batch(), {"steps": 1, "entries": entries}, 0)
@@ -219,7 +219,7 @@ def _pi_backend(tmp_path: Path, seed: tuple) -> CordisBackend:
     return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, models: None),
-        score_episode=resolve_episode_scorer(lambda task, result: 0.0),
+        score_rollout=resolve_rollout_scorer(lambda task, result: 0.0),
         tasks=("probe",),
         models=MODEL,
         seed=seed,
@@ -247,7 +247,7 @@ def test_a_served_tree_with_older_reef_entries_is_republished_with_the_shipped_o
     backend = _pi_backend(tmp_path, request_entries("pi"))
 
     result = backend.shipped_content_update({"steps": 3, "entries": old_entries}, served)
-    assert result is not None and not result.pending
+    assert result is not None and result.artifact is not None
     assert result.metrics == {"shipped_content_update": {"entries": [REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID]}}
     assert [entry["id"] for entry in result.state["entries"]] == [REQUESTS_ENTRY_ID, "r1", REQUESTS_SKILL_ID]
     assert result.state["steps"] == 3 and result.state["entries"][1] == rules
@@ -278,7 +278,7 @@ def test_a_scenario_opened_by_an_upgraded_reef_commits_the_shipped_entries_once(
     def open_scenario() -> tuple[list[dict], str, list[dict]]:
         built = CordisRecipe(
             resolve_proposer(lambda nodes, samples, models: None),
-            resolve_episode_scorer(lambda task, result: 0.0),
+            resolve_rollout_scorer(lambda task, result: 0.0),
             ("probe",),
             binary=str(make_binary(tmp_path)),
             seed=request_entries("pi"),
@@ -301,10 +301,7 @@ def test_a_scenario_opened_by_an_upgraded_reef_commits_the_shipped_entries_once(
     releases, served, entries = open_scenario()
     assert served == UPGRADED and entries[0]["config"]["code"] == UPGRADED
     # Newest first: the update is a served training commit on top of the creation release, held for no review.
-    assert [(row["operation"], row["current"], row["pending"]) for row in releases] == [
-        ("training", True, False),
-        ("creation", False, False),
-    ]
+    assert [(row["operation"], row["active"]) for row in releases] == [("training", True), ("creation", False)]
     assert releases[0]["metrics"] == {"shipped_content_update": {"entries": [REQUESTS_ENTRY_ID]}}
 
     releases_again, served, _ = open_scenario()

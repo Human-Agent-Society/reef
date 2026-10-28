@@ -1,13 +1,13 @@
 """Failure manifest for harness evolution steps.
 
-Each candidate step observes how the evaluation episodes of the composition
+Each candidate step observes how the evaluation rollouts of the composition
 it commits fail: which task, at which stage, and why. ``advance`` folds the
 step's observations into the previous step's manifest and classes every
 fingerprint as new, persisting, or fixed. The manifest travels in the
 algorithm state through the commit history, so the next step's proposer reads
 structured failure details instead of prose.
 
-Causes are normalized before fingerprinting because episode errors embed
+Causes are normalized before fingerprinting because rollout errors embed
 volatile absolute paths and line numbers; a fingerprint must survive a
 process restart and a fresh temporary directory.
 """
@@ -26,7 +26,7 @@ from reef.evaluation.harness import FailureObservation
 MANIFEST_KIND = "reef-failure-manifest/1"
 
 #: Failure stages, each tied to one observation locus: ``launch`` (the
-#: episode could not run), ``trajectory`` (the session files could not be
+#: rollout could not run), ``trajectory`` (the session files could not be
 #: read back), ``exit`` (the binary ran and exited nonzero).
 STAGES = ("launch", "trajectory", "exit")
 

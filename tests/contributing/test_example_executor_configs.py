@@ -110,7 +110,7 @@ def test_cpu_evolution_examples_select_uni_then_mp_without_changing_isolation(re
     evolution = config["evolution"]
     assert config["execution"]["evolution"]["workers"] == 1
     assert set(config["execution"]["evolution"]) == {"workers"}
-    assert not {"episode_workers", "worker_executor", "worker_resources"} & evolution.keys()
+    assert not {"rollout_workers", "worker_executor", "worker_resources"} & evolution.keys()
     assert evolution.get("executor", "local") == "local"
     for workers, expected in ((1, "uni"), (2, "mp")):
         config["execution"]["evolution"]["workers"] = workers

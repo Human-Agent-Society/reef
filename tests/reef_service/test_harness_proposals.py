@@ -16,11 +16,11 @@ from tests.reef_service.test_harness_recipe import (
     make_binary,
     runtime,
 )
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.rollouts.version_check import version_check_entry
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
 from reef.runtime.interfaces import InferenceHandler
@@ -57,7 +57,7 @@ def _recipe(
 ) -> CordisRecipe:
     return CordisRecipe(
         resolve_proposer(propose),
-        resolve_episode_scorer(evaluate),
+        resolve_rollout_scorer(evaluate),
         ("task one",),
         binary=str(make_binary(tmp_path)),
         seed=seed,
@@ -70,6 +70,10 @@ def _recipe(
 def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
+    # The recipe's base artifact, as the service assembly imports it: the rendered seed and its entries.
+    for relative, text in recipe.base_artifact_source().files.items():
+        (initial / relative).parent.mkdir(parents=True, exist_ok=True)
+        (initial / relative).write_text(text, encoding="utf-8")
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     return Dispatcher(
         recipe,
@@ -380,7 +384,7 @@ def test_the_route_admits_against_the_head_commits_entries_not_the_live_state(tm
         assert result is not None
         scenario.commit(result)
         head = scenario.repository.require_current_artifact().release_id
-        logged = scenario.release_queries.entries_for_version(head)
+        logged = scenario.release_queries.entries_for_version(head, scenario.surface.files_component)
         assert logged is not None and [entry["id"] for entry in logged] == ["models", "settings", "r1"]
         state = scenario.trainer.state
         assert isinstance(state, dict)

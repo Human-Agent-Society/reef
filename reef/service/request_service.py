@@ -23,7 +23,7 @@ from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.observability.operations import OperationMeasurement, OperationMetrics
@@ -129,7 +129,7 @@ class PreparedInference:
     #: lease); called exactly once when the attempt ends.
     lease: InferenceLease | None = None
     #: The request hooks this attempt runs: the surface's, or on an evaluation
-    #: call every component's but the one the episode evaluates.
+    #: call every component's but the one the rollout evaluates.
     hooks: InferenceHooks | None = None
 
     def release(self) -> None:
@@ -160,7 +160,7 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
         self._retry_policy = retry_policy or InferenceRetryPolicy()
-        # The harness head of a scenario with several components, by scenario step and served release: it is
+        # The harness head of a scenario with several components, by scenario step and active release: it is
         # read on every inference answer and changes only when a commit lands.
         self.harness_heads: dict[str, tuple[int, str, str]] = {}
 
@@ -242,15 +242,15 @@ class RequestService:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
         ``evaluated`` component (see ``Surface.inference_for_evaluation``).
 
-        ``rollout`` True serves a call of a rollout episode that Reef runs itself: the served release with its
+        ``rollout`` True serves a call of a rollout that Reef runs itself: the served release with its
         hooks, as for a recorded call, but no record is kept, and the response keeps its ``training`` block
-        with the runtime load ID that answered, so the caller assembles the episode's samples.
+        with the runtime load ID that answered, so the caller assembles the rollout's samples.
         """
         if rollout and record:
             raise ValueError("a rollout call keeps no record")
         family = request_family(record, rollout=rollout)
         operations = await self.inference_operations(headers, record=record)
-        # Evaluation and rollout traffic is measured apart, so Reef's own episodes do not read as served requests.
+        # Evaluation and rollout traffic is measured apart, so Reef's own rollouts do not read as served requests.
         measurement = operations.start(f"{family}/request")
         succeeded = False
         try:
@@ -515,7 +515,7 @@ class RequestService:
         (headers, scenario, artifact, handler, surface) and let the surface
         transform the request payload. ``record`` names the measurement family;
         an evaluation call (``record`` False) runs every component's hooks but
-        the ``evaluated`` one's, whose candidate the episode runs."""
+        the ``evaluated`` one's, whose candidate the rollout runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
         if evaluated is not None and evaluated not in initial.surface.names:
@@ -631,10 +631,10 @@ class RequestService:
         """The served tree plus its parent release and evaluation metrics.
 
         ``release_id`` addresses one catalog release instead of the
-        serving head, so a consumer can pin or roll back by pulling an older
+        serving head, so a consumer can pin or go back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
         naming it. The ``evaluation`` field carries the metrics of the training step
-        that published the served release, so a consumer can audit what a
+        that published the active release, so a consumer can audit what a
         pulled tree changed and why it was admitted before running it.
         Read-only: never creates a scenario.
         """
@@ -683,86 +683,58 @@ class RequestService:
 
     @staticmethod
     def harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
-        """The catalog rows a client pulls, newest first, and the head among them.
+        """The catalog rows a client pulls, newest first, and the release of the active harness artifact.
 
-        Another component's step carries the tree forward unchanged, so it is
-        no harness release: a client that compared release ids would pull the
-        same tree again and a person would be asked to install nothing. Nor
-        is a rollback or promote that restored other weights under the tree
-        served already. Each release is compared with the one served before
-        it by the content id of its files component, which its commit record
-        carries (the creation artifact's is read from the release). A row
-        that published no release (a rejected or skipped step) or was
-        recorded without a manifest counts when it names no other component.
-        The rows kept speak of listed releases only, so a client walking them
-        never meets a release that is not listed: ``parent_release_id``
-        names the previous kept release, the one the tree descends from; a
-        row that published nothing is named by the kept release it ran on;
-        and a rollback or promote whose target is not kept names the kept
-        release that target carried. The ids of the combination are kept
-        beside them as ``composed_release_id``, ``composed_parent_release_id``
-        and ``composed_rollback_target_release_id``. The head is the newest
-        kept row that is served and published a release. A flat scenario
-        lists every row and its head is the served release.
+        A row names the harness artifact it holds or ran on: ``artifact_id``
+        and ``component`` from ``Scenario.artifacts``, with ``active`` and
+        ``activated``. ``active`` is true on exactly one row, the row that
+        made the active harness artifact. In a scenario of several
+        components, a release that minted no harness artifact (another
+        component's step, an activation) is not listed. A listed row names
+        the release that minted its artifact as ``release_id`` and the
+        release that minted its parent's harness artifact as
+        ``parent_release_id``; the ids it had are kept beside them as
+        ``composed_release_id`` and ``composed_parent_release_id``. A step
+        that made no artifact is listed when the harness trainer made it.
         """
-        rows = list(scenario.releases())
         files_component = scenario.surface.files_component
-        if scenario.surface.single or files_component is None:
-            return rows, next((str(row["release_id"]) for row in rows if not row.get("pending")), None)
-        creation = scenario.release_queries.creation_components(scenario.scenario_step)
+        single = scenario.surface.single
+        harness = [row for row in scenario.artifacts() if single or row["component"] == files_component]
+        by_release = {row["release_id"]: row for row in harness}
+        by_artifact = {row["artifact_id"]: row for row in harness}
+        manifests = scenario.release_queries.manifests(scenario.scenario_step)
+
+        def artifact_of(release_id: str | None) -> dict[str, Any] | None:
+            """The harness artifact that the release ``release_id`` binds, or ``None`` when it is not known."""
+            if release_id is None or release_id in by_release:
+                return None if release_id is None else by_release[release_id]
+            return by_artifact.get((manifests.get(release_id) or {}).get(str(files_component)))
+
         kept: list[dict[str, Any]] = []
-        kept_ids: set[str] = set()
-        carried_by: dict[str, str] = {}  # each release not kept, to the kept release whose tree it carried
-        previous: dict[str, Any] | None = None  # the newest older row that is served
-        previous_manifest: dict[str, Any] | None = None  # the newest older served row that names its components
-        lineage: str | None = None  # the newest kept release that is served
-        lineage_parent: str | None = None  # the parent that release lists
-        head: str | None = None
-        for row in reversed(rows):
-            if row.get("operation") == "creation" and creation is not None and "components" not in row:
-                row = {**row, "components": dict(creation)}
-            release_id = str(row["release_id"])
-            published = previous is None or previous["release_id"] != release_id
-            own = None if not published else (row.get("components") or {}).get(files_component)
-            # A step that published nothing carries no manifest; the tree it served is the last one named.
-            before = None if previous_manifest is None else previous_manifest["components"].get(files_component)
-            if own is not None and before is not None:
-                changed = own != before
-            else:
-                changed = row.get("component") in (None, files_component)
-            if changed:
-                listed = dict(row)
-                if lineage is not None and not published:
-                    # A step that published nothing reads as it does in a flat scenario: the head's release
-                    # and the head's parent.
-                    if release_id != lineage:
-                        listed["composed_release_id"] = release_id
-                        listed["release_id"] = lineage
-                    if listed.get("parent_release_id") != lineage_parent:
-                        listed["composed_parent_release_id"] = listed.get("parent_release_id")
-                        listed["parent_release_id"] = lineage_parent
-                elif lineage is not None and listed.get("parent_release_id") != lineage:
-                    listed["composed_parent_release_id"] = listed.get("parent_release_id")
-                    listed["parent_release_id"] = lineage
-                target = listed.get("rollback_target_release_id")
-                if isinstance(target, str) and target not in kept_ids and target in carried_by:
-                    listed["composed_rollback_target_release_id"] = target
-                    listed["rollback_target_release_id"] = carried_by[target]
-                kept.append(listed)
-                if row.get("pending"):
-                    kept_ids.add(release_id)
-                elif published:
-                    lineage = head = release_id
-                    lineage_parent = listed.get("parent_release_id")
-                    kept_ids.add(release_id)
-            if not row.get("pending"):
-                previous = row
-                if row.get("components"):
-                    previous_manifest = row
-            if lineage is not None and release_id not in kept_ids:
-                carried_by[release_id] = lineage
-        kept.reverse()
-        return kept, head
+        for row in scenario.releases():
+            if row["checkpoint"] and row["release_id"] not in by_release:
+                continue
+            if not row["checkpoint"] and row.get("component") not in (None, files_component):
+                continue
+            artifact = artifact_of(row["release_id"])
+            if artifact is None:
+                continue
+            listed = {
+                **row,
+                "artifact_id": artifact["artifact_id"],
+                "component": artifact["component"],
+                "active": row["checkpoint"] and artifact["active"],
+                "activated": artifact["activated"],
+            }
+            if artifact["release_id"] != row["release_id"]:
+                listed["composed_release_id"] = row["release_id"]
+                listed["release_id"] = artifact["release_id"]
+            parent = artifact_of(artifact["parent_release_id"])
+            if parent is not None and parent["release_id"] != row["parent_release_id"]:
+                listed["composed_parent_release_id"] = row["parent_release_id"]
+                listed["parent_release_id"] = parent["release_id"]
+            kept.append(listed)
+        return kept, next((row["release_id"] for row in harness if row["active"]), None)
 
     @classmethod
     def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
@@ -771,7 +743,7 @@ class RequestService:
         return rows
 
     def harness_release_id(self, scenario: Scenario) -> str:
-        """The newest served release that changed what a client pulls; a release held for review is not served."""
+        """The release that a client pulls: the release that minted the active harness artifact."""
         current = scenario.repository.require_current_artifact().release_id
         if scenario.surface.single or scenario.surface.files_component is None:
             return current
@@ -820,12 +792,9 @@ class RequestService:
                 "reason": "manual mode takes instructions only",
                 "release_id": head,
             }
-        # The entries the head commit logged, which the served tree.json carries too, not the trainer's live
-        # state, which a step in flight has already moved; the seed before the first commit.
-        logged = scenario.release_queries.entries_for_version(head)
-        info = scenario.surface.harness
-        if logged is None and info is not None:
-            logged = info.seed_entries
+        # The entries of the head, which the served tree.json carries too, not the trainer's live state, which a
+        # step in flight has already moved; the base artifact's before the first commit.
+        logged = scenario.release_queries.entries_for_version(head, scenario.surface.files_component)
         entries = [dict(entry) for entry in logged or ()]
         try:
             mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
@@ -900,11 +869,9 @@ class RequestService:
         before_entries: Sequence[Mapping[str, Any]] = ()
         before_files: Mapping[str, str] | None = None
         if before is not None:
-            info = scenario.surface.harness
-            logged = scenario.release_queries.entries_for_version(before)
-            if logged is None and info is not None:
-                logged = info.seed_entries
-            before_entries = logged or ()
+            before_entries = (
+                scenario.release_queries.entries_for_version(before, scenario.surface.files_component) or ()
+            )
             tree = scenario.surface.files
             try:
                 artifact, _ = scenario.release_queries.artifact_with_metrics(before)
@@ -995,10 +962,10 @@ class RequestService:
                 "request_id": record_id,
                 "settled": True,
                 "step": step,
-                "state": result_of(rows[step], rows),
+                "state": result_of(rows[step]),
                 "meaning": None,
                 "started_at": None,
-                "episodes_total": None,
+                "rollouts_total": None,
                 "step_record": None,
                 "activity": [],
             }
@@ -1016,7 +983,7 @@ class RequestService:
             "meaning": STATE_WORDS.get(state),
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
-            "episodes_total": None if mine is None else mine.episodes_total,
+            "rollouts_total": None if mine is None else mine.rollouts_total,
             "step_record": None if mine is None else mine.step_record,
             # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
@@ -1080,9 +1047,8 @@ class RequestService:
 
         The served composition never carries an endpoint or a credential, so
         an installed tree needs one written beside it: the release's own
-        entries (the recipe's seed for the base release no step published)
-        plus the descriptor's binding template, the base URL taken from the
-        request's Host, the model from the evaluation the release ran against (the
+        entries (the base artifact's for the creation) plus the descriptor's
+        binding template, the base URL taken from the request's Host, the model from the evaluation the release ran against (the
         recipe's served model for the base release), and the token left as a
         placeholder the script fills from the client's environment. Empty
         when any of those is unknown, and the script then installs the
@@ -1098,9 +1064,9 @@ class RequestService:
         info = scenario.surface.harness
         if not isinstance(model, str) or not model:
             model = None if info is None else info.served_model
-        entries = scenario.release_queries.entries_for_version(manifest["release_id"])
-        if entries is None and info is not None:
-            entries = info.seed_entries
+        entries = scenario.release_queries.entries_for_version(
+            manifest["release_id"], scenario.surface.files_component
+        )
         if not service_url or not model or not entries:
             return {}
         api = "openai" if info is None else info.served_api

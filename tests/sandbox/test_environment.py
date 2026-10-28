@@ -13,7 +13,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 
 from reef.sandbox.e2b import E2BExecutor, E2BSession
 from reef.sandbox.environment import ExecutorEnvironment, run_sync
-from reef.sandbox.process import EpisodeLaunchError, EpisodeTimeout, LocalExecutor, ProcessOutcome
+from reef.sandbox.process import LocalExecutor, ProcessOutcome, RolloutLaunchError, RolloutTimeout
 
 
 def test_harbor_lifecycle_commands_and_file_transfers(tmp_path: Path) -> None:
@@ -34,7 +34,7 @@ def test_harbor_lifecycle_commands_and_file_transfers(tmp_path: Path) -> None:
         await environment.download_dir(".", tmp_path / "downloaded")
         await environment.stop(delete=True)
         await environment.stop(delete=True)
-        with pytest.raises(EpisodeLaunchError, match="not running"):
+        with pytest.raises(RolloutLaunchError, match="not running"):
             await environment.exec("true")
 
     run_sync(_run())
@@ -67,7 +67,7 @@ def test_timeout_does_not_leave_a_process_running(tmp_path: Path) -> None:
 
     async def _run() -> None:
         await environment.start(force_build=False)
-        with pytest.raises(EpisodeTimeout):
+        with pytest.raises(RolloutTimeout):
             await environment.exec(f"exec {shlex.quote(sys.executable)} -c 'import time; time.sleep(30)'")
         assert environment.process_owner.process_groups == set()
         await environment.stop(delete=True)
@@ -99,7 +99,7 @@ def test_async_cancellation_terminates_the_process_before_returning(tmp_path: Pa
         for process_group in groups:
             with pytest.raises(ProcessLookupError):
                 os.killpg(process_group, 0)
-        with pytest.raises(EpisodeLaunchError, match="not running"):
+        with pytest.raises(RolloutLaunchError, match="not running"):
             await environment.exec("true")
 
     run_sync(_run())
@@ -132,7 +132,7 @@ class RecordingSession(E2BSession):
     def close(self) -> None:
         self.close_calls += 1
         if self.fail_close:
-            raise EpisodeLaunchError("provider cleanup failed")
+            raise RolloutLaunchError("provider cleanup failed")
 
 
 @dataclass(frozen=True)
@@ -164,7 +164,7 @@ def test_owned_remote_environment_opens_a_session_and_reports_cleanup_failure(tm
         # The session applies the deployment's own settings; the environment passes the caller's.
         assert result.stdout == "remote" and executor.session.environment["SETTING"] == "caller"
         executor.session.fail_close = True
-        with pytest.raises(EpisodeLaunchError, match="cleanup failed"):
+        with pytest.raises(RolloutLaunchError, match="cleanup failed"):
             await environment.stop(delete=True)
         executor.session.fail_close = False
         await environment.stop(delete=True)

@@ -1,6 +1,6 @@
-Run one CEO-Bench episode: operate the NovaMind AI startup for the configured
+Run one CEO-Bench rollout: operate the NovaMind AI startup for the configured
 number of simulated days, starting from $1,000,000 in cash, through the
-benchmark's bash agent. The episode's system prompt, tools, and simulator come
+benchmark's bash agent. The rollout's system prompt, tools, and simulator come
 from the pinned CEO-Bench checkout at `/opt/ceobench`; this instruction is not
 shown to the model.
 

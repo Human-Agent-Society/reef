@@ -22,6 +22,7 @@ from reef_client.sse import synthesize_sse_events
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
+from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
     InferenceHandler,
@@ -31,7 +32,6 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
     new_runtime_load_id_incarnation,
 )
-from reef.runtime.serving import holds_weights
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 
@@ -39,23 +39,21 @@ from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 TINKER_URL = "https://tinker.thinkingmachines.ai"
 
 
-def checkpoint_sampler_path(artifact: Artifact, base_model: str, service: str | None) -> str | None:
-    """The sampler a materialized release names, or None for Reef's empty base tree.
+def checkpoint_sampler_path(artifact: Artifact, base_model: str, service: str | None) -> str:
+    """The sampler that a release's checkpoint manifest names.
 
-    ``ValueError``: the release is not materialized; its manifest names another model or another service than
-    ``service``; or it holds files but no manifest.
+    The base artifact holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
+    ``ValueError``: the release is not materialized; it has no manifest; or its manifest names another model or
+    another service than ``service``.
     """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
-    if (path / MANIFEST).exists():
-        checkpoint = TinkerCheckpoint.read(path)
-        checkpoint.check_compatible(base_model, service=service)
-        return checkpoint.sampler_path
-    # Reef's empty base tree is the base model; an arbitrary uploaded weight directory must not become it.
-    if holds_weights(path):
+    if not (path / MANIFEST).exists():
         raise ValueError(f"artifact is missing {MANIFEST}")
-    return None
+    checkpoint = TinkerCheckpoint.read(path)
+    checkpoint.check_compatible(base_model, service=service)
+    return checkpoint.sampler_path
 
 
 class TinkerInferenceRuntime(InferenceRuntime):
@@ -86,6 +84,15 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._releases: dict[str, tuple[str | None, str]] = {}
         self._active, self._version = self._remember(None)
         self._closed = False
+
+    @property
+    def served_weight_kind(self) -> ArtifactKind:
+        """A Tinker sampler serves a LoRA adapter on the base model."""
+        return "model_adapter"
+
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        """The base model with the sampler that the artifact's manifest names: each call samples its own artifact."""
+        return PolicyModel(self._model, checkpoint_sampler_path(artifact, self._model, self._service))
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -122,7 +129,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 return self._releases[artifact.ref.release_id]
             sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             # A release that carries the served sampler forward (a step of
-            # another component, a rollback to the same weights) was never
+            # another component, an activation of the same weights) was never
             # activated; it serves under the load the engine reports now,
             # not under the first load of that sampler.
             carried = sampler_path == self._active
@@ -137,7 +144,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         with self._lock:
             sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             if sampler_path != self._active:
-                # Even a sampler served earlier in this incarnation, as after a rollback, serves under a new load.
+                # Even a sampler served earlier in this incarnation, as after an activation, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
             self._releases[artifact.ref.release_id] = (self._active, self._version)
             return self._version

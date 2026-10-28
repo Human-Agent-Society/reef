@@ -101,7 +101,7 @@ def wait_for_jobs(dispatcher: Dispatcher, expected: int) -> None:
 
 
 @pytest.mark.unit
-def test_advance_current_requires_the_observed_head(tmp_path) -> None:
+def test_activate_requires_the_observed_head(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     backend = InMemoryRepositoryBackend("math", initial, root=tmp_path / "repository")
@@ -111,12 +111,12 @@ def test_advance_current_requires_the_observed_head(tmp_path) -> None:
 
     stale = ArtifactRef(content_id="artifact:stale", release_id="stale", parent_release_id=None)
     advanced = ArtifactRef(content_id="live:1", release_id="live:proc:w1:1", parent_release_id=head.release_id)
-    with pytest.raises(ArtifactConflict, match="serving head advanced"):
-        repository.advance_current(advanced, expected=stale)
+    with pytest.raises(ArtifactConflict, match="active artifact moved"):
+        repository.activate(advanced, expected=stale)
 
     assert repository.current_artifact == head
 
-    repository.advance_current(advanced, expected=head)
+    repository.activate(advanced, expected=head)
     assert repository.current_artifact == advanced
 
 

@@ -23,7 +23,7 @@ from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
 from reef.observability.base import (
     ExperimentLogger,
     ExperimentTracker,
-    RollbackExperimentEvent,
+    TrainFromExperimentEvent,
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
@@ -102,7 +102,7 @@ class WandbConfig:
 
 
 class _WandbScenarioLogger(ExperimentLogger):
-    """Stable scenario proxy whose underlying W&B run rotates on rollback."""
+    """Stable scenario proxy whose underlying W&B run rotates when a trainer starts from another artifact."""
 
     def __init__(
         self,
@@ -244,7 +244,7 @@ class WandbExperimentTracker(ExperimentTracker):
         with self._lock:
             self._record(event)
 
-    def record_rollback(self, event: RollbackExperimentEvent) -> None:
+    def record_train_from(self, event: TrainFromExperimentEvent) -> None:
         """Finish the current curve and immediately open its next run segment."""
         if not self.config.active:
             return
@@ -265,20 +265,18 @@ class WandbExperimentTracker(ExperimentTracker):
                 try:
                     run.summary.update(
                         {
-                            "reef/ended_by": "rollback",
-                            "reef/rollback_step": event.step,
-                            "reef/rollback_from_release_id": event.source_artifact_ref.release_id,
-                            "reef/rollback_target_release_id": event.target_release_id,
-                            "reef/current_release_id": event.produced_artifact_ref.release_id,
+                            "reef/ended_by": "train_from",
+                            "reef/train_from_step": event.step,
+                            "reef/train_from_release_id": event.start_artifact_ref.release_id,
                         }
                     )
                     run.finish()
                 except Exception as exc:
-                    logger.warning("W&B rollback finalization failed (%s)", type(exc).__name__)
+                    logger.warning("W&B run finalization failed (%s)", type(exc).__name__)
             scenario_logger = self._scenario_loggers.get(event.scenario)
             if scenario_logger is not None:
                 scenario_logger._rotate(
-                    source_artifact_ref=event.produced_artifact_ref,
+                    source_artifact_ref=event.start_artifact_ref,
                     run_segment=event.step,
                 )
                 context = scenario_logger._context()

@@ -178,7 +178,7 @@ following commands from the repository root:
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,
-starts the stack, and runs one episode of ``harbor/erdos_min_overlap`` on the
+starts the stack, and runs one rollout of ``harbor/erdos_min_overlap`` on the
 paper grid: eight groups of 64 rollouts, one optimizer step, thinking enabled,
 four GPUs. Two GPUs train the actor and two serve the policy; training and
 serving never share a GPU.
@@ -408,7 +408,7 @@ not put the key in YAML, tags, run names, or Slime flags. Reef assigns one W&B
 run identity to a scenario and resumes it after a service restart. Checkpoint
 paths are logged as metadata when ``upload_checkpoints`` is false. `Experiment
 tracking <../../reference/configuration.rst#experiment-tracking>`__ describes grouping,
-rollback behavior, offline mode, and metric names.
+run segments, offline mode, and metric names.
 
 When ``TTTDJobData`` receives a complete search grid, it records the following
 metrics in the ``tttd`` namespace. These values describe every evaluated

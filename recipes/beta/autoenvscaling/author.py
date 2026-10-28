@@ -32,8 +32,8 @@ from reef_client.serve import RECEIPT_HEADER
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
 from reef.core.prompts import untrusted_text
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.recipe.reefine.agent import launch_pi, rendered_files
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
 from reef.record2sample.generator.designer import (
@@ -44,7 +44,7 @@ from reef.record2sample.generator.designer import (
     ReefDesigner,
 )
 from reef.sandbox.environment import download_directory
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
+from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.train.cordis_backend.strategies import AgentHost, ProposerCalls
 
 logger = logging.getLogger(__name__)
@@ -353,7 +353,7 @@ class AgentTools(WorkspaceTools):
         self.root = root
         self.checks = checks
         #: The sandbox the agent edits its workspace in, once it is up.
-        self.session: EpisodeExecutor | None = None
+        self.session: ProgramExecutor | None = None
         self.lock = threading.Lock()
         #: Each check's result by its id; ``None`` while it runs.
         self.results: dict[int, dict[str, object] | None] = {}
@@ -391,7 +391,7 @@ class AgentTools(WorkspaceTools):
                 self.running_id = None
 
 
-def close_when_stopped(stop: threading.Event, finished: threading.Event, session: EpisodeExecutor) -> None:
+def close_when_stopped(stop: threading.Event, finished: threading.Event, session: ProgramExecutor) -> None:
     """Close ``session`` once ``stop`` is set, unless ``finished`` is first: a cancelled generation's agent stops."""
     while not finished.is_set():
         if stop.wait(STOP_POLL_SECONDS):
@@ -468,7 +468,7 @@ class AgentAuthor(TaskAuthor):
         scenario: str,
         model: str,
         api: str,
-        executor: EpisodeExecutor,
+        executor: ProgramExecutor,
         cache_dir: Path,
         timeout_seconds: float,
         max_model_calls: int,
@@ -566,7 +566,7 @@ class AgentAuthor(TaskAuthor):
         }
         started = time.monotonic()
         ended = "timed out"
-        session: EpisodeExecutor | None = None
+        session: ProgramExecutor | None = None
         finished = threading.Event()
         try:
             session = executor.open_session(forward_ports=(gateway.port,), timeout_s=self.timeout_seconds)
@@ -584,10 +584,10 @@ class AgentAuthor(TaskAuthor):
                 timeout=self.timeout_seconds,
             )
             ended = f"exited {outcome.exit_code}"
-        except EpisodeTimeout:
+        except RolloutTimeout:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             trajectory = []
-        except EpisodeLaunchError as exc:
+        except RolloutLaunchError as exc:
             if stop.is_set():
                 raise AuthorError("the agent's run was stopped") from exc
             raise AuthorError(f"the agent could not run: {exc}") from exc
@@ -596,7 +596,7 @@ class AgentAuthor(TaskAuthor):
             if session is not None:
                 try:
                     session.close()
-                except EpisodeLaunchError as exc:
+                except RolloutLaunchError as exc:
                     logger.warning(
                         "the AutoEnvScaling agent's sandbox did not stop; its provider timeout applies: %s", exc
                     )

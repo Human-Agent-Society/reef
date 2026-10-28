@@ -64,11 +64,16 @@ def _record(text: str = TEXT, requires: list | None = None) -> dict:
 
 
 def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
+    """A catalog row of a one-component scenario, where the artifact id is the release id; activated unless
+    ``rest`` says otherwise."""
     return {
         "release_id": release_id,
+        "artifact_id": release_id,
         "parent_release_id": parent,
         "operation": "training",
-        "pending": False,
+        "checkpoint": True,
+        "active": False,
+        "activated": True,
         "recorded_at": 1_050.0,
         "metrics": metrics,
         **rest,
@@ -76,6 +81,8 @@ def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-
 
 
 CREATION = _row({}, release_id="rel-0", parent=None, operation="creation")
+#: The creation while it serves: a newer release that passed the checks then waits for activation.
+SERVED_CREATION = {**CREATION, "active": True}
 MUTATION = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
 
 
@@ -103,18 +110,18 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
     assert logo in build_release_page(0, [CREATION])
 
 
-def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> None:
+def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
-    rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION))]
+    rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION), active=True)]
     page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
     head = f"/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}"
     assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
         assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
-    # A catalog with no served head leaves the crumb as text rather than a broken link.
-    pending_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, pending=True)]
-    bare = build_request_page(_record(), pending_only, now=1_100.0)
+    # A catalog with no active release leaves the crumb as text rather than a broken link.
+    inactive_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, activated=False)]
+    bare = build_request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
 
 
@@ -143,13 +150,13 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
 
 
 def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_size() -> None:
-    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", episodes_total=2)
+    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", rollouts_total=2)
     page = build_request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
     progress = _section(page, "Progress")
     assert REFRESH in page and '<span class="evaluating">Checking the harness</span>' in progress
-    assert "the evaluation is running the candidate through its episodes" in progress
+    assert "the evaluation is running the candidate through its rollouts" in progress
     assert "<dt>Step time</dt><dd>3 min 20 s into the step</dd>" in progress
-    assert "<dt>Evaluation episodes</dt><dd>2 in the evaluation</dd>" in progress
+    assert "<dt>Evaluation rollouts</dt><dd>2 in the evaluation</dd>" in progress
     assert '<dt>Step record</dt><dd class="id">/work/steps/1</dd>' in progress
     assert "<dt>Waiting</dt>" not in progress
 
@@ -161,13 +168,13 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_
         and "the proposer is writing the change" in progress
     )
     assert "<dt>Step time</dt><dd>42 s into the step</dd>" in progress
-    assert "Evaluation episodes" not in progress and "Step record" not in progress
+    assert "Evaluation rollouts" not in progress and "Step record" not in progress
 
     # Another request's step says nothing about this one, which still waits.
     other = replace(evaluating, request_id="another")
     page = build_request_page(_record(), [CREATION], progress=other, now=1_100.0)
     assert '<span class="queued">Queued</span>' in page and "<dd>100 s</dd>" in page
-    assert "Evaluation episodes" not in page
+    assert "Evaluation rollouts" not in page
     page = build_request_page(_record(), [CREATION], consumed=True, now=1_100.0)
     assert '<span class="running">In progress</span>' in page and "its row follows" in page and REFRESH in page
     page = build_request_page(
@@ -223,28 +230,27 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
     assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in changed
 
 
-def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_row_names_it() -> None:
-    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(), [CREATION, pending], now=1_100.0)
-    assert '<span class="pending">Ready for review</span>' in page
+def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is_active() -> None:
+    inactive = _row(_answered(selected=True, mutation=MUTATION), activated=False)
+    page = build_request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0)
+    assert '<span class="inactive">Waiting for activation</span>' in page
     assert "Proposed changes" in _sections(page)
-    assert "Release rel-1 is ready. This change includes an extension" in page
+    assert "Release rel-1 is ready but does not serve yet. This change includes an extension" in page
     assert REFRESH not in page
     assert "<code>/versions v1 install</code>" in page
-    promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
-    page = build_request_page(_record(), [CREATION, pending, promote], now=1_100.0)
-    assert '<span class="promoted">Promoted at v2</span>' in page
-    assert "passed the checks and was promoted at v2; the release that step published serves it" in page
+    page = build_request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
+    assert '<span class="selected">Published</span>' in page
+    assert "Published as release rel-1" in page
     assert "What changed" in _sections(page)
 
 
-def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
+def test_a_rejected_request_names_the_missed_rollout_on_both_pages() -> None:
     selection = {"reason": "candidate missed the floor on 1 of 1 tasks", "metrics": {"floor_score": 1.0}}
-    episode = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
+    rollout = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
     notes = {"review": {"result": "partial", "covered": [], "uncovered": ["no off switch"]}}
     row = _row(
         _answered(
-            selected=False, selection=selection, candidate_episodes=[episode], mutation=MUTATION, proposal_notes=notes
+            selected=False, selection=selection, candidate_rollouts=[rollout], mutation=MUTATION, proposal_notes=notes
         )
     )
     page = build_request_page(_record(), [CREATION, row], now=1_100.0)
@@ -260,7 +266,7 @@ def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
 
 
 def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_score() -> None:
-    """Every candidate episode failed before a score (the runner was not found): the checks judged nothing, so both
+    """Every candidate rollout failed before a score (the runner was not found): the checks judged nothing, so both
     pages say the evaluation could not run and quote the cause, and the version page shows no candidate score. Both
     pages say the floor tasks were set before the request and do not test what it asks for."""
     selection = {
@@ -269,9 +275,9 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
         "metrics": {"floor_score": 1},
     }
     cause = "harness binary reef-terminus not found"
-    episode = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
+    rollout = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
     metrics = _answered(
-        selected=False, selection=selection, candidate_episodes=[episode], candidate_score=0.0, mutation=MUTATION
+        selected=False, selection=selection, candidate_rollouts=[rollout], candidate_score=0.0, mutation=MUTATION
     )
     row = _row(metrics)
     result = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Result")
@@ -282,7 +288,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     assert "The evaluation could not run" in version and f"<dt>Could not run</dt><dd>{cause}</dd>" in version
     assert "Candidate score" not in version and "Missed" not in version and note in version
     # A scored miss keeps the checks' own words and its candidate score.
-    scored = _row({**metrics, "candidate_episodes": [{**episode, "score": 0.0, "failure": None, "reply": "no"}]})
+    scored = _row({**metrics, "candidate_rollouts": [{**rollout, "score": 0.0, "failure": None, "reply": "no"}]})
     version = build_release_page(1, [CREATION, scored])
     assert "The evaluation could not run" not in version and "Candidate score" in version
 
@@ -313,15 +319,15 @@ def test_answers_the_proposer_wrote_again_show_under_review_on_both_pages() -> N
 
 def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_session() -> None:
     """hermes has no /versions and no reef-pi: a published release is installed with reef-hermes update, a
-    release waiting for review is served with reef-hermes wait on the request, and the version page's Setup
+    release waiting for activation is activated with reef-hermes wait on the request, and the version page's Setup
     note names reef-hermes setup."""
     selected = _row(_answered(selected=True, published=True, mutation=MUTATION))
     page = build_request_page(_record(), [CREATION, selected], now=1_100.0, adapter="hermes")
     result = _section(page, "Result")
     assert "<code>reef-hermes update</code>" in result and "start reef-hermes again" in result
     assert "/versions" not in page and "reef-pi" not in page
-    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(), [CREATION, pending], now=1_100.0, adapter="hermes")
+    inactive = _row(_answered(selected=True, mutation=MUTATION), activated=False)
+    page = build_request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0, adapter="hermes")
     assert f"<code>reef-hermes wait {RECORD_ID}</code>" in _section(page, "Result")
     requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
     metrics = _answered(selected=True, published=True, mutation=MUTATION)

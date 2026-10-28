@@ -154,7 +154,7 @@ class ServiceConfig:
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
-    #: evaluation episodes from it. ``upstream_model`` is a provider model
+    #: evaluation rollouts from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
     upstream_url: str | None = config_option(
         None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."
@@ -298,10 +298,10 @@ class ServiceConfig:
             "Training settings as a JSON/YAML object.", path=("training",), public_path=("training", "config")
         ),
     )
-    #: Optional pre-publication checkpoint evaluator and selection plugin.
-    evaluation_settings: Mapping[str, Any] | None = field(
+    #: The rule that activates the artifacts that training makes, for any recipe.
+    activation_settings: Mapping[str, Any] | None = field(
         default=None,
-        metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
+        metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
     )
     #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
@@ -410,7 +410,7 @@ SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
     non_reef_fields = {
-        "evaluation_settings",
+        "activation_settings",
         "generator_settings",
         "pipeline_settings",
         "tracing_config",

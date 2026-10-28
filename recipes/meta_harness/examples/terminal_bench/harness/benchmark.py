@@ -7,8 +7,8 @@ import math
 import subprocess
 from pathlib import Path
 
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness import RolloutResult
 
 MANIFEST = json.loads(Path(__file__).with_name("tasks.json").read_text(encoding="utf-8"))
 SEED = (
@@ -21,7 +21,7 @@ SEED = (
 
 
 def task_paths(root: Path, names: list[str] | None = None) -> tuple[str, ...]:
-    """Refuse dataset drift before running any paid episode."""
+    """Refuse dataset drift before running any paid rollout."""
     root = root.resolve()
     selected = MANIFEST["tasks"] if names is None else names
     if not selected or len(set(selected)) != len(selected) or any(name not in MANIFEST["tasks"] for name in selected):
@@ -44,8 +44,8 @@ def task_paths(root: Path, names: list[str] | None = None) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    """Read one binary verifier reward; failed episodes count as zero."""
+def evaluate(task: str, result: RolloutResult) -> float:
+    """Read one binary verifier reward; failed rollouts count as zero."""
     if result.exit_code:
         return 0.0
     rows = [event for event in result.trajectory if event.get("type") == "verifier"]
@@ -62,8 +62,8 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return float(reward)
 
 
-class VerifierScorer(EpisodeScorer):
+class VerifierScorer(RolloutScorer):
     """:func:`evaluate` as the ``evolution.evaluate`` plugin terminal_bench.yaml names."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return evaluate(task, result)

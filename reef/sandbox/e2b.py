@@ -1,4 +1,4 @@
-"""Run episode processes in an E2B cloud sandbox (:mod:`reef.sandbox.remote`).
+"""Run rollout processes in an E2B cloud sandbox (:mod:`reef.sandbox.remote`).
 
 An E2B sandbox is a microVM of its own. :class:`E2BExecutor` is the deployment's
 setting (the API key, the template, how long a sandbox may live);
@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
-from reef.sandbox.process import EpisodeLaunchError, EpisodeTimeout, ProcessOutcome, SandboxProgram, SandboxUnavailable
+from reef.sandbox.process import ProcessOutcome, RolloutLaunchError, RolloutTimeout, SandboxProgram, SandboxUnavailable
 from reef.sandbox.remote import (
     SANDBOX_MARGIN_S,
     TUNNEL_PORT_BASE,
@@ -44,8 +44,8 @@ SANDBOX_RENEW_MARGIN_S = 300
 
 
 def template_alias(adapter: str, version: str) -> str:
-    """The pinned agent template, versioned separately for its episode isolation dependencies."""
-    return f"reef-{adapter}-{version}-episodes-v1".replace(".", "-").lower()
+    """The pinned agent template, versioned separately for its rollout isolation dependencies."""
+    return f"reef-{adapter}-{version}-rollouts-v1".replace(".", "-").lower()
 
 
 def ensure_template(alias: str, npm_package: str, api_key: str) -> None:
@@ -140,19 +140,19 @@ class E2BExecutor(RemoteExecutor):
         try:
             session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
             session.sandbox.commands.run(probe_command(self.binary), timeout=30)
-        except (e2b.SandboxException, EpisodeLaunchError) as exc:
+        except (e2b.SandboxException, RolloutLaunchError) as exc:
             raise SandboxUnavailable(f"E2B startup check failed: {exc}") from exc
         finally:
             if session is not None:
                 try:
                     session.close()
-                except EpisodeLaunchError as exc:
+                except RolloutLaunchError as exc:
                     raise SandboxUnavailable("E2B startup probe could not be cleaned up") from exc
         object.__setattr__(self, "validated", True)
 
     def open(self) -> E2BSession:
         if not self.template:
-            raise EpisodeLaunchError("an E2B sandbox needs a template")
+            raise RolloutLaunchError("an E2B sandbox needs a template")
         from e2b import Sandbox
 
         self.reap_once()
@@ -167,7 +167,7 @@ class E2BExecutor(RemoteExecutor):
                 metadata=self.labels(),
             )
         except Exception as exc:
-            raise EpisodeLaunchError(f"the E2B sandbox did not start: {exc}") from exc
+            raise RolloutLaunchError(f"the E2B sandbox did not start: {exc}") from exc
         session = E2BSession(sandbox, env=self.env)
         try:
             for index, port in enumerate(self.forward_ports):
@@ -285,14 +285,14 @@ class E2BSession(RemoteSession):
                     # Reattach to the same PID: replaying a command could repeat its side effects.
                     process.disconnect()
                     logger.warning("the E2B command connection dropped; reconnecting to process %s", process_id)
-            raise EpisodeLaunchError("the E2B command connection could not be restored")
+            raise RolloutLaunchError("the E2B command connection could not be restored")
         except CommandExitException as exc:
             finished = True
             return ProcessOutcome(exc.exit_code, exc.stdout, exc.stderr)
         except TimeoutException as exc:
-            raise EpisodeTimeout(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
+            raise RolloutTimeout(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
         except Exception as exc:
-            raise EpisodeLaunchError(f"the E2B sandbox could not run the process: {exc}") from exc
+            raise RolloutLaunchError(f"the E2B sandbox could not run the process: {exc}") from exc
         finally:
             if process is not None and not finished:
                 try:
@@ -303,7 +303,7 @@ class E2BSession(RemoteSession):
                 self.pull(root)
             except Exception as exc:
                 if finished:
-                    raise EpisodeLaunchError(f"could not copy {root.name} back from the E2B sandbox") from exc
+                    raise RolloutLaunchError(f"could not copy {root.name} back from the E2B sandbox") from exc
                 logger.warning("could not copy %s back from the failed E2B process", root.name)
 
 

@@ -4,7 +4,7 @@ The proposer is ``harness.native_evolution.propose`` with the serve file's
 seed nodes and one recorded failure; each sample is one model call. A sample
 is parsed when it yields a mutation and admitted when that mutation passes
 its node kind's admission rules, the same check the evolve step runs before
-any episode. The table this prints is the one the README's results carry.
+any rollout. The table this prints is the one the README's results carry.
 """
 
 import argparse
@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE.parents[3]))  # the reef checkout, for a source run
 from harness import native_evolution
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.runners.native.seed import SEED_NODES
 from reef.harness.tree.nodes import NODE_KINDS
 

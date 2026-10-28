@@ -109,22 +109,37 @@ def problem_order(problems: list[dict], budget: int) -> list[dict]:
     return order[:budget]
 
 
-def releases() -> list[dict] | None:
-    """The scenario's release chain, or None while the service cannot answer."""
+def artifacts() -> list[dict] | None:
+    """The scenario's artifacts, newest first, or None while the service cannot answer."""
     request = urllib.request.Request(
-        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases", headers={"Authorization": f"Bearer {TOKEN}"}
+        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/artifacts", headers={"Authorization": f"Bearer {TOKEN}"}
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())["releases"]
+            return json.loads(response.read())["artifacts"]
     except (urllib.error.URLError, TimeoutError):
         return None
 
 
+def training_step_count() -> int | None:
+    """The scenario's training steps so far, or None while the service cannot answer.
+
+    The stream activates nothing and sets no training start, so each commit of the scenario is a training step.
+    """
+    request = urllib.request.Request(f"{SERVICE_URL}/reef/status", headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError):
+        return None
+    scenario = payload["scenarios"].get(SCENARIO)
+    return 0 if scenario is None else int(scenario["scenario_step"])
+
+
 def serving_release() -> str | None:
-    """The scenario's latest release id, so each record names the weights that served it."""
-    rows = releases()
-    return str(rows[-1]["release_id"]) if rows else None
+    """The release of the scenario's active artifact, so each record names the weights that served it."""
+    rows = artifacts()
+    return next((str(row["release_id"]) for row in rows or () if row["active"]), None)
 
 
 class TrainerPacer:
@@ -168,12 +183,11 @@ class TrainerPacer:
 
 
 def wait_for_training(expected: int) -> None:
-    """Block until ``expected`` training releases exist, so the last step is not cut off."""
+    """Block until ``expected`` training commits exist, so the last step is not cut off."""
     deadline = time.time() + TRAIN_DRAIN_TIMEOUT_S
     trained = None
     while time.time() < deadline:
-        rows = releases()
-        trained = None if rows is None else sum(1 for r in rows if r.get("operation") == "training")
+        trained = training_step_count()
         if trained is not None and trained >= expected:
             print(f"trained: {trained}/{expected} steps committed", flush=True)
             return

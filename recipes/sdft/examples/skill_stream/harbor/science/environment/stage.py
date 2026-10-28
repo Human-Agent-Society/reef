@@ -60,7 +60,7 @@ def main() -> None:
         f"({EPOCHS} epochs, seed {SEED}); service {skills.SERVICE_URL}, scenario {skills.SCENARIO}",
         flush=True,
     )
-    releases_before = skills.wait_for_training(0, TRAIN_TIMEOUT_S)
+    steps_before = skills.wait_for_training(0, TRAIN_TIMEOUT_S)
     print(f"[{TASK} step 0] judge: {submit(0)}", flush=True)
     for step, prompt_indices in enumerate(schedule, start=1):
         started = time.time()
@@ -75,7 +75,7 @@ def main() -> None:
         sampled = time.time()
         for (_, demonstration), (_, receipt, _) in zip(wave, outputs, strict=True):
             client.report(skills.SCENARIO, {"references": [receipt], "metadata": {"teacher_context": demonstration}})
-        releases = skills.wait_for_training(releases_before + step, TRAIN_TIMEOUT_S)
+        trained = skills.wait_for_training(steps_before + step, TRAIN_TIMEOUT_S)
         finished = time.time()
         print(
             json.dumps(
@@ -83,7 +83,7 @@ def main() -> None:
                     "task": TASK,
                     "step": step,
                     "steps": len(schedule),
-                    "training_releases": releases,
+                    "training_steps": trained,
                     "mean_completion_tokens": sum(tokens for _, _, tokens in outputs) / len(outputs),
                     "truncated": sum(1 for _, _, tokens in outputs if tokens >= MAX_TOKENS),
                     "sample_s": round(sampled - started, 1),
