@@ -244,7 +244,7 @@ _CONFIGURED_FIELDS = {
     "training_ready_timeout",
     "training_settings",
     "training_backend_options",
-    "evaluation_settings",
+    "activation_settings",
     "pipeline_settings",
 }
 
@@ -261,8 +261,8 @@ def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
 def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
-    # The pipeline section belongs to any recipe; the recipe reads it.
-    if unsupported or "training" in config or "evaluation" in config:
+    # The pipeline and activation sections belong to any recipe; the recipe reads them.
+    if unsupported or "training" in config:
         raise DeployConfigError(
             "select a weight-training recipe for training; Reef does not start custom process stacks"
         )

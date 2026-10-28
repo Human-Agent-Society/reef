@@ -127,8 +127,8 @@ def _training_recipe(
     # Resolve the recipe fields once before connecting its runtime.
     # Construction consumes those same resolved values.
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
-    if settings.evaluation_settings is not None:
-        recipe_config["evaluation"] = dict(settings.evaluation_settings)
+    if settings.activation_settings is not None:
+        recipe_config["activation"] = dict(settings.activation_settings)
     if settings.pipeline_settings is not None:
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
@@ -177,32 +177,24 @@ def composed_training_recipe(
         settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
-    framework_sections = {
-        key: value
-        for key, value in (
-            ("evaluation", settings.evaluation_settings),
-            ("pipeline", settings.pipeline_settings),
-        )
-        if value is not None
-    }
-    if framework_sections:
-        # The component that trains weights keeps these sections under its own config.
+    if settings.pipeline_settings is not None:
+        # The component that trains weights keeps the pipeline section under its own config.
         components = dict(config["components"])
         for name, section in components.items():
             if recipe_class_for(section["implementation"]) is weight_type:
-                components[name] = {**section, "config": {**section.get("config", {}), **framework_sections}}
+                components[name] = {
+                    **section,
+                    "config": {**section.get("config", {}), "pipeline": dict(settings.pipeline_settings)},
+                }
         config = {**config, "components": components}
+    if settings.activation_settings is not None:
+        # The composite activates the artifacts of all its components with one rule.
+        config = {**config, "activation": dict(settings.activation_settings)}
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_component=training_component)
     except BaseException:
         close_runtimes(training_component, runtime)
         raise
-
-
-def refuse_weight_training_sections(settings: ServiceConfig) -> None:
-    """Refuse the top-level section that only a recipe that trains weights reads."""
-    if settings.evaluation_settings is not None:
-        raise ValueError("the top-level evaluation section requires a weight-training recipe")
 
 
 def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
@@ -233,9 +225,10 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
             return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env)
-        refuse_weight_training_sections(settings)
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
+        if settings.activation_settings is not None:
+            config["activation"] = dict(settings.activation_settings)
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(
@@ -252,9 +245,10 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         except BaseException:
             close_runtimes(None, runtime)
             raise
-    refuse_weight_training_sections(settings)
-    if settings.pipeline_settings is not None:
-        raise ValueError(f"recipe {selected!r} is a preset: set its pipeline section in the preset file")
+    if settings.pipeline_settings is not None or settings.activation_settings is not None:
+        raise ValueError(
+            f"recipe {selected!r} is a preset: set its pipeline and activation sections in the preset file"
+        )
     return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
 
 

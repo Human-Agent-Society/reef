@@ -18,6 +18,7 @@ from tests.support.config_helpers import load_harness_deployment as load_config
 
 from reef.core.plugins import PluginReference
 from reef.dispatcher.ingest import training_request_refusal
+from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import FloorPlugin
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe import reefine
@@ -72,7 +73,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
     config = load_config(path)
     section = config["evolution"]
     assert section["requests"] is True and section["version_check"] is True
-    assert section["review_kinds"] == ["code_extension"]
+    assert config["activation"] == {"module": "always", "config": {"review_kinds": ["code_extension"]}}
     assert section["selection"] == "floor"
     assert config["data"]["training_mode"] == "manual"
     # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
@@ -101,7 +102,8 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, ReefineRecipe) and built.adapter == "pi"
-    assert built.review_kinds == ("code_extension",)
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
     # Manual mode needs a proposer that names requests, which Reefine does; the build refuses otherwise.
     assert built.training_mode == "manual" and built.propose.reads_requests
     assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0

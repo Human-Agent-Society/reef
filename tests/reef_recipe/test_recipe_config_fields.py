@@ -15,7 +15,7 @@ from tests.support._threshold_processor import ThresholdJobData, ThresholdSample
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.core.config import config_arguments
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
+from reef.evaluation.activation import AlwaysActivate
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import resolve_config_field_values
@@ -243,12 +243,14 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     stages = PipelineConfig.from_setting(
         {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
-    trainer = StagedRecipe(**runtime_bindings(), pipeline_stages=stages).build("scenario", SQLiteRecordStore())
+    recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)
+    trainer = recipe.build("scenario", SQLiteRecordStore())
 
     assert isinstance(trainer.pipeline.record2sample, ThresholdSamples)
     assert isinstance(trainer.pipeline.sample2job, ThresholdJobData)
     assert trainer.job_loop is not None
-    assert isinstance(trainer.job_loop.evaluator, AlwaysSelectCheckpointPlugin)
+    # With no activation section, every artifact that training makes serves.
+    assert isinstance(recipe.activation_rule(), AlwaysActivate)
     plan = trainer.job_loop.plan
     assert isinstance(plan, FixedJobPlan)
     request = plan.next_job(JobPlanContext(JobData("scenario:1"), 0, None))

@@ -20,10 +20,12 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.evaluation.harness import RolloutEvaluationWorker, ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
@@ -2402,8 +2404,8 @@ def test_recipe_parses_search_quality_config(tmp_path: Path, monkeypatch) -> Non
         CordisRecipe.from_environment({}, config=config(max_rejected_history=-1))
 
 
-def test_review_publish_holds_the_win_as_an_inactive_release_until_activated(tmp_path: Path) -> None:
-    """Under review a gate win is minted into the catalog but not served; an activation serves that release itself."""
+def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Path) -> None:
+    """The held tip's metadata names what served, so a restart that lost the history serves that, not the tip."""
     proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
     built = CordisRecipe(
         resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
@@ -2412,7 +2414,45 @@ def test_review_publish_holds_the_win_as_an_inactive_release_until_activated(tmp
         binary=str(make_binary(tmp_path)),
         seed=(SEED_MODELS, SEED_SETTINGS),
         runtime=runtime(),
-        publish="review",
+        activation=PluginReference(NeverActivate, {}),
+    )
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    try:
+        scenario = dispatcher.get_or_create_scenario("review")
+        served = scenario.current_artifact_ref()
+        _report_once(scenario, "review", "1")
+        result = scenario.prepare_training_step()
+        assert result is not None
+        scenario.commit(result)
+        tip = scenario.repository.require_checkpoint_artifact()
+        assert tip != served and scenario.current_artifact_ref() == served
+    finally:
+        dispatcher.close()
+
+    reopened = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    try:
+        recovered = reopened.get_or_create_scenario("review")
+        assert recovered.repository.require_checkpoint_artifact() == tip
+        assert recovered.current_artifact_ref() == served
+    finally:
+        reopened.close()
+
+
+def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path: Path) -> None:
+    """Under the never rule a kept tree is minted into the catalog but not served; an activation serves that release
+    itself."""
+    proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
+    built = CordisRecipe(
+        resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
+        resolve_rollout_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        runtime=runtime(),
+        activation=PluginReference(NeverActivate, {}),
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -2429,11 +2469,11 @@ def test_review_publish_holds_the_win_as_an_inactive_release_until_activated(tmp
         head_before = scenario.current_artifact_ref()
         _report_once(scenario, "review", "1")
         result = scenario.prepare_training_step()
-        assert result is not None and result.pending is True
+        assert result is not None and result.changed_kinds == {"rules"}
         scenario.commit(result)
 
         record = scenario.store.history()[-1]
-        assert record.operation == "training" and record.pending is True and record.checkpoint is True
+        assert record.operation == "training" and record.activated is False and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
         row = scenario.artifacts()[0]
         assert row["release_id"] == row["artifact_id"] == record.artifact_ref.release_id
@@ -2539,31 +2579,30 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         restarted.close()
 
 
-def test_review_kinds_hold_only_wins_that_touch_a_listed_kind(tmp_path: Path) -> None:
-    def build(**options):
-        return CordisBackend(
-            descriptor=get_adapter("pi"),
-            propose=resolve_proposer(
-                lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
-            ),
-            score_rollout=resolve_rollout_scorer(evaluate),
-            tasks=("task one",),
-            models=MODEL,
-            binary=str(make_binary(tmp_path)),
-            **options,
-        )
-
-    held = build(review_kinds=("rules",))
-    assert run_backend_step(held, batch(), held.initial_state()).pending is True
-    free = build(review_kinds=("skill",))
-    assert run_backend_step(free, batch(), free.initial_state()).pending is False
-    reviewed = build(publish="review")
-    assert run_backend_step(reviewed, batch(), reviewed.initial_state()).pending is True
-    with pytest.raises(ValueError, match="publish must be 'auto' or 'review'"):
-        build(publish="staged")
+def test_review_kinds_hold_only_kept_trees_that_touch_a_listed_kind(tmp_path: Path) -> None:
+    """A kept tree names the kinds it changes; the always rule holds it only when one of them is reviewed."""
+    backend = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_rollout=resolve_rollout_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+    )
+    result = run_backend_step(backend, batch(), backend.initial_state())
+    assert result.artifact is not None and result.changed_kinds == {"rules"}
+    made = MadeArtifact(None, result.changed_kinds)
+    assert AlwaysActivate().activates(made)
+    assert not AlwaysActivate(frozenset({"rules"})).activates(made)
+    assert AlwaysActivate(frozenset({"skill"})).activates(made)
+    assert not NeverActivate().activates(made)
 
 
-def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
+def test_recipe_parses_the_activation_section_and_refuses_the_retired_publish_options(
+    tmp_path: Path, monkeypatch
+) -> None:
     module = tmp_path / "demo_publish.py"
     module.write_text(
         "from reef.evaluation.harness import RolloutScorer\n"
@@ -2575,8 +2614,8 @@ def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
-    def config(**evolution):
-        return {
+    def config(activation=None, **evolution):
+        settings = {
             "evolution": {
                 "propose": "demo_publish:Propose",
                 "evaluate": "demo_publish:Evaluate",
@@ -2585,15 +2624,23 @@ def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
                 **evolution,
             }
         }
+        if activation is not None:
+            settings["activation"] = activation
+        return settings
 
-    on = CordisRecipe.from_environment({}, config=config(publish="review", review_kinds=["code_extension"]))
-    assert on.publish == "review" and on.review_kinds == ("code_extension",)
-    off = CordisRecipe.from_environment({}, config=config())
-    assert off.publish == "auto" and off.review_kinds == ()
-    with pytest.raises(RecipeConfigError, match="publish must be 'auto' or 'review'"):
-        CordisRecipe.from_environment({}, config=config(publish="staged"))
+    reviewed = CordisRecipe.from_environment(
+        {}, config=config({"module": "always", "config": {"review_kinds": ["code_extension"]}})
+    ).activation_rule()
+    assert isinstance(reviewed, AlwaysActivate) and reviewed.review_kinds == {"code_extension"}
+    default = CordisRecipe.from_environment({}, config=config()).activation_rule()
+    assert isinstance(default, AlwaysActivate) and default.review_kinds == frozenset()
+    never = CordisRecipe.from_environment({}, config=config({"module": "never"})).activation_rule()
+    assert isinstance(never, NeverActivate)
     with pytest.raises(RecipeConfigError, match="review_kinds must be a list"):
-        CordisRecipe.from_environment({}, config=config(review_kinds="rules"))
+        CordisRecipe.from_environment({}, config=config({"module": "always", "config": {"review_kinds": "rules"}}))
+    for retired in ({"publish": "review"}, {"review_kinds": ["code_extension"]}):
+        with pytest.raises(RecipeConfigError, match="is gone: the activation section"):
+            CordisRecipe.from_environment({}, config=config(**retired))
 
 
 def test_activate_http_route_serves_an_inactive_release(tmp_path: Path) -> None:
@@ -2605,7 +2652,7 @@ def test_activate_http_route_serves_an_inactive_release(tmp_path: Path) -> None:
         binary=str(make_binary(tmp_path)),
         seed=(SEED_MODELS, SEED_SETTINGS),
         runtime=runtime(),
-        publish="review",
+        activation=PluginReference(NeverActivate, {}),
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -2649,14 +2696,15 @@ def test_activate_http_route_serves_an_inactive_release(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_pending_requires_durable_bytes() -> None:
-    """Only a step with bytes to activate later can ask to be held back, so a
-    no-artifact step is refused where it is built."""
-    assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
-    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
-        TrainStepResult({}, {}, pending=True)
-    with pytest.raises(ValueError, match="pending must be a boolean"):
-        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
+def test_changed_kinds_describe_published_bytes() -> None:
+    """Only a step that publishes bytes changes node kinds, so a no-artifact step with kinds is refused where it is
+    built."""
+    published = TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds=frozenset({"rules"}))
+    assert published.changed_kinds == {"rules"}
+    with pytest.raises(ValueError, match="changed_kinds describe the artifact a step publishes"):
+        TrainStepResult({}, {}, changed_kinds=frozenset({"rules"}))
+    with pytest.raises(ValueError, match="changed_kinds must be a frozenset"):
+        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds={"rules"})
 
 
 def test_a_kind_the_adapter_does_not_render_refuses_the_seed_and_the_recovered_state(tmp_path: Path) -> None:

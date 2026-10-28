@@ -37,7 +37,9 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.core.components import validate_component_name
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
+from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
@@ -198,6 +200,13 @@ class CompositeRecipe(Recipe):
         values = dict(field_values)
         if configured_mode is None:
             values["training_mode"] = next(iter(modes))
+        if config.get("activation") is not None:
+            # One rule activates the artifacts of every component.
+            try:
+                values["activation"] = activation_reference(config["activation"])
+                build_activation_rule(values["activation"])
+            except PluginConfigError as exc:
+                raise RecipeConfigError(str(exc)) from exc
         try:
             return cls(components=components, runtime=runtime, training_component=training_component, **values)
         except ValueError as exc:

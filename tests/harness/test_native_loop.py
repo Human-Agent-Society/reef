@@ -33,7 +33,9 @@ from tests.harness.test_native_serve import (
 from tests.reef_service.test_harness_recipe import MODEL, batch, run_backend_step
 from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
+from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
+from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import RolloutEvaluationWorker
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import Context, FiberState
@@ -534,29 +536,32 @@ def _backend(tmp_path: Path, propose, score=_score, **options) -> CordisBackend:
     )
 
 
-def test_a_win_that_creates_a_loop_is_pending_whatever_review_kinds_lists(tmp_path: Path) -> None:
+def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_lists(tmp_path: Path) -> None:
+    """A kept tree names the kinds it changes; the always rule holds a loop change whatever review_kinds lists."""
     loop = Mutation("create", "loop", {"name": "native_loop", "config": LOOP[1]})
     skill = Mutation("create", "s1", {"name": "skill", "config": {"name": "marker", "text": "# marker"}})
+    default, skill_reviewed = AlwaysActivate(), AlwaysActivate(frozenset({"skill"}))
     held = _backend(tmp_path, lambda n, s, m: loop)
-    result = run_backend_step(held, batch(), held.initial_state())
-    assert result.metrics["selected"] is True and result.pending is True
+    with_loop = run_backend_step(held, batch(), held.initial_state())
+    assert with_loop.metrics["selected"] is True and with_loop.changed_kinds == {"native_loop"}
+    # A list that names another kind holds the loop just the same.
+    assert not default.activates(MadeArtifact(None, with_loop.changed_kinds))
+    assert not skill_reviewed.activates(MadeArtifact(None, with_loop.changed_kinds))
+    assert with_loop.state is not None and "loop" in [entry["id"] for entry in with_loop.state["entries"]]
     free = _backend(tmp_path, lambda n, s, m: skill)
     result = run_backend_step(free, batch(), free.initial_state())
-    assert result.metrics["selected"] is True and result.pending is False
-    listed = _backend(tmp_path, lambda n, s, m: skill, review_kinds=("skill",))
-    assert run_backend_step(listed, batch(), listed.initial_state()).pending is True
-    # A list that names another kind holds the loop just the same, and so does the step that takes the loop out.
-    unlisted = _backend(tmp_path, lambda n, s, m: loop, review_kinds=("skill",))
-    with_loop = run_backend_step(unlisted, batch(), unlisted.initial_state())
-    assert with_loop.metrics["selected"] is True and with_loop.pending is True
-    assert with_loop.state is not None and "loop" in [entry["id"] for entry in with_loop.state["entries"]]
+    assert result.metrics["selected"] is True and result.changed_kinds == {"skill"}
+    assert default.activates(MadeArtifact(None, result.changed_kinds))
+    assert not skill_reviewed.activates(MadeArtifact(None, result.changed_kinds))
+    # The step that takes the loop out changes it too.
     without = _backend(
         tmp_path,
         lambda n, s, m: Mutation("remove", "loop"),
         score=lambda task, result: 0.0 if result.trajectory[0]["data"].get("loop") else 1.0,
     )
     removed = run_backend_step(without, batch(), with_loop.state)
-    assert removed.metrics["selected"] is True and removed.pending is True
+    assert removed.metrics["selected"] is True and removed.changed_kinds == {"native_loop"}
+    assert not default.activates(MadeArtifact(None, removed.changed_kinds))
     assert removed.state is not None and "loop" not in [entry["id"] for entry in removed.state["entries"]]
 
 

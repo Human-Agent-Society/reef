@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
+from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
@@ -313,7 +314,8 @@ class ScenarioCommitter:
                     self._step + 1, served, selected.component, release.component(selected.component)
                 )
                 manifest = self.release_manifest(staged)
-                # Published beside the chain, as an inactive release is: the chain tip and the backend head stay.
+                # Published beside the chain, as an artifact that is not activated is: the chain tip and the backend
+                # head stay.
                 published_ref = self._artifacts.publish(
                     staged,
                     expected_parent=self._artifacts.checkpoint,
@@ -415,12 +417,13 @@ class ScenarioCommitter:
             if result is None:
                 return None
             publication = result.publication
-            if not isinstance(publication, SavedArtifactPublication) or result.pending or result.state is None:
+            if not isinstance(publication, SavedArtifactPublication) or result.state is None:
                 raise ReefError("a shipped content update must publish durable bytes at once, with its state")
             prepared = replace(
                 trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
             )
-            self.commit_saved_artifact(result, publication, prepared, trainer, component)
+            # The content that this Reef ships replaces the served tree whatever the activation rule says.
+            self.commit_saved_artifact(publication, prepared, trainer, component, activated=True)
             trainer.apply_committed_state(result.state)
             return self._artifacts.current
 
@@ -445,7 +448,12 @@ class ScenarioCommitter:
                 result = self.prepare_experiment(result, trainer, next_step, component)
             with self._publication_lock:
                 prepared = trainer.prepare_commit(result)
-                recorded = self.recorded_retry(prepared, next_step, pending=result.pending, component=component)
+                # The activation rule decides whether the artifact that the step publishes serves; the training
+                # record says whether it did.
+                activated = not isinstance(result.publication, NoArtifactPublication) and (
+                    self._binding.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
+                )
+                recorded = self.recorded_retry(prepared, next_step, activated=activated, component=component)
                 if recorded is not None:
                     self.finish_recorded_retry(recorded, prepared, trainer)
                     return result.state
@@ -457,7 +465,7 @@ class ScenarioCommitter:
                     self.commit_without_artifact(prepared, trainer, component)
                     return result.state
 
-                self.commit_saved_artifact(result, publication, prepared, trainer, component)
+                self.commit_saved_artifact(publication, prepared, trainer, component, activated=activated)
                 return result.state
 
     def prepare_experiment(
@@ -508,7 +516,6 @@ class ScenarioCommitter:
         return result
 
     def commit_without_artifact(self, prepared: PreparedCommit, trainer: Trainer, component: str | None) -> None:
-        # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
         record = self._append_commit_record(
             step=next_step,
@@ -523,42 +530,53 @@ class ScenarioCommitter:
 
     def commit_saved_artifact(
         self,
-        result: TrainStepResult,
         publication: SavedArtifactPublication,
         prepared: PreparedCommit,
         trainer: Trainer,
         component: str | None,
+        *,
+        activated: bool,
     ) -> None:
+        """Publish a training step's artifact on the chain and record it; when ``activated``, serve it too.
+
+        Every artifact that training makes becomes the chain tip, the parent of the next publication. Only an
+        ``activated`` one becomes the active artifact; any other waits for an activation.
+        """
         artifacts = self._artifacts
         next_step = self._step + 1
         checkpoint = artifacts.checkpoint
         head = artifacts.current
-        pending = result.pending
         durable = self._store.durable
         if publication.component is None:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # A pending release is recorded as an inactive artifact and moves no head.
             # The engine must confirm the new revision before anything moves
             # the active release: the staged bytes load first, and the version
             # minted by publication then aliases them.
-            if not pending:
+            if activated:
                 self._activate(local_artifact)
             published_ref = artifacts.publish(
                 local_artifact,
                 expected_parent=checkpoint,
-                metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
-                advance_heads=not pending and not durable,
+                metadata=self.release_metadata(
+                    local_artifact,
+                    prepared,
+                    next_step,
+                    component=component,
+                    active_artifact=None if activated else head,
+                ),
+                advance_heads=not durable,
+                activate=activated,
             )
-            if not pending:
+            if activated:
                 self._activate(artifacts.resolve(published_ref), source=local_artifact)
             record = self._append_commit_record(
                 step=next_step,
                 artifact_ref=published_ref,
                 checkpoint=True,
                 prepared=prepared,
-                pending=pending,
+                activated=activated,
                 component=component,
                 components=self.recorded_components(local_artifact),
             )
@@ -578,6 +596,7 @@ class ScenarioCommitter:
         scenario_step: int,
         *,
         component: str | None = None,
+        active_artifact: ArtifactRef | None = None,
     ) -> dict[str, Any]:
         """The metadata a committed release carries.
 
@@ -598,6 +617,7 @@ class ScenarioCommitter:
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
             component=self.component_on_record(component),
+            active_artifact=active_artifact,
         )
         return {
             **dict(artifact.metadata),
@@ -606,10 +626,12 @@ class ScenarioCommitter:
         }
 
     def _install_committed_checkpoint(
-        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
     ) -> None:
         """Install the refs already committed in the store, then synchronize artifact storage."""
-        self._artifacts.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+        self._artifacts.install_checkpoint(
+            ref, expected=expected, expected_checkpoint=expected_checkpoint, activate=activate
+        )
         self._refresh_committed_checkpoint()
 
     def _refresh_committed_checkpoint(self) -> None:
@@ -697,16 +719,20 @@ class ScenarioCommitter:
 
         Install heads and settle the trainer before advancing the scenario step.
         Failed completion retries the same record. A step that made no
-        artifact records the active one, and a pending artifact is not
-        activated: neither moves a head.
+        artifact records the active one and moves no head. A made artifact
+        becomes the chain tip, and the active artifact when the record says
+        that the activation rule ``activated`` it.
         """
-        if record.made_artifact and not record.pending:
-            if self._artifacts.current == record.artifact_ref:
+        if record.made_artifact:
+            if self._artifacts.checkpoint == record.artifact_ref:
                 if self._store.durable:
                     self._refresh_committed_checkpoint()
             else:
                 self._install_committed_checkpoint(
-                    record.artifact_ref, expected=expected, expected_checkpoint=expected_checkpoint
+                    record.artifact_ref,
+                    expected=expected,
+                    expected_checkpoint=expected_checkpoint,
+                    activate=record.activated,
                 )
         trainer.commit_applied(prepared.algorithm_state)
         trainer.commit(prepared)
@@ -730,7 +756,7 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         next_step: int,
         *,
-        pending: bool = False,
+        activated: bool,
         component: str | None = None,
     ) -> CommitRecord | None:
         """The training record an earlier attempt of this commit left at ``next_step``, or ``None`` when there is none."""
@@ -739,7 +765,7 @@ class ScenarioCommitter:
             return None
         record = records[-1]
         if (
-            record.pending != pending
+            record.activated != (activated and record.made_artifact)
             or not self.own_record(record, self.component_on_record(component))
             or not self._record_matches_prepared(record, prepared)
         ):
@@ -792,7 +818,7 @@ class ScenarioCommitter:
         artifact_ref: ArtifactRef,
         checkpoint: bool,
         prepared: PreparedCommit,
-        pending: bool = False,
+        activated: bool = False,
         component: str | None = None,
         components: Mapping[str, str] | None = None,
     ) -> CommitRecord:
@@ -801,7 +827,7 @@ class ScenarioCommitter:
             step=step,
             artifact_ref=artifact_ref,
             checkpoint=checkpoint,
-            pending=pending,
+            activated=activated,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,

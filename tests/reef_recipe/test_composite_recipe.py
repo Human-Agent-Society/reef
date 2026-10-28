@@ -19,9 +19,11 @@ from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError, UnknownScenario
+from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
@@ -270,7 +272,7 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     from tests.support._training_deployment import LocalRuntime
 
     from reef.service.assembly import _serving_recipe
-    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 
     settings = service_config_from_mapping(
         {
@@ -304,20 +306,26 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
         _serving_recipe("reef.recipe.composite:CompositeRecipe", stray, {})
 
-    # A top level evaluation section reaches the component that trains: it is that component which parses it.
-    evaluated = service_config_from_mapping(
-        {
-            "reef": {
-                "recipe": "reef.recipe.composite:CompositeRecipe",
-                "model_path": "demo-model",
-                "training_backend": _LOCAL_TRAINING,
-                "components": _WEIGHTS_AND_HARNESS,
-            },
-            "evaluation": {"module": "no.such.module:Factory"},
-        }
-    )
-    with pytest.raises(RecipeConfigError, match=r"cannot import evaluation 'no\.such\.module:Factory'"):
-        _serving_recipe("reef.recipe.composite:CompositeRecipe", evaluated, {})
+    # A top level activation section is the composite's own: one rule activates the artifacts of every component.
+    def with_activation(activation: Mapping[str, Any]) -> ServiceConfig:
+        return service_config_from_mapping(
+            {
+                "reef": {
+                    "recipe": "reef.recipe.composite:CompositeRecipe",
+                    "model_path": "demo-model",
+                    "training_backend": _LOCAL_TRAINING,
+                    "components": _WEIGHTS_AND_HARNESS,
+                },
+                "activation": activation,
+            }
+        )
+
+    never = _serving_recipe("reef.recipe.composite:CompositeRecipe", with_activation({"module": "never"}), {})
+    assert isinstance(never.activation_rule(), NeverActivate)
+    with pytest.raises(RecipeConfigError, match=r"cannot import activation 'no\.such\.module:Rule'"):
+        _serving_recipe(
+            "reef.recipe.composite:CompositeRecipe", with_activation({"module": "no.such.module:Rule"}), {}
+        )
 
 
 @pytest.mark.unit
@@ -1142,7 +1150,9 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
                 label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}, checks=checks
             ),
             "config": _UnseededConfigRecipe(),
-        }
+        },
+        # A step that changes the "held" kind waits for a person to activate it.
+        activation=PluginReference(AlwaysActivate, {"review_kinds": ["held"]}),
     )
     dispatcher = _serve(composite, tmp_path / "svc")
     try:
@@ -1159,7 +1169,8 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
         assert checks.count == 0
         head = scenario.current_artifact_ref()
         scenario.commit(
-            TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), pending=True), component="harness"
+            TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), changed_kinds=frozenset({"held"})),
+            component="harness",
         )
         assert scenario.current_artifact_ref() == head
         held = scenario.store.history()[-1].artifact_ref.release_id

@@ -40,6 +40,7 @@ from reef.storage.commits import (
     active_artifact_ref,
     parse_scenario_metadata,
     scenario_metadata_for,
+    served_artifact_ref,
 )
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import Surface
@@ -299,6 +300,8 @@ class ScenarioFactory:
         )
         if registered_name != name:
             raise ValueError(f"scenario metadata is for {registered_name!r}, not {name!r}")
+        # What served after the artifact head's commit; the commit history's activations come after it.
+        served_at_head = served_artifact_ref(registration, checkpoint_head=checkpoint_head)
         base_artifact = backend.resolve_release(base_artifact.release_id)
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
         self._validate_release_selector(
@@ -322,15 +325,13 @@ class ScenarioFactory:
             # two leaves the commit history's checkpoint ahead of that pointer.
             if store.durable:
                 checkpoints = [
-                    record
-                    for record in store.history()
-                    if record.made_artifact and not record.pending and record.step >= checkpoint_step
+                    record for record in store.history() if record.made_artifact and record.step >= checkpoint_step
                 ]
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].artifact_ref
             # The active artifact is the newest activation in the log; the chain tip, the parent of the next
-            # publication, stays the checkpoint. Without a durable log the tip is the only artifact on record.
-            current_artifact = active_artifact_ref(committed_records(store, head_record), checkpoint_head)
+            # publication, stays the checkpoint. Without a durable log, the artifact head's metadata names it.
+            current_artifact = active_artifact_ref(committed_records(store, head_record), served_at_head)
 
             repository = Repository(
                 backend,
@@ -390,6 +391,7 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_component=recipe.training_component,
                     inference_handler=recipe.inference_handler,
+                    activation_rule=recipe.activation_rule(),
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
                     report_type=recipe.report_type,

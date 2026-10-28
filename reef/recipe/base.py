@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
-from reef.core.plugins import PluginConfigError
+from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
-from reef.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
+from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -99,6 +99,8 @@ class Recipe:
     training_mode: str = config_field("auto")
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
     pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
+    #: The deployment's ``activation`` section: the rule that activates new artifacts; None is ``always``.
+    activation: PluginReference | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):
@@ -110,6 +112,13 @@ class Recipe:
     def pipeline_spec(cls) -> PipelineSpec:
         """The recipe's default stage classes. The default passes records through and makes no job data."""
         return PipelineSpec()
+
+    def activation_rule(self) -> ActivationRule:
+        """The rule that decides whether an artifact that the recipe's trainers make serves (``activation``)."""
+        try:
+            return build_activation_rule(self.activation)
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc
 
     def stages(self) -> PipelineConfig:
         """The pipeline's stage classes and their configs."""
@@ -189,14 +198,24 @@ class Recipe:
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        """Recipe-specific keyword arguments resolved from config sections: the ``pipeline`` section's stages."""
+        """Recipe-specific keyword arguments resolved from config sections: the ``pipeline`` section's stages and
+        the ``activation`` section's rule."""
+        kwargs: dict[str, Any] = {}
         pipeline = settings.get("pipeline")
-        if pipeline is None:
-            return {}
+        activation = settings.get("activation")
         try:
-            return {"pipeline_stages": PipelineConfig.from_setting(pipeline, spec=cls.pipeline_spec(), environ=values)}
+            if pipeline is not None:
+                kwargs["pipeline_stages"] = PipelineConfig.from_setting(
+                    pipeline, spec=cls.pipeline_spec(), environ=values
+                )
+            if activation is not None:
+                reference = activation_reference(activation)
+                # Build it once here, so a bad rule config fails the deployment, not the first scenario.
+                build_activation_rule(reference)
+                kwargs["activation"] = reference
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        return kwargs
 
     @classmethod
     def select_weight_training(
@@ -405,12 +424,6 @@ class WeightTrainingRecipe(Recipe):
     deployment config and obtains its loss family from this hook; deployments
     do not repeat that binding in an environment variable.
 
-    ``candidate_evaluation`` is framework-owned configuration derived from an
-    optional top-level ``evaluation`` section. The plugin class it names builds one
-    candidate evaluator per scenario with ``from_config``, replacing the backend's default
-    metrics-only evaluator and selection policy without changing the recipe's
-    method-specific config fields.
-
     ``pipeline_stages`` is framework-owned configuration derived from an
     optional top-level ``pipeline`` section: each stage's class, the recipe's
     :meth:`pipeline_spec` unless the section names another, and its config.
@@ -424,7 +437,6 @@ class WeightTrainingRecipe(Recipe):
 
     training_component: TrainingComponent = field(kw_only=False)
     runtime: InferenceRuntime = field(kw_only=True)
-    candidate_evaluation: CandidateEvaluationConfig | None = field(default=None, repr=False, compare=False)
     job_parameters: Mapping[str, Any] | None = config_field(
         None,
         help=(
@@ -530,16 +542,7 @@ class WeightTrainingRecipe(Recipe):
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
         cls._validate_config(settings)
-        kwargs = super()._recipe_kwargs(settings, values)
-        evaluation = settings.get("evaluation")
-        if evaluation is not None:
-            if not isinstance(evaluation, Mapping):
-                raise RecipeConfigError("evaluation must be an object")
-            try:
-                kwargs["candidate_evaluation"] = CandidateEvaluationConfig.from_dict(evaluation, environ=values)
-            except CandidateEvaluationConfigError as exc:
-                raise RecipeConfigError(str(exc)) from exc
-        return kwargs
+        return super()._recipe_kwargs(settings, values)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:
@@ -597,23 +600,13 @@ class WeightTrainingRecipe(Recipe):
             )
         # Resolve the objective before starting workers, so an unknown reference fails the build.
         resolve_objective(spec.objective)
-        evaluator = (
-            AlwaysSelectCheckpointPlugin()
-            if self.candidate_evaluation is None
-            else build_candidate_evaluation(self.candidate_evaluation, runtime=self.runtime, scenario=scenario)
-        )
         # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
         try:
             return Trainer.build(
                 scenario,
                 records,
                 pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(
-                    self.training_component,
-                    self.job_plan(),
-                    evaluator,
-                    scenario=scenario,
-                ),
+                job_loop=JobLoop(self.training_component, self.job_plan(), scenario=scenario),
                 algorithm_state=algorithm_state,
                 report_type=self.report_type,
                 experiment_logger=experiment_logger,

@@ -18,6 +18,7 @@ from tests.support._threshold_processor import threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 from tests.support.component_trainers import (
     HARNESS,
+    HELD,
     WEIGHTS,
     HybridThresholdJobData,
     JudgedAtOnce,
@@ -1159,7 +1160,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     _append_records(scenario, 4)
     backends[WEIGHTS].hold_next = True
     weights = scenario.prepare_training_step(WEIGHTS)
-    assert weights is not None and weights.pending
+    assert weights is not None and weights.changed_kinds == {HELD}
     scenario.commit(weights, component=WEIGHTS)
     held = scenario.store.history()[-1].artifact_ref.release_id
     _append_records(scenario, 5)
@@ -1268,7 +1269,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
     creation = scenario.current_artifact_ref().release_id
     _append_records(scenario, 1)
     weights = scenario.prepare_training_step(WEIGHTS)
-    assert weights is not None and weights.pending
+    assert weights is not None and weights.changed_kinds == {HELD}
     scenario.commit(weights, component=WEIGHTS)
     held = scenario.store.history()[-1].artifact_ref.release_id
     scenario.activate(f"{held}:{WEIGHTS}", WEIGHTS)
@@ -1457,14 +1458,14 @@ def test_a_surface_built_with_the_flat_keywords_serves_one_component() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("held", [False, True])
 def test_recorded_release_survives_backend_completion_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers, pending: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers, held: bool
 ) -> None:
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher, 1)
     backend = backends[HARNESS]
-    backend.hold_next = pending
+    backend.hold_next = held
     original_head = scenario.current_artifact_ref()
     result = scenario.prepare_training_step(HARNESS)
     assert result is not None
@@ -1479,7 +1480,8 @@ def test_recorded_release_survives_backend_completion_failure(
         with pytest.raises(OSError, match="backend completion unavailable"):
             scenario.commit(result, component=HARNESS)
     (record,) = scenario.store.history()
-    expected_head = original_head if pending else record.artifact_ref
+    assert record.activated is not held
+    expected_head = original_head if held else record.artifact_ref
     assert scenario.current_artifact_ref() == expected_head
     assert scenario.scenario_step == 0
     assert trainer.state == original_state

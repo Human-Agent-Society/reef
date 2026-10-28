@@ -1254,12 +1254,12 @@ explains how to go back to an older one for good.
 Inactive artifacts
 ~~~~~~~~~~~~~~~~~~
 
-With ``evolution.publish: review``, the step makes the winning tree as a
-release but does not activate it. When a successful evaluation touches a node
-kind listed in ``evolution.review_kinds``, the step does the same. Its row
-carries ``active: false`` and ``activated: false``. The manifest and install
-routes keep serving the active release, and ``?release_id=`` can pull the
-inactive tree for a trial install. To make it serve, send the row's
+When the deployment's activation rule does not activate a new tree, for
+example a tree that touches a node kind in the ``always`` rule's
+``review_kinds``, the step makes the tree as a release but does not activate
+it. Its row carries ``active: false`` and ``activated: false``. The manifest
+and install routes keep serving the active release, and ``?release_id=`` can
+pull the inactive tree for a trial install. To make it serve, send the row's
 ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.
 
 In a scenario with several components, ``GET /reef/harness/releases``, the
@@ -1635,17 +1635,16 @@ query parameter to filter commits whose recorded ``consumed_ids`` contain
 any requested ID (at most 100 IDs of 1–256 characters). This is exact set
 membership, not an eligibility decision. Each row exposes ``step``,
 ``operation``, ``operation_verified``, ``recorded_at``, ``artifact_ref``,
-``pending``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
+``activated``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
 private checkpoint recovery data are excluded. Commit metadata remains
 available when trace bodies expire.
 
 ``operation`` is one of three values:
 
 - ``training``: a training step. ``artifact_ref`` is the release the step
-  made, or the active release when the step made none. ``pending`` is true
-  for an artifact that the step made but did not activate. The field keeps
-  this name until the activation rule moves out of training (RFC #965,
-  step 3).
+  made, or the active release when the step made none. ``activated`` is true
+  when the activation rule activated the artifact that the step made; it is
+  false for every other row.
 - ``activate``: an activation. ``artifact_ref`` is the release that serves
   afterwards.
 - ``train_from``: a new training start. ``artifact_ref`` names the artifact

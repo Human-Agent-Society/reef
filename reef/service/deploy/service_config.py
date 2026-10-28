@@ -298,10 +298,10 @@ class ServiceConfig:
             "Training settings as a JSON/YAML object.", path=("training",), public_path=("training", "config")
         ),
     )
-    #: Optional pre-publication checkpoint evaluator and selection plugin.
-    evaluation_settings: Mapping[str, Any] | None = field(
+    #: The rule that activates the artifacts that training makes, for any recipe.
+    activation_settings: Mapping[str, Any] | None = field(
         default=None,
-        metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
+        metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
     )
     #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
@@ -410,7 +410,7 @@ SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
     non_reef_fields = {
-        "evaluation_settings",
+        "activation_settings",
         "generator_settings",
         "pipeline_settings",
         "tracing_config",

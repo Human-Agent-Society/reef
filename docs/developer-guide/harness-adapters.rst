@@ -944,9 +944,10 @@ startup, and its ``listen`` function runs at its event. It can call
 loop. Under ``sandbox``, the loop process is the rollout jail, with a
 writable workspace and session directory, network access to the model
 endpoint, and the executor's base directories and shells. Under ``local``,
-it is the host. Use ``review_kinds: [native_hook]`` to require review before
-publishing hook changes. Under ``local``, tools also run without confinement;
-include ``native_tool`` in ``review_kinds`` when reviewing those changes.
+it is the host. List ``native_hook`` in the ``always`` activation rule's
+``review_kinds`` to require review before hook changes serve. Under
+``local``, tools also run without confinement; list ``native_tool`` there
+too when reviewing those changes.
 
 ``reef.harness.runners.native.seed.SEED_TOOLS`` provides the starting
 ``read_file``, ``write_file``, ``run_bash``, and ``execute`` entries. A recipe
@@ -1246,8 +1247,9 @@ The session header's ``loop`` names the loop that ran, or is null under a
 graph. In serve mode, it names the loop used on the session's first turn.
 ``graph`` still names the graph available to subagents. Loop code runs
 with the loop process's privileges. For that reason, ``native_loop``
-changes always require review: a selected change stays inactive regardless
-of ``review_kinds``, and ``harness_try`` refuses to mount it.
+changes always require review: the ``always`` activation rule leaves a
+selected change inactive whatever its ``review_kinds`` lists, and
+``harness_try`` refuses to mount it.
 
 Native trajectory
 ~~~~~~~~~~~~~~~~~
@@ -1983,9 +1985,9 @@ trees like any other new active release.
 
 An evolved extension runs in pi's process with the user's privileges.
 Admission screens its text only for credential-shaped literals. The pi
-tutorial deployment therefore sets
-``evolution.review_kinds: [code_extension]`` alongside ``requests: true``
-and ``version_check: true``. A selected release that changes an extension
+tutorial deployment therefore sets an ``always`` activation rule with
+``review_kinds: [code_extension]``, alongside ``evolution.requests: true``
+and ``evolution.version_check: true``. A selected release that changes an extension
 stays inactive until a person reviews and activates it.
 
 ``propose`` receives the request's ``requires`` list beside its text.

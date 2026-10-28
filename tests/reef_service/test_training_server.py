@@ -13,12 +13,14 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support._activation_rule_plugin import ComponentRule
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.jobs import JobStatus, TrainingJob
@@ -145,15 +147,12 @@ def test_service_config_preserves_inference_handler_config() -> None:
 
 
 @pytest.mark.unit
-def test_service_config_preserves_candidate_evaluation_section() -> None:
-    evaluation = {
-        "module": "cookbook.evaluation:CheckpointFactory",
-        "config": {"threshold": 0.8},
-    }
+def test_service_config_preserves_the_activation_section() -> None:
+    activation = {"module": "evaluated", "config": {"min_mean_score": 0.8}}
 
-    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": activation})
 
-    assert args.evaluation_settings == evaluation
+    assert args.activation_settings == activation
 
 
 @pytest.mark.unit
@@ -170,9 +169,9 @@ def test_service_config_reads_the_pipeline_section() -> None:
 
 
 @pytest.mark.unit
-def test_service_config_rejects_non_object_evaluation_section() -> None:
-    with pytest.raises(ValueError, match="evaluation must be an object"):
-        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": "disabled"})
+def test_service_config_rejects_non_object_activation_section() -> None:
+    with pytest.raises(ValueError, match="activation must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": "never"})
 
 
 @pytest.mark.unit
@@ -422,44 +421,47 @@ def test_a_sample2job_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) 
 
 
 @pytest.mark.unit
-def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("recipe", "activation", "rule_type"),
+    [
+        (
+            OPENCLAWRL_RECIPE,
+            {"module": "tests.support._activation_rule_plugin:ComponentRule", "config": {"component": "weights"}},
+            ComponentRule,
+        ),
+        # A recipe that trains no weights reads the section too.
+        ("reef.recipe.base:Recipe", {"module": "never"}, NeverActivate),
+    ],
+)
+def test_build_dispatcher_hands_the_activation_section_to_the_recipe(
+    monkeypatch, tmp_path, recipe, activation, rule_type
+) -> None:
     monkeypatch.setattr(
         GitLFSRepositoryBackendFactory,
         "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
-    evaluation = {
-        "module": "tests.support._candidate_evaluation_plugin:CheckpointEvaluator",
-        "config": {"score": 1.0, "threshold": 0.0},
-    }
 
     dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe=OPENCLAWRL_RECIPE,
-            evaluation_settings=evaluation,
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={"EVALUATION_TOKEN": "secret"},
+        _settings(recipe=recipe, activation_settings=activation, agent_record_dir=str(tmp_path / "agent-record"))
     )
 
-    recipe = dispatcher.recipe
-    assert recipe.candidate_evaluation is not None
-    assert recipe.candidate_evaluation.plugin.plugin_class.__name__ == evaluation["module"].rpartition(":")[2]
+    assert isinstance(dispatcher.recipe.activation_rule(), rule_type)
 
 
 @pytest.mark.unit
-def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_refuses_an_activation_section_for_a_preset(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         GitLFSRepositoryBackendFactory,
         "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
-    with pytest.raises(ValueError, match="evaluation section requires a weight-training recipe"):
+    with pytest.raises(ValueError, match="set its pipeline and activation sections in the preset file"):
         deploy.build_dispatcher(
             _settings(
                 recipe="recipe",
-                evaluation_settings={"module": "cookbook.evaluation:CheckpointFactory"},
+                activation_settings={"module": "never"},
                 agent_record_dir=str(tmp_path / "agent-record"),
             )
         )
@@ -507,7 +509,7 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
         # A recipe that trains no weights reads the section too, and refuses the same mistake.
         ("reef.recipe.base:Recipe", RecipeConfigError, "must name a class that inherits Record2Sample"),
         # A preset sets its pipeline section in its own file.
-        ("recipe", ValueError, "set its pipeline section in the preset file"),
+        ("recipe", ValueError, "set its pipeline and activation sections in the preset file"),
     ],
 )
 def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(

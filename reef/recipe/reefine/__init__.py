@@ -92,7 +92,6 @@ class ReefineRecipe(CordisRecipe):
             "evaluate": "reef.recipe.reefine.evolution:AnswerScorer",
             "requests": True,
             "version_check": True,
-            "review_kinds": ["code_extension"],
             "selection": "floor",
         }
         merged = {**defaults, **evolution}
@@ -130,7 +129,10 @@ class ReefineRecipe(CordisRecipe):
             # The agent proposer answers requests on pi alone (reef.recipe.reefine.agent); on another adapter the text
             # proposer does, so no agent is built, jailed or warned about.
             merged["proposer_agent"] = None
-        kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)
+        # An evolved extension runs in the harness's process with the user's privileges, so by default a person
+        # activates a tree that changes one.
+        activation = settings.get("activation", {"module": "always", "config": {"review_kinds": ["code_extension"]}})
+        kwargs = super()._recipe_kwargs({**settings, "evolution": merged, "activation": activation}, values)
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(evolution.get("multimodal"), values)
         except ValueError as exc:

@@ -142,7 +142,7 @@ class CampaignService:
                     {
                         "step": step,
                         "operation": "training",
-                        "pending": False,
+                        "activated": True,
                         "artifact_ref": {"release_id": f"r{step}"},
                         "consumed_ids": self.pending,
                     }

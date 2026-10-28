@@ -48,7 +48,7 @@ An artifact is the content of one component, such as a checkpoint's weights or a
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations and train-from operations. ``GET /reef/scenarios/{scenario}/commits`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
-For harness scenarios, ``GET /reef/harness/releases`` lists the release chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. It lists every training step, also a rejected or skipped step, which has ``checkpoint: false`` and carries the active release's ID. Under ``evolution.publish: review``, a new release sits in the catalog with its evaluation metrics, ``active: false`` and ``activated: false``. No session gets it until a person activates it. Clients label such a release ``Waiting for activation``.
+For harness scenarios, ``GET /reef/harness/releases`` lists the release chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. It lists every training step, also a rejected or skipped step, which has ``checkpoint: false`` and carries the active release's ID. A new release that the activation rule did not activate sits in the catalog with its evaluation metrics, ``active: false`` and ``activated: false``. No session gets it until a person activates it. Clients label such a release ``Waiting for activation``.
 
 Read the proposal inbox
 -----------------------
@@ -125,11 +125,13 @@ The answer's ``artifact_id`` names the activated artifact, and its ``release_id`
 
 A full-weight serving runtime cannot activate the creation artifact after it served a checkpoint. The engines do not keep the files of the model that they started with, so Reef answers an error. Activate a saved checkpoint instead. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
 
-A rule in the deployment decides whether Reef activates each new artifact:
+The deployment's `activation section <../reference/configuration.rst#the-activation-section>`__ names the rule that decides whether Reef activates each new artifact:
 
-- By default, Reef activates each new artifact that passes its checks when the training step makes it.
-- With manual activation, Reef makes each new artifact but does not activate it. A person activates it. For weights, name ``reef.evaluation.evaluators:ManualPromotionPlugin`` in the `evaluation section <../reference/configuration.rst#the-evaluation-section>`__; the plugin keeps this name until the activation rule moves out of training (RFC #965, step 3). For a harness, set ``evolution.publish: review``. To leave only the changes that touch some node kinds inactive, list those kinds in ``evolution.review_kinds``.
-- An evaluation plugin that rejects a checkpoint also leaves its artifact inactive.
+- ``always``, the default, activates each new artifact when the training step makes it. Its ``review_kinds`` holds back a harness tree that changes one of the listed node kinds.
+- ``never`` makes each new artifact but does not activate it. A person activates it.
+- ``evaluated`` activates an artifact once an evaluation of it reaches ``min_mean_score``.
+
+An artifact that the rule does not activate still becomes the start of the next training job.
 
 Train from an artifact
 ----------------------

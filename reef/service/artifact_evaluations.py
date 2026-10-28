@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import ReefError
+from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -55,6 +55,10 @@ MAX_RUNNING_EVALUATIONS = 2
 ROLLOUT_CONCURRENCY = 4
 #: The error of an evaluation that was queued or running when the service that held it stopped.
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
+#: How often Reef tries to activate an artifact that passed its evaluation while training results wait to commit,
+#: and the seconds it waits after the first attempt, growing with each.
+ACTIVATION_ATTEMPTS = 5
+ACTIVATION_RETRY_SECONDS = 1.0
 #: The scenario name that an evaluation's model calls carry; the artifact endpoint serves no scenario.
 EVALUATION_SCENARIO = "artifact-evaluation"
 
@@ -383,12 +387,15 @@ class ArtifactEvaluations:
             self.launch_waiting()
 
     def end(self, run: EvaluationRun, *, result: PolicyEvaluation | None, error: str | None) -> None:
-        """Store the end of ``run``: its ``result``, or its ``error`` when ``result`` is None."""
+        """Store the end of ``run``: its ``result``, or its ``error`` when ``result`` is None. A finished run
+        activates its artifact when the scenario's activation rule says so (``activates_evaluated``)."""
+        activates = False
         try:
             with self.dispatcher.locked_scenario(run.scenario) as current:
                 evaluations = current.store.evaluations
                 if result is not None:
                     evaluations.finish(run.evaluation_id, result=result, finished_at=time.time())
+                    activates = current.activation_rule.activates_evaluated(run.request.artifact_id, result)
                 else:
                     evaluations.fail(
                         run.evaluation_id, error=error or "the evaluation failed", finished_at=time.time()
@@ -396,6 +403,26 @@ class ArtifactEvaluations:
         except (ReefError, ValueError) as exc:
             # The scenario was deleted, or the evaluation ended already: nothing is left to record it in.
             logger.warning("could not store the end of evaluation %s: %s", run.evaluation_id, exc)
+            return
+        if activates:
+            self.activate(run)
+
+    def activate(self, run: EvaluationRun) -> None:
+        """Activate the artifact of ``run``, waiting while a training result waits for its commit."""
+        for attempt in range(ACTIVATION_ATTEMPTS):
+            try:
+                self.dispatcher.activate(run.scenario, run.request.artifact_id, run.request.component)
+                return
+            except CommitPending:
+                time.sleep(ACTIVATION_RETRY_SECONDS * (attempt + 1))
+            except (ReefError, ValueError) as exc:
+                logger.warning("could not activate artifact %s of %s: %s", run.request.artifact_id, run.scenario, exc)
+                return
+        logger.warning(
+            "artifact %s of %s passed its evaluation but stayed inactive: training kept committing",
+            run.request.artifact_id,
+            run.scenario,
+        )
 
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None; one that another service left is failed."""

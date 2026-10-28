@@ -281,8 +281,6 @@ class CordisRecipe(Recipe):
     max_rejected_history: int = 25
     min_win_margin: int = 0
     floor_score: float = 1.0
-    publish: str = "auto"
-    review_kinds: tuple[str, ...] = ()
     #: Models an installed client may switch to besides the served one, rendered into its config.
     client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
@@ -349,8 +347,6 @@ class CordisRecipe(Recipe):
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
         if self.floor_score <= 0:
             raise ValueError("floor_score must be positive")
-        if self.publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
         if not isinstance(self.selection, PluginReference) or not issubclass(
             self.selection.plugin_class, SelectionPlugin
         ):
@@ -485,14 +481,12 @@ class CordisRecipe(Recipe):
         # A recheck compares two trees; the floor evaluates one.
         if selection_setting == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
-        publish = evolution.get("publish", "auto")
-        if publish not in ("auto", "review"):
-            raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
-        review_kinds = evolution.get("review_kinds", ())
-        if isinstance(review_kinds, str) or not isinstance(review_kinds, Sequence):
-            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
-        if not all(isinstance(kind, str) and kind for kind in review_kinds):
-            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
+        for moved in ("publish", "review_kinds"):
+            if moved in evolution:
+                raise RecipeConfigError(
+                    f"evolution.{moved} is gone: the activation section decides whether a kept tree serves "
+                    "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
+                )
         client_models = evolution.get("client_models", ())
         if isinstance(client_models, str) or not isinstance(client_models, Sequence):
             raise RecipeConfigError("evolution.client_models must be a list of model names")
@@ -591,8 +585,6 @@ class CordisRecipe(Recipe):
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
             "max_promoted_per_client": per_client,
-            "publish": publish,
-            "review_kinds": tuple(review_kinds),
             "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
@@ -755,8 +747,6 @@ class CordisRecipe(Recipe):
             "promote": self.promote,
             "recheck_every": self.recheck_every,
             "max_rejected_history": self.max_rejected_history,
-            "publish": self.publish,
-            "review_kinds": self.review_kinds,
             "seed": self.seed,
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,

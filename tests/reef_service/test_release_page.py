@@ -26,7 +26,9 @@ from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import AlwaysActivate
 from reef.harness.rollouts.run import RolloutResult
 from reef.harness.step_result import design_sections
 from reef.recipe.cordis import CordisRecipe
@@ -99,7 +101,7 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         runtime=runtime(),
         proposals_dir=str(tmp_path / "inbox"),
         step_record_dir=str(tmp_path / "steps") if keep_records else None,
-        review_kinds=("code_extension",),
+        activation=PluginReference(AlwaysActivate, {"review_kinds": ["code_extension"]}),
         training_mode="hybrid",
     )
     bootstrap = tmp_path / "bootstrap"

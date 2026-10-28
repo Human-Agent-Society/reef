@@ -174,14 +174,15 @@ to keep the older one serving.
 A Slime stack trains one scenario for its lifetime: its workers hold one set
 of weights. To train another scenario, run another stack on different ports.
 
-Evaluate a candidate
---------------------
+Choose what serves
+------------------
 
-By default Reef publishes every saved checkpoint. To measure the exported
-checkpoint first, add an ``evaluation`` section. The fields are in
-`Configuration <../reference/configuration.rst#the-evaluation-section>`__, the plugin
-interface and a worked example in `Write a recipe
-<../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__.
+By default Reef activates every saved checkpoint, so the newest one serves.
+To serve a checkpoint only after an evaluation of it passes, or only when a
+person activates it, add an ``activation`` section. The rules and their
+settings are in `Configuration
+<../reference/configuration.rst#the-activation-section>`__. Training continues
+from the newest checkpoint either way.
 
 Train a LoRA adapter
 --------------------
