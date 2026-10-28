@@ -641,7 +641,6 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
                 SAORecipe(**runtime_bindings(component)).job_plan(),
                 AlwaysSelectCheckpointPlugin(),
                 scenario="math",
-                model_kind="model",
             ),
             algorithm_state=algorithm_state,
             default_job_samples=1,

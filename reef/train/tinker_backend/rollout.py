@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import PolicyEvaluation, RolloutRequest, RolloutScores
+from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.client.tasks import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
@@ -97,20 +97,20 @@ class TaskJobRollouts:
     """The rollouts of one task job.
 
     Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with
-    the ``group_id`` of its task. ``evaluation`` holds the policy that the rollouts ran and the score of each
-    rollout, by task name, in run order; each group names a task of its scores. Purpose: ``roll_out`` makes it;
-    the component trains ``samples``, and an evaluation job reports ``evaluation`` in its metrics.
+    the ``group_id`` of its task. ``scores`` holds the score of each rollout, by task name, in run order; each
+    group names a task of ``scores``. Purpose: ``roll_out`` makes it; the component trains ``samples`` and
+    reports the scores in the job's metrics.
     """
 
     samples: tuple[TrajectorySample, ...]
-    evaluation: PolicyEvaluation
+    scores: RolloutScores
 
     def __post_init__(self) -> None:
         if any(not isinstance(sample, TrajectorySample) for sample in self.samples):
             raise TypeError("task rollouts train trajectories")
-        if not isinstance(self.evaluation, PolicyEvaluation):
-            raise TypeError("TaskJobRollouts.evaluation must be a PolicyEvaluation")
-        names = {task for task, _ in self.evaluation.scores.tasks}
+        if not isinstance(self.scores, RolloutScores):
+            raise TypeError("TaskJobRollouts.scores must be RolloutScores")
+        names = {task for task, _ in self.scores.tasks}
         groups = [sample.group_id for sample in self.samples]
         seen: list[str | None] = []
         for group in groups:
@@ -125,7 +125,7 @@ class TaskJobRollouts:
         """Each task's rewards of the rollouts that did not fail, in run order."""
         return {
             task: tuple(score.value for score in scores if score.value is not None)
-            for task, scores in self.evaluation.scores.tasks
+            for task, scores in self.scores.tasks
         }
 
 
@@ -287,4 +287,4 @@ def roll_out(
     scores = RolloutScores.by_task(
         [task_name(task) for task in tasks], [runner.rollout_score(rollout) for rollout in rollouts]
     )
-    return TaskJobRollouts(tuple(samples), PolicyEvaluation(runner.harness, runner.served_model, scores))
+    return TaskJobRollouts(tuple(samples), scores)

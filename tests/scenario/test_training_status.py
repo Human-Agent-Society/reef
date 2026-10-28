@@ -139,13 +139,7 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
 def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer() -> None:
     finished = JobOutcome("job-2", "stub", "finished")
     running = JobLoopState(job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished)
-    loop = JobLoop(
-        StubTrainingComponent(),
-        FixedJobPlan(JobRequest()),
-        AlwaysSelectCheckpointPlugin(),
-        scenario="s",
-        model_kind="model",
-    )
+    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), AlwaysSelectCheckpointPlugin(), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
