@@ -192,9 +192,7 @@ def _dispatcher(
         target.write_text(text, encoding="utf-8")
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(
-            bootstrap, root=tmp_path / "repository", base_metadata=recipe.base_artifact_source().metadata
-        ),
+        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         # The commit history is what puts gate metrics on the release catalog.
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -2965,7 +2963,9 @@ def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one
             assert entries[1] == {"id": "r1", "name": "rules", "config": {"text": "marker rules"}}
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            committed = scenario.release_queries.entries_for_version(manifest["release_id"], scenario.scenario_step)
+            committed = scenario.release_queries.entries_for_version(
+                manifest["release_id"], scenario.surface.files_component
+            )
             assert committed is not None and text == json.dumps(list(committed), indent=2, sort_keys=True) + "\n"
             assert "pi-agent/tree.json" not in render_composition(NODES_V1, get_adapter("pi"))
         finally:
@@ -3006,7 +3006,9 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
             # The entries live in the commit history, where the proposals route and the step's proposer read them.
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            entries = scenario.release_queries.entries_for_version(manifest["release_id"], scenario.scenario_step)
+            entries = scenario.release_queries.entries_for_version(
+                manifest["release_id"], scenario.surface.files_component
+            )
             assert entries is not None and list(entries) == [notice, *ENTRIES_V1]
             assert tree_files(get_adapter("pi"), entries) == {}
         finally:
