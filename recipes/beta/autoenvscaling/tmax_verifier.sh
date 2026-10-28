@@ -20,7 +20,8 @@ for name in pytest.ini tox.ini setup.cfg pyproject.toml; do
   if [ -f "$TESTS_DIR/$name" ]; then config="$TESTS_DIR/$name"; break; fi
 done
 if [ -z "$config" ]; then
-  config="$(mktemp)"
+  # pytest reads -c by its extension and refuses a file without one, so the empty config is a pytest.ini.
+  config="$(mktemp -d)/pytest.ini"
   printf '[pytest]\n' > "$config"
 fi
 unset PYTEST_ADDOPTS PYTEST_PLUGINS

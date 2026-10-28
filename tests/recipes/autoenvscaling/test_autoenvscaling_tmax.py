@@ -189,7 +189,9 @@ def test_each_fixture_keeps_its_own_file_under_a_name_a_variant_can_hold(tmp_pat
     assert admitted.environment == task.environment
 
 
-def verifier_reward(tmp_path: Path, test_outputs: str | None, *, planted: bool = False) -> str:
+def verifier_reward(
+    tmp_path: Path, test_outputs: str | None, *, planted: bool = False, checks_config: bool = False
+) -> str:
     """The reward the verifier writes for ``test_outputs`` (no file for None), under a ``python3`` with pytest."""
     tests = tmp_path / "tests"
     logs = tmp_path / "logs"
@@ -210,7 +212,14 @@ def verifier_reward(tmp_path: Path, test_outputs: str | None, *, planted: bool =
     # The test's own interpreter, which has pytest, as the verifier's python3.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    # With checks_config, python3 refuses a pytest -c file without a supported extension, as newer pytest does.
+    check = (
+        'prev=""; for arg in "$@"; do if [ "$prev" = "-c" ]; then case "$arg" in '
+        '*.ini|*.cfg|*.toml) ;; *) echo "unsupported config $arg" >&2; exit 4;; esac; fi; prev="$arg"; done\n'
+        if checks_config
+        else ""
+    )
+    (bin_dir / "python3").write_text(f'#!/bin/sh\n{check}exec "{sys.executable}" "$@"\n')
     (bin_dir / "python3").chmod(0o755)
     environ = {
         **os.environ,
@@ -259,3 +268,8 @@ def test_the_tmax_verifier_scores_the_fraction_passed_and_fails_closed(
     tmp_path: Path, test_outputs: str | None, reward: str
 ) -> None:
     assert verifier_reward(tmp_path, test_outputs, planted=True) == reward
+
+
+def test_the_tmax_verifier_gives_pytest_a_config_file_with_an_extension(tmp_path: Path) -> None:
+    # Newer pytest refuses an extensionless -c file, and every task would then score 0.
+    assert verifier_reward(tmp_path, "def test_one():\n    pass\n", checks_config=True) == "1.0000\n"
