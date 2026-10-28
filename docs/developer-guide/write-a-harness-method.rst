@@ -119,8 +119,10 @@ custom promoter, it uses the user prompt from each failing trace.
 the number of task comparisons it wins exceeds the number it loses by more
 than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
 candidate and selects it when every task reaches ``evolution.floor_score``
-(default ``1.0``). An episode that could not run misses the floor. The
-current release does not run under ``floor``, so ``current_scores`` is empty.
+(default ``1.0``). A rollout that gave no answer fails its task. A rollout
+that did not run fails no task, but a task with no rollout that ran does not
+pass (see `Selection policies <#selection-policies>`__). The current release
+does not run under ``floor``, so ``current_scores`` is empty.
 ``always`` selects every applied mutation.
 
 .. warning::
@@ -263,14 +265,33 @@ tree state takes precedence over ``seed``. See `Harness evolution keys
 Selection policies
 ~~~~~~~~~~~~~~~~~~
 
-A policy reads ``EvaluationResult.metrics``. It contains per-task score lists
-in task order: ``candidate_scores`` and ``current_scores``. A score is
-``None`` when an episode could not run. The policy below selects a candidate
-only when at least one task improves and none regresses.
+An evaluation runs rollouts and gives their scores. A selection policy reads
+the scores and decides whether the candidate is published.
+``EvaluationResult.metrics`` holds the scores of each side,
+``candidate_scores`` and ``current_scores``, as
+``reef.core.evaluation.RolloutScores`` in JSON: one entry for each task, in
+task order, each with the scores of its rollouts in run order. Read them with
+``RolloutScores.from_json``. Each rollout's ``RolloutScore`` is one of two
+cases:
+
+- A score: the rollout ran, and ``value`` is the scorer's value. A rollout
+  where the tree gave no answer scores 0: an error ended its turn, or
+  ``forbid_residue`` refused its residue. The candidate caused it.
+- Failed: ``value`` is ``None`` (``"failed"`` in JSON). The environment could
+  not run the rollout: the launch failed, the trial never ran, or its
+  trajectory could not be read. The candidate did not cause it.
+
+The built-in policies use ``reef.evaluation.evaluators.compare_scores`` and
+``check_floor``. ``compare_scores`` pairs the two sides rollout by rollout,
+compares their values, and drops a pair with a failed side;
+``score_comparison`` reports the dropped pairs as ``dropped``. ``check_floor``
+passes a task when every rollout that did not fail reaches the floor. The policy below selects a candidate only when at least one
+rollout improves and none regresses.
 
 .. code:: python
 
    from reef import CandidateEvaluator, SelectionDecision
+   from reef.core.evaluation import RolloutScores
    from reef.evaluation import SelectionPlugin
 
 
@@ -286,13 +307,14 @@ only when at least one task improves and none regresses.
            return self._candidate_backend.evaluate(candidate)
 
        def decide(self, candidate, evaluation):
-           pairs = zip(
-               evaluation.metrics["candidate_scores"],
-               evaluation.metrics["current_scores"],
-               strict=True,
-           )
-           scores = [(c if c is not None else -1e30, k if k is not None else -1e30) for c, k in pairs]
-           selected = all(c >= k for c, k in scores) and any(c > k for c, k in scores)
+           candidate_scores = RolloutScores.from_json(evaluation.metrics["candidate_scores"])
+           current_scores = RolloutScores.from_json(evaluation.metrics["current_scores"])
+           pairs = [
+               (mine.value, theirs.value)
+               for mine, theirs in zip(candidate_scores.rollouts(), current_scores.rollouts(), strict=True)
+               if not (mine.is_failed or theirs.is_failed)
+           ]
+           selected = all(c >= k for c, k in pairs) and any(c > k for c, k in pairs)
            return SelectionDecision(
                selected=selected,
                policy="pareto",

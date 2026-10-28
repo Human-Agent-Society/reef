@@ -179,7 +179,7 @@ def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
     scored = worker.run(
         render_composition(binding.compose_nodes(descriptor), descriptor), task, models=ModelBindings(binding)
     )
-    assert scored.score == 1.0
+    assert scored.score.value == 1.0
     proposer = GEPAProposer(
         archive=Archive(tmp_path / "gepa.json"),
         descriptor=descriptor,

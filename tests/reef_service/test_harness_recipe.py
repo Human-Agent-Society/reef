@@ -20,6 +20,7 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import RolloutScore
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
@@ -66,6 +67,11 @@ SKILL = {"name": "skill", "config": {"name": "notes", "text": "# notes"}}
 # key-named fields, #476).
 SEED_MODELS = {"id": "models", "name": "config", "config": {"target": "models", "data": {"providers": {}}}}
 SEED_SETTINGS = {"id": "settings", "name": "config", "config": {"data": {"defaultThinkingLevel": "off"}}}
+
+
+def flat(scores: list[dict[str, object]]) -> list[object]:
+    """Every rollout's score in ``RolloutScores.to_json``'s value, task by task."""
+    return [score for task in scores for score in task["scores"]]
 
 
 def evaluate(task: str, result: EpisodeResult) -> float:
@@ -241,7 +247,7 @@ def test_winning_mutation_publishes_an_artifact(tmp_path: Path) -> None:
     assert result.metrics["selection"]["selected"] is True
     assert result.metrics["selection"]["policy"] == "score_comparison"
     assert result.metrics["selection"]["candidate_id"] == "demo:trace:1:candidate"
-    assert result.metrics["selection"]["metrics"] == {"wins": 1, "losses": 0, "ties": 0}
+    assert result.metrics["selection"]["metrics"] == {"wins": 1, "losses": 0, "ties": 0, "dropped": 0}
     assert "wins" not in result.metrics["selection"]["evaluation"]["metrics"]
     assert result.metrics["wins"] == 1
     assert isinstance(result.publication, SavedArtifactPublication)
@@ -672,11 +678,13 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
 
     error = {"code": "LOAD_ERROR", "message": "tool 'x' cannot load"}
     errored = episode_worker._score_result(result({"kind": "error", "error": error}, 1), "task one")
-    assert errored.score is None and errored.failure is not None
+    assert errored.score == RolloutScore.scored(0.0) and errored.failure is not None
     assert errored.failure.stage == "graph" and errored.failure.cause == "LOAD_ERROR: tool 'x' cannot load"
     assert errored.path == {"stages": [], "reason": "error", "error": error}
     crashed = episode_worker._score_result(result({"kind": "completed"}, 1), "task one")
-    assert crashed.score == 1.0 and crashed.failure is not None and crashed.failure.stage == "exit"
+    assert (
+        crashed.score == RolloutScore.scored(1.0) and crashed.failure is not None and crashed.failure.stage == "exit"
+    )
     assert crashed.path == {"stages": [], "reason": "completed"}
 
 
@@ -694,7 +702,7 @@ def test_an_episode_whose_log_the_reader_found_empty_says_no_transcript_was_read
     )
     empty = EpisodeResult(exit_code=0, stdout="reef-ok", stderr="", trajectory=(), residue=())
     scored = episode_worker._score_result(empty, "task one")
-    assert scored.score == 0.0 and scored.reply is None
+    assert scored.score == RolloutScore.scored(0.0) and scored.reply is None
     assert scored.failure is None and scored.transcript_read is False
     answered = ({"role": "assistant", "content": "reef-ok"},)
     scored = episode_worker._score_result(
@@ -722,12 +730,13 @@ def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run(
 
     never_ran = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row("docker build failed"),), residue=())
     scored = episode_worker._score_result(never_ran, "task one")
-    assert scored.score is None and scored.failure is not None
+    # The trial never ran: the environment, not the tree, failed it.
+    assert scored.score.is_failed and scored.failure is not None
     assert scored.failure.stage == "trial" and scored.failure.cause == "docker build failed"
     # A verifier that ran and wrote nothing is the agent's loss: it scores through the scorer.
     wrote_nothing = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
     scored = episode_worker._score_result(wrote_nothing, "task one")
-    assert scored.score == 0.0 and scored.failure is not None and scored.failure.stage == "exit"
+    assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "exit"
 
 
 def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Path) -> None:
@@ -754,7 +763,7 @@ def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Pa
     scored = episode_worker._score_result(
         EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health"
     )
-    assert scored.score == 1.0 and scored.failure is None and scored.reply is None
+    assert scored.score == RolloutScore.scored(1.0) and scored.failure is None and scored.reply is None
 
 
 def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(episode_worker) -> None:
@@ -768,7 +777,7 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
     )
     result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
     scored = episode_worker._score_result(result, "task one")
-    assert scored.score is None and scored.failure is not None and scored.failure.stage == "graph"
+    assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "graph"
     assert scored.failure.cause == "agent checker: MODEL_ERROR: the endpoint answered 500"
     assert scored.path == {"stages": ["think"], "reason": None, "error": error, "errored_agent": "checker"}
     # An agent that errored while the root still finished its turn is the root's business: the turn scores.
@@ -786,7 +795,9 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
         EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=finished, residue=()), "task one"
     )
     assert (
-        scored.score == 1.0 and scored.failure is None and scored.path == {"stages": ["think"], "reason": "completed"}
+        scored.score == RolloutScore.scored(1.0)
+        and scored.failure is None
+        and scored.path == {"stages": ["think"], "reason": "completed"}
     )
 
 
@@ -1334,7 +1345,7 @@ def test_gate_knobs_reach_the_episodes_and_interleave_the_sides(tmp_path: Path, 
     assert timeouts == [5.0, 5.0, 5.0, 5.0]
     assert sides == ["candidate", "current", "candidate", "current"]
     assert result.metrics["episode_repeats"] == 2
-    assert len(result.metrics["selection"]["evaluation"]["metrics"]["candidate_scores"]) == 2
+    assert len(flat(result.metrics["selection"]["evaluation"]["metrics"]["candidate_scores"])) == 2
 
 
 def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: Path) -> None:
@@ -2079,8 +2090,8 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
     try:
         evaluation = b.evaluate(prepared.candidate)
         assert len(list(barrier.iterdir())) == 4
-        assert evaluation.metrics["candidate_scores"] == (0.0, 1.0)
-        assert evaluation.metrics["current_scores"] == (0.0, 1.0)
+        assert flat(evaluation.metrics["candidate_scores"]) == [0.0, 1.0]
+        assert flat(evaluation.metrics["current_scores"]) == [0.0, 1.0]
     finally:
         b.close()
 
@@ -2105,8 +2116,8 @@ def test_harness_evolve_auto_runs_real_episodes_on_selected_backend(tmp_path, wo
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     with caplog.at_level("INFO"):
         result = b.evaluate(prepared.candidate)
-    assert result.metrics["candidate_scores"] == (1.0, 1.0)
-    assert result.metrics["current_scores"] == (0.0, 0.0)
+    assert flat(result.metrics["candidate_scores"]) == [1.0, 1.0]
+    assert flat(result.metrics["current_scores"]) == [0.0, 0.0]
     assert f"executor={expected}" in caplog.text
     b.close()
 

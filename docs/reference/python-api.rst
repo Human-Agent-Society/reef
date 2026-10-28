@@ -1460,10 +1460,9 @@ builds the class with no arguments and refuses a non-empty ``config``.
 |                        | parsed ``trajectory``                                    |
 +------------------------+----------------------------------------------------------+
 | ``evaluation.metrics`` | guarantees ``candidate_scores`` and ``current_scores``:  |
-|                        | per-task score lists in task order, ``None`` for an      |
-|                        | episode that could not run; ``current_scores`` is empty  |
-|                        | under ``selection: floor``, which runs the candidate     |
-|                        | alone                                                    |
+|                        | ``RolloutScores`` in JSON, each rollout a number or      |
+|                        | ``"failed"``; ``current_scores`` is empty under          |
+|                        | ``selection: floor``, which runs the candidate alone     |
 +------------------------+----------------------------------------------------------+
 
 Returning ``None`` from ``propose`` skips the step. Reef passes every keyword
@@ -1827,7 +1826,8 @@ is both the start of a later job and the release Reef publishes. A job of
 Harbor tasks also takes ``rollout``, the episodes of each task, and
 ``evaluation_of``, a non-empty name: such an evaluation job rolls its tasks out
 from its start, saves no checkpoint, and reports ``evaluation_of``,
-``evaluation_reward_mean`` and ``evaluation_tasks`` with ``rollout_rewards``.
+``evaluation_scores`` (``RolloutScores`` in JSON) and ``evaluation_mean_score``
+with ``rollout_rewards``.
 
 ``TinkerDeployment.default_serving`` is ``trainer``: its
 ``trainer_serving_config`` selects ``reef.inference.tinker.TinkerInferenceRuntime``

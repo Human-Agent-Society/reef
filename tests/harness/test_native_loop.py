@@ -33,6 +33,7 @@ from tests.harness.test_native_serve import (
 from tests.reef_service.test_harness_recipe import MODEL, batch, run_backend_step
 from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
+from reef.core.evaluation import RolloutScore
 from reef.evaluation.harness import EpisodeEvaluationWorker
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import Context, FiberState
@@ -1215,7 +1216,7 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     for loop in ("main", None):
         result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
         scored = worker._score_result(result, "task one")
-        assert scored.score is None and scored.failure is not None
+        assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {
         "main": ("loop", "LOOP_ERROR: RuntimeError: boom"),

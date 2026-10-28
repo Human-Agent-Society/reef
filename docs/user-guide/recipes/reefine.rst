@@ -117,8 +117,9 @@ Behavior and configuration
   human promotion. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
-  ``evolution.floor_score`` (``1.0``). The current release is not run, and an
-  episode that could not run misses the floor.
+  ``evolution.floor_score`` (``1.0``). The current release is not run. A
+  rollout that gave no answer misses the floor; one that the environment
+  could not run does not.
 * What only you can provide (a phone number, a credential, a permission, an
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
   ``prompt`` is one sentence of at most 200 characters that setup shows when

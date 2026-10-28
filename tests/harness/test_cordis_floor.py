@@ -39,11 +39,16 @@ class DecideOnlyBackend:
         raise AssertionError("this case exercises decide(), not evaluate()")
 
 
-def _evaluation(scores: tuple[float | None, ...]) -> EvaluationResult:
+def _evaluation(scores: tuple[float | str | list[float | str], ...]) -> EvaluationResult:
+    """The candidate's scores, one task per value: a score, ``"failed"``, or a list of runs."""
+    tasks = [
+        {"task": f"t{index}", "scores": value if isinstance(value, list) else [value]}
+        for index, value in enumerate(scores)
+    ]
     return EvaluationResult(
         evaluator="harness_episode_pairs",
         evaluator_version="1",
-        metrics={"candidate_scores": scores, "current_scores": ()},
+        metrics={"candidate_scores": tasks, "current_scores": []},
     )
 
 
@@ -56,25 +61,28 @@ def test_floor_selects_only_when_every_task_meets_the_floor() -> None:
 
     met = plugin.decide(candidate, _evaluation((1.0, 1.5)))
     assert met.selected and met.policy == "floor"
-    assert met.metrics == {"passed": 2, "failed": 0, "floor_score": 1.0}
+    assert met.metrics == {"passed": 2, "failed": 0, "failed_rollouts": 0, "floor_score": 1.0}
     assert met.reason == "candidate met the floor on all 2 tasks"
 
-    # An episode that could not run has no score and missed the floor.
-    missed = plugin.decide(candidate, _evaluation((1.0, 0.5, None)))
+    # A rollout that gave no answer scores 0 and misses the floor.
+    missed = plugin.decide(candidate, _evaluation((1.0, 0.5, 0.0)))
     assert not missed.selected
-    assert missed.metrics == {"passed": 1, "failed": 2, "floor_score": 1.0}
+    assert missed.metrics == {"passed": 1, "failed": 2, "failed_rollouts": 0, "floor_score": 1.0}
     assert missed.reason == "candidate missed the floor on 2 of 3 tasks"
+
+    # A failed rollout fails no task, but a task whose rollouts all failed does not pass.
+    partly = plugin.decide(candidate, _evaluation(([1.0, "failed"],)))
+    assert partly.selected and partly.metrics["failed_rollouts"] == 1
+    assert not plugin.decide(candidate, _evaluation(([1.0, 1.0], ["failed", "failed"]))).selected
 
     lowered = FloorPlugin(DecideOnlyBackend(), floor_score=0.5)
     assert lowered.decide(candidate, _evaluation((0.5, 0.75))).selected
     assert lowered.decide(candidate, _evaluation((0.5, 0.25))).metrics == {
         "passed": 1,
         "failed": 1,
+        "failed_rollouts": 0,
         "floor_score": 0.5,
     }
-
-    nothing = plugin.decide(candidate, _evaluation(()))
-    assert not nothing.selected and nothing.reason == "no evaluation task was scored"
 
     for bad in (0, -1.0, True, float("nan"), "1"):
         with pytest.raises(ValueError, match="floor_score must be a positive number"):
@@ -114,7 +122,8 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
 
     evaluation = b.evaluate(candidate, sides=("candidate",))
     assert sides == ["candidate"]
-    assert evaluation.metrics["candidate_scores"] == (1.0,) and evaluation.metrics["current_scores"] == ()
+    assert evaluation.metrics["candidate_scores"] == [{"task": "task one", "scores": [1.0]}]
+    assert evaluation.metrics["current_scores"] == []
     assert evaluation.metrics["evaluation_sides"] == ["candidate"]
     assert set(evaluation.metrics) == {
         "candidate_scores",
@@ -135,7 +144,7 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
     # The default pair is unchanged and records no evaluation_sides.
     paired = b.evaluate(candidate).metrics
     assert sides == ["candidate", "candidate", "current"] and "evaluation_sides" not in paired
-    assert paired["current_scores"] == (0.0,) and paired["current_score"] == 0.0
+    assert paired["current_scores"] == [{"task": "task one", "scores": [0.0]}] and paired["current_score"] == 0.0
 
     plugin = FloorPlugin(b)
     result = b.settle_step(prepared, plugin.decide(candidate, evaluation))

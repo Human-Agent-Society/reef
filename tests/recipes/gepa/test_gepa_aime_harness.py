@@ -126,11 +126,11 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
             backend = trainer.candidate_backend
             assert backend._episode_evaluator.worker_selection.settings.backend == "uni"
             assert [
-                row.score
+                row.score.value
                 for row in backend._episode_evaluator.run_episodes([({}, "problem", None), ({}, "problem", None)])
             ] == [1.0, 1.0]
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert backend._episode_evaluator.run_episodes([({}, "problem", None)])[0].score == 1.0
+            assert backend._episode_evaluator.run_episodes([({}, "problem", None)])[0].score.value == 1.0
         finally:
             trainer.close()
 
@@ -182,7 +182,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
                 "mp" if executor == "auto" else executor
             )
             rows = backend._episode_evaluator.run_episodes([({}, "problem", None), ({}, "problem", None)])
-            assert [row.score for row in rows] == [1.0, 1.0]
+            assert [row.score.value for row in rows] == [1.0, 1.0]
             with pytest.raises(Exception, match="no AIME answer is registered"):
                 backend._episode_evaluator.run_episodes([({}, "unknown", None)])
         finally:

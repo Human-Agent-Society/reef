@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.client.tasks import TaskEpisode, TaskEpisodeRunner, TaskLab
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
@@ -98,28 +98,36 @@ class TaskRollouts:
     """The rollouts of one task job.
 
     Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with
-    the ``group_id`` of its task. ``rewards`` maps each task's name to the rewards of its episodes that ran,
-    in run order; a task whose episodes all failed has no rewards. Purpose: ``roll_out`` makes it; the
-    component trains ``samples`` and reports ``rewards`` in the job's metrics.
+    the ``group_id`` of its task. ``scores`` holds the score of each rollout, by task name, in run order; each
+    group names a task of ``scores``. Purpose: ``roll_out`` makes it; the component trains ``samples`` and
+    reports the scores in the job's metrics.
     """
 
     samples: tuple[TrajectorySample, ...]
-    rewards: Mapping[str, tuple[float, ...]]
+    scores: RolloutScores
 
     def __post_init__(self) -> None:
         if any(not isinstance(sample, TrajectorySample) for sample in self.samples):
             raise TypeError("task rollouts train trajectories")
+        if not isinstance(self.scores, RolloutScores):
+            raise TypeError("TaskRollouts.scores must be RolloutScores")
+        names = {task for task, _ in self.scores.tasks}
         groups = [sample.group_id for sample in self.samples]
         seen: list[str | None] = []
         for group in groups:
             if not seen or seen[-1] != group:
-                if group in seen or group not in self.rewards:
-                    raise ValueError("each task's samples form one contiguous group named by a task with rewards")
+                if group in seen or group not in names:
+                    raise ValueError("each task's samples form one contiguous group named by a task of the scores")
                 seen.append(group)
         if any(groups.count(group) < 2 for group in seen):
             raise ValueError("a task's group trains only with two or more samples")
-        if any(any(not math.isfinite(value) for value in values) for values in self.rewards.values()):
-            raise ValueError("episode rewards must be finite")
+
+    def rewards(self) -> dict[str, tuple[float, ...]]:
+        """Each task's rewards of the rollouts that did not fail, in run order."""
+        return {
+            task: tuple(score.value for score in scores if score.value is not None)
+            for task, scores in self.scores.tasks
+        }
 
 
 class SamplerEndpoint:
@@ -265,7 +273,6 @@ async def roll_out(
         runs = [task for task in tasks for _ in range(settings.episodes_per_task)]
         episodes = await asyncio.gather(*(run(task) for task in runs))
     samples: list[TrajectorySample] = []
-    rewards: dict[str, tuple[float, ...]] = {}
     for index, task in enumerate(tasks):
         name = task_name(task)
         ran = [
@@ -273,9 +280,19 @@ async def roll_out(
             for episode in episodes[index * settings.episodes_per_task : (index + 1) * settings.episodes_per_task]
             if not episode.is_infrastructure_failure
         ]
-        rewards[name] = tuple(episode.reward or 0.0 for episode in ran)
         group = [sample for sample in (episode_sample(episode, name, assembly) for episode in ran) if sample]
         # A group of fewer than two samples has no relative reward, so it does not train.
         if len(group) >= 2:
             samples.extend(group)
-    return TaskRollouts(tuple(samples), rewards)
+    scores = RolloutScores.by_task(
+        [task_name(task) for task in tasks], [rollout_score(episode) for episode in episodes]
+    )
+    return TaskRollouts(tuple(samples), scores)
+
+
+def rollout_score(episode: TaskEpisode) -> RolloutScore:
+    """The score of one rollout: failed when the environment could not run it, else its reward, 0 when it ran
+    without one."""
+    if episode.is_infrastructure_failure:
+        return RolloutScore.failed()
+    return RolloutScore.scored(0.0 if episode.reward is None else episode.reward)

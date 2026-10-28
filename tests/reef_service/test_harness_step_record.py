@@ -565,7 +565,7 @@ def test_every_episode_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path:
     broken = native_backend(tmp_path, binary=str(tmp_path / "missing"), step_record_dir=tmp_path / "broken")
     run_backend_step(broken, batch(), broken.initial_state())
     record = read_json(tmp_path / "broken" / "1" / "episodes" / "candidate-0" / "episode.json")
-    assert record["score"] is None and record["failure"]["stage"] == "launch"
+    assert record["score"] == "failed" and record["failure"]["stage"] == "launch"
     assert record["exit_code"] is None and record["stdout"] is None and record["residue"] is None
 
 

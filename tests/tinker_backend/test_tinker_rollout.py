@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.harness.client.tasks import EpisodeRow, TaskLab
@@ -98,7 +99,13 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     assert sampler.paths == ["tinker://start/sampler"] * 4
     # Each task's two episodes form its group; the task whose sandbox failed has none.
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add", "sort", "sort"]
-    assert rollouts.rewards == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": ()}
+    assert rollouts.rewards() == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": ()}
+    # The sandbox of "broken" did not start: its rollouts failed, which is not the policy's failure.
+    assert rollouts.scores.to_json() == [
+        {"task": "add", "scores": [1.0, 1.0]},
+        {"task": "sort", "scores": [0.0, 0.0]},
+        {"task": "broken", "scores": ["failed", "failed"]},
+    ]
     training = rollouts.samples[0].training
     assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
     assert training["runtime_load_id"] == "tinker:start"
@@ -189,7 +196,8 @@ def grouped(tmp_path: Path) -> TaskRollouts:
         }
         return TrajectorySample(trajectory, group_id=name)
 
-    return TaskRollouts((sample("add", 1.0), sample("add", 0.0)), {"add": (1.0, 0.0)})
+    scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
+    return TaskRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
 
 
 @pytest.mark.unit
@@ -233,7 +241,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
         # The rollouts are kept: running the job again trains them without new episodes.
         kept = json.loads((component.job_directory("job-0") / ROLLOUTS_FILE).read_text())
-        assert kept["rewards"] == {"add": [1.0, 0.0]}
+        assert kept["scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
         settings = component.job_parameters(parameters).rollout
         assert component.task_rollouts(job, component.job_directory("job-0"), component._base, settings) == grouped(
             tmp_path
@@ -296,7 +304,8 @@ def test_an_evaluation_job_scores_its_start_and_trains_nothing(tmp_path, monkeyp
         status = finished(component, "eval-0")
         assert status.state == "finished" and status.checkpoints == () and client.trained == []
         assert status.metrics["evaluation_of"] == "job-3"
-        assert (status.metrics["evaluation_reward_mean"], status.metrics["evaluation_tasks"]) == (0.5, 1)
+        assert status.metrics["evaluation_scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
+        assert status.metrics["evaluation_mean_score"] == 0.5
         trajectory = grouped(tmp_path).samples[0]
         with pytest.raises(ValueError, match="its data must be tasks"):
             component.submit(

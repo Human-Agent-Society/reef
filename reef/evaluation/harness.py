@@ -37,12 +37,14 @@ from reef.core.evaluation import (
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     EvaluationResult,
+    RolloutScore,
+    RolloutScores,
     SelectionDecision,
     UpdateCandidate,
 )
 from reef.core.plugins import ConfiguredPlugin, PluginConfigError
 from reef.core.tasks import primary_reward
-from reef.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
+from reef.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin, check_floor, compare_scores
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
@@ -154,9 +156,14 @@ class FailureObservation:
 
 @dataclass(frozen=True)
 class ScoredEpisode:
-    """One evaluation episode as the evaluation keeps it: the score, or why it has none, and what the trajectory showed."""
+    """One evaluation episode as the evaluation keeps it: its rollout score, why it has no value, and what the trajectory showed.
 
-    score: float | None
+    ``score`` is failed when the episode could not launch, its trial never ran or its trajectory could not be
+    read, and 0 when the tree gave no answer (an error ended its turn, or ``forbid_residue`` refused its
+    residue). ``failure`` says why, and is also set for a scored episode that exited nonzero (stage ``exit``).
+    """
+
+    score: RolloutScore
     failure: FailureObservation | None
     residue: int = 0
     agents: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -227,11 +234,15 @@ class EpisodeEvaluationWorker:
                 keep_dir=keep_dir,
             )
         except EpisodeError as error:
-            scored = ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
+            scored = ScoredEpisode(
+                RolloutScore.failed(), FailureObservation(task=task, stage="launch", cause=str(error))
+            )
             write_episode_record(keep_dir, task, None, scored)
             return scored
         except TrajectoryError as error:
-            scored = ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
+            scored = ScoredEpisode(
+                RolloutScore.failed(), FailureObservation(task=task, stage="trajectory", cause=str(error))
+            )
             write_episode_record(keep_dir, task, None, scored)
             return scored
         finally:
@@ -248,26 +259,39 @@ class EpisodeEvaluationWorker:
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return ScoredEpisode(
-                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+                RolloutScore.scored(0.0),
+                FailureObservation(task=task, stage="residue", cause=cause),
+                residue,
+                agents,
+                path,
             )
         trial_error = failed_trial_error(result.trajectory)
         if trial_error:
             # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
-            # start): no answer was given, so it ranks below every real score instead of tying a zero.
+            # start): the environment did not run it, so it counts for neither side.
             return ScoredEpisode(
-                None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path
+                RolloutScore.failed(),
+                FailureObservation(task=task, stage="trial", cause=trial_error),
+                residue,
+                agents,
+                path,
             )
         if path.get("error") is not None:
             # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
-            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
-            # score instead of tying a zero.
+            # agent whose failure ended the run): nothing it wrote is an answer, and the tree caused it, so it scores 0.
             error = path["error"]
             cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
             if path.get("errored_agent"):
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if root_header(result.trajectory).get("loop") else "graph"
-            return ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
+            return ScoredEpisode(
+                RolloutScore.scored(0.0),
+                FailureObservation(task=task, stage=stage, cause=cause),
+                residue,
+                agents,
+                path,
+            )
         score = float(
             self.scorer.score(task, result) if models is None else self.scorer.score_with_models(task, result, models)
         )
@@ -278,11 +302,18 @@ class EpisodeEvaluationWorker:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
+                RolloutScore.scored(score),
+                FailureObservation(task=task, stage="exit", cause=cause),
+                residue,
+                agents,
+                path,
+                reply,
             )
         # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The summary
         # still says no transcript was read, so a low score a text grader gave is not blamed on the request.
-        return ScoredEpisode(score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory))
+        return ScoredEpisode(
+            RolloutScore.scored(score), None, residue, agents, path, reply, transcript_read=bool(result.trajectory)
+        )
 
 
 def write_episode_record(
@@ -293,7 +324,7 @@ def write_episode_record(
         return
     record = {
         "task": clip_record_text(task),
-        "score": scored.score,
+        "score": scored.score.to_json(),
         "failure": None if scored.failure is None else scored.failure.to_dict(),
         "path": scored.path,
         "exit_code": None if result is None else result.exit_code,
@@ -584,11 +615,18 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
         scored = self.run_episodes(pairings)
         runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
         tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
-        scores = {side: tuple(run.score for run in runs[side]) for side in sides}
+        scores = {
+            side: RolloutScores.by_task(self.evaluation_tasks(candidate), [run.score for run in runs[side]])
+            for side in sides
+        }
         metrics: dict[str, Any] = {
-            "candidate_scores": scores.get("candidate", ()),
-            "current_scores": scores.get("current", ()),
-            "episode_failures": sum(score is None for side in sides for score in scores[side]),
+            # The rollout scores of each side, by task; ``current_scores`` is empty when the current tree did not run.
+            "candidate_scores": scores["candidate"].to_json() if "candidate" in scores else [],
+            "current_scores": scores["current"].to_json() if "current" in scores else [],
+            # Episodes that failed or gave no answer: every failure except a scored run that exited nonzero.
+            "episode_failures": sum(
+                run.failure is not None and run.failure.stage != "exit" for side in sides for run in runs[side]
+            ),
             "episode_repeats": self.episode_repeats,
         }
         for side in sides:
@@ -596,7 +634,9 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
             # build the committed side's manifest from the decision alone.
             metrics[f"{side}_failures"] = tuple(run.failure.to_dict() for run in runs[side] if run.failure is not None)
             metrics[f"{side}_residue"] = sum(run.residue for run in runs[side])
-            metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
+            metrics[f"{side}_score"] = math.fsum(
+                score.value for score in scores[side].rollouts() if score.value is not None
+            )
             # Per agent sums over the side's episodes, so a result says which agent did the work.
             metrics[f"{side}_agents"] = sum_agents(run.agents for run in runs[side])
             # Per episode, in pairing order: the root's stage path and how its turn ended.
@@ -606,7 +646,7 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
             metrics["candidate_episodes"] = [
                 {
                     "task": clip_redacted(task, EPISODE_SUMMARY_CHARS),
-                    "score": run.score,
+                    "score": run.score.to_json(),
                     "failure": (
                         None if run.failure is None else clip_redacted(run.failure.cause, EPISODE_SUMMARY_CHARS)
                     ),
@@ -652,11 +692,18 @@ class ScoreComparisonMixin(CandidateEvaluationPlugin):
         self._min_win_margin = min_win_margin
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        candidate_scores, current_scores = score_vectors(evaluation)
-        wins, losses = score_comparison_tally(candidate_scores, current_scores)
-        ties = len(candidate_scores) - wins - losses
+        comparison = compare_scores(
+            RolloutScores.from_json(evaluation.metrics["candidate_scores"]),
+            RolloutScores.from_json(evaluation.metrics["current_scores"]),
+        )
+        wins, losses = comparison.wins, comparison.losses
         selected = wins - losses > self._min_win_margin
-        metrics: dict[str, Any] = {"wins": wins, "losses": losses, "ties": ties}
+        metrics: dict[str, Any] = {
+            "wins": wins,
+            "losses": losses,
+            "ties": comparison.ties,
+            "dropped": comparison.dropped,
+        }
         if self._min_win_margin:
             metrics["min_win_margin"] = self._min_win_margin
         return SelectionDecision(
@@ -688,10 +735,9 @@ class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin, Selectio
 
 
 class FloorMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that selects when every evaluation task scores at least ``floor_score``.
+    """Give a plugin a ``decide()`` that selects when every evaluation task meets ``floor_score`` (``check_floor``).
 
-    A floor is absolute, not a comparison: only the candidate's scores are
-    read, and an episode that could not run (score ``None``) missed it.
+    A floor is absolute, not a comparison: only the candidate's scores are read.
     """
 
     def __init__(self, *, floor_score: float = 1.0) -> None:
@@ -706,21 +752,23 @@ class FloorMixin(CandidateEvaluationPlugin):
         self._floor_score = float(floor_score)
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        scores = tuple(evaluation.metrics.get("candidate_scores", ()))
-        passed = sum(1 for score in scores if score is not None and score >= self._floor_score)
-        failed = len(scores) - passed
-        if not scores:
-            reason = "no evaluation task was scored"
-        elif failed:
-            reason = f"candidate missed the floor on {failed} of {len(scores)} tasks"
+        floor = check_floor(RolloutScores.from_json(evaluation.metrics["candidate_scores"]), self._floor_score)
+        tasks = floor.passed + floor.failed
+        if floor.failed:
+            reason = f"candidate missed the floor on {floor.failed} of {tasks} tasks"
         else:
-            reason = f"candidate met the floor on all {len(scores)} tasks"
+            reason = f"candidate met the floor on all {tasks} tasks"
         return SelectionDecision(
-            selected=bool(scores) and not failed,
+            selected=not floor.failed,
             policy="floor",
             reason=reason,
             evaluation=evaluation,
-            metrics={"passed": passed, "failed": failed, "floor_score": self._floor_score},
+            metrics={
+                "passed": floor.passed,
+                "failed": floor.failed,
+                "failed_rollouts": floor.failed_rollouts,
+                "floor_score": self._floor_score,
+            },
         )
 
 
@@ -740,23 +788,3 @@ class FloorPlugin(FloorMixin, BackendEvaluateMixin, SelectionPlugin):
         if unknown:
             raise PluginConfigError(f"the floor selection takes floor_score, not {', '.join(unknown)}")
         return cls(candidate_backend, floor_score=config.get("floor_score", 1.0))
-
-
-def score_vectors(
-    evaluation: EvaluationResult,
-) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
-    candidate = tuple(evaluation.metrics.get("candidate_scores", ()))
-    current = tuple(evaluation.metrics.get("current_scores", ()))
-    return candidate, current
-
-
-def score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[float | None, ...]) -> tuple[int, int]:
-    wins = losses = 0
-    for candidate_score, current_score in zip(candidate, current, strict=True):
-        candidate_rank = candidate_score if candidate_score is not None else float("-inf")
-        current_rank = current_score if current_score is not None else float("-inf")
-        if candidate_rank > current_rank:
-            wins += 1
-        elif candidate_rank < current_rank:
-            losses += 1
-    return wins, losses
