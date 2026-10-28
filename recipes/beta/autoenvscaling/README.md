@@ -1,6 +1,6 @@
 # autoenvscaling
 
-**Status: beta.** AutoEnvScaling remains under `recipes/beta/autoenvscaling/` until complete, reproducible learning results are published. The tests validate the generator, the authors, the checks and the band against stand ins; they do not run pi or a model, and they do not establish learning performance. See [issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this classification.
+**Status: beta.** AutoEnvScaling remains under `recipes/beta/autoenvscaling/` until complete, reproducible learning results are published. The tests validate the generator, the authors, the checks and the band against stand ins; they do not run pi, Claude Code or a model, and they do not establish learning performance. See [issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this classification.
 
 AutoEnvScaling (preprint forthcoming) as a Reef task generator: a coding agent rebuilds recorded coding-agent sessions as Harbor tasks. The agent writes one task in a workspace from one session and the repository the session changed. It runs the task's oracle and nop check itself through a tool, and revises until the check passes. A pass-rate band marks the tasks that the Reasoning Agent can reach. With `author: prompt`, the same generator runs the generator service's one-reply prompt Designer on the same sessions, as the baseline ([the prompt Designer baseline](#the-prompt-designer-baseline)).
 
@@ -35,6 +35,8 @@ beta/autoenvscaling/
   sources.py        the sources file (session records and their repositories), the session rendered for the agent
   author.py         the author contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
   author_tools.ts   the agent's task_check tool
+  claude_author.py  Claude Code as the agent, signed in with its owner's OAuth token, behind a gateway that serves only the checks
+  task_check.py     Claude Code's task_check command
   checks.py         the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
   generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band and the parents
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
@@ -54,7 +56,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
 
-An accepted task names two source records: the author's last recorded call, the one that wrote the task, and the session's record. A task rebuilt from a repository gets 4 CPUs, 4 GB of memory, 10 GB of storage, 20 minutes to build, an hour for the solver and 7.5 minutes for the verifier.
+An accepted task names two source records: the author's last recorded call, the one that wrote the task, and the session's record. A task that Claude Code wrote names one source record, the session's, and its transcript ([Claude Code as the author](#claude-code-as-the-author)). A task rebuilt from a repository gets 4 CPUs, 4 GB of memory, 10 GB of storage, 20 minutes to build, an hour for the solver and 7.5 minutes for the verifier.
 
 The last step of every task's Dockerfile keeps the solver from reading the change it must make out of the repository's history. It removes every remote and every ref but HEAD's, and prunes the rest, so no commit after the base commit is left in the image.
 
@@ -99,6 +101,9 @@ The generator's `config` keys:
 | `state_dir` | required | where each scenario keeps its cursor, reports, agent runs and repository snapshots |
 | `sources_path` | required | the sources file |
 | `author` | `agent` | `agent`, or `prompt` for the baseline |
+| `author_harness` | `pi` | the agent: `pi`, or `claude-code` ([Claude Code as the author](#claude-code-as-the-author)); `claude-code` needs `author: agent` |
+| `claude_model` | `opus` | with `claude-code`, the model Claude Code asks for (`--model`) |
+| `claude_token_env` | `CLAUDE_CODE_OAUTH_TOKEN` | with `claude-code`, the environment variable that holds the Claude Code OAuth token |
 | `count` | 8 | sessions in each generation |
 | `band_low`, `band_high` | 0.25, 0.75 | the pass-rate band; null is no bound |
 | `agent_model` | required | the Designer's model |
@@ -106,7 +111,7 @@ The generator's `config` keys:
 | `agent_token_env` | `REEF_TOKEN` | the environment variable that holds that Reef's token |
 | `agent_api` | `openai` | `openai`, `responses` or `anthropic`; the prompt Designer takes `openai` or `responses` |
 | `max_checks` | 6 | the agent's checks that ran, in one run |
-| `max_model_calls` | 250 | the agent's model calls in one run |
+| `max_model_calls` | 250 | the agent's model calls in one run; Claude Code's turns (`--max-turns`) |
 | `agent_timeout_seconds` | 2700 | the longest one agent run lasts |
 | `agent_sandbox` | `e2b` | the cloud sandbox the agent runs in: `e2b` or `modal` |
 | `agent_sandbox_options` | none | that provider's options, such as `e2b_template`, or `modal_app` and `modal_image` |
@@ -122,6 +127,34 @@ The author is pi, Reefine's pinned coding agent, in an E2B sandbox. It reads the
 Its one tool, `task_check`, runs the workspace's task through admission and Harbor's oracle and nop agents on the generator service, and answers with both rewards and, for a failing task, the reason. A check that could not run uses up none of `max_checks`.
 
 The agent holds no credential. Its model calls go through a loopback gateway that sends each one to `agent_reef_url` under the generator's scenario, with the token from `agent_token_env` and the tags `role: designer`, `generation` and `index`, so each call is an inference record. A run lasts at most `agent_timeout_seconds` and makes at most `max_model_calls` model calls. Each run keeps the task and pi's session log in `state_dir/<scenario>/runs/<generation>-<index>/`.
+
+### Claude Code as the author
+
+With `author_harness: claude-code`, the agent is Claude Code, at the version Reef pins, in the same sandbox, with the same inputs, rules and checks. It is signed in with a Claude Code OAuth token that its owner made with `claude setup-token`:
+
+```yaml
+pipeline:
+  record2sample:
+    config:
+      generator:
+        module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
+        config:
+          # The rest as in examples/tinker/serve.yaml.
+          author_harness: claude-code
+          claude_model: opus
+```
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # the variable claude_token_env names
+```
+
+- Claude Code sends every model call itself, straight to Anthropic, and Reef records none of them. The generator still reads the sessions from `agent_reef_url` with the token from `agent_token_env`, and the test review still calls `agent_model` there through `agent_api`.
+- The token goes only into the environment of the sandbox's Claude Code process. It is never on a command line, in a log, in an error, in the run's directory or in the task. Claude Code removes it from the environment of its shell commands. Reef replaces it in every file of the run's directory, refuses a check of a task that holds it, and admits no such task.
+- The agent checks its task with the command `python3 "$REEF_AUTHOR_CHECK"`, the same check as pi's tool. The command waits up to 9 minutes; for a longer check it prints `state: running` and the `--wait <check_id>` command that waits again.
+- A run ends at `agent_timeout_seconds` or after `max_model_calls` turns, Claude Code's own limit; either way its task stands. Any other error of Claude Code's (a spent plan, a refused token) is an outage.
+- The task names one source record, the session's, so a variant keeps its parent's split. Its metadata names the transcript, `designer_transcript`, relative to `state_dir/<scenario>/`, and `designer_harness: claude-code`. Each run keeps Claude Code's transcript under `claude/projects/` in its run directory. Reef deletes Claude Code's other state there, which can hold the account's email.
+
+Reef refuses at startup a token that is missing or is no Claude Code OAuth token (`sk-ant-oat...`), and an `agent_sandbox_options.env_from` that names `ANTHROPIC_*`, `CLAUDE_CODE_USE_*`, a `*BASE_URL*` or `*PROXY*` variable, or the token's variable.
 
 ## The band
 
@@ -321,8 +354,9 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
 
 ## Requirements
 
-- For the agent, a cloud sandbox: an E2B API key in `E2B_API_KEY` and the `e2b` extra (`pip install 'reef-infra[e2b]'`), or with `agent_sandbox: modal`, Modal's credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or `~/.modal.toml`) and the `modal` extra. The sandbox runs pi from an image Reef builds on first use.
+- For Claude Code as the agent, a Claude Code OAuth token in `claude_token_env`.
+- For the agent, a cloud sandbox: an E2B API key in `E2B_API_KEY` and the `e2b` extra (`pip install 'reef-infra[e2b]'`), or with `agent_sandbox: modal`, Modal's credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or `~/.modal.toml`) and the `modal` extra. The sandbox runs pi, or Claude Code, from an image Reef builds on first use.
 - For the agent, `git` on the Reef host, for the repository snapshots.
 - Docker and the `harbor` command line on the generator service's host, as for SPADE.
 
-Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as the example does.
+Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as the example does. No run has used the Claude Code image on E2B or Modal yet, so start `author_harness: claude-code` with one session.

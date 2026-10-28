@@ -2,6 +2,9 @@
 
 import json
 import shlex
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,7 +15,7 @@ from reef.harness.rollouts.run import run_rollout
 from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.sandbox.config import build_executor
 from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.process import RolloutLaunchError, SandboxUnavailable
+from reef.sandbox.process import LocalExecutor, RolloutLaunchError, SandboxExecutor, SandboxUnavailable
 from reef.sandbox.remote import protected_command, remote_root, unpack
 
 
@@ -178,6 +181,75 @@ def test_session_applies_the_deployment_environment_over_the_callers(tmp_path, m
         assert envs["SETTING"] == "deployment" and envs["OTHER"] == "x"
     finally:
         session.close()
+
+
+SECRET = "sk-ant-oat01-secret-value"
+
+
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash", "/bin/dash"])
+def test_protected_command_keeps_secret_values_out_of_argv(tmp_path, shell):
+    if not Path(shell).exists():
+        pytest.skip(f"{shell} is not on this host")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    # bubblewrap's stand-in keeps its arguments and what it reads from --args's descriptor; printf's marks a run.
+    record = str(tmp_path / "jail.json")
+    (fake / "bwrap").write_text(
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        "jail = {'argv': sys.argv[1:], 'args': os.read(3, 65536).decode()}\n"
+        f"json.dump(jail, open({record!r}, 'w'))\n"
+    )
+    (fake / "printf").write_text(f"#!/bin/sh\ntouch {tmp_path / 'printf-ran'}\n")
+    for name in ("bwrap", "printf"):
+        (fake / name).chmod(0o755)
+    command = protected_command(
+        "claude -p hi",
+        {"HOME": "/home/user", "CLAUDE_CODE_OAUTH_TOKEN": "a value the caller also passed"},
+        tmp_path,
+        tmp_path / "workspace",
+        (),
+        (),
+        secret_names=("CLAUDE_CODE_OAUTH_TOKEN",),
+    )
+    assert SECRET not in command and "a value the caller also passed" not in command
+    subprocess.run(
+        [shell, "-c", command],
+        env={"PATH": f"{fake}:/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": SECRET},
+        check=True,
+        timeout=30,
+    )
+    jail = json.loads((tmp_path / "jail.json").read_text())
+    assert not any(SECRET in argument for argument in jail["argv"])
+    assert jail["args"] == f"--setenv\0CLAUDE_CODE_OAUTH_TOKEN\0{SECRET}\0"
+    assert jail["argv"].index("--args") > jail["argv"].index("--clearenv"), "--clearenv would drop it"
+    assert jail["argv"][jail["argv"].index("HOME") - 1 :][:3] == ["--setenv", "HOME", "/home/user"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in jail["argv"]
+    assert not (tmp_path / "printf-ran").exists(), "the shell's builtin printf expands the value"
+    with pytest.raises(ValueError, match="not an environment variable name"):
+        protected_command("claude", {}, tmp_path, tmp_path, (), (), secret_names=("A B",))
+
+
+def test_e2b_sends_secrets_as_process_env_and_other_executors_refuse_them(tmp_path, monkeypatch):
+    pytest.importorskip("e2b")
+    sandbox = Mock()
+    sandbox.commands.run.return_value.wait.return_value = SimpleNamespace(exit_code=0, stdout="ok", stderr="")
+    session = E2BSession(sandbox, env={"SETTING": "deployment"})
+    monkeypatch.setattr(session, "push", lambda root: None)
+    monkeypatch.setattr(session, "pull", lambda root: None)
+    session.set_secret_env({"CLAUDE_CODE_OAUTH_TOKEN": SECRET})
+    try:
+        session.launch(["claude"], root=tmp_path, workspace=tmp_path, env={"OTHER": "x"}, timeout=10)
+        command = sandbox.commands.run.call_args.args[0]
+        envs = sandbox.commands.run.call_args.kwargs["envs"]
+        assert SECRET not in command and '--setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"' in command
+        assert envs == {"SETTING": "deployment", "OTHER": "x", "CLAUDE_CODE_OAUTH_TOKEN": SECRET}
+    finally:
+        session.close()
+    with pytest.raises(ValueError, match="not an environment variable name"):
+        session.set_secret_env({"A=B": SECRET})
+    for executor in (LocalExecutor(), SandboxExecutor()):
+        with pytest.raises(SandboxUnavailable, match="cannot keep an environment value off its command lines"):
+            executor.set_secret_env({"CLAUDE_CODE_OAUTH_TOKEN": SECRET})
 
 
 def test_ordinary_rollout_reads_remote_trajectory_and_residue_and_closes(monkeypatch, tmp_path):

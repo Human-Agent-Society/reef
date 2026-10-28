@@ -249,7 +249,9 @@ class ModalSession(RemoteSession):
     ) -> ProcessOutcome:
         """Run one process in the jail; ``timeout`` stops its whole tree, and Modal's own limit backs it up."""
         command, envs = remote_command(argv, {**env, **self.env}, root)
-        command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
+        command = protected_command(
+            command, envs, root, workspace, writable_paths, readonly_paths, secret_names=tuple(self.secret_env)
+        )
         seconds = max(math.ceil(timeout), 1)
         limited = f"timeout --kill-after={KILL_AFTER_S} {seconds} /bin/sh -c {shlex.quote(command)}"
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
@@ -258,7 +260,12 @@ class ModalSession(RemoteSession):
             self.push(root)
             started = time.monotonic()
             process = self.sandbox.exec(
-                "/bin/sh", "-c", limited, workdir=cwd, env=envs, timeout=seconds + KILL_AFTER_S + 30
+                "/bin/sh",
+                "-c",
+                limited,
+                workdir=cwd,
+                env={**envs, **self.secret_env},
+                timeout=seconds + KILL_AFTER_S + 30,
             )
             process.wait()
             status = process.returncode

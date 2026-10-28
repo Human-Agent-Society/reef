@@ -181,6 +181,14 @@ class ProgramExecutor(ABC):
         """Release what :meth:`open_session` started."""
         return
 
+    def set_secret_env(self, env: Mapping[str, str]) -> None:
+        """Give each later process of this executor ``env`` in its environment, and never on a command line.
+
+        ``env`` maps variable names to values, such as a credential. An executor that cannot keep a value off
+        every command line it builds raises :class:`SandboxUnavailable`, which every executor does by default.
+        """
+        raise SandboxUnavailable(f"{type(self).__name__} cannot keep an environment value off its command lines")
+
     @abstractmethod
     def launch(
         self,

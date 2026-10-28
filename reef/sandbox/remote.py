@@ -107,12 +107,21 @@ def protected_command(
     workspace: Path,
     writable_paths: Sequence[Path],
     readonly_paths: Sequence[Path],
+    *,
+    secret_names: Sequence[str] = (),
 ) -> str:
     """Keep the sandbox's filesystem read-only except the rollout's declared output directories.
 
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
+
+    Each name in ``secret_names`` is a variable of the command's own environment that the jail gets by name: the
+    shell's builtin ``printf`` writes it to bubblewrap's ``--args`` descriptor when the command runs, so its value
+    is never in an argument list. ``env`` gives the jail every other variable, by value.
     """
+    for name in secret_names:
+        if not name.isidentifier():
+            raise ValueError(f"{name!r} is not an environment variable name")
     arguments = [
         "bwrap",
         "--unshare-user",
@@ -145,11 +154,18 @@ def protected_command(
         ISOLATION_ENV: "bwrap",
         "REEF_NATIVE_ENFORCE": "bwrap",
     }.items():
-        arguments.extend(("--setenv", name, value))
+        if name not in secret_names:
+            arguments.extend(("--setenv", name, value))
+    if secret_names:
+        # After --clearenv, which bubblewrap applies where it reads it.
+        arguments.extend(("--args", "3"))
     arguments.extend(
         ("--chdir", f"{remote}/{workspace.relative_to(root).as_posix()}", "--", "/bin/sh", "-c", f"exec {command}")
     )
-    return f"exec {shlex.join(arguments)}"
+    if not secret_names:
+        return f"exec {shlex.join(arguments)}"
+    values = " ".join(f'--setenv {name} "${name}"' for name in secret_names)
+    return f"printf '%s\\000' {values} | exec {shlex.join(arguments)} 3<&0 </dev/null"
 
 
 def pack(directory: Path) -> bytes:
@@ -363,9 +379,12 @@ class RemoteExecutor(ProgramExecutor):
 class RemoteSession(ProgramExecutor):
     """One running cloud sandbox: launch processes in it, pull what they wrote, close it when done.
 
-    ``env`` is the deployment's explicit environment; every process gets it over the caller's. A subclass
-    implements the provider's primitives (:meth:`write_file`, :meth:`read_file`, :meth:`run`, :meth:`start`,
-    :meth:`public_url`, :meth:`stop`) and :meth:`launch`; this class forwards ports, copies roots and closes.
+    ``env`` is the deployment's explicit environment; every process gets it over the caller's. ``secret_env``
+    holds what :meth:`set_secret_env` gave, by variable name: a subclass's :meth:`launch` puts it in the
+    provider's process environment over the rest and hands the jail its names only (``protected_command``'s
+    ``secret_names``). A subclass implements the provider's primitives (:meth:`write_file`, :meth:`read_file`,
+    :meth:`run`, :meth:`start`, :meth:`public_url`, :meth:`stop`) and :meth:`launch`; this class forwards ports,
+    copies roots and closes.
     """
 
     #: The provider's name, for messages.
@@ -373,8 +392,17 @@ class RemoteSession(ProgramExecutor):
 
     def __init__(self, *, env: Mapping[str, str] | None = None) -> None:
         self.env = dict(env or {})
+        self.secret_env: dict[str, str] = {}
         self.closed = False
         self.pumps: list[TunnelPump] = []
+
+    def set_secret_env(self, env: Mapping[str, str]) -> None:
+        """Each later process of this sandbox gets ``env`` through its environment alone; ``ValueError`` for a key
+        that is no variable name."""
+        for name in env:
+            if not name.isidentifier():
+                raise ValueError(f"{name!r} is not an environment variable name")
+        self.secret_env = dict(env)
 
     @abstractmethod
     def write_file(self, path: str, data: bytes, *, as_root: bool = False) -> None:

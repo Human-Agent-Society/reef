@@ -240,6 +240,29 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
 
 
 @pytest.mark.unit
+def test_a_secret_reaches_the_process_environment_and_no_command_line(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "rollout"
+    (root / "workspace").mkdir(parents=True)
+    sandbox = Sandbox(Process(0, "done"))
+    session = ModalSession(sandbox, env={"DEPLOYMENT": "yes"})
+    monkeypatch.setattr(session, "push", lambda path: None)
+    monkeypatch.setattr(session, "pull", lambda path, relative="": None)
+    session.set_secret_env({"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value"})
+    session.launch(["claude"], root=root, workspace=root / "workspace", env={"CALLER": "1"}, timeout=30)
+    ((args, options),) = sandbox.commands
+    assert not any("sk-ant-oat01-secret-value" in argument for argument in args)
+    jailed = shlex.split(args[-1])[-1]
+    assert jailed.startswith(
+        "printf '%s\\000' --setenv CLAUDE_CODE_OAUTH_TOKEN \"$CLAUDE_CODE_OAUTH_TOKEN\" | exec bwrap"
+    )
+    assert options["env"] == {
+        "CALLER": "1",
+        "DEPLOYMENT": "yes",
+        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value",
+    }
+
+
+@pytest.mark.unit
 def test_a_process_past_its_limit_is_a_timeout_and_a_failed_command_is_a_launch_error(tmp_path, monkeypatch) -> None:
     root = tmp_path / "rollout"
     (root / "workspace").mkdir(parents=True)

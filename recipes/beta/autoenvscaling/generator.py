@@ -66,6 +66,7 @@ from recipes.beta.autoenvscaling.checks import (
     reference_instructions,
     validate_band,
 )
+from recipes.beta.autoenvscaling.claude_author import CLAUDE_HARNESS, TOKEN_PREFIX, TOKEN_VARIABLE, ClaudeCodeAuthor
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
@@ -95,6 +96,7 @@ from reef.record2sample.generator.harbor import (
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sandbox.config import remote_executor
 from reef.sandbox.process import SandboxUnavailable
+from reef.sandbox.remote import RemoteExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,12 @@ DEFAULT_AGENT_SANDBOX = "e2b"
 # The Designer: the coding agent, or the generator service's one-reply prompt Designer on the same sessions.
 AUTHORS = ("agent", "prompt")
 DEFAULT_AUTHOR = "agent"
+# The coding agent that is the agent author: Reefine's pi, or Claude Code signed in with its owner's OAuth token.
+AUTHOR_HARNESSES = ("pi", CLAUDE_HARNESS)
+DEFAULT_AUTHOR_HARNESS = "pi"
+CLAUDE_KEYS = ("claude_model", "claude_token_env")
+DEFAULT_CLAUDE_MODEL = "opus"
+DEFAULT_CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 DEFAULT_REVIEW = "refuse"
 DEFAULT_CALIBRATION = "off"
 DEFAULT_CALIBRATION_ROLLOUTS = 4
@@ -177,6 +185,9 @@ CONFIG_KEYS = frozenset(
         "state_dir",
         "sources_path",
         "author",
+        "author_harness",
+        "claude_model",
+        "claude_token_env",
         "count",
         "band_low",
         "band_high",
@@ -382,7 +393,8 @@ class SessionProposal:
 
     ``task_name`` is set once the author's task was admitted. ``stage`` says where a session that became no
     task inside the band stopped (``STAGE_*``); it is empty for a task inside the band. ``designer_record_id`` is
-    the author's last recorded call, the one that wrote the task. A variant has ``position`` -1, the name of the
+    the author's last recorded call, the one that wrote the task, or empty for an author that Reef records no call
+    of (Claude Code; its task names the transcript instead). A variant has ``position`` -1, the name of the
     task it varies in ``parent_task`` and ``harder`` or ``simpler`` in ``direction``; both are empty otherwise.
     """
 
@@ -486,13 +498,21 @@ def task_author(
     """The author the config names, its model calls recorded under ``scenario``: the coding agent, or with
     ``author: prompt`` the one-reply prompt Designer on the agent's model settings.
 
-    The agent runs in the cloud sandbox ``agent_sandbox`` names (``e2b`` by default, or ``modal``), with that
-    provider's options from ``agent_sandbox_options``. Credentials come from ``environ``: the Reef token from the
-    variable ``agent_token_env`` names, and the sandbox provider's own (``E2B_API_KEY``, or Modal's token).
+    The agent is pi, or Claude Code with ``author_harness: claude-code`` (:func:`claude_code_author`). It runs in
+    the cloud sandbox ``agent_sandbox`` names (``e2b`` by default, or ``modal``), with that provider's options from
+    ``agent_sandbox_options``. Credentials come from ``environ``: the Reef token from the variable
+    ``agent_token_env`` names, and the sandbox provider's own (``E2B_API_KEY``, or Modal's token).
     """
     kind = config.get("author", DEFAULT_AUTHOR)
     if kind not in AUTHORS:
         raise ValueError(f"author must be one of {AUTHORS}")
+    harness = config.get("author_harness", DEFAULT_AUTHOR_HARNESS)
+    if harness not in AUTHOR_HARNESSES:
+        raise ValueError(f"author_harness must be one of {AUTHOR_HARNESSES}")
+    if harness != CLAUDE_HARNESS and any(key in config for key in CLAUDE_KEYS):
+        raise ValueError(f"{' and '.join(CLAUDE_KEYS)} need author_harness: {CLAUDE_HARNESS}")
+    if harness == CLAUDE_HARNESS and kind == "prompt":
+        raise ValueError(f"author_harness: {CLAUDE_HARNESS} needs author: agent")
     model = str(config.get("agent_model", "") or "")
     reef_url = str(config.get("agent_reef_url", "") or "")
     if not model or not reef_url or "${" in reef_url:
@@ -519,6 +539,18 @@ def task_author(
     max_model_calls = int(config.get("max_model_calls", DEFAULT_MAX_MODEL_CALLS))
     if timeout_seconds <= 0 or max_model_calls < 1:
         raise ValueError("agent_timeout_seconds and max_model_calls must be positive")
+    if harness == CLAUDE_HARNESS:
+        return claude_code_author(
+            config,
+            environ,
+            reef_url=reef_url,
+            token=token,
+            executor=executor,
+            cache_dir=cache_dir,
+            timeout_seconds=timeout_seconds,
+            max_turns=max_model_calls,
+            has_behaviour_rule=has_behaviour_rule,
+        )
     return AgentAuthor(
         reef_url=reef_url,
         token=token,
@@ -529,6 +561,65 @@ def task_author(
         cache_dir=cache_dir,
         timeout_seconds=timeout_seconds,
         max_model_calls=max_model_calls,
+        has_behaviour_rule=has_behaviour_rule,
+    )
+
+
+def claude_code_author(
+    config: Mapping[str, Any],
+    environ: Mapping[str, str],
+    *,
+    reef_url: str,
+    token: str | None,
+    executor: RemoteExecutor,
+    cache_dir: Path,
+    timeout_seconds: float,
+    max_turns: int,
+    has_behaviour_rule: bool,
+) -> ClaudeCodeAuthor:
+    """Claude Code as the agent author, on ``claude_model``, signed in with the OAuth token in the variable
+    ``claude_token_env`` names.
+
+    Raises ``ValueError`` when that variable is unset or empty, or holds no Claude Code OAuth token, and when the
+    sandbox's ``env_from`` forwards a variable that would point Claude Code away from Anthropic (``ANTHROPIC_*``,
+    ``CLAUDE_CODE_USE_*``, a base URL or a proxy) or would put the token on the jail's command line. No message
+    holds the token.
+    """
+    token_env = config.get("claude_token_env", DEFAULT_CLAUDE_TOKEN_ENV)
+    if not isinstance(token_env, str) or not token_env.isidentifier():
+        raise ValueError("claude_token_env must name an environment variable")
+    claude_token = environ.get(token_env, "").strip()
+    if not claude_token:
+        raise ValueError(f"author_harness: {CLAUDE_HARNESS} needs a Claude Code OAuth token in {token_env}")
+    if not claude_token.startswith(TOKEN_PREFIX):
+        raise ValueError(
+            f"{token_env} must hold a Claude Code OAuth token, which starts with {TOKEN_PREFIX} "
+            "(`claude setup-token` makes one)"
+        )
+    model = config.get("claude_model", DEFAULT_CLAUDE_MODEL)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("claude_model must be a Claude model name or alias")
+    for name in executor.env:
+        upper = name.upper()
+        if (
+            upper.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_"))
+            or "BASE_URL" in upper
+            or "PROXY" in upper
+            or upper in (TOKEN_VARIABLE, token_env.upper())
+        ):
+            raise ValueError(
+                f"agent_sandbox_options.env_from must not forward {name} to Claude Code: it calls Anthropic "
+                f"itself, with the token from {token_env} alone"
+            )
+    return ClaudeCodeAuthor(
+        reef_url=reef_url,
+        token=token,
+        claude_token=claude_token,
+        model=model.strip(),
+        executor=executor,
+        cache_dir=cache_dir,
+        timeout_seconds=timeout_seconds,
+        max_turns=max_turns,
         has_behaviour_rule=has_behaviour_rule,
     )
 
@@ -838,7 +929,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 refused.append(replace(proposal, stage=STAGE_OUTAGE, refusal=error))
             else:
                 pending[task.name] = replace(
-                    proposal, designer_record_id=task.source_agent_record_ids[0], task_name=task.name
+                    proposal, designer_record_id=str(task.metadata.get("designer_record_id", "")), task_name=task.name
                 )
                 tasks.append(task)
             # The session or the parent is taken; a restart continues with the next one. A cancelled run takes
@@ -890,7 +981,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
     async def rebuilt(self, source: SessionSource, index: int, *, variant: TaskVariant | None = None) -> HarborTask:
         """The author's task from one session, or a variant of a parent from it, admitted; its sources are the
-        author's last recorded call and the session, so a variant shares its parent's split.
+        author's last recorded call and the session, so a variant shares its parent's split. An author with no
+        recorded call but a transcript (Claude Code) gives a task whose one source is the session, and whose
+        metadata names the transcript under the state directory.
 
         Raises :class:`ProposalRefused` when the session becomes no task, and ``AuthorError`` when the author
         could not run.
@@ -923,15 +1016,15 @@ class AutoEnvScalingGenerator(TaskGenerator):
         finally:
             # A check the agent left running finishes, and deletes its candidate, before the task is written.
             await asyncio.to_thread(checks.close)
-        if not authored.record_ids:
+        if not authored.record_ids and not authored.transcript:
             raise ProposalRefused("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
-        record_id = authored.record_ids[-1]
+        record_id = authored.record_ids[-1] if authored.record_ids else ""
         try:
             task = admitted_task(
                 authored.reply,
                 generation=self.generation,
                 index=index,
-                record_id=record_id,
+                record_id=record_id or source.record_id,
                 checkout_path=source.repository.path,
             )
         except (ValueError, HarborTaskError) as exc:
@@ -939,10 +1032,18 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
             ) from exc
         lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
+        if record_id:
+            return replace(
+                task,
+                source_agent_record_ids=(record_id, source.record_id),
+                metadata={**task.metadata, "designer_record_id": record_id, **lineage},
+            )
+        designer = {
+            "designer_transcript": f"runs/{work_dir.name}/{authored.transcript}",
+            "designer_harness": CLAUDE_HARNESS,
+        }
         return replace(
-            task,
-            source_agent_record_ids=(record_id, source.record_id),
-            metadata={**task.metadata, "designer_record_id": record_id, **lineage},
+            task, source_agent_record_ids=(source.record_id,), metadata={**task.metadata, **designer, **lineage}
         )
 
     async def validate(self, task: HarborTask) -> TaskValidationResult:

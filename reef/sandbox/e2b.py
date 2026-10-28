@@ -260,14 +260,18 @@ class E2BSession(RemoteSession):
         from e2b.sandbox_sync.commands.command_handle import CommandHandle
 
         command, envs = remote_command(argv, {**env, **self.env}, root)
-        command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
+        command = protected_command(
+            command, envs, root, workspace, writable_paths, readonly_paths, secret_names=tuple(self.secret_env)
+        )
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
         process: CommandHandle | None = None
         finished = False
         try:
             self.push(root)
             deadline = time.monotonic() + timeout
-            process = self.sandbox.commands.run(command, envs=envs, cwd=cwd, timeout=timeout, background=True)
+            process = self.sandbox.commands.run(
+                command, envs={**envs, **self.secret_env}, cwd=cwd, timeout=timeout, background=True
+            )
             process_id = process.pid
             for attempt in range(3):
                 try:
