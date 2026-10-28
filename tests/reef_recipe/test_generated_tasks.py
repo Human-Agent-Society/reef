@@ -971,7 +971,7 @@ def test_every_artifact_is_evaluated_on_the_imported_eval_tasks_with_k_rollouts_
         {},
         config={
             "data": {
-                "job_parameters": {"rollout": {"episodes_per_task": 2, "environment": "e2b"}, "save_interval": 4},
+                "job_parameters": {"rollout": {"rollouts_per_task": 2, "environment": "e2b"}, "save_interval": 4},
                 "checkpoint-eval-rollouts-per-task": 5,
             },
             "model": {"path": "Qwen/Qwen3-8B"},
@@ -990,23 +990,23 @@ def test_every_artifact_is_evaluated_on_the_imported_eval_tasks_with_k_rollouts_
     assert job is not None
     assert [item.metadata["task"]["name"] for item in job.data.samples] == ["held-out-a", "held-out-b"]
     assert job.parameters == {
-        "rollout": {"episodes_per_task": 5, "environment": "e2b"},
+        "rollout": {"rollouts_per_task": 5, "environment": "e2b"},
         "save_interval": 4,
         "method": {"objective": "task_group", "learning_rate_schedule": None},
         "evaluation_of": "job-1:4",
     }
     training = recipe.job_plan().experiment_config()["parameters"]
-    assert training["rollout"] == {"episodes_per_task": 2, "environment": "e2b"}, "training keeps its k"
+    assert training["rollout"] == {"rollouts_per_task": 2, "environment": "e2b"}, "training keeps its k"
 
 
-@pytest.mark.parametrize("spelling", ["episodes_per_task", "episodes-per-task"])
+@pytest.mark.parametrize("spelling", ["rollouts_per_task", "rollouts-per-task"])
 def test_the_evaluation_k_replaces_either_spelling_of_the_training_k(tmp_path: Path, spelling: str) -> None:
     recipe = training_recipe(
         job_parameters={"rollout": {spelling: 2, "concurrency": 4}}, checkpoint_eval_rollouts_per_task=3
     )
     evaluation = recipe.artifact_evaluation(task_storage(tmp_path))
     assert isinstance(evaluation, ImportedTaskEvaluation)
-    assert evaluation.parameters["rollout"] == {"concurrency": 4, "episodes_per_task": 3}
+    assert evaluation.parameters["rollout"] == {"concurrency": 4, "rollouts_per_task": 3}
 
 
 @pytest.mark.parametrize("rollouts", [0, -1, True, "5"])
@@ -1025,7 +1025,7 @@ def test_the_component_checks_the_evaluation_rollout() -> None:
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
     with pytest.raises(
         RecipeConfigError,
-        match=r"checkpoint evaluation .*rollout.episodes_per_task must be an int of at least 2, got 1",
+        match=r"checkpoint evaluation .*rollout.rollouts_per_task must be an int of at least 2, got 1",
     ):
         GeneratedTaskRecipe(
             RolloutChecking(),

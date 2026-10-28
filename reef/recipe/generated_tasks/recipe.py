@@ -93,15 +93,15 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     def evaluation_parameters(self, rollouts: int) -> dict[str, object]:
         """The parameters of a checkpoint's evaluation job beside ``method``.
 
-        They are a copy of ``job_parameters`` whose ``rollout`` runs ``rollouts`` episodes of each task;
+        They are a copy of ``job_parameters`` whose ``rollout.rollouts_per_task`` is ``rollouts``;
         ``job_parameters`` does not change.
         """
         parameters: dict[str, object] = dict(self.job_parameters or {})
         rollout = parameters.get("rollout")
         settings = dict(rollout) if isinstance(rollout, Mapping) else {}
         # The component reads a rollout key in either spelling, so the training value leaves in both spellings.
-        kept = {name: value for name, value in settings.items() if str(name).replace("-", "_") != "episodes_per_task"}
-        parameters["rollout"] = {**kept, "episodes_per_task": rollouts}
+        kept = {name: value for name, value in settings.items() if str(name).replace("-", "_") != "rollouts_per_task"}
+        parameters["rollout"] = {**kept, "rollouts_per_task": rollouts}
         return parameters
 
     def artifact_evaluation(self, task_storage: TaskStorage | None) -> ArtifactEvaluation | None:

@@ -153,7 +153,7 @@ def test_a_generated_task_scenario_admits_only_eval_uploads_with_checkpoint_eval
     # The generated-task recipe reads imported tasks only to evaluate checkpoints, on the eval split.
     recipe = GeneratedTaskRecipe(
         **runtime_bindings(),
-        job_parameters={"rollout": {"episodes_per_task": 2}},
+        job_parameters={"rollout": {"rollouts_per_task": 2}},
         checkpoint_eval_rollouts_per_task=rollouts,
     )
     dispatcher = dispatcher_for(tmp_path, recipe)

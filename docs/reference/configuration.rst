@@ -1464,7 +1464,7 @@ Harbor tasks <http-api.rst#upload-harbor-tasks>`__ or the ``task-import``
 section fill. Set ``checkpoint_eval_rollouts_per_task`` to k. When the trainer
 decides a checkpoint, it also submits an evaluation job from that checkpoint
 that rolls out every eval task k times and trains nothing. The job uses
-``job_parameters`` with k in place of ``rollout.episodes_per_task``, so the
+``job_parameters`` with k in place of ``rollout.rollouts_per_task``, so the
 agent and the environment are those of training. The job and its commit
 metric are those of the SFT-then-RL recipe's evaluation (`SFT then RL
 <#sft-then-rl>`__). For each published checkpoint, the training component runs

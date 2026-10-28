@@ -154,7 +154,7 @@ def submit(p: TrainingPipeline) -> list[str]:
 
 
 def train(p: TrainingPipeline, job_id: str, rewards: Mapping[str, Sequence[float]] | None = None) -> list[str]:
-    """Train the next task job as the trainer does; each task's episodes earn ``rewards[name]``, 1.0 and 0.0 by default."""
+    """Train the next task job as the trainer does; each task's rollouts earn ``rewards[name]``, 1.0 and 0.0 by default."""
     names = submit(p)
     p.job_ended(finished(job_id, {name: (rewards or {}).get(name, (1.0, 0.0)) for name in names}))
     return names

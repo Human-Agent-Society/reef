@@ -81,11 +81,11 @@ class ReviewSettings:
 
 @dataclass(frozen=True)
 class TaskUse:
-    """One use of a train task in a task job: the rewards of the task's episodes in that job.
+    """One use of a train task in a task job: the rewards of the task's rollouts in that job.
 
     Values: ``task_name`` and ``job_id`` are non-empty strings. ``use_index`` is a non-negative int, the number of
     uses of the task saved before this one. ``rewards`` is a tuple of finite numbers in run order; it is empty
-    when no episode of the task ran.
+    when no rollout of the task ran.
     Purpose: ``save_task_uses`` makes one for each task of a task job that ended, and saves it under
     ``use/<task_name>/<job_id>``. ``review_pool`` reads the rewards; a restart puts the least used tasks first.
     """
