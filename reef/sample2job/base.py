@@ -199,7 +199,8 @@ class Sample2Job(ABC, Plugin):
         """Return samples that the stage made itself and that train now as one job, or None.
 
         While the value is not None, the pipeline is ready and its next job data holds exactly these samples. It
-        stays the same until ``own_job_data_submitted``.
+        stays the same until ``own_job_data_submitted`` or ``job_ended``: the trainer reserves job data only
+        while no job runs, so it holds none when a job's end arrives.
         """
         return None
 

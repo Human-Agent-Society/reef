@@ -1074,8 +1074,11 @@ class GeneratedTaskJobData(Sample2Job):
 
     With ``pool_capacity`` above 0, the job's end also saves a use of each of its tasks with the job's rewards
     (``use/<task>/<job>``), runs the pool review that is due, and puts the job's tasks that no review retired
-    back at the end of the pool. A start repeats a review that a stop cut short, then puts every train task
-    that no review retired in the pool, least used first, then oldest first.
+    back at the end of the pool. The next job's tasks can be handed out while a job runs, but no job takes them
+    before this end, so a review hands them out again without the tasks it retired. A start puts every train
+    task that no review retired in the pool, least used first, then oldest first. The trainer then gives the
+    stage the last job's end again, which saves the uses that a stop left out and repeats a review that it cut
+    short.
     """
 
     #: The tasks wait in the task pool, not in a buffer, and a job trains ``tasks_per_step`` tasks.
@@ -1120,12 +1123,7 @@ class GeneratedTaskJobData(Sample2Job):
         record2record.attach_task_pool(self.task_pool)
         store = record2sample.task_store
         if store is not None:
-            if self.task_pool.capacity is None:
-                loaded = available_tasks(store)
-            else:
-                # A stop between a review's retired tasks and the review itself repeats the same review now.
-                self.run_due_review(store)
-                loaded = active_tasks(store)
+            loaded = available_tasks(store) if self.task_pool.capacity is None else active_tasks(store)
             for generation, stored in loaded:
                 self.task_pool.add(stored.name, task_item(store, generation, stored), group_key=generation)
         #: The tasks of the next job, from hand-out until the trainer commits the job's submission.
@@ -1224,6 +1222,15 @@ class GeneratedTaskJobData(Sample2Job):
         if review is None:
             return
         self.task_pool.retire(frozenset(review.retired))
+        handed_out = self.handed_out
+        if handed_out is not None and any(task_name_of(task) in review.retired for task in handed_out.tasks):
+            # The trainer reserves job data only while no job runs, so no job took these tasks: hand them out
+            # again without the retired ones.
+            self.task_pool.drop(tuple(task for task in handed_out.tasks if task_name_of(task) in review.retired))
+            self.task_pool.put_back(
+                tuple(task for task in handed_out.tasks if task_name_of(task) not in review.retired)
+            )
+            self.handed_out = None
         logger.info(
             "generated-task pool review %d on scenario %r after %d jobs: kept %d, retired %s",
             review.review,

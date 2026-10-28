@@ -144,13 +144,18 @@ def finished(job_id: str, rewards: Mapping[str, Sequence[float]]) -> JobOutcome:
     )
 
 
-def train(p: TrainingPipeline, job_id: str, rewards: Mapping[str, Sequence[float]] | None = None) -> list[str]:
-    """Train the next task job as the trainer does; each task's episodes earn ``rewards[name]``, 1.0 and 0.0 by default."""
+def submit(p: TrainingPipeline) -> list[str]:
+    """Submit the next task job as the trainer does, and return the names of its tasks."""
     handed_out(p)
     data = p.build_job_data(BATCH_SIZE)
-    names = [item.metadata["task"]["name"] for item in data.samples]
     p.acknowledge(data.data_id)
     p.release_records(p.releasable_record_ids())
+    return [item.metadata["task"]["name"] for item in data.samples]
+
+
+def train(p: TrainingPipeline, job_id: str, rewards: Mapping[str, Sequence[float]] | None = None) -> list[str]:
+    """Train the next task job as the trainer does; each task's episodes earn ``rewards[name]``, 1.0 and 0.0 by default."""
+    names = submit(p)
     p.job_ended(finished(job_id, {name: (rewards or {}).get(name, (1.0, 0.0)) for name in names}))
     return names
 
@@ -218,13 +223,28 @@ def test_rounds_start_only_while_active_tasks_are_below_capacity(tmp_path: Path)
     assert p.status()["training_pool"]["active"] == 4
 
 
+def test_a_taken_task_counts_as_active_for_the_capacity(tmp_path: Path) -> None:
+    task_generator = FixedTasks(generated(0, 3), generated(1, 3))
+    p = pipeline(tmp_path, task_generator, rounds=2, tasks_per_step=1, pool_capacity=3, review_interval=0)
+    train(p, "job-1")
+    assert handed_out(p) == [TASK_B] and handed_out(p) == [TASK_B]
+    assert len(job_stage(p).task_pool.waiting) == 2
+    assert len(task_store(p).generations()) == 1, "two waiting tasks and one taken task fill the capacity"
+
+
 # ------------------------------------------------------------------------------------------------- review
 
 
 @pytest.mark.parametrize(
     ("rewards", "reason"),
-    [((1.0, 1.0), "above_band"), ((0.0, 0.0), "below_band"), ((0.5, 0.5), "no_reward_spread")],
-    ids=["above_band", "below_band", "no_reward_spread"],
+    [
+        ((1.0, 1.0), "above_band"),
+        ((0.0, 0.0), "below_band"),
+        ((0.5, 0.5), "no_reward_spread"),
+        # The population standard deviation is 0.075; the sample standard deviation, 0.106, would keep the task.
+        ((0.45, 0.6), "no_reward_spread"),
+    ],
+    ids=["above_band", "below_band", "no_reward_spread", "no_population_spread"],
 )
 def test_a_review_retires_a_task_outside_the_band_or_without_reward_spread(
     tmp_path: Path, rewards: tuple[float, float], reason: str
@@ -235,6 +255,28 @@ def test_a_review_retires_a_task_outside_the_band_or_without_reward_spread(
     assert retired_tasks(store) == {TASK_A: RetiredTask(TASK_A, 0, rewards, reason)}
     assert pool_reviews(store) == (PoolReview(0, 1, 1, {TASK_A: reason}),)
     assert handed_out(p) == [TASK_B], "a retired task is not handed out again"
+
+
+def test_a_review_retires_a_waiting_task_before_it_trains_again(tmp_path: Path) -> None:
+    p = pipeline(
+        tmp_path, FixedTasks(generated(0, 2)), tasks_per_step=1, pool_capacity=2, review_interval=2, review_window=2
+    )
+    train(p, "job-1", {TASK_A: (1.0, 1.0)})
+    train(p, "job-2")
+    assert set(retired_tasks(task_store(p))) == {TASK_A}
+    assert handed_out(p) == [TASK_B], "task A waited in the pool when the review retired it"
+
+
+def test_a_review_takes_a_retired_task_out_of_the_next_jobs_hand_out(tmp_path: Path) -> None:
+    task_d, task_e = "harbor-00000-003", "harbor-00000-004"
+    p = pipeline(tmp_path, FixedTasks(generated(0, 5)), pool_capacity=5, review_interval=2, review_window=2)
+    train(p, "job-1", {TASK_A: (1.0, 1.0)})
+    assert submit(p) == [TASK_C, task_d]
+    # While job-2 runs, the trainer's readiness check hands out the next job's tasks.
+    assert handed_out(p) == [task_e, TASK_A]
+    p.job_ended(finished("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
+    assert set(retired_tasks(task_store(p))) == {TASK_A}
+    assert handed_out(p) == [task_e, TASK_B], "the hand-out starts again without task A, in pool order"
 
 
 def test_a_pass_rate_on_a_band_edge_is_kept(tmp_path: Path) -> None:
@@ -314,6 +356,32 @@ def test_a_restart_after_retirement_repeats_the_same_review(tmp_path: Path) -> N
     assert pooled(again) == [TASK_B]
 
 
+def test_a_restart_after_a_stop_between_two_uses_reviews_every_use_of_the_job(tmp_path: Path) -> None:
+    config = {"pool_capacity": 2, "review_interval": 1, "review_window": 2}
+    first = pipeline(tmp_path, FixedTasks(generated(0, 2)), **config)
+    store = task_store(first)
+    write_document = store.write_document
+
+    def stopping_write_document(*, key: str, document: str) -> None:
+        if key == f"use/{TASK_B}/job-1":
+            raise OSError(28, "No space left on device")
+        write_document(key=key, document=document)
+
+    # The service stops after it saved the use of task A in job-1 and before the use of task B.
+    store.write_document = stopping_write_document
+    rewards = {TASK_A: (1.0, 0.0), TASK_B: (1.0, 1.0)}
+    with pytest.raises(OSError, match="No space left"):
+        train(first, "job-1", rewards)
+    assert set(task_uses(store)) == {TASK_A}
+    first.close()
+    again = pipeline(tmp_path, FixedTasks(), **config)
+    assert pool_reviews(task_store(again)) == (), "a start reviews nothing before the last job's end"
+    # The trainer gives the stage the last job's end again.
+    again.job_ended(finished("job-1", rewards))
+    assert pool_reviews(task_store(again)) == (PoolReview(0, 1, 1, {TASK_B: "above_band"}),)
+    assert pooled(again) == [TASK_A]
+
+
 # ------------------------------------------------------------------------------------------------- settings and status
 
 
@@ -345,7 +413,10 @@ def test_a_pool_capacity_refuses_refill_tasks_above_1(tmp_path: Path) -> None:
 def test_the_status_reports_retired_tasks_and_their_reasons(tmp_path: Path) -> None:
     p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
     train(p, "job-1", {TASK_A: (0.0, 0.0)})
-    assert p.status()["training_pool"] == {
+    assert handed_out(p) == [TASK_B]
+    status = p.status()
+    assert status["task_pool"] == 0, "the next job holds task B"
+    assert status["training_pool"] == {
         "capacity": 2,
         "active": 1,
         "retired": 1,

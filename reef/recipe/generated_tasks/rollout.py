@@ -52,8 +52,8 @@ class TaskPool:
     ``task_id``; ``arrival_count`` is larger than the ``arrival_index`` of each task that ``add`` or ``requeue``
     made. ``capacity`` is None or a positive int, the active tasks (waiting or taken) below which the pool
     needs new tasks. ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``drop``
-    removes taken tasks; ``requeue`` moves taken tasks back to ``waiting`` with new indices; ``retire`` removes
-    waiting tasks; ``add`` gives a new task a new index.
+    removes taken tasks; ``requeue`` moves taken tasks back to ``waiting`` with new indices, and ``put_back``
+    with their own indices; ``retire`` removes waiting tasks; ``add`` gives a new task a new index.
     Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the sample-to-job
     stage takes a job's tasks from it, and drops them or puts them back when the job ends.
     """
@@ -100,8 +100,13 @@ class TaskPool:
             self.arrival_count += 1
             self.waiting[task.task_id] = replace(self.taken.pop(task.task_id), arrival_index=self.arrival_count)
 
+    def put_back(self, tasks: tuple[PooledTask, ...]) -> None:
+        """Move taken tasks back to their places among the waiting ones: no task job took them."""
+        for task in tasks:
+            self.waiting[task.task_id] = self.taken.pop(task.task_id)
+
     def retire(self, task_ids: frozenset[Hashable]) -> None:
-        """Remove the waiting tasks with these IDs. A taken task stays until its job ends, and is dropped then."""
+        """Remove the waiting tasks with these IDs; a taken task stays taken."""
         for task_id in task_ids:
             self.waiting.pop(task_id, None)
 
