@@ -152,9 +152,10 @@ Each part is one relation between a few values. ``T`` is a harness tree
      - ``render_A(T)`` is the files that ``A``'s agent reads.
        ``import_A(F)`` reads those files back, so
        ``import_A(render_A(T)) = T``. A client installs ``render_A`` of the
-       head ``H``. When its files ``F`` changed since the installed release
-       ``B``, ``merge(B, H, import_A(F))`` takes each file from the side
-       that changed it.
+       head ``H`` as a layer over the person's own configuration. When its
+       files ``F`` changed since the installed release ``B``,
+       ``merge(B, H, import_A(F))`` takes each file from the side that
+       changed it, and a file both changed by its part's ``merge``.
      - `Use a published tree`_
 
 Step data
@@ -469,55 +470,79 @@ To run a long-lived deployment without the example's driver, start
 Use a published tree
 --------------------
 
-``reef-client harness`` connects an agent on your machine to a scenario. It
-reads the harness the agent keeps, installs the release that Reef serves, and
-runs the agent on it. The adapters ``pi``, ``claude``, ``codex`` and
-``opencode`` support it. Install ``reef-client`` where the agent runs, and set
+``reef-client harness`` runs the agent on your machine with the scenario's
+release as a layer over your own configuration. Your own settings, skills,
+rules and sessions stay as they are; the release adds to them, and its model
+calls go to Reef. The adapters ``claude``, ``pi``, ``opencode`` and ``codex``
+support it. Install ``reef-client`` where the agent runs, and set
 ``REEF_TOKEN`` when the deployment has a token:
 
 .. code:: bash
 
    pip install reef-client
-   reef-client harness connect code-repair --reef http://127.0.0.1:8900 --adapter pi
-   reef-client harness run code-repair
+   reef-client harness connect code-repair --reef http://127.0.0.1:8900
+   reef-client harness run
 
 .. flow::
    :loop: each run starts on the newest release
 
-   connect :: imports your harness into a new scenario, installs the head
-   run :: syncs, starts the agent, and syncs again when it exits
+   connect :: installs the scenario's head as a layer, once
+   run :: syncs, starts the agent on the layer, and syncs again when it exits
    Reef* :: records each model call; steps publish releases
 
-- ``connect`` creates the scenario when it does not exist. While the scenario
-  is at its first release, ``connect`` imports the agent's harness files as a
-  new release: for pi, from ``PI_CODING_AGENT_DIR``, or ``~/.pi/agent`` when
-  the variable is unset. It reads the files of the adapter's parts, such as
-  ``AGENTS.md``, skills, prompts and extensions. It does not import config
-  files: they hold the endpoints and credentials that Reef's model binding
-  owns. A scenario that has evolved keeps its releases, and ``connect``
-  installs its head without an import. Your own directory is only read.
-- The install is ``~/.local/share/reef-client/harness/<scenario>``. Its
-  config sends every model call to ``<reef>/reef/scenarios/<scenario>/v1``
-  with your token, so Reef records the call as the scenario's traffic.
-  ``connect`` and ``sync`` print what a release ``requires`` of the machine.
-- ``run`` syncs, starts the agent with ``PI_CODING_AGENT_DIR`` at the
-  install, and syncs again when the agent exits. Each session starts on the
-  newest release, and what the session changed reaches Reef before its next
-  step. A command after ``--`` replaces the agent's own:
-  ``reef-client harness run code-repair -- pi -c``.
-- ``sync`` sends the harness files you or the agent changed since the
-  installed release, then installs the head. Reef merges the changes onto
-  its head file by file, so a release that a step made in the meantime is
-  kept. The result serves at once, and Reef does not evaluate it: you are
-  its author. A file that a step and you both changed is refused by name,
-  and your files stay as they are. So does every change while a step runs;
-  the next ``run`` or ``sync`` sends it. ``sync --discard`` drops your
-  changes and installs the head. ``status`` shows the installed release, the
-  head and the changed files.
-- With ``claude``, the install also holds Claude Code's automatic memory, in
-  ``claude/memory``: the notes it writes for itself in a session sync like
-  any other harness file. Memory that Claude Code wrote before ``connect``
-  is per project, under ``~/.claude/projects``, and is not imported.
+- ``connect`` creates the scenario when it does not exist and installs its
+  head in ``~/.local/share/reef-client/harness/<scenario>``. The scenario's
+  adapter decides which agent runs. ``connect`` keeps the token, and prints
+  an alias that makes the agent's own command run through Reef, such as
+  ``alias claude='reef-client harness run code-repair --'``. It never reads
+  or writes your own configuration.
+- ``run`` syncs, starts the agent with the layer, and syncs again when the
+  agent exits. Each session starts on the newest release, and what the
+  session changed in the layer reaches Reef before its next step. Arguments
+  after ``--`` go to the agent. With one scenario installed, ``run``,
+  ``sync``, ``status`` and ``disconnect`` need no scenario name.
+- ``sync`` sends the layer's files that you or the agent changed since the
+  installed release, then installs the head. Reef merges them onto its head
+  as each part's ``merge`` says (`Tree parts
+  <../developer-guide/harness-adapters.rst#tree-parts>`__): text such as
+  rules, skills and memory merges by line, so only a line that a step and
+  you both changed is refused, by the file's name; your files then stay as
+  they are. The result serves at once, and Reef does not evaluate it: you
+  are its author. While a step runs, your changes wait for the next ``run``
+  or ``sync``. ``sync --discard`` drops them and installs the head.
+- ``status`` shows the installed release, the head and the changed files;
+  ``disconnect`` removes the install.
+
+How the layer goes over your own configuration depends on the agent:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 86
+
+   * - Adapter
+     - The release over your configuration
+   * - ``claude``
+     - The release's skills and commands load as a plugin, named
+       ``reef:<name>`` beside your own. Its rules follow your ``CLAUDE.md``.
+       Its settings bind the model and win over yours. Claude Code's
+       automatic memory goes to the release's ``memory`` part, for every
+       working directory, so it syncs; memory written before ``connect``
+       stays under ``~/.claude/projects``.
+   * - ``pi``
+     - The release's skills, prompts and extensions load beside yours; on a
+       name both define, the release's wins. Its rules follow your
+       ``AGENTS.md``; pi then skips your ``APPEND_SYSTEM.md``. pi's
+       settings take no layer, and changing the model in a session still
+       writes your ``settings.json``.
+   * - ``opencode``
+     - The release's config, skills, commands and plugins merge over yours;
+       on a key or name both define, the release's wins. Your
+       ``AGENTS.md`` is read from ``~/.config/opencode``.
+   * - ``codex``
+     - Arguments bind the model and add the release's rules after your
+       ``AGENTS.md``, replacing your own ``developer_instructions``. Codex
+       loads skills from no directory an argument names, so the release's
+       skills and config stay out of your sessions.
 
 Reef learns from your sessions in two ways. A client that grades a run sends
 ``POST /reef/report`` with a score over the receipts of its model calls. Or
@@ -536,12 +561,10 @@ A client of its own uses the routes under ``reef-client`` (see `HTTP API
   metrics of the step that published it, and ``requires``.
   ``?release_id=<id>`` serves an older release. ``?form=source`` serves the
   source tree. ``?form=client&service_url=<url>&root=<directory>`` serves
-  the files bound to ``<url>/reef/scenarios/<scenario>``, for an install at
-  ``<directory>``.
+  the release as a layer for an install at ``<directory>``, bound to
+  ``<url>/reef/scenarios/<scenario>``, with the command that runs the agent.
 - ``POST /reef/harness/import`` merges a person's harness files onto the
   head as a new release.
-- ``GET /reef/harness/adapters`` says where each adapter's harness lives on a
-  person's machine (``roots``) and which files are the harness's (``files``).
 
 Ask for a harness change
 ~~~~~~~~~~~~~~~~~~~~~~~~

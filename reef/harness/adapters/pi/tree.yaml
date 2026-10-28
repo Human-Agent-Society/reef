@@ -2,20 +2,25 @@
 # the file as its format and renders it to its renders path, inside the pi
 # configuration directory of an episode or of an install. A tree file that no
 # part takes is refused.
+# When a person and Reef both change a file, its part's merge decides: lines merges
+# the lines each changed, and file, the default, refuses.
 parts:
   rules:
     path: rules.md
     format: text
+    merge: lines
     renders: pi-agent/AGENTS.md
     holds: the instructions pi reads at the start of every session
   skill:
     path: skills/{name}/SKILL.md
     format: skill
+    merge: lines
     renders: pi-agent/skills/{name}/SKILL.md
     holds: an Agent Skill, which pi loads when its description fits the task
   command:
     path: commands/{name}.md
     format: command
+    merge: lines
     renders: pi-agent/prompts/{name}.md
     holds: a prompt template that a person runs as /name
   extension:

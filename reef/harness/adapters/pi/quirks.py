@@ -53,7 +53,38 @@ def migrated_settings(settings: dict[str, object]) -> dict[str, object]:
     return settings
 
 
+#: The extension a pi layer loads: pi reads models.json only from its own directory, so this registers the
+#: providers of the layer's, with the defaults pi gives a model there.
+PROVIDER_EXTENSION = """\
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export default function (pi: any) {
+  const path = join(dirname(fileURLToPath(import.meta.url)), "..", "pi-agent", "models.json");
+  const { providers } = JSON.parse(readFileSync(path, "utf8"));
+  for (const [name, provider] of Object.entries<any>(providers)) {
+    const models = (provider.models ?? []).map((model: any) => ({
+      name: model.id,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 16384,
+      ...model,
+    }));
+    pi.registerProvider(name, { ...provider, models });
+  }
+}
+"""
+
+
 class PiAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def layer_files(files: dict[str, str]) -> dict[str, str]:
+        # --append-system-prompt reads a file only when it exists, so the rules file is always there.
+        return {"pi-agent/AGENTS.md": "", **files, "reef/pi-provider.ts": PROVIDER_EXTENSION}
+
     @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
         # Write pi's settings in the form pi keeps.

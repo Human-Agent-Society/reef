@@ -161,6 +161,12 @@ class AdapterRenderer:
         """
         return files
 
+    @staticmethod
+    def layer_files(files: dict[str, str]) -> dict[str, str]:
+        """The files of a layer over a person's own configuration (``AdapterLayer``): ``files``, the rendered tree,
+        with what the layer's ``args`` name and the tree may lack, such as an empty rules file."""
+        return files
+
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
 
@@ -237,34 +243,28 @@ class InstallSpec:
 
 
 @dataclass(frozen=True)
-class LocalRoot:
-    """Where one render root of an adapter lives on a person's machine.
+class AdapterLayer:
+    """How a person's machine runs the agent with a release over the person's own configuration.
 
-    Values: ``name`` is one path segment, the first segment of every render
-    path under the root (``pi-agent``). ``variable`` is the environment
-    variable the harness reads the root from (``PI_CODING_AGENT_DIR``); the
-    descriptor's ``env`` sets it to ``{root}/<name>`` for an episode.
-    ``default`` is the directory the harness uses when the variable is unset,
-    absolute or under ``~/``.
-    Purpose: ``load_descriptor`` makes one per entry of ``roots``;
-    ``GET /reef/harness/adapters`` serves them, and a client reads a person's
-    harness files there and runs the agent with ``variable`` set.
+    The client writes the release's layer files (``render_tree`` with ``layer``) under a directory of its own, the
+    install, and runs the binary with ``args`` added and ``env`` set. The agent still loads the person's own
+    configuration, which the client never writes.
+
+    Values: ``args`` are non-empty groups of arguments, such as a flag and its value; ``env`` maps variables to
+    values. Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}`` (the binding's), ``{token}``
+    (only in ``env``: a command line is visible to other processes) and ``{file:<render path>}`` (that file's text
+    as a JSON string; a group whose file is empty is left out).
+    Purpose: ``load_descriptor`` parses the ``layer`` section; ``reef.harness.sync.layer_install`` fills it in.
     """
 
-    name: str
-    variable: str
-    default: str
+    args: tuple[tuple[str, ...], ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.name or "/" in self.name or self.name in (".", ".."):
-            raise DescriptorError(f"root {self.name!r} must be one path segment")
-        if not self.variable.isidentifier():
-            raise DescriptorError(f"root {self.name!r} variable {self.variable!r} must be an environment variable")
-        if not (self.default.startswith("/") or self.default.startswith("~/")):
-            raise DescriptorError(f"root {self.name!r} default {self.default!r} must be absolute or under ~/")
-
-    def to_json(self) -> dict[str, str]:
-        return {"variable": self.variable, "default": self.default}
+        if any(not group or not all(isinstance(arg, str) for arg in group) for group in self.args):
+            raise DescriptorError("layer args must be non-empty groups of strings")
+        if any("{token}" in arg for group in self.args for arg in group):
+            raise DescriptorError("layer args must not hold {token}: a command line is visible to other processes")
 
 
 @dataclass(frozen=True)
@@ -307,9 +307,9 @@ class AdapterDescriptor:
     #: Optional quirk that validates the executor against the rendered tree,
     #: replacing the blanket self_isolating restriction before launch.
     validate_execution: ExecutionValidator | None = None
-    #: Where each render root lives on a person's machine, by root name. Empty when the adapter does not sync
-    #: with a person's machine; otherwise every part that renders a path renders it under one of the roots.
-    roots: Mapping[str, LocalRoot] = field(default_factory=dict)
+    #: How a person's machine runs the agent with a release over its own configuration; ``None`` when the adapter
+    #: does not run on a person's machine.
+    layer: AdapterLayer | None = None
 
     def place_root(self, files: Mapping[str, str], root: str) -> dict[str, str]:
         """``files`` with ``{root}`` in each config file replaced by ``root``, the directory that holds the render
@@ -385,7 +385,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
     renderer, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     model_binding = _parse_model_binding(data.get("model_binding"), config_targets, where)
-    roots = _parse_roots(data.get("roots", {}), env, layout, where)
+    layer = _parse_layer(data.get("layer"), where)
     return AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
@@ -405,31 +405,25 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,
         validate_execution=validate_execution,
-        roots=roots,
+        layer=layer,
     )
 
 
-def _parse_roots(raw: Any, env: Mapping[str, str], layout: TreeLayout, where: str) -> dict[str, LocalRoot]:
-    """The ``roots`` section: each root's default directory, with the variable ``env`` sets to ``{root}/<name>``.
-
-    A declared root needs that variable, and every part that renders a path must render it under a declared root,
-    so a client can place each file of the tree.
-    """
-    if not isinstance(raw, Mapping) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in raw.items()
-    ):
-        raise DescriptorError(f"{where} 'roots' must map root names to default directories")
-    roots: dict[str, LocalRoot] = {}
-    for name, default in raw.items():
-        variables = [variable for variable, value in env.items() if value == f"{{root}}/{name}"]
-        if len(variables) != 1:
-            raise DescriptorError(f"{where} root {name!r} needs exactly one 'env' variable set to {{root}}/{name}")
-        roots[name] = LocalRoot(name, variables[0], default)
-    if roots:
-        for part in layout.parts.values():
-            if part.renders is not None and part.renders.split("/", 1)[0] not in roots:
-                raise DescriptorError(f"{where} part {part.name!r} renders {part.renders!r} under no declared root")
-    return roots
+def _parse_layer(raw: Any, where: str) -> AdapterLayer | None:
+    """The ``layer`` section, or ``None`` without one; DescriptorError names the first malformed field."""
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping) or not set(raw) <= {"args", "env"}:
+        raise DescriptorError(f"{where} 'layer' must be an object of args and env")
+    args, env = raw.get("args", []), raw.get("env", {})
+    if not isinstance(args, list) or not all(isinstance(group, list) for group in args):
+        raise DescriptorError(f"{where} layer 'args' must be a list of argument groups")
+    if not isinstance(env, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        raise DescriptorError(f"{where} layer 'env' must map strings to strings")
+    try:
+        return AdapterLayer(args=tuple(tuple(group) for group in args), env=dict(env))
+    except DescriptorError as exc:
+        raise DescriptorError(f"{where}: {exc}") from exc
 
 
 def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:

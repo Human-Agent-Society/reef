@@ -166,7 +166,10 @@ def test_a_part_of_one_name_has_one_tree_path_on_every_bundled_adapter() -> None
         ({"path": "../a.md", "format": "text", "renders": "a.md", "holds": "x"}, "normal relative path"),
         ({"path": "a.md", "format": "prose", "renders": "a.md", "holds": "x"}, "format must be one of"),
         ({"path": "a.md", "format": "text", "renders": "a.md", "holds": ""}, "needs holds"),
-        ({"path": "a.md", "format": "text", "renders": "a.md", "holds": "x", "limit": 1}, "takes renders and review"),
+        (
+            {"path": "a.md", "format": "text", "renders": "a.md", "holds": "x", "limit": 1},
+            "takes renders, review and merge",
+        ),
     ],
 )
 def test_a_tree_yaml_refuses_a_malformed_part(tmp_path: Path, entry: dict, problem: str) -> None:

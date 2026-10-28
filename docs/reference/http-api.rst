@@ -862,14 +862,18 @@ does a scenario whose recipe serves no harness tree.
   that the adapter's parts take, the ones a patch names (see `Tree parts
   <../developer-guide/harness-adapters.rst#tree-parts>`__). A client that
   renders the tree itself reads this form.
-- ``client``: the release rendered with a model binding at
-  ``<service_url>/reef/scenarios/<scenario>``, and placed at ``root``. Both
-  query parameters are required: ``service_url`` is the address the client
-  reaches Reef at, and ``root`` is the directory the client installs the
-  files in. The binding asks for the served model, and its key is the
-  literal ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own
-  token. A config default that names a path as ``{root}/...``, such as
-  Claude Code's memory directory, names it under ``root``.
+- ``client``: the release as a layer over a person's own configuration,
+  for an install at ``root``, bound to
+  ``<service_url>/reef/scenarios/<scenario>``. Both query parameters are
+  required: ``service_url`` is the address the client reaches Reef at, and
+  ``root`` is the directory the client installs the files in. The binding
+  asks for the served model, and its key is the literal
+  ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own token.
+  This form adds ``run``, the command that runs the agent on the files
+  (``binary``, ``args`` and ``env``; ``env`` may hold the placeholder too),
+  and ``synced``, the render templates of the files the client sends back,
+  ``{name}`` standing for one path segment. An adapter without a ``layer``
+  is HTTP 400.
 
 Another value is HTTP 400. In the other forms, a config file may hold
 ``{root}``: write the directory that holds the render roots there. The first two forms carry no endpoint and no
@@ -919,14 +923,14 @@ agent as the scenario's head, with ``x-reef-scenario``:
   part that renders there. A path that no part renders to is ignored and
   listed in ``ignored``. A file of the base that ``files`` lacks is one the
   person removed. Config files are not read: the model binding owns them.
-- ``base_release_id`` is the release the client installed. ``null`` is a
-  client that installed nothing; only a scenario still at its first release
-  takes it, and any other scenario answers HTTP 409.
+- ``base_release_id`` is required: the release the client installed.
 - Reef puts the client's changes since the base on the head, file by file. A
   file that only the client changed takes the client's text; a file that
-  only the head changed keeps the head's. A file that both changed to
-  different texts is HTTP 409, which names it at its render path. The
-  answer's ``merged`` is true when the head had moved on from the base.
+  only the head changed keeps the head's. A file that both changed merges as
+  its part's ``merge`` says: ``lines`` keeps each side's changed lines, and
+  ``file`` keeps neither. What cannot merge is HTTP 409, which names the
+  file at its render path. An empty file counts as no file. The answer's
+  ``merged`` is true when the head had moved on from the base.
 - The merged tree must pass the adapter's validation, as a method's
   candidate does; a problem is HTTP 400 naming it. Reef does not evaluate
   the tree.

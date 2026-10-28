@@ -7,12 +7,13 @@ import json
 import pytest
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.sync import TreeMerge, import_files, merge_trees
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.sync import TOKEN_PLACEHOLDER, TreeMerge, import_files, layer_install, merge_lines, merge_trees
 from reef.harness.tree import HarnessTree, render_tree
 
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"
 COMMAND = "---\ndescription: Ship the change.\n---\n\nRun the tests and commit.\n"
-SYNCED = [name for name in available_adapters() if get_adapter(name).roots]
+SYNCED = [name for name in available_adapters() if get_adapter(name).layer is not None]
 
 
 def test_the_adapters_that_sync_are_the_ones_whose_roots_are_known() -> None:
@@ -58,17 +59,67 @@ def test_codex_reads_a_file_where_a_skill_and_a_command_both_render_as_the_skill
     assert imported.tree == HarnessTree({"skills/ship/SKILL.md": COMMAND})
 
 
-def test_the_merge_keeps_each_sides_own_changes_and_names_the_files_both_changed() -> None:
-    base = HarnessTree({"rules.md": "Base.\n", "skills/fix/SKILL.md": SKILL})
-    head = HarnessTree({"rules.md": "Evolved.\n", "skills/fix/SKILL.md": SKILL})
-    # The client added a memory note and removed the skill; the head changed the rules.
-    client = HarnessTree({"rules.md": "Base.\n", "memory/MEMORY.md": "- note\n"})
-    assert merge_trees(base, head, client) == TreeMerge(
-        HarnessTree({"rules.md": "Evolved.\n", "memory/MEMORY.md": "- note\n"}), ()
+def test_the_merge_keeps_each_sides_own_changes_and_merges_text_parts_by_line() -> None:
+    layout = get_adapter("claude").layout
+    base = HarnessTree(
+        {"rules.md": "Test first.\nBe brief.\n", "extensions/a.js": "a\n", "skills/fix/SKILL.md": SKILL}
     )
-    edited = HarnessTree({"rules.md": "Mine.\n", "skills/fix/SKILL.md": SKILL})
-    assert merge_trees(base, head, edited) == TreeMerge(None, ("rules.md",))
-    assert merge_trees(base, head, head).tree == head
+    head = HarnessTree(
+        {"rules.md": "Test first.\nBe very brief.\n", "extensions/a.js": "b\n", "skills/fix/SKILL.md": SKILL}
+    )
+    # The client added a memory note, removed the skill, and changed a line of the rules the head left alone.
+    client = HarnessTree(
+        {"rules.md": "Test first, always.\nBe brief.\n", "extensions/a.js": "a\n", "memory/MEMORY.md": "- note\n"}
+    )
+    merged = HarnessTree(
+        {"rules.md": "Test first, always.\nBe very brief.\n", "extensions/a.js": "b\n", "memory/MEMORY.md": "- note\n"}
+    )
+    assert merge_trees(base, head, client, layout) == TreeMerge(merged, ())
+    # A code file merges whole, so two changes to it are a conflict; so are two changes to one line.
+    clash = HarnessTree({**client.files, "extensions/a.js": "c\n", "rules.md": "Test first.\nBe terse.\n"})
+    assert merge_trees(base, head, clash, layout) == TreeMerge(None, ("extensions/a.js", "rules.md"))
+    assert merge_trees(base, head, head, layout).tree == head
+
+
+def test_two_notes_added_at_one_place_keep_both_the_heads_first() -> None:
+    assert merge_lines("- a\n", "- a\n- from Reef\n", "- a\n- from you\n") == "- a\n- from Reef\n- from you\n"
+    assert merge_lines("x\ny\n", "X\ny\n", "X\ny\n") == "X\ny\n"
+    assert merge_lines("x\ny\n", "X\ny\n", "x2\ny\n") is None
+
+
+BINDINGS = {"claude": "anthropic", "codex": "responses", "opencode": "openai", "pi": "openai"}
+
+
+@pytest.mark.parametrize("adapter", sorted(BINDINGS))
+def test_a_layer_runs_the_agent_over_the_persons_own_config_with_the_token_off_the_command_line(adapter) -> None:
+    descriptor = get_adapter(adapter)
+    served = ModelBinding(base_url="http://upstream.invalid", model="m1", api=BINDINGS[adapter])
+    tree = HarnessTree({"rules.md": "Run the tests first.\n", "skills/fix/SKILL.md": SKILL})
+    layer = layer_install(tree, descriptor, served, "http://reef.invalid/reef/scenarios/s", "/home/a/install")
+    assert all(TOKEN_PLACEHOLDER not in arg for arg in layer.args)
+    assert TOKEN_PLACEHOLDER in "".join(layer.files.values()) + "".join(layer.env.values())
+    assert any("{name}" in template for template in layer.synced)
+    # The command each adapter's binary was checked with.
+    expected = {
+        "claude": ["--plugin-dir", "/home/a/install/claude", "--settings", "/home/a/install/claude/settings.json"],
+        "codex": ["-c", 'model_provider="reef"', "-c", 'model="m1"'],
+        "opencode": [],
+        "pi": ["-e", "/home/a/install/pi-agent", "-e", "/home/a/install/reef/pi-provider.ts"],
+    }[adapter]
+    assert list(layer.args[: len(expected)]) == expected
+    if adapter == "claude":
+        assert json.loads(layer.files["claude/.claude-plugin/plugin.json"]) == {"name": "reef"}
+        assert (
+            json.loads(layer.files["claude/settings.json"])["autoMemoryDirectory"] == "/home/a/install/claude/memory"
+        )
+    if adapter == "codex":
+        assert layer.args[-1] == f"developer_instructions={json.dumps('Run the tests first.' + chr(10))}"
+        empty = layer_install(HarnessTree({}), descriptor, served, "http://reef.invalid/reef/scenarios/s", "/r")
+        assert not any(arg.startswith("developer_instructions") for arg in empty.args)
+    if adapter == "opencode":
+        assert layer.env["OPENCODE_CONFIG_DIR"] == "/home/a/install/opencode"
+    # The episode defaults stay in episodes: a layer never opens every permission of the person's agent.
+    assert "permission" not in "".join(layer.files.values())
 
 
 def test_claude_keeps_its_memory_in_the_tree_under_the_root_that_writes_it() -> None:

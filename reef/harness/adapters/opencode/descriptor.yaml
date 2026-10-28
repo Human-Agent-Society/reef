@@ -20,10 +20,14 @@ install:
   version: "1.18.18"
   binary_path: "node_modules/.bin/opencode"
 argv: ["run", "--format", "json", "--auto", "{prompt}"]
-# Where the render root lives on a person's machine when its env variable is unset. A client
-# reads the person's harness there, and runs the agent with the variable at its install.
-roots:
-  opencode: "~/.config/opencode"
+# How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays,
+# and OPENCODE_CONFIG_DIR adds the install's config, skills, commands and plugins over it; on a
+# key or name both define, the release's wins. That directory's AGENTS.md takes the place of
+# the person's, so the inline config reads the person's back as an instruction file.
+layer:
+  env:
+    OPENCODE_CONFIG_DIR: "{root}/opencode"
+    OPENCODE_CONFIG_CONTENT: '{"instructions": ["~/.config/opencode/AGENTS.md"]}'
 env:
   OPENCODE_CONFIG_DIR: "{root}/opencode"
   XDG_CONFIG_HOME: "{root}/xdg-config"

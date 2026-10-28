@@ -27,10 +27,19 @@ argv:
   - workspace-write
   - --skip-git-repo-check
   - "{prompt}"
-# Where the render root lives on a person's machine when its env variable is unset. A client
-# reads the person's harness there, and runs the agent with the variable at its install.
-roots:
-  codex: "~/.codex"
+# How a person's machine runs Codex on a release: the person's own ~/.codex stays, and -c
+# arguments win over its config.toml key by key. They bind the model, with the key in an
+# environment variable rather than on the command line, and add the rules as
+# developer_instructions after the person's AGENTS.md. Codex reads skills from no directory a
+# flag names, so the release's skills and config stay out of a person's session.
+layer:
+  env:
+    REEF_LAYER_TOKEN: "{token}"
+  args:
+    - ["-c", 'model_provider="reef"']
+    - ["-c", 'model="{model}"']
+    - ["-c", 'model_providers.reef={name="Reef", base_url="{base_url}/v1", wire_api="responses", env_key="REEF_LAYER_TOKEN", supports_websockets=false}']
+    - ["-c", "developer_instructions={file:codex/AGENTS.md}"]
 env:
   CODEX_HOME: "{root}/codex"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged

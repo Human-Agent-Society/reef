@@ -106,13 +106,6 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
                         if install is None
                         else {"kind": install.kind, "package": install.package, "version": install.version}
                     ),
-                    # Where a client finds a person's harness, and which of its files are the tree's.
-                    "roots": {root: local.to_json() for root, local in descriptor.roots.items()},
-                    "files": sorted(
-                        part.renders
-                        for part in descriptor.layout.parts.values()
-                        if descriptor.roots and part.renders is not None
-                    ),
                 }
             )
         return web.json_response({"adapters": entries})

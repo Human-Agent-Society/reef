@@ -371,6 +371,12 @@ def configured_agents(config: Mapping[str, object]) -> tuple[dict[str, str], set
 
 class OpencodeAdapterRenderer(AdapterRenderer):
     @staticmethod
+    def layer_files(files: dict[str, str]) -> dict[str, str]:
+        # The layer's AGENTS.md takes the global slot, so an empty one keeps opencode from falling back to
+        # ~/.claude/CLAUDE.md; the layer's inline config reads the person's own back.
+        return {"opencode/AGENTS.md": "", **files}
+
+    @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
         agents, hidden = configured_agents(config)
         if "default_agent" in config:

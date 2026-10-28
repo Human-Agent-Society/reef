@@ -15,10 +15,17 @@ install:
   version: "0.84.2"
   binary_path: "node_modules/.bin/pi"
 argv: ["--mode", "json", "-p", "{prompt}"]
-# Where the render root lives on a person's machine when its env variable is unset. A client
-# reads the person's harness there, and runs the agent with the variable at its install.
-roots:
-  pi-agent: "~/.pi/agent"
+# How a person's machine runs pi on a release: the person's own ~/.pi/agent stays, and the
+# release loads over it. -e loads the install's skills, prompts and extensions, and on a name
+# both define the release's wins. The rules follow the person's AGENTS.md. pi reads models.json
+# only from its own directory, so an extension the render adds registers the release's
+# providers. pi still writes the person's settings.json when the person changes the model.
+layer:
+  args:
+    - ["-e", "{root}/pi-agent"]
+    - ["-e", "{root}/reef/pi-provider.ts"]
+    - ["--append-system-prompt", "{root}/pi-agent/AGENTS.md"]
+    - ["--model", "reef/{model}"]
 env:
   PI_CODING_AGENT_DIR: "{root}/pi-agent"
   PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"

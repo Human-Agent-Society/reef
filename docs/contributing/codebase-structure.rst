@@ -364,9 +364,10 @@ The extension points those packages expose are in `Python API
     release for weights and trees alike: served, pending for review, or
     none. The scenario committer publishes it.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
-    machine, in both directions, through the adapter's ``tree.yaml`` and the
-    ``roots`` of its ``descriptor.yaml`` (``reef/harness/adapters/``). The
-    client half is ``reef_client.harness``.
+    machine, in both directions: the release as a layer over the person's
+    own configuration (the ``layer`` of the adapter's ``descriptor.yaml``),
+    and the person's changes merged back (the ``merge`` of each part in its
+    ``tree.yaml``). The client half is ``reef_client.harness``.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into samples? Put the
   shared contract in ``reef/record2sample/``. Does it shape samples into job data?

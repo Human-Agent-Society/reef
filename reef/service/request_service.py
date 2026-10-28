@@ -23,7 +23,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
-from reef.harness.sync import client_files, import_files, merge_trees
+from reef.harness.sync import import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
@@ -625,9 +625,12 @@ class RequestService:
         naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
         is the release rendered for the scenario's adapter, ``source`` is
         its source tree, the paths a patch names, and ``client`` is the
-        release rendered with a model binding at ``service_url``'s route of
-        the scenario and placed at ``root``, the client's install directory
-        (``reef.harness.sync.client_files``). The ``evaluation`` field carries the metrics of the
+        release as a layer for a client that installs it at ``root``, bound
+        to ``service_url``'s route of the scenario
+        (``reef.harness.sync.layer_install``). The client form adds ``run``,
+        the command that runs the agent on the files (``binary``, ``args``,
+        ``env``), and ``synced``, the render templates of the files a client
+        sends back. The ``evaluation`` field carries the metrics of the
         training step that published the release, so a consumer can audit
         what a pulled tree changed and why it was admitted before running
         it. Read-only: never creates a scenario.
@@ -646,9 +649,12 @@ class RequestService:
         if form == "client" and service_url is not None and root is not None:
             backend = self.harness_backend(scenario)
             scenario_url = f"{service_url.rstrip('/')}/reef/scenarios/{scenario.name}"
-            manifest["files"] = client_files(
+            layer = layer_install(
                 HarnessTree(manifest["files"]), backend.descriptor, backend.models.served, scenario_url, root
             )
+            manifest["files"] = dict(layer.files)
+            manifest["run"] = {"binary": backend.descriptor.binary, "args": list(layer.args), "env": dict(layer.env)}
+            manifest["synced"] = list(layer.synced)
         return manifest
 
     def harness_import(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -656,14 +662,11 @@ class RequestService:
 
         ``payload["files"]`` maps each file's path under the adapter's render
         roots to its text. ``payload["base_release_id"]`` is the release the
-        client installed, or ``None`` for a client that installed none, which
-        only a scenario still at its creation release takes; any other
-        scenario raises ``ArtifactConflict``, so an import never replaces what
-        Reef made. The files become the tree that
+        client installed. The files become the tree that
         ``reef.harness.sync.import_files`` reads against the base, and
         ``merge_trees`` puts the client's changes on the head: a file that the
-        head and the client both changed raises ``ArtifactConflict`` naming
-        it. A merged tree that fails validation raises ``ValueError`` naming
+        head and the client both changed in a way its part's ``merge``
+        refuses raises ``ArtifactConflict`` naming it. A merged tree that fails validation raises ``ValueError`` naming
         every problem. An import that changes nothing publishes nothing. The
         answer names the head after the import, the parent it was made on,
         whether it changed, whether it merged onto a newer head, the tree's
@@ -675,8 +678,8 @@ class RequestService:
         ):
             raise ValueError("files must map each path under the adapter's roots to the file's text")
         base = payload.get("base_release_id")
-        if base is not None and (not isinstance(base, str) or not base):
-            raise ValueError("base_release_id must be the release the client installed, or null for none")
+        if not isinstance(base, str) or not base:
+            raise ValueError("base_release_id must be the release the client installed")
         scenario = self._file_scenario(headers)
         backend = self.harness_backend(scenario)
         component = scenario.surface.files_component
@@ -684,18 +687,13 @@ class RequestService:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
         current_id = scenario.repository.require_current_artifact().release_id
         head_id = self.harness_release_id(scenario)
-        if base is None and head_id != scenario.release_queries.creation_artifact.release_id:
-            raise ArtifactConflict(
-                f"scenario {scenario.name!r} has evolved to release {head_id}: install it before you import, "
-                "so the import does not replace what Reef made"
-            )
         head = HarnessTree(self._harness_manifest_for_scenario(scenario, head_id, source=True)["files"])
-        if base is None or base == head_id:
+        if base == head_id:
             base_tree = head
         else:
             base_tree = HarnessTree(self._harness_manifest_for_scenario(scenario, base, source=True)["files"])
         imported = import_files(files, base_tree, backend.descriptor)
-        merge = merge_trees(base_tree, head, imported.tree)
+        merge = merge_trees(base_tree, head, imported.tree, backend.descriptor.layout)
         if merge.tree is None:
             located = [(path, backend.descriptor.layout.locate(path)) for path in merge.conflicts]
             # The person knows each file at its render path, such as pi-agent/AGENTS.md for rules.md.

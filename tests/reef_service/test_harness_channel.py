@@ -177,10 +177,6 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
             assert pi["binary"] == "pi" and pi["trajectory_format"] == "pi-session-jsonl"
             assert pi["install"]["package"].startswith("@")
             assert isinstance(pi["model_bindings"], list) and pi["model_bindings"]
-            # A client finds a person's harness under the roots, and copies the files the patterns name.
-            assert pi["roots"] == {"pi-agent": {"variable": "PI_CODING_AGENT_DIR", "default": "~/.pi/agent"}}
-            assert "pi-agent/skills/{name}/SKILL.md" in pi["files"] and "pi-agent/settings.json" not in pi["files"]
-            assert by_name["hermes"]["roots"] == {} and by_name["hermes"]["files"] == []
         finally:
             await client.close()
 
@@ -496,14 +492,14 @@ def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) ->
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("adapter", "roots", "message"),
+    ("layer", "message"),
     [
-        ("pi", {"pi": "~/.pi/agent"}, "root 'pi' needs exactly one 'env' variable"),
-        ("pi", {"pi-agent": "pi/agent"}, "must be absolute or under ~/"),
-        ("hermes", {"hermes": "~/.hermes"}, "renders 'hermes-commands/{name}/SKILL.md' under no declared root"),
+        ({"args": [["--key", "{token}"]]}, "must not hold {token}"),
+        ({"args": ["-e"]}, "a list of argument groups"),
+        ({"files": {}}, "an object of args and env"),
     ],
 )
-def test_descriptor_roots_place_every_rendered_file(tmp_path, adapter: str, roots, message: str) -> None:
-    target = descriptor_with(tmp_path, adapter, lambda data: data.__setitem__("roots", roots))
+def test_a_descriptor_layer_keeps_the_token_off_the_command_line(tmp_path, layer, message: str) -> None:
+    target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("layer", layer))
     with pytest.raises(DescriptorError, match=re.escape(message)):
         load_descriptor(target)

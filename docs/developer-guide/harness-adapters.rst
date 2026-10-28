@@ -112,6 +112,13 @@ Each entry under ``parts`` maps a part name to these fields:
        to the part waits for a person, whatever ``evolution.review_parts``
        names, and ``harness_try`` refuses to mount it. Native's
        ``native_loop`` part sets it.
+   * - ``merge``
+     - Optional, ``file`` by default. How a file that a person and Reef
+       both changed since the person's installed release merges:
+       ``lines`` takes each side's changed lines and refuses only lines
+       both changed; ``file`` refuses. The bundled adapters that run on a
+       person's machine merge their text parts (rules, skills, commands,
+       memory) by ``lines``.
 
 ``load_descriptor`` refuses a ``tree.yaml`` that breaks one of these rules:
 
@@ -244,7 +251,7 @@ extension is the entry file of a Claude Code plugin; the plugin still needs a
 marketplace or settings reference before Claude Code activates it.
 
 ``claude`` has one more part, ``memory``: ``memory/<name>.md`` renders to
-``claude/memory/<name>.md``. Its descriptor sets Claude Code's
+``claude/memory/<name>.md``. Its renderer sets Claude Code's
 ``autoMemoryDirectory`` to ``{root}/claude/memory``, so the notes that Claude
 Code writes for itself across sessions, and ``MEMORY.md``, their index, are
 files of the tree. A client sends them back to Reef, and a method can read
@@ -264,23 +271,27 @@ fields are:
 - ``config`` maps each config target's name to the file's root-relative
   ``path``, its ``defaults``, and its ``checks`` (see `Config checks`_). A
   ``primary`` target is required. A file of the tree's ``config`` part
-  merges into the target its name names. A default can name a path under the
-  root as ``{root}/...``. The program that writes the rendered files
-  replaces ``{root}`` with the directory that holds the render roots: the
-  episode root, or a client's install.
+  merges into the target its name names. A config value can name a path
+  under the root as ``{root}/...``. The program that writes the rendered
+  files replaces ``{root}`` with the directory that holds the render roots:
+  the episode root, or a client's install.
 - ``trajectory`` gives the session log's ``path`` and reader ``format``.
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. It also turns off what would make an episode
   non-deterministic, such as the binary's own updater.
-- ``roots`` (optional) maps each render root to the directory where the
-  agent keeps it on a person's machine when its variable is unset, such as
-  ``pi-agent: "~/.pi/agent"``. The variable is the ``env`` entry set to
-  ``{root}/<name>`` (``PI_CODING_AGENT_DIR``). With ``roots``, every part
-  that renders a path must render it under a declared root, and
-  ``reef-client harness`` can import a person's harness and run the agent
-  on an install (see `Use a published tree
-  <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__). Without
-  it, the adapter does not sync with a person's machine.
+- ``layer`` (optional) says how a person's machine runs the agent with a
+  release over the person's own configuration, which stays as it is. It
+  has two fields, as ``argv`` and ``env`` do for an episode: ``args``, groups
+  of arguments added to the binary's own, such as ``["--plugin-dir",
+  "{root}/claude"]``, and ``env``, variables such as ``OPENCODE_CONFIG_DIR``.
+  Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}``
+  (the model binding's), ``{token}`` (in ``env`` only, so no command line
+  shows it), and ``{file:<render path>}``, that file's text as a JSON
+  string; a group whose file is empty is left out. Use the agent's own way
+  to add configuration, such as a plugin directory or an extra config
+  directory. Without ``layer``, the adapter does not run on a person's
+  machine (see `Use a published tree
+  <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
 - ``install`` pins the vendor install: ``kind`` (``npm``, or ``git`` for an
   editable virtual environment), ``package``, ``version`` (as ``--version``
   reports it), and ``binary_path`` below the install prefix. A ``git``
@@ -483,6 +494,11 @@ calls its steps in this order:
 #. ``finalize_render`` gets every file as text, each config file already
    written in its format. It is for work that spans several files, or for a
    layout that the suffix's format cannot produce.
+#. ``layer_files`` runs only for a layer (``render_tree`` with ``layer``),
+   which starts each config target from nothing instead of the episode
+   defaults and skips the targets' checks. It adds what the layer's
+   ``args`` name and the tree may lack: Claude's plugin manifest, an empty
+   rules file, or pi's extension that registers the release's models.
 
 Each step defaults to returning its input unchanged, and refuses a tree by
 raising ``RenderError``. Every step must be a static method; an ordinary
@@ -501,13 +517,13 @@ Run a rendered tree
 ^^^^^^^^^^^^^^^^^^^
 
 ``reef-client harness`` runs an agent on a published tree for an adapter
-with ``roots``. To do it yourself, write the files of
+with a ``layer``. To do it yourself, write the files of
 ``GET /reef/harness?form=client&service_url=<reef>&root=<directory>`` under
-``<directory>``, replace ``REEF_TOKEN_PLACEHOLDER`` with your token, and point the agent at
-the directory as the descriptor's ``env`` does (for pi,
-``PI_CODING_AGENT_DIR`` set to ``<directory>/pi-agent``). Those files bind
-the model to ``<reef>/reef/scenarios/<scenario>``, which names the scenario
-in the path, so the agent needs no custom header.
+``<directory>``, and replace ``REEF_TOKEN_PLACEHOLDER`` with your token in
+the files and in ``run.env``. Then run ``run.binary`` with ``run.args`` and
+``run.env``. Those files bind the model to
+``<reef>/reef/scenarios/<scenario>``, which names the scenario in the path,
+so the agent needs no custom header.
 
 A client that renders the source tree (``GET /reef/harness?form=source``)
 binds the model in the same render:

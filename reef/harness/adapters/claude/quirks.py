@@ -89,6 +89,17 @@ def frontmatter_chooses_model(text: str) -> bool:
 
 class ClaudeAdapterRenderer(AdapterRenderer):
     @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        # Automatic memory is the tree's memory part, for every working directory; the program that writes the
+        # files puts the root in place of {root}.
+        return {**config, "autoMemoryDirectory": "{root}/claude/memory"} if path == "claude/settings.json" else config
+
+    @staticmethod
+    def layer_files(files: dict[str, str]) -> dict[str, str]:
+        # The install's claude/ loads as a plugin named reef, and its rules file is always there to append.
+        return {"claude/CLAUDE.md": "", **files, "claude/.claude-plugin/plugin.json": '{"name": "reef"}\n'}
+
+    @staticmethod
     def check_model_route(
         configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
     ) -> None:

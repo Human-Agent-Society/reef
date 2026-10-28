@@ -99,9 +99,9 @@ Harness evolution
 
 **An agent on a pulled tree gets HTTP 400 ``missing or empty x-reef-scenario``.** The default ``GET /reef/harness`` files carry no endpoint and no credential, so the client binds the agent's model itself. Install with ``reef-client harness connect``, or pull ``?form=client&service_url=<reef>&root=<directory>``: those files send each call to ``<reef>/reef/scenarios/<scenario>/v1``, which names the scenario in the path. A binding of your own must send the ``x-reef-scenario`` header and the token (`Use a published tree <evolve-your-harness.rst#use-a-published-tree>`__).
 
-**``reef-client harness connect`` says it did not import your harness.** The scenario has releases beyond its first, and an import would replace what Reef made. ``connect`` installs the head instead. Copy your files into the install and run ``reef-client harness sync`` to merge them onto the head, or connect to a new scenario name.
+**``reef-client harness sync`` says that a release and your files both changed a file.** A step changed the same lines of a file of the install that you changed. Your files stay as they are. Make those lines match one side, then sync again; ``sync --discard`` drops all your changes instead.
 
-**``reef-client harness sync`` says that a release and your files both changed a file.** A step changed a file of the install that you changed too. Your files stay as they are. Make each named file match one side, then sync again; ``sync --discard`` drops all your changes instead.
+**``reef-client harness run`` says to name the scenario.** More than one scenario is installed. Name one, such as ``reef-client harness run code-repair``.
 
 **``run`` or ``sync`` says ``kept your files`` because the scenario is running a step.** Reef takes no import while a step runs. Your changes stay in the install, and the next ``run`` or ``sync`` sends them.
 

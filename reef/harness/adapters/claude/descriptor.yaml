@@ -23,10 +23,16 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
-# Where the render root lives on a person's machine when its env variable is unset. A client
-# reads the person's harness there, and runs the agent with the variable at its install.
-roots:
-  claude: "~/.claude"
+# How a person's machine runs Claude Code on a release: the person's own ~/.claude stays, and
+# the release loads over it. The install's claude/ is a plugin, so its skills and commands
+# load as reef:<name> beside the person's own; its rules follow the person's CLAUDE.md; its
+# settings, which bind the model and point automatic memory at the memory part, win over the
+# person's.
+layer:
+  args:
+    - ["--plugin-dir", "{root}/claude"]
+    - ["--settings", "{root}/claude/settings.json"]
+    - ["--append-system-prompt-file", "{root}/claude/CLAUDE.md"]
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"
@@ -43,10 +49,6 @@ config:
       # the updater is off through env, not here.
       includeCoAuthoredBy: false
       disableDeepLinkRegistration: "disable"
-      # Automatic memory in one directory of the tree's memory part, for
-      # every working directory; the program that writes the files puts the
-      # root in place of {root}.
-      autoMemoryDirectory: "{root}/claude/memory"
     checks:
       - key: [includeCoAuthoredBy, disableDeepLinkRegistration, autoMemoryDirectory]
         match: IsDefault()

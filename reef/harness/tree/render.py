@@ -48,6 +48,8 @@ def render_tree(
     tree: HarnessTree,
     descriptor: AdapterDescriptor,
     overlays: Sequence[tuple[str, Mapping[str, Any]]] = (),
+    *,
+    layer: bool = False,
 ) -> dict[str, str]:
     """The files ``descriptor``'s binary reads for ``tree``, by path relative to the episode or install root.
 
@@ -58,8 +60,19 @@ def render_tree(
     no part of the adapter takes, a config file that is not a JSON object, a
     config target the adapter does not declare, two files that land on one
     path, and whatever the adapter's renderer refuses.
+
+    With ``layer``, the files are a layer over a person's own configuration
+    (``AdapterDescriptor.layer``): no config target starts from its episode
+    defaults, the targets' checks do not run, and the renderer's
+    ``layer_files`` adds what the layer's arguments name. The defaults and
+    checks keep episodes deterministic, and the tree passed the checks when it
+    was published. RenderError when the adapter has no layer.
     """
-    configs = {name: deep_merge({}, target.defaults) for name, target in descriptor.config_targets.items()}
+    if layer and descriptor.layer is None:
+        raise RenderError(f"adapter {descriptor.name!r} does not run on a person's machine: it declares no layer")
+    configs = {
+        name: {} if layer else deep_merge({}, target.defaults) for name, target in descriptor.config_targets.items()
+    }
     owners = {target.path: f"config target {name!r}" for name, target in descriptor.config_targets.items()}
     files: dict[str, str] = {}
     formats: dict[str, Format] = {}
@@ -90,20 +103,23 @@ def render_tree(
         configs[target_name] = deep_merge(configs[target_name], data)
     for name, target in descriptor.config_targets.items():
         files[target.path] = json.dumps(configs[name], indent=2, sort_keys=True) + "\n"
-    return apply_adapter_renderer(descriptor, files, formats)
+    rendered = apply_adapter_renderer(descriptor, files, formats, checks=not layer)
+    return descriptor.renderer.layer_files(rendered) if layer else rendered
 
 
 def apply_adapter_renderer(
-    descriptor: AdapterDescriptor, files: dict[str, str], formats: Mapping[str, Format]
+    descriptor: AdapterDescriptor, files: dict[str, str], formats: Mapping[str, Format], *, checks: bool = True
 ) -> dict[str, str]:
     """Run the adapter's renderer steps over the laid-out files, whose config files are JSON objects.
 
-    ``formats`` maps each rendered path that is not a config file to its part's format.
+    ``formats`` maps each rendered path that is not a config file to its part's format. ``checks`` runs the config
+    targets' checks; a layer's render skips them.
     """
     renderer = descriptor.renderer
     merged = {target.path: json.loads(files[target.path]) for target in descriptor.config_targets.values()}
     check_model_route(descriptor, merged)
-    check_config(descriptor, merged)
+    if checks:
+        check_config(descriptor, merged)
     configs = {path: renderer.process_config(path, config) for path, config in merged.items()}
     skills = {
         path: renderer.process_skill(path, files[path]) for path, format in formats.items() if format is Format.SKILL
