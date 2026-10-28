@@ -124,7 +124,40 @@ The agent holds no credential. Its model calls go through a loopback gateway tha
 
 The pass rate of a task that ran is the mean reward of its training episodes. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-The band does not decide what trains. The recipe trains on the training episodes of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every episode of a group whose rewards are all equal. With 0 or 1 rewards and four episodes per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
+By default, the band does not decide what trains. The recipe trains each valid train task once, before the band is known. Its `task_group` objective gives an advantage of 0 to every episode of a group whose rewards are all equal. With 0 or 1 rewards and four episodes per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch. With the recipe's pool review on, the recipe's own band decides which tasks continue to train ([the training pool review](#the-training-pool-review)).
+
+## The training pool review
+
+By default, each train task trains once. With `pool_capacity` above 0 in `pipeline.sample2job.config`, the recipe keeps a training pool, as AutoEnvScaling's self-play loop does. A task goes back to the end of the pool when its job ends, so the tasks train in turn. A new generation starts only while fewer tasks than `pool_capacity` are active.
+
+```yaml
+pipeline:
+  sample2job:
+    config:
+      tasks_per_step: 2
+      pool_capacity: 32
+```
+
+Every `review_interval` task jobs, the recipe reviews the pool. For each active task, it reads the last `review_window` rewards that training recorded; a task with fewer rewards stays. The review retires a task for one of these reasons, in this order:
+
+- `below_band`: the pass rate, the mean of those rewards, is below `review_band_low`.
+- `above_band`: the pass rate is above `review_band_high`.
+- `no_reward_spread`: the population standard deviation of the rewards is below `review_min_reward_std`.
+
+A retired task does not train again. With `review_interval: 0`, the tasks train in turn and no review retires them, as in AutoEnvScaling's static mode. The generator still receives the first rollout of each task only.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `pool_capacity` | 0 | 0 trains each task once; above 0, tasks train again, and rounds start only while fewer tasks than this are active |
+| `review_interval` | 16 | task jobs between two reviews; 0 reviews nothing |
+| `review_window` | 4 | the most recent rewards of a task that a review reads; at least 2 |
+| `review_band_low` | 0.25 | the lowest pass rate that keeps a task |
+| `review_band_high` | 0.75 | the highest pass rate that keeps a task |
+| `review_min_reward_std` | 0.1 | the smallest standard deviation of the rewards that keeps a task; 0 turns this rule off |
+
+The review keys need `pool_capacity` above 0. The recipe's band keys repeat the generator's `band_low` and `band_high`, because the generator does not read the recipe's settings. Set both bands when you change one.
+
+This review differs from AutoEnvScaling's. It reads the rewards of recent training episodes, which can be one pool cycle old; it does not run the current model again. It keeps no reserve of tasks, and it asks the generator for no replacement tasks.
 
 ## The task checks
 
