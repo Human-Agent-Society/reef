@@ -96,7 +96,9 @@ class LocalTrainingWorkers:
         """Start the worker of each weight trainer of ``current`` that has a job running or records to train.
 
         A loaded scenario resumes the job a restart left running, and the
-        records that arrived before it, without waiting for a new record.
+        records that arrived before it, without waiting for a new record. A
+        created scenario whose pipeline starts its own work, such as a round
+        of generated tasks, starts its worker too: no record would wake it.
         """
         for component_trainer in current.trainers:
             trainer = component_trainer.trainer

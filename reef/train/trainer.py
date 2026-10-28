@@ -402,7 +402,9 @@ class Trainer:
         if not self.trains:
             return False
         with self._lock:
-            if self._pending is not None or self._pipeline.background_jobs_running() or self.pipeline_ready():
+            # Look for job data before the background jobs: the look advances the pipeline, which can start one,
+            # such as the first round of generated tasks in a scenario that has no record yet.
+            if self._pending is not None or self.pipeline_ready() or self._pipeline.background_jobs_running():
                 return True
             trajectories = self.trajectory_store
             if (

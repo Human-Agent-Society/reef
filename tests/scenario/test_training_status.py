@@ -3,27 +3,40 @@
 The status tests bind a scenario double to the dispatcher's registry, so each
 one checks one status field. The wait tests pin when a worker looks again
 without a new record: a running training job saves checkpoints, and a
-background job, such as a judgment, can make a batch ready.
+background job, such as a judgment, can make a batch ready. A scenario
+created with no record starts its worker when its pipeline starts such a job.
 """
 
 from __future__ import annotations
 
 import tempfile
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.core.job_data import JobOutcome
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
+from reef.observability import ExperimentLogger
+from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
+from reef.storage.records import RecordStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import TaskStorage
 from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, RunningJob
+from reef.train.trainer import Trainer
+from reef.train.types import Sample
 
 pytestmark = pytest.mark.unit
 
@@ -231,3 +244,90 @@ def test_a_worker_with_running_background_jobs_polls_on_a_bounded_interval() -> 
     timeout = worker_wait_timeout(scenario_double(background_jobs_running=True))
 
     assert timeout is not None and timeout > 0
+
+
+class BackgroundStepJobData(ThresholdJobData):
+    """Make one job's data from no record, as the rounds of generated tasks do.
+
+    The first look starts a step. The step runs until a look after ``finished`` is set; that look ends it, and
+    the step's one task is the next job's data.
+    """
+
+    def __init__(self, context: PipelineContext, finished: Event) -> None:
+        super().__init__(context, None, None)
+        self.finished = finished
+        self.step: Literal["not started", "running", "ended"] = "not started"
+        self.samples: tuple[Sample, ...] | None = None
+
+    def advance(self) -> None:
+        if self.step == "not started":
+            self.step = "running"
+        elif self.step == "running" and self.finished.is_set():
+            self.step = "ended"
+            self.samples = (TaskSample(Path("generated-task")),)
+
+    def background_jobs_running(self) -> bool:
+        return self.step == "running"
+
+    def own_job_data(self) -> tuple[Sample, ...] | None:
+        return self.samples
+
+    def own_job_data_submitted(self) -> frozenset[str]:
+        self.samples = None
+        return frozenset({"own:1"})
+
+
+@dataclass(frozen=True, kw_only=True)
+class BackgroundStepRecipe(TestPolicyRecipe):
+    """A weights recipe whose job data is ``BackgroundStepJobData``'s; ``step_finished`` ends its step."""
+
+    step_finished: Event = field(default_factory=Event, compare=False)
+
+    def build(
+        self,
+        scenario: str,
+        records: RecordStore,
+        *,
+        algorithm_state: Mapping[str, object] | None = None,
+        experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
+    ) -> Trainer:
+        return Trainer.build(
+            scenario,
+            records,
+            pipeline_factory=lambda context: threshold_pipeline(
+                context, sample2job=BackgroundStepJobData(context, self.step_finished)
+            ),
+            job_loop=JobLoop(self.training_component, FixedJobPlan(JobRequest()), scenario=scenario),
+            algorithm_state=algorithm_state,
+            experiment_logger=experiment_logger,
+            default_job_samples=1,
+        )
+
+
+def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_without_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What POST /reef/scenarios does for a recipe that needs no record, such as generated tasks: no record or
+    # upload ever wakes the worker, so the worker must start with the scenario and poll while the step runs.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    recipe = BackgroundStepRecipe(**runtime_bindings(component))
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+    )
+    try:
+        dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
+        recipe.step_finished.set()
+        deadline = time.monotonic() + 2
+        while not component.submitted and time.monotonic() < deadline:
+            time.sleep(0.01)
+        [job] = component.submitted
+        assert [str(sample.task_path) for sample in job.data.samples] == ["generated-task"]
+    finally:
+        dispatcher.close()
