@@ -104,7 +104,7 @@ def launch_agent(
     names more paths the process only reads. Raises ``EpisodeTimeout`` and
     ``EpisodeLaunchError`` as the executor does.
     """
-    for relative, text in files.items():
+    for relative, text in descriptor.place_root(files, str(home)).items():
         target = home / PurePosixPath(relative)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")

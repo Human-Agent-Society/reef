@@ -863,12 +863,16 @@ does a scenario whose recipe serves no harness tree.
   <../developer-guide/harness-adapters.rst#tree-parts>`__). A client that
   renders the tree itself reads this form.
 - ``client``: the release rendered with a model binding at
-  ``<service_url>/reef/scenarios/<scenario>``, where ``service_url`` (a
-  required query parameter) is the address the client reaches Reef at. The
-  binding asks for the served model, and its key is the literal
-  ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own token.
+  ``<service_url>/reef/scenarios/<scenario>``, and placed at ``root``. Both
+  query parameters are required: ``service_url`` is the address the client
+  reaches Reef at, and ``root`` is the directory the client installs the
+  files in. The binding asks for the served model, and its key is the
+  literal ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own
+  token. A config default that names a path as ``{root}/...``, such as
+  Claude Code's memory directory, names it under ``root``.
 
-Another value is HTTP 400. The first two forms carry no endpoint and no
+Another value is HTTP 400. In the other forms, a config file may hold
+``{root}``: write the directory that holds the render roots there. The first two forms carry no endpoint and no
 credential: the client writes its own model binding where its agent reads
 it. A new scenario's base release holds the recipe's ``evolution.seed``, so a
 client can pull before any step publishes. A recipe whose seed is empty
@@ -910,22 +914,28 @@ agent as the scenario's head, with ``x-reef-scenario``:
      "$REEF_URL/reef/harness/import"
 
 - ``files`` maps each file's render path (``roots`` and ``files`` of
-  ``GET /reef/harness/adapters``) to its text. Reef maps each file back to
-  the tree path of the part that renders there. A path that no part renders
-  to is ignored and listed in ``ignored``. The files replace the head's
-  files, so a file the person removed leaves the tree. The head's config
-  files stay: the model binding owns them.
-- ``base_release_id`` is the release the client installed. Another release
-  than the served head is HTTP 409, so the client pulls first and an import
-  never drops a release it has not seen. ``null`` is a client that
-  installed nothing; only a scenario still at its first release takes it.
-- The tree must pass the adapter's validation, as a method's candidate
-  does; a problem is HTTP 400 naming it. Reef does not evaluate the tree.
+  ``GET /reef/harness/adapters``) to its text: every harness file of the
+  install, changed or not. Reef maps each file back to the tree path of the
+  part that renders there. A path that no part renders to is ignored and
+  listed in ``ignored``. A file of the base that ``files`` lacks is one the
+  person removed. Config files are not read: the model binding owns them.
+- ``base_release_id`` is the release the client installed. ``null`` is a
+  client that installed nothing; only a scenario still at its first release
+  takes it, and any other scenario answers HTTP 409.
+- Reef puts the client's changes since the base on the head, file by file. A
+  file that only the client changed takes the client's text; a file that
+  only the head changed keeps the head's. A file that both changed to
+  different texts is HTTP 409, which names it at its render path. The
+  answer's ``merged`` is true when the head had moved on from the base.
+- The merged tree must pass the adapter's validation, as a method's
+  candidate does; a problem is HTTP 400 naming it. Reef does not evaluate
+  the tree.
 - An import that changes nothing answers ``changed: false`` and publishes
   nothing. Otherwise the commit's operation is ``import``, its metrics carry
-  ``patch`` and ``patch_parts``, and the release serves at once. The next
-  step builds on it.
+  ``import`` (with ``base_release_id``), ``patch`` and ``patch_parts``, and
+  the release serves at once. The next step builds on it.
 - An import while a step runs is HTTP 409; send it again when the step ends.
+  So is an import that another commit overtook.
 
 Harness requests
 ~~~~~~~~~~~~~~~~

@@ -23,8 +23,9 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         release_id = request.query.get("release_id") or None
         form = request.query.get("form", "rendered")
         service_url = request.query.get("service_url") or None
+        root = request.query.get("root") or None
         manifest = await asyncio.to_thread(
-            request_service.harness_manifest, request.headers, release_id, form, service_url
+            request_service.harness_manifest, request.headers, release_id, form, service_url, root
         )
         return web.json_response(
             manifest,

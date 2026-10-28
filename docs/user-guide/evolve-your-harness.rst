@@ -107,7 +107,8 @@ The loop
 --------
 
 Harness evolution has five parts. Data and sync happen between steps, and
-each step runs evolve, evaluation and release:
+each step runs evolve, evaluation and release. Data, evaluation and release
+work as they do for weight training; evolve and sync are the harness's own:
 
 .. flow::
    :loop: the agent runs the new head, and its model calls are the next data
@@ -116,7 +117,7 @@ each step runs evolve, evaluation and release:
    Evolve :: the method edits a copy of the head tree into a candidate
    Evaluation* :: scores the candidate against the head
    Release :: a selected candidate becomes the new head
-   Sync :: clients install the head; a person's harness comes back as a release
+   Sync :: each client run installs the head and sends back what the session changed
 
 Each part is one relation between a few values. ``T`` is a harness tree
 (`The harness tree`_), and ``A`` is the deployment's adapter.
@@ -144,13 +145,16 @@ Each part is one relation between a few values. ``T`` is a harness tree
      - `Evaluation: the publication policy`_
    * - Release
      - A selected ``T'`` becomes a git release and the head.
-       ``publish: review`` holds it until a person promotes it.
+       ``publish: review`` holds it until a person promotes it. A rejected
+       ``T'`` makes no release; the history keeps it.
      - `Promote a pending release`_
    * - Sync
      - ``render_A(T)`` is the files that ``A``'s agent reads.
        ``import_A(F)`` reads those files back, so
-       ``import_A(render_A(T)) = T``. Clients install ``render_A`` of the
-       head, and import their own files as a release.
+       ``import_A(render_A(T)) = T``. A client installs ``render_A`` of the
+       head ``H``. When its files ``F`` changed since the installed release
+       ``B``, ``merge(B, H, import_A(F))`` takes each file from the side
+       that changed it.
      - `Use a published tree`_
 
 Step data
@@ -481,9 +485,8 @@ runs the agent on it. The adapters ``pi``, ``claude``, ``codex`` and
    :loop: each run starts on the newest release
 
    connect :: imports your harness into a new scenario, installs the head
-   run :: installs a newer release, then starts the agent on it
+   run :: syncs, starts the agent, and syncs again when it exits
    Reef* :: records each model call; steps publish releases
-   push :: publishes your edits of the install as a release
 
 - ``connect`` creates the scenario when it does not exist. While the scenario
   is at its first release, ``connect`` imports the agent's harness files as a
@@ -496,17 +499,25 @@ runs the agent on it. The adapters ``pi``, ``claude``, ``codex`` and
 - The install is ``~/.local/share/reef-client/harness/<scenario>``. Its
   config sends every model call to ``<reef>/reef/scenarios/<scenario>/v1``
   with your token, so Reef records the call as the scenario's traffic.
-  ``connect`` and ``pull`` print what a release ``requires`` of the machine.
-- ``run`` installs a newer release, then starts the agent with
-  ``PI_CODING_AGENT_DIR`` at the install. A command after ``--`` replaces the
-  agent's own: ``reef-client harness run code-repair -- pi -c``. When the
-  install has edits that are not pushed, or Reef does not answer, ``run``
-  keeps the installed release.
-- ``push`` publishes your edits of the install as a release. The release
-  serves at once and Reef does not evaluate it: you are its author.
-  ``pull`` installs the head, and refuses to drop edits that are not pushed
-  unless you add ``--force``. ``status`` shows the installed release, the
-  head and the edited files.
+  ``connect`` and ``sync`` print what a release ``requires`` of the machine.
+- ``run`` syncs, starts the agent with ``PI_CODING_AGENT_DIR`` at the
+  install, and syncs again when the agent exits. Each session starts on the
+  newest release, and what the session changed reaches Reef before its next
+  step. A command after ``--`` replaces the agent's own:
+  ``reef-client harness run code-repair -- pi -c``.
+- ``sync`` sends the harness files you or the agent changed since the
+  installed release, then installs the head. Reef merges the changes onto
+  its head file by file, so a release that a step made in the meantime is
+  kept. The result serves at once, and Reef does not evaluate it: you are
+  its author. A file that a step and you both changed is refused by name,
+  and your files stay as they are. So does every change while a step runs;
+  the next ``run`` or ``sync`` sends it. ``sync --discard`` drops your
+  changes and installs the head. ``status`` shows the installed release, the
+  head and the changed files.
+- With ``claude``, the install also holds Claude Code's automatic memory, in
+  ``claude/memory``: the notes it writes for itself in a session sync like
+  any other harness file. Memory that Claude Code wrote before ``connect``
+  is per project, under ``~/.claude/projects``, and is not imported.
 
 Reef learns from your sessions in two ways. A client that grades a run sends
 ``POST /reef/report`` with a score over the receipts of its model calls. Or
@@ -524,10 +535,11 @@ A client of its own uses the routes under ``reef-client`` (see `HTTP API
   ``files`` by render path, ``release_id``, its parent, the ``evaluation``
   metrics of the step that published it, and ``requires``.
   ``?release_id=<id>`` serves an older release. ``?form=source`` serves the
-  source tree. ``?form=client&service_url=<url>`` serves the files bound to
-  ``<url>/reef/scenarios/<scenario>``.
-- ``POST /reef/harness/import`` publishes a person's harness files as the
-  head.
+  source tree. ``?form=client&service_url=<url>&root=<directory>`` serves
+  the files bound to ``<url>/reef/scenarios/<scenario>``, for an install at
+  ``<directory>``.
+- ``POST /reef/harness/import`` merges a person's harness files onto the
+  head as a new release.
 - ``GET /reef/harness/adapters`` says where each adapter's harness lives on a
   person's machine (``roots``) and which files are the harness's (``files``).
 

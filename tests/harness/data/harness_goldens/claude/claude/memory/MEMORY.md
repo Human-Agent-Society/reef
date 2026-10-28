@@ -1,0 +1,1 @@
+- Run the tests before you report a fix.

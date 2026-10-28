@@ -43,8 +43,12 @@ config:
       # the updater is off through env, not here.
       includeCoAuthoredBy: false
       disableDeepLinkRegistration: "disable"
+      # Automatic memory in one directory of the tree's memory part, for
+      # every working directory; the program that writes the files puts the
+      # root in place of {root}.
+      autoMemoryDirectory: "{root}/claude/memory"
     checks:
-      - key: [includeCoAuthoredBy, disableDeepLinkRegistration]
+      - key: [includeCoAuthoredBy, disableDeepLinkRegistration, autoMemoryDirectory]
         match: IsDefault()
       # Settings that choose the model, a credential helper or a login
       # method, which Reef's model binding owns.
@@ -107,6 +111,7 @@ trajectory:
   path: "claude/projects"
 cleanup_whitelist:
   - "claude/projects/**"
+  - "claude/memory/**"
   # Claude Code's boot persists local state beside the rendered config:
   # a top-level state file, feature-gate cache, per-session todo lists, and
   # captured shell snapshots. Episode state, not residue.

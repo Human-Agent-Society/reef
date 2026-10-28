@@ -18,6 +18,14 @@ parts:
     format: command
     renders: claude/commands/{name}.md
     holds: a prompt template that a person runs as /name
+  # The descriptor points autoMemoryDirectory at claude/memory, so the notes
+  # Claude Code writes for itself across sessions are files of the tree: a
+  # client syncs them, and a method may read and edit them.
+  memory:
+    path: memory/{name}.md
+    format: text
+    renders: claude/memory/{name}.md
+    holds: a note of Claude Code's automatic memory, or MEMORY.md, the index it reads at the start of every session
   # Claude Code's code surface is a plugin: a directory with an entry file.
   # The part renders that entry file; activating it still needs a marketplace
   # or settings reference, so skills, commands and rules carry the harness.

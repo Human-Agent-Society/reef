@@ -181,7 +181,7 @@ def run_episode(
     root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-", dir=parent))
     try:
         written = set()
-        for relative, text in files.items():
+        for relative, text in descriptor.place_root(files, str(root)).items():
             relative_path = PurePosixPath(relative)
             if relative_path.is_absolute() or ".." in relative_path.parts:
                 raise EpisodeError(f"render path {relative!r} escapes the episode root")

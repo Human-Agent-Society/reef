@@ -243,6 +243,13 @@ such as ``native/tools/<name>.py`` (see `Native runner`_). On ``claude``, an
 extension is the entry file of a Claude Code plugin; the plugin still needs a
 marketplace or settings reference before Claude Code activates it.
 
+``claude`` has one more part, ``memory``: ``memory/<name>.md`` renders to
+``claude/memory/<name>.md``. Its descriptor sets Claude Code's
+``autoMemoryDirectory`` to ``{root}/claude/memory``, so the notes that Claude
+Code writes for itself across sessions, and ``MEMORY.md``, their index, are
+files of the tree. A client sends them back to Reef, and a method can read
+and edit them.
+
 Descriptor fields
 ~~~~~~~~~~~~~~~~~
 
@@ -257,7 +264,10 @@ fields are:
 - ``config`` maps each config target's name to the file's root-relative
   ``path``, its ``defaults``, and its ``checks`` (see `Config checks`_). A
   ``primary`` target is required. A file of the tree's ``config`` part
-  merges into the target its name names.
+  merges into the target its name names. A default can name a path under the
+  root as ``{root}/...``. The program that writes the rendered files
+  replaces ``{root}`` with the directory that holds the render roots: the
+  episode root, or a client's install.
 - ``trajectory`` gives the session log's ``path`` and reader ``format``.
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. It also turns off what would make an episode
@@ -492,8 +502,8 @@ Run a rendered tree
 
 ``reef-client harness`` runs an agent on a published tree for an adapter
 with ``roots``. To do it yourself, write the files of
-``GET /reef/harness?form=client&service_url=<reef>`` under one directory,
-replace ``REEF_TOKEN_PLACEHOLDER`` with your token, and point the agent at
+``GET /reef/harness?form=client&service_url=<reef>&root=<directory>`` under
+``<directory>``, replace ``REEF_TOKEN_PLACEHOLDER`` with your token, and point the agent at
 the directory as the descriptor's ``env`` does (for pi,
 ``PI_CODING_AGENT_DIR`` set to ``<directory>/pi-agent``). Those files bind
 the model to ``<reef>/reef/scenarios/<scenario>``, which names the scenario

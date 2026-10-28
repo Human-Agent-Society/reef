@@ -7,7 +7,7 @@ import json
 import pytest
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.sync import import_files
+from reef.harness.sync import TreeMerge, import_files, merge_trees
 from reef.harness.tree import HarnessTree, render_tree
 
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"
@@ -56,3 +56,26 @@ def test_an_import_replaces_the_heads_files_and_ignores_what_no_part_renders_to(
 def test_codex_reads_a_file_where_a_skill_and_a_command_both_render_as_the_skill() -> None:
     imported = import_files({"codex/skills/ship/SKILL.md": COMMAND}, HarnessTree({}), get_adapter("codex"))
     assert imported.tree == HarnessTree({"skills/ship/SKILL.md": COMMAND})
+
+
+def test_the_merge_keeps_each_sides_own_changes_and_names_the_files_both_changed() -> None:
+    base = HarnessTree({"rules.md": "Base.\n", "skills/fix/SKILL.md": SKILL})
+    head = HarnessTree({"rules.md": "Evolved.\n", "skills/fix/SKILL.md": SKILL})
+    # The client added a memory note and removed the skill; the head changed the rules.
+    client = HarnessTree({"rules.md": "Base.\n", "memory/MEMORY.md": "- note\n"})
+    assert merge_trees(base, head, client) == TreeMerge(
+        HarnessTree({"rules.md": "Evolved.\n", "memory/MEMORY.md": "- note\n"}), ()
+    )
+    edited = HarnessTree({"rules.md": "Mine.\n", "skills/fix/SKILL.md": SKILL})
+    assert merge_trees(base, head, edited) == TreeMerge(None, ("rules.md",))
+    assert merge_trees(base, head, head).tree == head
+
+
+def test_claude_keeps_its_memory_in_the_tree_under_the_root_that_writes_it() -> None:
+    claude = get_adapter("claude")
+    tree = HarnessTree({"rules.md": "Answer briefly.\n", "memory/MEMORY.md": "- [Tests](tests.md)\n"})
+    files = claude.place_root(render_tree(tree, claude), '/home/a "b"/install')
+    settings = json.loads(files["claude/settings.json"])
+    assert settings["autoMemoryDirectory"] == '/home/a "b"/install/claude/memory'
+    assert files["claude/memory/MEMORY.md"] == "- [Tests](tests.md)\n"
+    assert import_files(files, tree, claude).tree == tree

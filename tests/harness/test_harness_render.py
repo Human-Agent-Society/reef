@@ -91,7 +91,13 @@ SOURCES = {
     # pi keeps every model call on the binding, so its tree holds a setting and no provider or model choice.
     "pi": {**COMMON, **config({"defaultThinkingLevel": "off"}), "extensions/tracer.ts": TRACER},
     "opencode": {**COMMON, **config(SETTINGS), "extensions/tracer.ts": TRACER},
-    "claude": {**COMMON, **config(SETTINGS), "extensions/tracer.js": TRACER},
+    # claude's memory part holds the notes of its automatic memory.
+    "claude": {
+        **COMMON,
+        **config(SETTINGS),
+        "extensions/tracer.js": TRACER,
+        "memory/MEMORY.md": "- Run the tests before you report a fix.\n",
+    },
     # codex refuses code extensions.
     "codex": COMMON,
     # terminus refuses code extensions, and its config holds Terminus 2 constructor arguments.
@@ -142,7 +148,12 @@ def test_config_merges_the_tree_over_the_defaults_and_each_overlay_over_the_tree
     }
     # claude's descriptor defaults sit below the tree's own keys.
     settings = json.loads(render(config({"cleanupPeriodDays": 7}), CLAUDE)["claude/settings.json"])
-    assert settings == {"cleanupPeriodDays": 7, "disableDeepLinkRegistration": "disable", "includeCoAuthoredBy": False}
+    assert settings == {
+        "autoMemoryDirectory": "{root}/claude/memory",
+        "cleanupPeriodDays": 7,
+        "disableDeepLinkRegistration": "disable",
+        "includeCoAuthoredBy": False,
+    }
 
 
 def test_native_and_codex_take_no_part_their_harness_never_reads() -> None:

@@ -15,10 +15,23 @@ Client to Reef
     ``import_files`` reads the files at their render paths back into a tree:
     each file that a part renders becomes the part's tree file. Config files
     are not read back. They hold the endpoints and credentials that the model
-    binding owns, so the import keeps the head's config parts.
+    binding owns, so the import keeps the config parts of the release the
+    client installed. ``merge_trees`` then puts the client's changes on the
+    head, which may have moved on since that release.
 
 For a tree whose files are each in the form their render writes,
 ``import_files(render_tree(tree))`` is the tree again.
+
+The merge is per file, with ``b``, ``h`` and ``c`` a path's text in the base,
+the head and the client's tree, absent counting as a value:
+
+==========  ==========  ===========================
+``c == b``  ``h == b``  result
+==========  ==========  ===========================
+yes         any         ``h``: the client kept it
+no          yes         ``c``: only the client changed it
+no          no          ``c`` when ``c == h``, else a conflict
+==========  ==========  ===========================
 """
 
 from __future__ import annotations
@@ -64,23 +77,24 @@ def create_harness_surface(descriptor: AdapterDescriptor) -> Surface:
 
 
 def client_files(
-    tree: HarnessTree, descriptor: AdapterDescriptor, served: ModelBinding, scenario_url: str
+    tree: HarnessTree, descriptor: AdapterDescriptor, served: ModelBinding, scenario_url: str, root: str
 ) -> dict[str, str]:
-    """``tree`` rendered for a client: its model calls go to ``scenario_url``, Reef's route of one scenario.
+    """``tree`` rendered for a client that installs it at ``root``: its model calls go to ``scenario_url``, Reef's
+    route of one scenario.
 
     The binding asks for ``served``'s model in ``served``'s dialect, with ``TOKEN_PLACEHOLDER`` as its key: the
     client writes its own token there, so Reef never sends a credential back.
     """
     binding = replace(served, base_url=scenario_url, api_key=TOKEN_PLACEHOLDER)
-    return render_tree(tree, descriptor, binding.config_overlays(descriptor))
+    return descriptor.place_root(render_tree(tree, descriptor, binding.config_overlays(descriptor)), root)
 
 
 @dataclass(frozen=True)
 class ImportedTree:
     """A person's harness files read back into a tree.
 
-    Values: ``tree`` holds the config files of the head the import started
-    from, and one tree file for each imported file that a part renders to.
+    Values: ``tree`` holds the config files of the release the client
+    installed, and one tree file for each imported file that a part renders to.
     ``ignored`` holds the imported paths that no part renders to, sorted.
     Purpose: ``import_files`` makes it; the import route publishes ``tree``
     and tells the client what it ``ignored``.
@@ -90,14 +104,14 @@ class ImportedTree:
     ignored: tuple[str, ...]
 
 
-def import_files(files: Mapping[str, str], head: HarnessTree, descriptor: AdapterDescriptor) -> ImportedTree:
-    """``files``, by render path, as ``descriptor``'s tree: the head's config files and a tree file per part file.
+def import_files(files: Mapping[str, str], base: HarnessTree, descriptor: AdapterDescriptor) -> ImportedTree:
+    """``files``, by render path, as ``descriptor``'s tree: ``base``'s config files and a tree file per part file.
 
-    A file that no part renders to is ignored. The imported files replace every other file of ``head``, so a
-    file the person removed is removed from the tree too.
+    ``base`` is the release the client installed. A file that no part renders to is ignored. The imported files
+    replace every other file of ``base``, so a file the person removed is removed from the tree too.
     """
     kept = {}
-    for path, text in head.files.items():
+    for path, text in base.files.items():
         location = descriptor.layout.locate(path)
         if location is not None and location.part.format is Format.CONFIG:
             kept[path] = text
@@ -112,12 +126,53 @@ def import_files(files: Mapping[str, str], head: HarnessTree, descriptor: Adapte
     return ImportedTree(HarnessTree({**kept, **imported}), tuple(sorted(ignored)))
 
 
+@dataclass(frozen=True)
+class TreeMerge:
+    """A client's tree merged onto the head, by the table of this module.
+
+    Values: ``tree`` is the merged tree when ``conflicts`` is empty, else
+    ``None``. ``conflicts`` holds the tree paths that the head and the client
+    both changed to different texts, sorted.
+    Purpose: ``merge_trees`` makes it; the import route publishes ``tree``,
+    or refuses with the ``conflicts``.
+    """
+
+    tree: HarnessTree | None
+    conflicts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (self.tree is None) == (not self.conflicts):
+            raise ValueError("a merge has a tree exactly when it has no conflict")
+
+
+def merge_trees(base: HarnessTree, head: HarnessTree, client: HarnessTree) -> TreeMerge:
+    """``client``'s changes since ``base`` put on ``head``, file by file, by the table of this module."""
+    merged: dict[str, str] = {}
+    conflicts = []
+    for path in sorted(base.files.keys() | head.files.keys() | client.files.keys()):
+        before, theirs, mine = base.files.get(path), head.files.get(path), client.files.get(path)
+        if mine in (before, theirs):
+            text = theirs
+        elif theirs == before:
+            text = mine
+        else:
+            conflicts.append(path)
+            continue
+        if text is not None:
+            merged[path] = text
+    if conflicts:
+        return TreeMerge(None, tuple(conflicts))
+    return TreeMerge(HarnessTree(merged), ())
+
+
 __all__ = [
     "HARNESS_COMPONENT",
     "TOKEN_PLACEHOLDER",
     "HarnessFiles",
     "ImportedTree",
+    "TreeMerge",
     "client_files",
     "create_harness_surface",
     "import_files",
+    "merge_trees",
 ]

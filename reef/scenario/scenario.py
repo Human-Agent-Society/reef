@@ -253,9 +253,13 @@ class Scenario:
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         return self._committer.rollback(release_id, operation=operation)
 
-    def import_release(self, artifact: Artifact, *, component: str, metrics: Mapping[str, Any]) -> ArtifactRef:
+    def import_release(
+        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
+    ) -> ArtifactRef:
         """Publish a person's own ``component`` tree as the new head; ``ScenarioCommitter.import_release``."""
-        return self._committer.import_release(artifact, component=component, metrics=metrics)
+        return self._committer.import_release(
+            artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+        )
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""

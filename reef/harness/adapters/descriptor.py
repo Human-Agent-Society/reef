@@ -12,7 +12,9 @@ drive one harness binary:
   enforced defaults (a ``primary`` target is required; the tree's config part
   merges into a target) and their checks (a key of the merged config and the
   matcher every value there must match; see
-  :mod:`reef.harness.adapters.matchers`).
+  :mod:`reef.harness.adapters.matchers`). A default may name a path under the
+  root as ``{root}/...``; the program that writes the rendered files puts the
+  root there (``AdapterDescriptor.place_root``).
 - ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
   episode) and the relocation environment (``{root}`` substituted per
   episode) that points the binary's whole configuration at the episode root.
@@ -47,6 +49,7 @@ the shared render). External adapters register through the
 from __future__ import annotations
 
 import importlib
+import json
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -307,6 +310,13 @@ class AdapterDescriptor:
     #: Where each render root lives on a person's machine, by root name. Empty when the adapter does not sync
     #: with a person's machine; otherwise every part that renders a path renders it under one of the roots.
     roots: Mapping[str, LocalRoot] = field(default_factory=dict)
+
+    def place_root(self, files: Mapping[str, str], root: str) -> dict[str, str]:
+        """``files`` with ``{root}`` in each config file replaced by ``root``, the directory that holds the render
+        roots: the episode root, or a client's install. The root is escaped as a JSON string's content."""
+        config_paths = {target.path for target in self.config_targets.values()}
+        placed = json.dumps(root)[1:-1]
+        return {path: text.replace("{root}", placed) if path in config_paths else text for path, text in files.items()}
 
 
 def _require_str(data: Mapping[str, Any], key: str, where: str) -> str:

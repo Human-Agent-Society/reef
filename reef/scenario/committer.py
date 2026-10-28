@@ -396,12 +396,16 @@ class ScenarioCommitter:
                 restoring.trainer.apply_rollback_start(restored_start)
             return published_ref
 
-    def import_release(self, artifact: Artifact, *, component: str, metrics: Mapping[str, Any]) -> ArtifactRef:
+    def import_release(
+        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
+    ) -> ArtifactRef:
         """Publish ``artifact`` as ``component``'s new release outside a step: a person's own tree, served at once.
 
-        The commit records the operation ``import`` with ``metrics``, and carries every other component of the
-        served release forward. It refuses with ``ArtifactConflict`` while a step holds job data, as a rollback
-        refuses: the step was prepared against the head that the import would replace.
+        ``expected_release_id`` is the current release that ``artifact`` was made against. The commit records the
+        operation ``import`` with ``metrics``, and carries every other component of the served release forward.
+        It refuses with ``ArtifactConflict`` while a step holds job data, as a rollback refuses: the step was
+        prepared against the head that the import would replace. It also refuses when the current release is no
+        longer ``expected_release_id``: another commit landed after the tree was made.
         """
         with self._lock, self._publication_lock:
             if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
@@ -413,6 +417,11 @@ class ScenarioCommitter:
             recorded = self.recorded_retry(prepared, next_step, operation="import")
             if recorded is not None:
                 return self.finish_recorded_retry(recorded, prepared, self._trainer).artifact_ref
+            if current_ref.release_id != expected_release_id:
+                raise ArtifactConflict(
+                    f"scenario {self._name!r} moved to release {current_ref.release_id} during the import; "
+                    "import again"
+                )
             if self._store.durable:
                 self._synchronize_checkpoint()
             staged = self.stage_publication(next_step, SavedArtifactPublication(artifact, component), checkpoint)
