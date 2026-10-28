@@ -624,6 +624,7 @@ class SQLRecordStore(RecordStore):
             model_config=values.get("model_config"),
             training_mode=values.get("training_mode"),
             artifact_evaluation=values.get("artifact_evaluation"),
+            activation=values.get("activation"),
         )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
@@ -635,6 +636,7 @@ class SQLRecordStore(RecordStore):
             "artifact_evaluation": (
                 None if settings.artifact_evaluation is None else dict(settings.artifact_evaluation)
             ),
+            "activation": None if settings.activation is None else dict(settings.activation),
         }
         rows = [
             {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}

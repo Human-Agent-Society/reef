@@ -4,7 +4,7 @@ Training makes artifacts and never activates one. A scenario's ``ActivationRule`
 artifact: activate it at once, after its evaluation, or never. The committer asks the rule when a training step
 publishes an artifact, and the training record keeps the result (``CommitRecord.activated``). The artifact
 evaluation service asks the rule when an evaluation of an artifact finishes. A deployment names the rule in its
-``activation`` section.
+``activation`` section, and a scenario can select a built-in rule for itself (``ScenarioSettings.activation``).
 """
 
 from __future__ import annotations

@@ -20,7 +20,8 @@ class ScenarioBinding:
     surface: Surface
     runtime: InferenceRuntime | None
     inference_handler: InferenceHandler | None
-    #: Decides whether an artifact that training publishes serves at once (``ActivationRule``).
+    #: The deployment's rule that decides whether an artifact that training publishes serves at once
+    #: (``ActivationRule``). A scenario's own ``activation`` setting replaces it (``Scenario.set_activation_rule``).
     activation_rule: ActivationRule
     #: The report contract selected by the recipe while building its trainer;
     #: when set, every report on this scenario is parsed through it at

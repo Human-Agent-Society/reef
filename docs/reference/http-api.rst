@@ -68,7 +68,9 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``                                       | update the scenario training mode                 |
+| ``POST /reef/scenarios/{scenario}/update``                                       | update a scenario's settings                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/settings``                                      | read a scenario's settings                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``                                      | what this scenario accepts                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -183,8 +185,7 @@ Scenario model settings
 scenario. Existing scenarios retain their settings on repeated creation.
 The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
-existing ``training_mode`` field, and ``artifact_evaluation`` (`Automatic
-evaluation`_). Send ``model: null`` to restore deployment
+other `scenario settings <#scenario-updates>`__. Send ``model: null`` to restore deployment
 defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
@@ -717,9 +718,17 @@ adapter residency evicts it.
 Scenario updates
 ~~~~~~~~~~~~~~~~
 
-``POST /reef/scenarios/{scenario}/update`` updates an existing scenario.
-Currently, only ``training_mode`` is supported; unknown fields are rejected.
-To change the data processor's mode:
+``POST /reef/scenarios/{scenario}/update`` updates an existing scenario. The
+body holds one or more of these settings; Reef rejects other fields:
+
+- ``training_mode``: the mode of the data processor, below.
+- ``model``: the scenario's model (`Scenario model settings`_).
+- ``artifact_evaluation``: the settings that Reef evaluates each new artifact
+  with (`Automatic evaluation`_).
+- ``activation``: the scenario's activation rule, below.
+
+The response holds the scenario name and each setting that the request
+changed. To change the data processor's mode:
 
 .. code:: json
 
@@ -745,10 +754,64 @@ return ``400``. A processor that does not support the requested mode returns
 ``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
 require a proposer that explicitly accepts ``requests``.
 
-``GET /reef/status`` reports the selected ``training_mode``. This selector
-is runtime state, not persisted scenario configuration: a service restart
-uses the recipe's configured mode again, while a scenario reload after a
-failed step keeps the selected mode.
+``GET /reef/status`` reports the selected ``training_mode``. Reef stores the
+mode with the scenario's settings, so a reload and a restart keep it.
+
+The ``activation`` setting selects the rule that decides whether Reef
+activates each new artifact of this scenario. It replaces the deployment's
+`activation section <configuration.rst#the-activation-section>`__ for this
+scenario. Send one of the built-in rules:
+
+.. code:: json
+
+   {"activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}}
+
+The ``module`` is ``always`` (``config`` takes ``review_kinds``), ``never`` or
+``evaluated`` (``config`` takes ``min_mean_score``). The response holds the
+stored rule. Send ``"activation": null`` to follow the deployment's rule again.
+The setting names built-in rules only: a ``package.module:ClassName`` rule is
+HTTP 400, because a client must not choose which code the service imports.
+Such a rule stays a deployment setting.
+
+The ``evaluated`` rule activates an artifact only after an evaluation of it, so
+it needs ``artifact_evaluation``. Reef checks the two settings together, and
+stores both or neither. It answers HTTP 400 when, after the request, the rule
+that applies is ``evaluated`` and the scenario has no ``artifact_evaluation``.
+Thus a request can set both at once, or set ``artifact_evaluation`` first.
+A request that clears ``artifact_evaluation`` under ``evaluated`` is refused
+too.
+
+A new rule applies to the artifacts that training makes after the change. It
+never activates an existing artifact. Under ``evaluated``, an artifact
+activates when an evaluation that finishes after the change scores high
+enough.
+
+Read the settings
+~~~~~~~~~~~~~~~~~
+
+``GET /reef/scenarios/{scenario}/settings`` returns the settings of an existing
+scenario:
+
+.. code:: json
+
+   {
+     "scenario": "agents",
+     "training_mode": "auto",
+     "model": null,
+     "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
+     "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
+     "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}
+   }
+
+- ``training_mode`` and ``model`` are what the scenario runs. ``model`` is the
+  redacted view of `Scenario model settings`_, or null for the deployment's
+  model.
+- ``artifact_evaluation`` and ``activation`` are the stored settings, or null.
+- ``effective_activation`` is the rule that applies: the scenario's
+  ``activation``, else the deployment's. A deployment rule of your own reads
+  as its ``package.module:ClassName``.
+
+An unknown scenario returns ``404``.
 
 Inference
 ---------

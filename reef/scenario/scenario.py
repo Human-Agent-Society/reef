@@ -110,7 +110,14 @@ class Scenario:
     @property
     def activation_rule(self) -> ActivationRule:
         """The rule that decides whether an artifact that training makes serves."""
-        return self._binding.activation_rule
+        return self._committer.activation_rule
+
+    def set_activation_rule(self, rule: ActivationRule | None) -> None:
+        """Select the rule for the artifacts that training makes from now on; None selects the deployment's rule.
+
+        An artifact made before the change keeps the decision it got.
+        """
+        self._committer.activation_rule = self._binding.activation_rule if rule is None else rule
 
     @property
     def report_type(self) -> type[ReportBase] | None:

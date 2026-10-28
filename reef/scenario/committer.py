@@ -96,6 +96,8 @@ class ScenarioCommitter:
             raise ValueError("a scenario commits through at least one trainer")
         self._name = name
         self._binding = binding
+        #: Decides whether a training step's artifact serves: the binding's rule until the scenario selects its own.
+        self.activation_rule = binding.activation_rule
         self._artifacts = artifacts
         self.trainers = trainers
         self._step = scenario_step
@@ -449,7 +451,7 @@ class ScenarioCommitter:
                 prepared = trainer.prepare_commit(result)
                 # The activation rule decides whether the step's artifact serves. The training record keeps the result.
                 activated = not isinstance(result.publication, NoArtifactPublication) and (
-                    self._binding.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
+                    self.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
                 )
                 recorded = self.recorded_retry(prepared, next_step, activated=activated, component=component)
                 if recorded is not None:

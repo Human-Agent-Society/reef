@@ -22,6 +22,7 @@ from reef.core.artifact_ref import ArtifactRef
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyModel
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.harness.client.tasks import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
@@ -335,6 +336,122 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_and_queues
             assert evaluations.evaluate_new(NewArtifact("s", artifact_id, None)) is None
 
     asyncio.run(run())
+
+
+async def settings_of(client: TestClient) -> dict[str, Any]:
+    response = await client.get("/reef/scenarios/s/settings", headers=AUTH)
+    assert response.status == 200, await response.text()
+    return await response.json()
+
+
+@pytest.mark.integration
+def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    recipe = WeightRecipe(runtime=ReleaseRuntime(), activation=activation_reference({"module": "never"}))
+    (tmp_path / "initial").mkdir()
+    # The in-memory repository keeps its registrations in its factory: a restart reuses it.
+    factory = InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
+    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "records"))
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await created(client, tmp_path, "add")
+            assert await settings_of(client) == {
+                "scenario": "s",
+                "training_mode": "auto",
+                "model": None,
+                "artifact_evaluation": None,
+                "activation": None,
+                "effective_activation": {"module": "never", "config": {}},
+            }
+            rule = {"module": "always", "config": {"review_kinds": ["skill"]}}
+            response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": rule})
+            assert response.status == 200, await response.text()
+            assert await response.json() == {"scenario": "s", "activation": rule}
+            settings = await settings_of(client)
+            assert settings["activation"] == rule and settings["effective_activation"] == rule
+            assert isinstance(dispatcher.loaded_scenario("s").activation_rule, AlwaysActivate)
+
+    asyncio.run(run())
+    dispatcher.close()
+
+    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "records"))
+
+    async def after_restart() -> None:
+        async with TestClient(TestServer(create_app(restarted, tokens=TOKEN))) as client:
+            assert (await settings_of(client))["effective_activation"]["module"] == "always"
+            assert isinstance(restarted.loaded_scenario("s").activation_rule, AlwaysActivate)
+            # null follows the deployment's rule again.
+            response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": None})
+            assert (await response.json())["activation"] is None
+            settings = await settings_of(client)
+            assert settings["activation"] is None and settings["effective_activation"]["module"] == "never"
+            assert isinstance(restarted.loaded_scenario("s").activation_rule, NeverActivate)
+            missing = await client.get("/reef/scenarios/other/settings", headers=AUTH)
+            assert missing.status == 404
+
+    asyncio.run(after_restart())
+    restarted.close()
+
+
+@pytest.mark.integration
+def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_a_plugin_rule_is_refused(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    evaluated = {"module": "evaluated", "config": {"min_mean_score": 0.5}}
+    evaluation = {"harness": {"name": "terminus-2"}}
+
+    async def update(client: TestClient, body: dict[str, Any]) -> tuple[int, str]:
+        response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=body)
+        return response.status, await response.text()
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await created(client, tmp_path, "add")
+            status, text = await update(client, {"activation": evaluated})
+            assert status == 400 and "set artifact_evaluation" in text
+            # The request is refused as a whole: a bad artifact_evaluation stores no activation either.
+            status, _ = await update(client, {"activation": {"module": "never"}, "artifact_evaluation": {"x": 1}})
+            assert status == 400
+            assert (await settings_of(client))["activation"] is None
+
+            # Both in one request, or artifact_evaluation first.
+            assert (await update(client, {"activation": evaluated, "artifact_evaluation": evaluation}))[0] == 200
+            assert (await update(client, {"activation": None, "artifact_evaluation": None}))[0] == 200
+            assert (await update(client, {"artifact_evaluation": evaluation}))[0] == 200
+            assert (await update(client, {"activation": evaluated}))[0] == 200
+            assert isinstance(dispatcher.loaded_scenario("s").activation_rule, EvaluatedActivation)
+
+            status, text = await update(client, {"artifact_evaluation": None})
+            assert status == 400 and "set artifact_evaluation" in text
+            settings = await settings_of(client)
+            assert settings["artifact_evaluation"]["harness"]["name"] == "terminus-2"
+            assert settings["activation"] == settings["effective_activation"] == evaluated
+
+            # A scenario names built-in rules only: the client does not choose which code the service imports.
+            plugin = {"module": "tests.support._activation_rule_plugin:ComponentRule", "config": {"component": "w"}}
+            for refused in (plugin, "never", {"module": "evaluated", "config": {}}):
+                status, _ = await update(client, {"activation": refused})
+                assert status == 400, refused
+            assert (await settings_of(client))["activation"] == evaluated
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_scenario_under_a_deployment_evaluated_rule_without_artifact_evaluation_loads_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    evaluated = activation_reference({"module": "evaluated", "config": {"min_mean_score": 0.5}})
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime(), activation=evaluated))
+    with caplog.at_level("WARNING", logger="reef.scenario.registry"):
+        dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
+    assert "activates no new artifact" in caplog.text
+    with pytest.raises(ValueError, match="set artifact_evaluation"):
+        dispatcher.set_evaluation_and_activation("s", artifact_evaluation=None, activation=None)
+    dispatcher.close()
 
 
 async def until(client: TestClient, done) -> list[dict[str, Any]]:

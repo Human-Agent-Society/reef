@@ -199,7 +199,7 @@ class ArtifactEvaluations:
 
     def evaluate_new(self, new: NewArtifact) -> StoredEvaluation | None:
         """Queue the evaluation of ``new`` with its scenario's settings; None when the scenario has none."""
-        stored = self.dispatcher.artifact_evaluation(new.scenario)
+        stored = self.dispatcher.stored_settings(new.scenario).artifact_evaluation
         if stored is None:
             return None
         settings = ArtifactEvaluationSettings.from_json(stored)
@@ -220,23 +220,40 @@ class ArtifactEvaluations:
         artifact_id, settings = request_settings(body)
         return self.accept(scenario, artifact_id, settings, state="running")
 
-    def configure(self, scenario: str, value: object) -> Mapping[str, object] | None:
-        """Store the settings ``value`` that Reef evaluates each new artifact of ``scenario`` with, and return them
-        as stored; None stops the automatic evaluations.
+    def configure(self, scenario: str, changes: Mapping[str, object]) -> dict[str, object]:
+        """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed
+        setting as stored.
 
-        The settings are checked against the scenario's current artifact as a client's request would be, except
-        that the eval tasks may still be missing. Raise ``ValueError`` or ``ReefError`` for settings that the
-        scenario cannot run.
+        ``changes`` holds ``artifact_evaluation``, ``activation``, or both. ``artifact_evaluation`` is the settings
+        that Reef evaluates each new artifact with, or None to evaluate none. They are checked against the
+        scenario's current artifact as a client's request would be, except that the eval tasks may still be
+        missing. ``activation`` is the scenario's own built-in activation rule, or None to follow the deployment's.
+        A setting that ``changes`` leaves out keeps its stored value. Reef checks the two settings together and
+        stores both or neither (``Dispatcher.set_evaluation_and_activation``). Raise ``ValueError`` or
+        ``ReefError`` for settings that the scenario cannot run.
         """
-        if value is None:
-            self.dispatcher.set_artifact_evaluation(scenario, None)
-            return None
-        settings = ArtifactEvaluationSettings.from_json(value)
         with self.dispatcher.locked_scenario(scenario) as current:
-            self.checked(current, current.current_artifact_ref().release_id, settings)
-        stored = settings.to_json()
-        self.dispatcher.set_artifact_evaluation(scenario, stored)
-        return stored
+            stored = self.dispatcher.stored_settings(scenario)
+            artifact_evaluation = stored.artifact_evaluation
+            if "artifact_evaluation" in changes:
+                value = changes["artifact_evaluation"]
+                if value is None:
+                    artifact_evaluation = None
+                else:
+                    settings = ArtifactEvaluationSettings.from_json(value)
+                    self.checked(current, current.current_artifact_ref().release_id, settings)
+                    artifact_evaluation = settings.to_json()
+            activation = self.dispatcher.set_evaluation_and_activation(
+                scenario,
+                artifact_evaluation=artifact_evaluation,
+                activation=changes.get("activation", stored.activation),
+            )
+        stored_changes: dict[str, object] = {}
+        if "artifact_evaluation" in changes:
+            stored_changes["artifact_evaluation"] = artifact_evaluation
+        if "activation" in changes:
+            stored_changes["activation"] = activation
+        return stored_changes
 
     def checked(
         self, current: Scenario, artifact_id: str, settings: ArtifactEvaluationSettings

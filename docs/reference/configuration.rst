@@ -1183,7 +1183,10 @@ Training makes artifacts: every checkpoint that a weight training job saves,
 and every tree that a harness trainer keeps. Training never decides whether an
 artifact serves. The activation rule that this section names decides that.
 The section applies to every recipe, a composite included. Without the
-section, the rule is ``always``.
+section, the rule is ``always``. A scenario can select one of the built-in rules
+for itself with ``POST /reef/scenarios/{scenario}/update`` (`Scenario updates
+<http-api.rst#scenario-updates>`__). The section's rule applies to each scenario
+that selects none.
 
 An artifact that the rule does not activate stays inactive. A person can
 activate it with ``POST /reef/scenarios/{scenario}/activate``. Activation does
@@ -1216,6 +1219,8 @@ The built-in rules:
   ``mean_score`` of at least ``min_mean_score`` (required). Set the scenario's
   ``artifact_evaluation`` (`Automatic evaluation
   <http-api.rst#automatic-evaluation>`__) so Reef evaluates each new artifact.
+  Reef logs a warning when it creates or loads a scenario without it under
+  this rule: such a scenario activates no new artifact.
 
 A rule of your own subclasses ``ActivationRule``:
 

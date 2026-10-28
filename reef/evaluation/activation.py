@@ -15,6 +15,10 @@ An ``activation`` section has this shape::
 - ``evaluated`` (``EvaluatedActivation``) activates an artifact once an evaluation of it finishes with a
   ``mean_score`` of at least ``min_mean_score``. The scenario's ``artifact_evaluation`` settings evaluate each
   new artifact.
+
+A scenario can set its own rule (``ScenarioSettings.activation``) with one of the built-in rules above, in the
+mapping form. It replaces the deployment's rule for that scenario. The setting comes from an HTTP client, so it
+never names a ``package.module:ClassName``: the client must not choose which code the service imports.
 """
 
 from __future__ import annotations
@@ -138,6 +142,29 @@ def activation_reference(value: object) -> PluginReference:
     return reference
 
 
+def scenario_activation_reference(value: object) -> PluginReference:
+    """The built-in rule that a scenario's ``activation`` setting names, with its config.
+
+    ``value`` is a mapping ``{"module": <built-in name>, "config": {...}}``; ``config`` is optional. Raise
+    ``PluginConfigError`` for any other value, a ``package.module:ClassName`` included, and for a config that the
+    rule refuses.
+    """
+    if not isinstance(value, Mapping) or value.get("module") not in BUILT_IN_RULES:
+        raise PluginConfigError(f"activation must be an object whose module is one of {', '.join(BUILT_IN_RULES)}")
+    return activation_reference(value)
+
+
+def activation_setting(reference: PluginReference | None) -> dict[str, object]:
+    """The JSON form of the rule ``reference`` names: ``{"module", "config"}``, where ``module`` is a built-in name or
+    the ``package.module:ClassName`` of a plugin class. None names ``always``, the default."""
+    if reference is None:
+        return {"module": "always", "config": {}}
+    plugin_class = ActivationRule.referenced_class(reference)
+    names = {rule_class: name for name, rule_class in BUILT_IN_RULES.items()}
+    module = names.get(plugin_class, f"{plugin_class.__module__}:{plugin_class.__qualname__}")
+    return {"module": module, "config": dict(reference.config)}
+
+
 def build_activation_rule(reference: PluginReference | None) -> ActivationRule:
     """The rule that ``reference`` names, built from its config; ``AlwaysActivate`` when it is None."""
     if reference is None:
@@ -151,5 +178,7 @@ __all__ = [
     "EvaluatedActivation",
     "NeverActivate",
     "activation_reference",
+    "activation_setting",
     "build_activation_rule",
+    "scenario_activation_reference",
 ]

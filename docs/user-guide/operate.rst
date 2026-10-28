@@ -131,6 +131,8 @@ The deployment's `activation section <../reference/configuration.rst#the-activat
 - ``never`` makes each new artifact but does not activate it. A person activates it.
 - ``evaluated`` activates an artifact once an evaluation of it reaches ``min_mean_score``.
 
+A scenario can select one of these rules for itself with ``POST /reef/scenarios/{scenario}/update`` and ``{"activation": {"module": "never"}}``. Send ``"activation": null`` to follow the deployment's rule again. ``GET /reef/scenarios/{scenario}/settings`` reads back the scenario's rule and the rule that applies (`Scenario updates <../reference/http-api.rst#scenario-updates>`__).
+
 An artifact that the rule does not activate still becomes the start of the next training job.
 
 Train from an artifact
@@ -256,10 +258,12 @@ Choose the storage backend
 --------------------------
 
 The storage backend keeps the records, commits, and settings of each scenario.
-The settings are the model configuration and the selected training mode. You
-set both with ``POST /reef/scenarios/{scenario}/update``. After a restart, the
-scenario uses its stored training mode. If the recipe does not support that
-mode, the scenario uses the default mode and Reef logs a warning.
+The settings are the model configuration, the selected training mode, the
+automatic evaluation settings and the activation rule. You set them with
+``POST /reef/scenarios/{scenario}/update`` and read them back with
+``GET /reef/scenarios/{scenario}/settings``. After a restart, the scenario uses
+its stored settings. If the recipe does not support the stored training mode,
+the scenario uses the default mode and Reef logs a warning.
 
 Select the backend with ``storage.record-backend``:
 
