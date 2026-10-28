@@ -48,9 +48,9 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
-from reef.harness.delivery import create_harness_surface
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.sync import create_harness_surface
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -69,7 +69,9 @@ from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Method
+from reef.train.harness_backend.evolve import Evolution
 from reef.train.harness_backend.records import StepRecord
+from reef.train.harness_backend.release import ReleaseRules
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 
@@ -486,10 +488,19 @@ class HarnessEvolutionRecipe(Recipe):
             if task_storage is None:
                 raise RecipeConfigError("evolution.evaluation.task_store needs the task storage of a scenario session")
             task_store = task_storage.open(self.evaluation.task_store)
+        records = StepRecord(root / STEPS_DIR)
         return HarnessBackend(
             descriptor=descriptor,
             releases=releases,
-            method=self.method,
+            evolution=Evolution(
+                method=self.method,
+                descriptor=descriptor,
+                history=history,
+                records=records,
+                # Only a method that runs the agent through its tools gets it bound here.
+                agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
+                max_episodes=self.evolution.max_episodes_per_step,
+            ),
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
@@ -508,14 +519,13 @@ class HarnessEvolutionRecipe(Recipe):
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,
                 max_model_calls_per_step=self.evolution.max_model_calls_per_step,
-                max_episodes_per_step=self.evolution.max_episodes_per_step,
-                recheck_every=self.evaluation.recheck_every,
+            ),
+            rules=ReleaseRules(
                 publish=self.evolution.publish,
                 review_parts=frozenset(self.evolution.review_parts),
+                recheck_every=self.evaluation.recheck_every,
             ),
-            records=StepRecord(root / STEPS_DIR),
-            # Only a method that runs the agent through its tools gets it bound here.
-            agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
+            records=records,
         )
 
     def build_evaluator(

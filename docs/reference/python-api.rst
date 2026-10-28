@@ -1628,7 +1628,7 @@ Surface
 
 .. code:: python
 
-   from reef.harness.delivery import create_harness_surface
+   from reef.harness.sync import create_harness_surface
    from reef.surface import (
        ComponentSurface, Surface, create_config_surface, create_weight_surface,
    )

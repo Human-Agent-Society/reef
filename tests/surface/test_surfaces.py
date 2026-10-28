@@ -4,7 +4,7 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.harness.adapters import get_adapter
-from reef.harness.delivery import create_harness_surface
+from reef.harness.sync import create_harness_surface
 from reef.recipe.base import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (

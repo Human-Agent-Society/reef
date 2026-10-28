@@ -23,7 +23,7 @@ from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.harness.adapters import get_adapter
-from reef.harness.delivery import create_harness_surface
+from reef.harness.sync import create_harness_surface
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint

@@ -144,7 +144,7 @@ loaded. It evicts a leaked adapter first, then the oldest-activated adapter
 that is no scenario's current one. The surface never touches it.
 
 **Harness file trees.** ``create_harness_surface(descriptor)``, in
-``reef.harness.delivery``, serves each release of the ``harness`` component
+``reef.harness.sync``, serves each release of the ``harness`` component
 through ``HarnessFiles``. A release stores the harness source tree, and a read
 renders it for the descriptor's adapter without a model binding, so the
 client gets the files its agent reads and binds its own model.

@@ -58,8 +58,8 @@ from reef.evaluation.harness import History, evaluation_selection
 from reef.harness import run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.delivery import HARNESS_COMPONENT
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.sync import HARNESS_COMPONENT
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout

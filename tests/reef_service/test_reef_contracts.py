@@ -21,7 +21,7 @@ from reef.core import ReefError, RequestType
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.delivery import create_harness_surface
+from reef.harness.sync import create_harness_surface
 from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceStream
