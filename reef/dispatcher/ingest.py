@@ -84,7 +84,9 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                     source = stored_reference.item if stored_reference is not None else None
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(
-                        f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
+                        f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}. "
+                        "A report is checked against the scenario it is sent to, so send it with the same "
+                        "x-reef-scenario as the inference it references"
                     )
     except ReportValidationError:
         current.operations.increment("ingest/rejected_report_total")
