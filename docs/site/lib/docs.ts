@@ -123,8 +123,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
 
 // The site loads only the files listed above, so a page missing from the list
 // does not merely go unlinked — it 404s. Adding a page under a section
-// directory now fails the build until it is placed in the reading order. Not
-// scanned: rfcs/ (design records, read in the repo).
+// directory now fails the build until it is placed in the reading order.
 const navigated = new Set<string>(navigationSources.flatMap((group) => group.files));
 // Pages live in one directory per navigation section, so a page's path names
 // its section and the URL follows the path.

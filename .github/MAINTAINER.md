@@ -100,7 +100,7 @@ question, RFC, and roadmap forms apply their corresponding existing labels.
 These type labels do not replace area or lifecycle labels.
 
 An RFC issue is both the proposal and the durable decision record. Maintainers
-must not ask authors to add new RFC documents under `docs/rfcs`. The affected
+must not ask authors to add RFC documents to the repository. The affected
 maintainers record acceptance in a comment and move an accepted RFC to
 `status: ready`; implementation pull requests link the issue. Material design
 changes and shipped implementation links are recorded on the RFC issue.

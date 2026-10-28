@@ -18,7 +18,7 @@ from reef.harness.tree import TreePatch
 
 SCENARIO_HEADER = "x-reef-scenario"
 RELEASE_ID_HEADER = "x-reef-release-id"
-#: Harness-stamped side-channel context (method-integration RFC §3.2). The
+#: Harness-stamped side-channel context. The
 #: service carries each pair through to the INFERENCE record so a processor
 #: can correlate on it, and reads one value itself: ``release``, the release
 #: a client runs, which names the record's artifact where the client pulls
