@@ -72,7 +72,8 @@ The selected content. An artifact is of exactly one of four kinds:
 - ``harness``: a whole agent harness that Reef runs as it is, such as a Harbor
   agent or an adapter's binary.
 - ``harness_plugin``: a part that installs into a base harness, such as a
-  harness tree that Reef evolves, or a skill tree.
+  harness tree that Reef evolves, a skill tree, or the request defaults of a
+  ``config`` component.
 - ``model``: a whole model, such as a provider's model or full weights.
 - ``model_adapter``: a LoRA adapter on a base model.
 

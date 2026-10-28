@@ -153,8 +153,8 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
 
 
 #: The kind of an artifact. A ``harness`` is a whole agent harness that Reef runs as it is, such as a Harbor agent
-#: or an adapter's binary. A ``harness_plugin`` installs into a base harness, such as an evolved tree or a skill
-#: tree. A ``model`` is a whole model, such as a provider's model or full weights. A ``model_adapter`` is a LoRA
+#: or an adapter's binary. A ``harness_plugin`` installs into a base harness, such as an evolved tree, a skill
+#: tree, or request defaults. A ``model`` is a whole model, such as a provider's model or full weights. A ``model_adapter`` is a LoRA
 #: adapter on a base model.
 ArtifactKind = Literal["harness", "harness_plugin", "model", "model_adapter"]
 ARTIFACT_KINDS: tuple[ArtifactKind, ...] = ("harness", "harness_plugin", "model", "model_adapter")
