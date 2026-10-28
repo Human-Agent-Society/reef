@@ -189,7 +189,7 @@ The review needs `agent_api: openai` or `responses`; with `anthropic`, set `revi
 
 A generated task can copy the instruction of a benchmark task that is kept for evaluation. An evaluation on that benchmark then measures what the policy saw in training. The contamination check compares the `instruction.md` of each task with the instructions of a set of reference tasks. It runs in `validate` right after the oracle check, before the test review and the calibration, so a contaminated task costs no review call and no calibration episode. It makes no model call and runs no sandbox.
 
-The rule is upstream's, after Tmax:
+The rule is upstream's, which takes the 13-gram size from TMax (Ivison et al., 2026, `allenai/TMax-15K`):
 
 1. Each instruction loses every line that contains `canary`, in any case. Benchmark tasks can carry the same canary string, and it says nothing about the task.
 2. The rest is lowercased and split into word tokens (`\w+`), so case, punctuation, Markdown and whitespace do not change a match.
