@@ -388,6 +388,8 @@ class CalibrationCheck(TaskCheck):
         rewards = rewards_of(tuple(episodes))
         episode_errors = [episode.error for episode in episodes if episode.error]
         details: dict[str, object] = {
+            # The mode this result was made under: the report's calibration settings are those at its close.
+            "mode": "refuse" if self.is_refusing else "measure",
             "rewards": list(rewards),
             "mean": None,
             "std": None,

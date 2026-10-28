@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
     NoChecks,
+    ScriptedEpisodes,
     ScriptedSession,
     StandInAuthor,
     agent_files,
@@ -23,13 +25,22 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     run_tasks,
     stand_in_e2b_package,
 )
-from recipes.beta.autoenvscaling import AgentAuthor, AutoEnvScalingGenerator, TaskVariant
+from recipes.beta.autoenvscaling import (
+    AgentAuthor,
+    AuthoredTask,
+    AuthorError,
+    AutoEnvScalingGenerator,
+    CalibrationCheck,
+    CandidateChecks,
+    TaskAuthor,
+    TaskVariant,
+)
 from recipes.beta.autoenvscaling import author as author_module
 from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
 from reef.core.plugins import PluginConfigError
-from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask
+from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask
 
 
 @pytest.fixture(autouse=True)
@@ -284,3 +295,72 @@ def test_the_prompt_designer_refuses_a_variant(tmp_path: Path) -> None:
     source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
     with pytest.raises(ValueError, match="adaptive generation needs author: agent"):
         designer.author(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
+
+
+class BlockingVariantAuthor(TaskAuthor):
+    """An author whose run lasts until it is stopped; it keeps the parent of each variant it was asked for."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped = threading.Event()
+        self.varied: list[str] = []
+
+    def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        if variant is not None:
+            self.varied.append(variant.parent)
+        self.started.set()
+        if stop.wait(10):
+            self.stopped.set()
+        raise AuthorError("the agent's run was stopped")
+
+
+def test_a_cancelled_variant_leaves_its_parent_its_slot(tmp_path: Path) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True, variant_share=0.5)
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    author = BlockingVariantAuthor()
+    blocked = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
+
+    async def cancelled() -> None:
+        generation = asyncio.ensure_future(blocked.generate(REQUEST))
+        await asyncio.to_thread(author.started.wait, 10)
+        generation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await generation
+        await asyncio.to_thread(author.stopped.wait, 10)
+
+    asyncio.run(cancelled())
+    assert author.varied == [NAMES[0]], "the cancelled run was the parent's variant"
+    assert parents(tmp_path)[0]["varied"] is False, "a cancelled run takes no slot, as it takes no session"
+
+
+def test_with_a_refusing_calibration_a_task_outside_the_band_is_refused_and_becomes_no_parent(
+    tmp_path: Path,
+) -> None:
+    service = ScriptedEpisodes(tmp_path / "tasks", [1.0] * 8)
+    calibration = CalibrationCheck(
+        service,
+        scenario="autoenvscaling",
+        rollouts=4,
+        max_rollouts=8,
+        margin=0.15,
+        min_std=0.1,
+        band_low=0.25,
+        band_high=0.75,
+    )
+    generator = autoenvscaling(
+        tmp_path, StandInAuthor(), service, count=2, is_adaptive=True, task_checks=(calibration,)
+    )
+    results = run_tasks(generator, (1.0, 1.0))
+    assert len(results) == 2 and all(isinstance(result, RejectedTask) for result in results)
+    asyncio.run(generator.record_results(results, generation=0))
+    assert [proposal["stage"] for proposal in report(tmp_path)["proposals"]] == ["calibration", "calibration"]
+    assert parents(tmp_path) == [], "only a task that trained can become a parent"

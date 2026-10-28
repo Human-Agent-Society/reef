@@ -16,7 +16,9 @@ directory lets a restart continue with the next session.
 With ``adaptive`` on, ``record_results`` also keeps each training task whose pass rate fell outside the band, and a
 later generation gives up to ``variant_share`` of its slots to variants of those tasks: harder for a task the solver
 passes too often, simpler for one it passes too rarely. A variant comes from the same session, so it shares the
-parent's split. Eval tasks and outages never become parents, and each parent is varied once.
+parent's split. Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, and each
+parent is varied once. The task checks run in ``validate``: Harbor's oracle and nop check, then the contamination
+check, the test review and the solver calibration when they are on.
 """
 
 from __future__ import annotations
@@ -634,7 +636,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
     Values: ``count`` and ``max_checks`` are positive. ``band_low`` and ``band_high`` are each in [0, 1] or null,
     and ``band_low`` does not exceed ``band_high``. ``task_checks`` is the oracle check, then the given checks in
     order. ``calibration`` is the first :class:`CalibrationCheck` among them, or None. ``cursor`` is the cursor
-    saved under ``state_dir``, and ``generation`` is the generation that ``generate`` makes now.
+    saved under ``state_dir``, and ``generation`` is the generation that ``generate`` makes now. ``is_adaptive``
+    is a bool and ``variant_share`` in (0, 1]; ``variant_slots``, the most variant slots of a generation, is
+    ``variant_share`` of ``count`` rounded down, and is at least 1 when ``is_adaptive``. ``parents`` are the
+    :class:`ParentTask` entries saved in ``adaptive.json``, empty unless ``is_adaptive``.
     Purpose: the generated-task recipe builds it with ``from_config`` and calls ``generate``, ``validate`` and
     ``record_results`` in each round.
     """
@@ -819,9 +824,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 proposal = SessionProposal(
                     index, position, source.record_id, parent_task=parent.name, direction=parent.direction
                 )
-                # Each parent gets one variant slot, whatever becomes of the variant.
-                self.parents = [replace(kept, varied=kept.varied or kept.name == parent.name) for kept in self.parents]
-                self.save_parents()
             else:
                 position = self.cursor.next_position
                 source = self.sources[position % len(self.sources)]
@@ -839,9 +841,16 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     proposal, designer_record_id=task.source_agent_record_ids[0], task_name=task.name
                 )
                 tasks.append(task)
-            # The session is taken; a restart continues with the next one. A cancelled run takes none.
+            # The session or the parent is taken; a restart continues with the next one. A cancelled run takes
+            # none, so a parent whose variant was cancelled keeps its slot. Otherwise each parent gets one variant
+            # slot, whatever becomes of the variant.
             if variant is None:
                 self.save_cursor(replace(self.cursor, next_position=position + 1))
+            else:
+                self.parents = [
+                    replace(kept, varied=kept.varied or kept.name == variant.parent) for kept in self.parents
+                ]
+                self.save_parents()
             if error:
                 logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
                 break
@@ -1019,7 +1028,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """Close an open generation: save training pass rates, band measurements and held-out outcomes in its report.
 
         An eval task gets the stage ``held_out``. The band is only recorded in the report. It does not change the
-        recipe's task store.
+        recipe's task store. With ``is_adaptive``, each training task outside the band also becomes a parent
+        (:meth:`keep_parents`).
         """
         open_path = self.open_path(generation)
         if not open_path.is_file():

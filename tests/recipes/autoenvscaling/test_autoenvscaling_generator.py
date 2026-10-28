@@ -789,3 +789,18 @@ def test_a_task_that_could_not_run_is_an_outage_in_the_report(tmp_path: Path) ->
     failure = FailedTask(item, "the sandbox provider is down", True)
     asyncio.run(generator.record_results((failure,), generation=0))
     assert [entry["stage"] for entry in report(tmp_path)["proposals"]] == ["outage"]
+
+
+def test_the_generator_refuses_a_band_whose_low_exceeds_its_high(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="band_low must not exceed band_high"):
+        autoenvscaling(tmp_path, StandInAuthor(), band_low=0.8, band_high=0.2)
+
+
+def test_from_config_gives_the_calibration_the_configured_band(tmp_path: Path) -> None:
+    generator = AutoEnvScalingGenerator.from_config(
+        generating_config(tmp_path, calibration="measure", band_low=0.1, band_high=0.9),
+        scenario="autoenvscaling",
+        environ={"E2B_API_KEY": "key"},
+    )
+    [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
+    assert (calibration.band_low, calibration.band_high) == (0.1, 0.9)

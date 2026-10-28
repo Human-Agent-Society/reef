@@ -349,6 +349,7 @@ def test_a_task_inside_the_band_with_variance_is_kept_after_the_first_episodes(t
         "errors": [],
         "could_not_run": "",
         "details": {
+            "mode": "refuse",
             "rewards": [0.0, 1.0, 1.0, 0.0],
             "mean": 0.5,
             "std": 0.5,

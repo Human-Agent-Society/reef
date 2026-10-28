@@ -13,7 +13,7 @@ tasks and trains on them.
 - ``checks``: the task checks: Harbor's oracle and nop agents, the contamination check, the test review, and the
   solver calibration.
 - ``generator``: ``AutoEnvScalingGenerator``: the sessions walked with a cursor, admission and the history
-  step, the agent's check and the task checks through the generator service, and the band.
+  step, the agent's check and the task checks through the generator service, the band and the parents.
 """
 
 from recipes.beta.autoenvscaling.author import (
