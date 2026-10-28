@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from reef.artifact import (
     GitLFSRepositoryBackendFactory,
     RepositoryBackendContext,
 )
+from reef.artifact.git_lfs import _GitWorkspace
 from reef.core.plugins import PluginConfigError
 
 
@@ -284,6 +286,66 @@ def test_local_repository_bootstrap_is_idempotent_across_constructors(
     assert len({version.release_id for version in versions}) == 1
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == versions[0].release_id
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == versions[0].release_id
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("competing_inputs", "refusal"),
+    [({}, None), ({"seed": "other"}, r"imported from \{'seed': 'other'\}.*configures \{\}")],
+    ids=["equal-inputs", "other-inputs"],
+)
+def test_a_constructor_reads_a_base_imported_after_it_found_none(
+    competing_inputs: dict[str, str],
+    refusal: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_lfs: None,
+) -> None:
+    """A second constructor imports the base after the first found none and before the first lists the refs.
+    The first then opens that base, or refuses it when it came from other inputs."""
+    remote = tmp_path / "artifacts.git"
+    first_work_dir = (tmp_path / "work-first").resolve()
+    has_refs = _GitWorkspace.has_refs
+    competitors: list[GitLFSRepositoryBackend] = []
+
+    def import_competing_base(workspace: _GitWorkspace) -> bool:
+        if workspace.work_dir == first_work_dir:
+            # The first constructor read no base from the empty repository. The second imports one now.
+            assert run_git("--git-dir", str(remote), "for-each-ref") == ""
+            competitors.append(
+                GitLFSRepositoryBackend(
+                    "second",
+                    remote,
+                    work_dir=tmp_path / "work-second",
+                    cache_dir=tmp_path / "cache-second",
+                    base=BaseArtifactSource(inputs=competing_inputs),
+                )
+            )
+        return has_refs(workspace)
+
+    monkeypatch.setattr(_GitWorkspace, "has_refs", import_competing_base)
+
+    with nullcontext() if refusal is None else pytest.raises(ArtifactSourceError, match=refusal):
+        first = GitLFSRepositoryBackend("first", remote, work_dir=first_work_dir, cache_dir=tmp_path / "cache-first")
+        assert first.resolve_release() == competitors[0].resolve_release()
+    (competitor,) = competitors
+    release = competitor.resolve_release()
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == release.release_id
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == release.release_id
+
+
+@pytest.mark.integration
+def test_a_repository_with_releases_but_no_base_is_refused(tmp_path: Path, fake_git_lfs: None) -> None:
+    """An older Reef's repository has a head but no base. A constructor refuses it and imports no base."""
+    remote = tmp_path / "artifacts.git"
+    first = GitLFSRepositoryBackend("first", remote, work_dir=tmp_path / "work-first", cache_dir=tmp_path / "cache")
+    head_release_id = first.resolve_release().release_id
+    run_git("--git-dir", str(remote), "update-ref", "-d", "refs/reef/base")
+
+    with pytest.raises(ArtifactSourceError, match="has releases but no base artifact"):
+        GitLFSRepositoryBackend("second", remote, work_dir=tmp_path / "work-second", cache_dir=tmp_path / "cache")
+    assert run_git("--git-dir", str(remote), "for-each-ref", "refs/reef/base") == ""
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == head_release_id
 
 
 @pytest.mark.integration
