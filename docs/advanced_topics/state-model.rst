@@ -54,10 +54,11 @@ Serving and training each read artifacts of the chain:
 The training component decides which checkpoints a job saves. A Slime or
 Tinker job saves a checkpoint every ``save_interval`` optimizer steps when
 the job's parameters set it, and one when the job ends. Each saved checkpoint
-becomes an artifact. Reef activates a checkpoint that candidate evaluation
-selects. A rejected checkpoint stays an inactive artifact, and the active
-release keeps serving. The next job starts from the newest saved checkpoint
-whether or not it was selected: evaluation decides only what is served. A
+becomes an artifact. Reef activates a checkpoint when the deployment's
+activation rule says so. Any other checkpoint stays an inactive artifact,
+and the active release keeps serving. The next job starts from the newest
+saved checkpoint whether or not it was activated: the rule decides only what
+serves. A
 restart resumes from the committed state. The step counter, the weight
 trainer's state, and record progress survive.
 
@@ -125,10 +126,10 @@ durable store, the order is:
 
    * - Commit kind
      - Order after trainer preparation
-   * - Selected checkpoint
+   * - Activated artifact
      - Stage the bytes, load them into serving, publish the durable release,
-       commit the store, install the committed heads, synchronize the backend
-       pointer, apply trainer state.
+       commit the store with ``activated: true``, install the committed heads,
+       synchronize the backend pointer, apply trainer state.
    * - Activation
      - Check the artifact as at its publication; in a scenario of several
        components, publish the release that binds it. Load the release into
@@ -146,12 +147,10 @@ durable store, the order is:
        chain tip. A job submission, a rejected harness candidate, and a job's
        end commit this way.
    * - Inactive artifact
-     - Publish durable bytes, commit the store with ``pending: true``, apply
-       trainer state; keep the active release and the chain tip. A weight
-       checkpoint that evaluation rejects commits this way. So does a harness
-       win under ``evolution.publish: review`` or ``evolution.review_kinds``.
-       The ``pending`` field keeps its name until the activation rule moves
-       out of training (RFC #965, step 3).
+     - Publish durable bytes, commit the store with ``activated: false``,
+       move the chain tip, apply trainer state; keep the active release. An
+       artifact that the activation rule does not activate commits this way.
+       A later activation is its own record.
 
 Every trainer is bound to a release component (``records`` when the recipe
 serves none). With several trainers, every commit record names the

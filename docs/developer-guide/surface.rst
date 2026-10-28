@@ -127,7 +127,7 @@ LoRA adapter. A weight recipe passes its runtime's
 
 **Weights.** ``WeightLoader`` makes the inference runtime serve a release.
 ``activate`` calls the runtime's ``activate_checkpoint`` at startup recovery,
-after Reef publishes a selected checkpoint, and at an activation. It returns the runtime load ID that serves the release:
+after Reef publishes a checkpoint that the activation rule activates, and at an activation. It returns the runtime load ID that serves the release:
 a new load ID for a runtime that loads weights, or the release ID for one that
 loads nothing, such as a proxy. The runtime loads only published weights; no trainer
 changes what the engines serve. For a training scenario, Reef records the

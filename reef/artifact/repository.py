@@ -347,12 +347,16 @@ class Repository(ArtifactRepository):
                 )
             self._current_artifact = ref
 
-    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        """Install already-committed serving and checkpoint refs without storage I/O."""
+    def install_checkpoint(
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
+    ) -> None:
+        """Install an already-committed release as the checkpoint, the chain tip, without storage I/O. When
+        ``activate`` is true, also make it the active artifact (``current``)."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
                 raise ArtifactConflict("repository heads changed before the committed release was installed")
-            self._current_artifact = ref
+            if activate:
+                self._current_artifact = ref
             self._checkpoint_artifact = ref
 
     def synchronize_checkpoint(self) -> None:
@@ -438,14 +442,15 @@ class Repository(ArtifactRepository):
         expected_parent: ArtifactRef,
         metadata: Mapping[str, object] | None = None,
         advance_heads: bool = True,
+        activate: bool = True,
     ) -> ArtifactRef:
         """Publish ``artifact`` as the next release.
 
-        ``advance_heads`` is plural because it covers both heads this
-        repository owns, its current and checkpoint refs, along with the one
+        ``advance_heads`` moves the chain tip, the checkpoint ref, and the one
         storage head the backend owns (``RepositoryBackend.publish``'s
-        ``advance_head``). ``False`` mints a pending release that no head
-        moves to.
+        ``advance_head``); ``activate`` then also makes the release the active
+        artifact (``current``). ``advance_heads=False`` mints a release beside
+        the chain that no head moves to.
         """
         ref = self._backend.publish(
             (
@@ -463,7 +468,8 @@ class Repository(ArtifactRepository):
         )
         if advance_heads:
             with self._head_lock:
-                self._current_artifact = ref
+                if activate:
+                    self._current_artifact = ref
                 self._checkpoint_artifact = ref
         self.discard(artifact)
         return ref

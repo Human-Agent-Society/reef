@@ -334,7 +334,7 @@ class Campaign:
         if len(commits) != 1 or (
             commits[0]["step"] != step
             or commits[0]["operation"] != "training"
-            or commits[0].get("pending")
+            or not commits[0]["activated"]
             or commits[0]["artifact_ref"]["release_id"] != history[step]["release_id"]
             or set(commits[0]["consumed_ids"]) != expected
         ):

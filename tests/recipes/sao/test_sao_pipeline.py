@@ -26,7 +26,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
@@ -508,45 +507,36 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
 
 
 @pytest.mark.integration
-def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_path) -> None:
+def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_serving(tmp_path) -> None:
     component = _SAOComponent(tmp_path / "checkpoints")
     inference = StubInferenceRuntime()
     recipe = SAORecipe.from_environment(
-        {"EVALUATION_TOKEN": "secret"},
-        config={
-            "pipeline": {"sample2job": {"config": {"job_samples": 1}}},
-            "evaluation": {
-                "module": "tests.support._candidate_evaluation_plugin:CheckpointEvaluator",
-                "config": {
-                    "score": 0.25,
-                    "threshold": 0.8,
-                    "token_env": "EVALUATION_TOKEN",
-                },
-            },
-        },
+        {},
+        config={"pipeline": {"sample2job": {"config": {"job_samples": 1}}}, "activation": {"module": "never"}},
         **runtime_bindings(component, inference),
     )
     dispatcher = _sao_dispatcher(tmp_path, recipe)
     try:
-        dispatcher.get_or_create_scenario("math")
+        scenario = dispatcher.get_or_create_scenario("math")
         base = inference.activated[:]
+        served = scenario.current_artifact_ref()
         _rollout(dispatcher, 1, 0.9)
 
         _wait_for_finished_jobs(dispatcher, 1)
 
-        # The rejected checkpoint never serves: only the base release was activated.
+        # The checkpoint is published as the chain tip, but never serves: only the base release was activated.
         assert inference.activated == base
         [job] = component.submitted
         [record] = _checkpoint_commits(dispatcher)
-        selection = record.metrics["selection"]
-        assert selection["candidate_id"] == f"{job.job_id}:0"
-        assert selection["selected"] is False
-        assert selection["evaluation"]["evaluator"] == "external_checkpoint"
-        assert selection["evaluation"]["metrics"] == {
-            "score": 0.25,
-            "release_path": str(tmp_path / "checkpoints" / "1"),
+        assert record.checkpoint and not record.activated
+        assert record.metrics["training_job"] == {
+            "job_id": job.job_id,
+            "backend": component.name,
+            "event": "checkpoint",
+            "step": 0,
         }
-        assert selection["evaluation"]["metadata"] == {"scenario": "math", "token_present": True}
+        assert scenario.current_artifact_ref() == served
+        assert scenario.repository.checkpoint_artifact == record.artifact_ref
     finally:
         dispatcher.close()
 
@@ -639,7 +629,6 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             job_loop=JobLoop(
                 component,
                 SAORecipe(**runtime_bindings(component)).job_plan(),
-                AlwaysSelectCheckpointPlugin(),
                 scenario="math",
             ),
             algorithm_state=algorithm_state,

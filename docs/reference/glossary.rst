@@ -161,13 +161,19 @@ naming each component's ``content_id``.
 Candidate selection
 -------------------
 
-The decision whether a produced update should become the active release. A
+A harness trainer's decision about which candidate tree its search keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
-both. Every recipe carries the
-plugin as ``candidate_evaluation``. For a weight recipe, each checkpoint that
-a training job saves is one candidate. Selection decides only what is served;
-the next training job starts from the newest saved checkpoint either way.
+both. A harness recipe names it in ``evolution.selection``. Selection does
+not decide what serves; the activation rule does.
+
+Activation rule
+---------------
+
+The deployment's rule that decides whether a new artifact serves: at once
+(``always``), after an evaluation of it (``evaluated``), or when a person
+activates it (``never``). Training continues from the new artifact either
+way. See `Configuration <configuration.rst#the-activation-section>`__.
 
 Surface
 -------

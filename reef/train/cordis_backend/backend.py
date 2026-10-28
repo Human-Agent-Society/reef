@@ -47,14 +47,7 @@ from reef.harness.tree.mutations import (
     admit_mutations,
     nodes_from_entries,
 )
-from reef.harness.tree.nodes import (
-    ALWAYS_REVIEWED_KINDS,
-    NODE_KINDS,
-    RESERVED_ENTRY_IDS,
-    clip_record_text,
-    directive_shaped,
-    secret_shaped,
-)
+from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_text, directive_shaped, secret_shaped
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
@@ -394,8 +387,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         promote: Promoter | None = None,
         recheck_every: int = 0,
         max_rejected_history: int = 25,
-        publish: str = "auto",
-        review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         proposals_dir: str | Path | None = None,
         max_pending_proposals: int = 8,
@@ -464,10 +455,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._promote_task = promote
         self._recheck_every = recheck_every
         self._max_rejected_history = max_rejected_history
-        if publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
-        self._publish = publish
-        self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
         # Selected compositions render into temporary source trees before the
         # scenario committer copies them into repository-owned storage.
@@ -1063,12 +1050,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if replaced is not None:
                 replaced.discard()
             self._rendered_publications[step] = artifact
-            # Under review, or when a reviewed kind is touched, the release waits for an activation; loop code is
-            # reviewed whether or not the deployment listed it.
-            pending = self._publish == "review" or bool(
-                (self._review_kinds | ALWAYS_REVIEWED_KINDS) & self._mutation_kinds(candidate)
+            # The scenario's activation rule decides whether the kept tree serves, from the kinds it changes.
+            return TrainStepResult(
+                {**state, "entries": entries},
+                metrics,
+                artifact=artifact,
+                changed_kinds=frozenset(self._mutation_kinds(candidate)),
             )
-            return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])

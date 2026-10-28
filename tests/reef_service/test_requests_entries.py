@@ -247,7 +247,7 @@ def test_a_served_tree_with_older_reef_entries_is_republished_with_the_shipped_o
     backend = _pi_backend(tmp_path, request_entries("pi"))
 
     result = backend.shipped_content_update({"steps": 3, "entries": old_entries}, served)
-    assert result is not None and not result.pending
+    assert result is not None and result.artifact is not None
     assert result.metrics == {"shipped_content_update": {"entries": [REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID]}}
     assert [entry["id"] for entry in result.state["entries"]] == [REQUESTS_ENTRY_ID, "r1", REQUESTS_SKILL_ID]
     assert result.state["steps"] == 3 and result.state["entries"][1] == rules

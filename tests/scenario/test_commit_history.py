@@ -28,7 +28,6 @@ from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
 from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
@@ -199,7 +198,7 @@ def operation_record(operation: str, step: int, release_id: str, **changes) -> C
 @pytest.mark.parametrize(
     "changes",
     [
-        {"pending": True},
+        {"activated": True},
         {"algorithm_state": {"steps": 1}},
         {"metrics": {"loss": 1.0}},
         {"training_job_id": "job-1"},
@@ -210,7 +209,7 @@ def operation_record(operation: str, step: int, release_id: str, **changes) -> C
 )
 def test_activations_and_training_starts_carry_no_trainer_state(operation, changes) -> None:
     assert CommitRecord.from_dict(operation_record(operation, 1, "r1").to_dict()).operation == operation
-    with pytest.raises(CommitHistoryError, match=r"must not carry|may be pending"):
+    with pytest.raises(CommitHistoryError, match=r"must not carry|made an artifact is activated"):
         operation_record(operation, 1, "r1", **changes)
 
 
@@ -239,19 +238,21 @@ def test_each_operation_names_its_artifact_exactly() -> None:
             operation_record(operation, 1, "r1")
     with pytest.raises(CommitHistoryError, match="scenario must be a non-empty string"):
         operation_record("activate", 1, "r1", scenario="")
-    with pytest.raises(CommitHistoryError, match="only a training commit that made an artifact may be pending"):
-        replace(sample_record(), pending=True)
+    with pytest.raises(CommitHistoryError, match="only a training commit that made an artifact is activated"):
+        replace(sample_record(), activated=True)
 
 
 @pytest.mark.unit
 def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     creation = ArtifactRef("content:base", "base", None)
-    made = replace(sample_record(step=1, checkpoint=True))
-    held = replace(sample_record(step=2, checkpoint=True, runtime_load_id="w2"), pending=True)
+    made = replace(sample_record(step=1, checkpoint=True), activated=True)
+    held = sample_record(step=2, checkpoint=True, runtime_load_id="w2")
     nothing = replace(sample_record(step=3), artifact_ref=made.artifact_ref)
     assert active_artifact_ref((), creation) == creation
     assert active_artifact_ref((made,), creation) == made.artifact_ref
-    # A pending artifact, a step that made nothing and a new training start do not activate anything.
+    assert made.to_dict()["activated"] is True and "activated" not in held.to_dict()
+    assert CommitRecord.from_dict(made.to_dict()) == made
+    # An artifact the rule did not activate, a step that made nothing and a new training start activate nothing.
     start = operation_record("train_from", 4, "base")
     assert active_artifact_ref((made, held, nothing, start), creation) == made.artifact_ref
     activation = operation_record("activate", 5, held.artifact_ref.release_id, artifact_ref=held.artifact_ref)
@@ -259,7 +260,7 @@ def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     back = operation_record("activate", 6, "base", artifact_ref=creation)
     assert active_artifact_ref((made, held, nothing, start, activation, back), creation) == creation
     # A training step that makes and activates an artifact afterwards is the newest activation.
-    newest = sample_record(step=7, checkpoint=True, runtime_load_id="w7")
+    newest = replace(sample_record(step=7, checkpoint=True, runtime_load_id="w7"), activated=True)
     assert active_artifact_ref((made, held, activation, back, newest), creation) == newest.artifact_ref
 
 
@@ -649,7 +650,6 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,
@@ -803,7 +803,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     wait_for_jobs(first, 1)
     submitted, checkpoint, _ = committed_records(agent_record_dir)
     assert checkpoint.checkpoint is True
-    assert checkpoint.metrics["selected"] is True
+    assert checkpoint.activated is True
 
     # Simulate the crash after the checkpoint's publication: the history loses its checkpoint record and the
     # job's end, which a crashed process would never have committed.

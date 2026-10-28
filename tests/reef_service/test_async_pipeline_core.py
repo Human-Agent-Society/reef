@@ -331,8 +331,11 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _, committed = scenario.release_queries.artifact_with_metrics()
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
-    assert committed["selection"]["selected"] is True
     assert committed["training_job"]["event"] == "checkpoint"
+    assert not {"selected", "selection"} & set(committed)
+    # The default activation rule serves the checkpoint at its commit.
+    [checkpoint] = [record for record in scenario.store.history() if record.checkpoint]
+    assert checkpoint.activated and scenario.current_artifact_ref() == checkpoint.artifact_ref
     # The last commit is the job's end.
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 3

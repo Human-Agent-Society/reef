@@ -9,6 +9,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
@@ -105,6 +106,11 @@ class Scenario:
     def runtime(self) -> InferenceRuntime | None:
         """The inference runtime that serves this scenario, if any."""
         return self.model_config.runtime or self._binding.runtime
+
+    @property
+    def activation_rule(self) -> ActivationRule:
+        """The rule that decides whether an artifact that training makes serves."""
+        return self._binding.activation_rule
 
     @property
     def report_type(self) -> type[ReportBase] | None:

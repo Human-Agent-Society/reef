@@ -2,8 +2,9 @@ Write a recipe
 ==============
 
 A recipe is the method a deployment runs: how recorded traffic is processed,
-how it becomes the data of a training job, what signal that data carries, and whether the
-candidate it produces becomes the active release.
+how it becomes the data of a training job, and what signal that data carries.
+The deployment's activation rule, not the recipe, decides whether an artifact
+that training makes serves.
 
 `Quickstart <../getting-started/quickstart.rst>`__ defines the term.
 
@@ -64,8 +65,7 @@ to publish it.
 Before you write one
 --------------------
 
-If an existing recipe's processor, objective, candidate evaluation, and
-surface already match your method, change its config instead. Re-read
+If an existing recipe's processor, objective, and surface already match your method, change its config instead. Re-read
 `Choosing a recipe <../user-guide/recipes.rst>`__.
 
 Build one
@@ -78,7 +78,6 @@ A weight recipe is four pieces plus the class that binds them.
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
    pipeline stages | the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
-   candidate evaluation | measures each checkpoint that a training job saved and decides select or reject. Every recipe carries one; the default, ``AlwaysSelectCheckpointPlugin``, selects every checkpoint
    recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``job_plan()`` returns the ``JobPlan`` that gives each training job's parameters
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
@@ -251,64 +250,53 @@ state of the previous job only when it trains the same objective. A job of
 another objective starts with an empty objective state. While a schedule is active, job metrics include
 ``learning_rate`` and ``learning_rate_schedule``.
 
-Evaluate a candidate
+Activate an artifact
 ~~~~~~~~~~~~~~~~~~~~
 
-Each checkpoint that a training job saves is a candidate, a
-``CheckpointCandidate`` (``reef.core.evaluation``). Its ``release_path`` is
-the directory that Reef publishes if the candidate is selected, and
-``training_metrics`` holds the component's metrics for the checkpoint. The
-commit records those metrics beside the evaluation's, so an evaluation adds
-only its own metrics. A commit refuses an evaluation metric whose key is
-already a training metric. The recipe's ``candidate_evaluation``
-decides what happens to it. A weight recipe declares its evaluator in the
-deployment config. The top-level ``evaluation`` section serves weight recipes
-only. A harness recipe names its plugin in ``evolution.selection`` instead
-(see `Write a harness method
-<write-a-harness-method.rst#selection-policies>`__):
+A recipe trains; it does not decide what serves. Each artifact that a
+training job saves goes onto the scenario's release chain. The next job
+starts from it. The deployment's activation rule decides whether the
+artifact also serves: at once, after an evaluation of it, or only when a
+person activates it. The rule applies to every recipe, so a recipe class
+has no evaluation or selection code. Name it in the top-level
+``activation`` section:
 
 .. code:: yaml
 
-   evaluation:
-     module: my_pkg.evaluation:BenchmarkEvaluator
+   activation:
+     module: evaluated
      config:
-       benchmark: gsm8k
-       threshold: 0.8
+       min_mean_score: 0.8
 
-The reference names a ``ConfiguredEvaluationPlugin`` subclass. Reef imports
-and checks the class when it loads the recipe config. It then calls the class
-method ``from_config`` once per scenario with the opaque ``config``,
-``runtime``, ``scenario``, and ``environ``. Allocate model resources in
-``from_config``, not when the module is imported:
+The built-in rules are ``always`` (the default), ``never`` and
+``evaluated``. A rule of your own is an ``ActivationRule`` subclass
+(``reef.core.activation``) named by ``package.module:ClassName``. Reef
+imports and checks the class when it loads the deployment config. It builds
+the rule with the class method ``from_config``, which receives the opaque
+``config``:
 
 .. code:: python
 
-   from reef import ConfiguredEvaluationPlugin
+   from reef import ActivationRule
 
 
-   class BenchmarkEvaluator(ConfiguredEvaluationPlugin):
-       def __init__(self, benchmark, threshold, runtime, scenario):
-           ...
+   class ComponentRule(ActivationRule):
+       def __init__(self, components):
+           self.components = frozenset(components)
 
        @classmethod
-       def from_config(cls, config, *, runtime, scenario, environ):
-           return cls(config["benchmark"], config["threshold"], runtime, scenario)
+       def from_config(cls, config):
+           return cls(config["components"])
 
-       def evaluate(self, candidate): ...
+       def activates(self, made):
+           return made.component in self.components
 
-       def decide(self, candidate, evaluation): ...
-
-The class must implement both ``evaluate`` and ``decide``. Reef rejects
-functions, abstract classes, and objects that only have matching method names.
-The trainer calls ``evaluate`` and then ``decide`` for each saved checkpoint,
-before Reef publishes it. A rejection leaves the active release serving and
-publishes the checkpoint as an inactive artifact, which a person can
-activate. The next job still starts from the rejected checkpoint: evaluation
-decides only what is served. `Python API
-<../reference/python-api.rst#candidate-evaluation>`__ documents the plugin
-contract: ``evaluate``, ``decide``, the fail-closed rule, and idempotency by
-``candidate.candidate_id``. The section fields are in `Configuration
-<../reference/configuration.rst#the-evaluation-section>`__.
+``activates`` receives a ``MadeArtifact``: the component whose trainer made
+the artifact and, for a harness tree, the node kinds it changes. Override
+``activates_evaluated`` to activate an artifact when an evaluation of it
+finishes. `Configuration
+<../reference/configuration.rst#the-activation-section>`__ lists the
+built-in rules and their settings.
 
 Where the feedback comes from
 -----------------------------

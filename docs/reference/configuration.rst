@@ -857,8 +857,8 @@ on an inference-only recipe does not create a training backend.
      config:
        training_mode: hybrid
 
-The mode controls training initiation, independently of
-``evolution.publish: auto | review``. It supplies the initial processor mode.
+The mode controls training initiation, independently of the `activation
+rule <#the-activation-section>`__. It supplies the initial processor mode.
 Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
 at runtime. This changes subsequent job data; reserved job data completes under
 its original mode. Mode changes are not persisted: a service restart uses the
@@ -1110,12 +1110,10 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
    evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
    evolution.promote | | optional ``Promoter`` class, in the same form as ``evolution.propose``; its ``promote(samples, *, manifest=None)`` chooses which trace prompts to promote; without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
-   evolution.publish | auto | ``auto`` activates the tree of every successful evaluation; ``review`` leaves it inactive until ``POST /reef/scenarios/{scenario}/activate`` names it
-   evolution.review_kinds | [] | node kinds whose wins stay inactive until a person activates them, while the rest serve at once; a win that touches a ``native_loop`` waits whether or not the list names it
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
-   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and an ``always`` activation rule whose ``review_kinds`` is ``[code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``rollouts/<side>-<task index>/`` (each evaluation rollout's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``rollout.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``rollouts/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
@@ -1178,54 +1176,57 @@ Read by the weight-training stack. See `Evolve your model
 Slime fills architecture flags such as layer counts and hidden sizes from
 ``inference.model-path``. Do not put them in the config.
 
-The ``evaluation`` section
+The ``activation`` section
 --------------------------
 
-Only weight-training recipes read this section; a deployment that pairs it
-with any other recipe fails at startup, because a harness recipe builds its
-evaluator in code. Every checkpoint that a training job saves becomes an
-artifact. Absent by default, in which case Reef activates every artifact. When
-present, Reef calls the named class's ``from_config`` method once per
-scenario. The plugin then receives each saved checkpoint as a
-``CheckpointCandidate`` and decides whether Reef activates its artifact. An
-artifact that the plugin does not select stays inactive, and a person can
-activate it with ``POST /reef/scenarios/{scenario}/activate``. Neither
-decision changes where training continues. `Activate an artifact
+Training makes artifacts: every checkpoint that a weight training job saves,
+and every tree that a harness trainer keeps. Training never decides whether an
+artifact serves. The activation rule that this section names decides that.
+The section applies to every recipe, a composite included. Without the
+section, the rule is ``always``.
+
+An artifact that the rule does not activate stays inactive. A person can
+activate it with ``POST /reef/scenarios/{scenario}/activate``. Activation does
+not change where training continues. `Activate an artifact
 <../user-guide/operate.rst#activate-an-artifact>`__ describes activation, and
 `Go back to an older artifact
 <../user-guide/operate.rst#go-back-to-an-older-artifact>`__ describes how to
 make an older artifact serve for good.
 
-For fully manual activation, name the built-in plugin that selects no
-artifact. The plugin keeps its name until the activation rule moves out of
-training (RFC #965, step 3).
-
 .. code:: yaml
 
-   evaluation:
-     module: reef.evaluation.evaluators:ManualPromotionPlugin
+   activation:
+     module: always
+     config:
+       review_kinds: [code_extension]
 
 .. config::
 
-   evaluation.module | a ``package.module:ClassName`` reference to a ``ConfiguredEvaluationPlugin`` subclass. Required.
-   evaluation.config | opaque mapping handed to ``from_config``; Reef never reads it
+   activation.module | ``always``, ``never``, ``evaluated``, or a ``package.module:ClassName`` reference to an ``ActivationRule`` subclass (``reef.core.activation``). Default ``always``.
+   activation.config | the rule's settings, below; a class of your own receives the mapping in ``from_config``
 
-.. code:: yaml
+The built-in rules:
 
-   evaluation:
-     module: my_pkg.evaluation:BenchmarkEvaluator
-     config:
-       benchmark: gsm8k
-       threshold: 0.8
+- ``always`` activates every new artifact, except a harness tree that changes
+  a node kind in ``review_kinds`` (a list, default empty). A tree that changes
+  a ``native_loop`` waits for a person whether or not the list names it.
+- ``never`` activates no artifact, for fully manual activation. It takes no
+  config.
+- ``evaluated`` activates an artifact once an evaluation of it finishes with a
+  ``mean_score`` of at least ``min_mean_score`` (required). Set the scenario's
+  ``artifact_evaluation`` (`Automatic evaluation
+  <http-api.rst#automatic-evaluation>`__) so Reef evaluates each new artifact.
 
-The class method ``from_config(config, *, runtime, scenario,
-environ)`` returns the scenario's plugin. Reef checks the class when it loads
-the recipe config. It builds the plugin later, so allocate model resources in
-``from_config``. Reef rejects functions, abstract classes and structural
-lookalikes.
+A rule of your own subclasses ``ActivationRule``:
 
-The plugin interface is in `Write a recipe
-<../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__.
+- ``activates(made)`` decides when training publishes an artifact. ``made``
+  names the component and the harness node kinds that the artifact changes.
+- ``activates_evaluated(artifact_id, evaluation)`` decides when an evaluation
+  of the artifact finishes.
+
+Reef checks the class and builds the rule when it loads the deployment
+config, so a bad rule fails at startup. Reef rejects functions, abstract
+classes and structural lookalikes.
 
 The ``pipeline`` section
 ------------------------

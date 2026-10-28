@@ -33,8 +33,6 @@ recipe:
       requests: true
       # The notice at session start offers the update once the head moved.
       version_check: true
-      # An evolved extension runs in pi's process with your privileges, so a person activates it.
-      review_kinds: [code_extension]
       # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
       # that the tree still works (the model binding, the tools, the extensions load), not that the requested
       # change does; the step page's design and review notes and the person judge the change itself.
@@ -66,6 +64,12 @@ recipe:
               '
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual
+
+# An evolved extension runs in pi's process with your privileges, so a person activates it.
+activation:
+  module: always
+  config:
+    review_kinds: [code_extension]
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

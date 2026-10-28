@@ -28,8 +28,10 @@ from tests.train.test_harness_evolve_processor import harness_stages
 from tests.train.test_reef_trainer_contracts import ExampleBackend
 
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
+from reef.evaluation.activation import NeverActivate
 from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import harness
 from reef.recipe.cordis import CordisRecipe
@@ -714,7 +716,7 @@ def test_a_chain_union_past_one_requests_cap_still_renders_the_install_script(tm
 
 
 def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
-    """Under review a release waits for a person to activate it; the activation serves that release itself, so the
+    """Under the never activation rule a release waits for a person to activate it; the activation serves that release itself, so the
     served head lists what the release named."""
 
     def propose(nodes, samples, models, *, requests=()):
@@ -724,7 +726,7 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             else None
         )
 
-    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, propose, publish="review"))
+    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, propose, activation=PluginReference(NeverActivate, {})))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 

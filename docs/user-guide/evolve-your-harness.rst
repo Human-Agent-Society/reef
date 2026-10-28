@@ -153,10 +153,10 @@ tools, budgets, the session log and the sandbox stay Reef's; a loop that
 raises, or calls the context past its budget of transitions, ends the turn
 with ``LOOP_ERROR`` and fails the checks, and the first end of a turn is final
 whatever the loop code catches. Loop code runs inside the loop's own
-process, so a win that creates, changes or removes a ``native_loop`` is always
-an inactive release that a person activates, whether or not ``evolution.review_kinds``
-names the kind, and ``harness_try`` refuses to mount one on a serving process:
-the model proposes a loop, a person serves it.
+process. So a win that creates, changes or removes a ``native_loop`` is always
+an inactive release that a person activates, whether or not the activation
+rule's ``review_kinds`` names the kind. ``harness_try`` also refuses to mount
+one on a serving process: the model proposes a loop, a person serves it.
 
 Rendered paths
 ~~~~~~~~~~~~~~
@@ -439,12 +439,14 @@ Two settings shape the evaluation result:
   evaluation already refused.
 
 By default Reef activates the release of a successful evaluation at once.
-``evolution.publish: review`` makes every win an inactive release instead,
-and ``evolution.review_kinds`` (a
-list of node kinds, empty by default) does so only for the wins that touch those
-kinds, so ``[code_extension]`` lets rules and config serve at once while code
-waits for a person; a win that touches a ``native_loop`` waits whether or not
-the list names it. An inactive release sits in the catalog with its evaluation
+The deployment's top-level ``activation`` section changes that
+(`Configuration <../reference/configuration.rst#the-activation-section>`__).
+``module: never`` makes every win an inactive release instead. The
+``always`` rule's ``review_kinds`` (a list of node kinds, empty by default)
+does so only for the wins that touch those kinds. For example,
+``[code_extension]`` lets rules and config serve at once, and code waits for
+a person. A win that touches a ``native_loop`` waits whether or not the list
+names it. An inactive release sits in the catalog with its evaluation
 metrics and is never served until ``POST /reef/scenarios/{scenario}/activate``
 names it. The loop keeps evolving from it in the meantime, so activating the
 latest inactive release serves everything accumulated since the active one.
@@ -965,9 +967,9 @@ Admission screens the proposed mutations and the evaluation evaluates them.
 Reef's entries (``reef-version-check``, ``reef-requests``,
 ``reef-pi-extension-api``) are reserved ids no proposal may change. An
 evolved extension runs in pi's process with your privileges, so the
-tutorial's ``configs/deployment.yaml`` sets
-``evolution.review_kinds: [code_extension]`` beside ``requests: true`` and
-``version_check: true``: a release that touches one stays inactive until
+tutorial's ``configs/deployment.yaml`` sets an ``always`` activation rule
+with ``review_kinds: [code_extension]`` beside ``evolution.requests: true``
+and ``evolution.version_check: true``: a release that touches one stays inactive until
 ``POST /reef/scenarios/{scenario}/activate`` names it, and no session installs
 it before then; activate it as shown below. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
@@ -1100,9 +1102,9 @@ the installed tree, and ``report`` works as for any adapter.
 Activate an inactive release
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When a win touches a kind in ``evolution.review_kinds`` (``code_extension``
-in the tutorial's ``deployment.yaml``) or a ``native_loop``, Reef leaves its
-release inactive. The release sits in the catalog with ``active: false`` and
+When a win touches a kind in the activation rule's ``review_kinds``
+(``code_extension`` in the tutorial's ``deployment.yaml``) or a
+``native_loop``, Reef leaves its release inactive. The release sits in the catalog with ``active: false`` and
 ``activated: false``, and no session gets it on its own. In a ``reef-pi``
 session it is offered like any other release, because installing it is your
 decision. When you take the offer, ``reef-pi`` sends it to ``POST

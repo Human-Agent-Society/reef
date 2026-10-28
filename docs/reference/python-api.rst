@@ -4,7 +4,7 @@ Python API for custom learning methods
 The Python API is the set of extension points a learning method plugs into. Reef
 owns everything around them: accepting and replaying records, holding a job's data
 until it is acknowledged, committing algorithm state, submitting training jobs,
-and publishing the selected checkpoints.
+and publishing the saved checkpoints.
 
 `Write a recipe <../developer-guide/write-a-recipe.rst>`__ is the executable tutorial.
 
@@ -233,8 +233,10 @@ default class of each pipeline stage (see `Pipeline stages
   The objective declares the backend loss family.
 - ``job_plan()`` returns the ``JobPlan`` that chooses the parameters of each
   training job (see `Training objective`_).
-- ``candidate_evaluation`` is the optional plugin that the deployment's
-  ``evaluation`` section configures.
+
+Every recipe's ``activation_rule()`` returns the rule that decides whether an
+artifact that its trainers make serves; the deployment's ``activation``
+section names it (`Activation rule`_).
 
 .. code:: python
 
@@ -1496,8 +1498,7 @@ Migration:
   ``reads_requests`` or ``runs_agent``.
 - Move the body of a ``CandidatePluginFactory`` or
   ``CandidateEvaluationPluginFactory`` to the class method ``from_config`` on
-  the plugin. The plugin then inherits ``SelectionPlugin`` or
-  ``ConfiguredEvaluationPlugin``. The worked examples are in
+  the plugin. The plugin then inherits ``SelectionPlugin``. The worked examples are in
 `Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
 
 Candidate evaluation
@@ -1507,8 +1508,8 @@ Candidate evaluation
 
    from reef import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision
 
-A plugin explicitly inherits ``CandidateEvaluationPlugin``, measures a produced
-candidate before it is published, and decides. ``CandidateEvaluator`` and
+A harness recipe's plugin explicitly inherits ``CandidateEvaluationPlugin``,
+measures a candidate tree, and decides whether the search keeps it. ``CandidateEvaluator`` and
 ``CandidateSelector`` remain separate abstract capabilities; implementing only
 one does not make an object a plugin. Reef
 enforces the fixed evaluate-then-decide order and verifies the decision kept the
@@ -1525,38 +1526,52 @@ exact result it was given.
 |                                   | carry the evaluation it was given             |
 +-----------------------------------+-----------------------------------------------+
 
-A rejection leaves the active release serving, and Reef publishes the
-candidate as an inactive artifact (``POST
-/reef/scenarios/{scenario}/activate`` serves it). An exception is fail-closed:
-Reef does not publish the candidate. Make evaluations
-idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
-result was not durably committed. The deployment names the plugin class in
-its ``evaluation`` section (`Configuration
-<configuration.rst#the-evaluation-section>`__).
+A rejected candidate makes no artifact, and the kept tree stays the search's
+current one. An exception is fail-closed: Reef does not publish the candidate.
+Make evaluations idempotent by ``candidate.candidate_id`` because recovery may
+repeat work whose result was not durably committed. Whether a kept tree serves
+is the activation rule's decision, not the plugin's.
 
-Without an ``evaluation`` section, a weight recipe uses
-``AlwaysSelectCheckpointPlugin`` (``reef.evaluation.evaluators``): it selects
-every saved checkpoint and adds no metrics. ``ManualPromotionPlugin`` selects
-none, so a person activates each artifact. It keeps this name until the
-activation rule moves out of training (RFC #965, step 3). The commit already records the
-checkpoint's ``training_metrics``, and it refuses an evaluation or decision
-metric whose key is a training metric or ``selected``, ``selection`` or
-``training_job``. A training component only trains: it runs no evaluation of
-an artifact.
-
-A configured plugin inherits ``ConfiguredEvaluationPlugin``. It implements the
-class method ``from_config(config, *, runtime, scenario, environ)``, which
-returns one scenario-local plugin. Reef checks the class
-when it loads the configuration and calls ``from_config`` for each scenario.
-Reef rejects functions, abstract classes and objects that only expose
-matching methods.
-
-Harness recipes instead name a ``reef.evaluation.SelectionPlugin``
+A harness recipe names a ``reef.evaluation.SelectionPlugin``
 class in ``evolution.selection``. Its ``from_config(config, *,
 candidate_backend)`` binds the plugin to the scenario's candidate backend.
 ``BackendAlwaysSelectPlugin`` and ``reef.evaluation.harness``'s
 ``ScoreComparisonPlugin`` and ``FloorPlugin`` are the built-in policies
 ``always``, ``score_comparison`` and ``floor``.
+
+Activation rule
+---------------
+
+.. code:: python
+
+   from reef.core.activation import ActivationRule, MadeArtifact
+
+Training makes artifacts and never activates one. A scenario's
+``ActivationRule`` decides whether an artifact serves:
+
++----------------------------------------------+------------------------------------------------+
+| Member                                       | Contract                                       |
++==============================================+================================================+
+| ``activates(made)``                          | true when Reef activates the artifact as soon  |
+|                                              | as training publishes it. ``made`` is a        |
+|                                              | ``MadeArtifact``: the ``component`` and the    |
+|                                              | ``changed_kinds`` of a harness tree            |
++----------------------------------------------+------------------------------------------------+
+| ``activates_evaluated(artifact_id, result)`` | true when Reef activates the artifact once an  |
+|                                              | evaluation of it finished with the             |
+|                                              | ``PolicyEvaluation`` ``result``; false by      |
+|                                              | default                                        |
++----------------------------------------------+------------------------------------------------+
+
+The committer asks ``activates`` when a training step publishes an artifact.
+The commit record's ``activated`` keeps what the rule decided. The artifact
+evaluation service asks ``activates_evaluated`` when an evaluation finishes,
+and then activates the artifact. The built-in rules are
+``reef.evaluation.activation``'s ``AlwaysActivate``, ``NeverActivate`` and
+``EvaluatedActivation``. The deployment names a rule in its ``activation``
+section (`Configuration <configuration.rst#the-activation-section>`__). A rule
+of your own inherits ``ActivationRule``. Reef builds it from its config with
+the class method ``from_config(config)``.
 
 Surface
 -------
@@ -1645,7 +1660,7 @@ Neither inherits from the other, and no trainer holds a serving engine.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` orders both around each commit. It publishes a
-  selected checkpoint, has the runtime serve it
+  saved checkpoint, has the runtime serve it when the activation rule activates it
   (``WeightRuntime.activate_checkpoint``), and then writes the commit record.
   A failed publication therefore leaves serving unchanged. For an activation
   it has the runtime serve the release that binds the artifact, then writes
@@ -1798,20 +1813,19 @@ call ``start_jobs()`` once it can train. Until then no job runs, including
 the jobs that a restart left.
 
 ``reef.train.jobs.JobLoop`` is the control plane's side. It holds the weight
-trainer's one training component, the recipe's ``JobPlan`` and the candidate
-evaluation plugin. It returns the result that the trainer commits:
+trainer's one training component and the recipe's ``JobPlan``. It returns the
+result that the trainer commits:
 
 1. When no job runs, the trainer reserves ready job data. The plan names the
    job, the loop submits it, and the trainer commits the submission, which
    consumes the records of the job's data.
-2. While the job runs, each new saved checkpoint becomes a
-   ``CheckpointCandidate`` (``candidate_id`` ``"<job_id>:<step>"``). The
-   evaluation plugin decides, and the trainer commits the decision. A selected
-   checkpoint's ``release_path`` becomes the new release.
+2. While the job runs, the trainer commits each new saved checkpoint: its
+   ``release_path`` becomes a new artifact, with the checkpoint's training
+   metrics. The scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
 
 Training is linear: the next job starts from the newest saved checkpoint,
-whether or not it was selected. A restarted job replaces the trainer's start
+whether or not it serves. A restarted job replaces the trainer's start
 with its fresh start. A job continues the objective state of its start only
 when it trains the same objective. The trainer commits the loop's state as its
 algorithm state. This ``JobLoopState`` has four fields:

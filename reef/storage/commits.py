@@ -98,9 +98,11 @@ class CommitRecord:
 
     - ``"training"``: one trainer's step. ``artifact_ref`` is the release
       the step made when ``checkpoint`` is true, and the active release when
-      the step made none. ``pending`` is true only for a release that the
-      step did not activate. ``algorithm_state``, the high-water values,
-      ``consumed_ids``, ``metrics`` and ``training_job_id`` are the
+      the step made none. ``activated`` is true exactly when the scenario's
+      activation rule activated the release that the step made. A later
+      activation is an ``"activate"`` record. ``algorithm_state``, the
+      high-water values, ``consumed_ids``, ``metrics`` and
+      ``training_job_id`` are the
       trainer's state and the step's outcome. ``component`` names the
       trainer in a scenario of several components.
     - ``"activate"``: ``artifact_ref`` is the release that is active after
@@ -116,7 +118,7 @@ class CommitRecord:
       trainer), and ``components`` is ``None``.
 
     An ``"activate"`` or ``"train_from"`` record makes no artifact and
-    carries no trainer state: ``checkpoint`` and ``pending`` are false,
+    carries no trainer state: ``checkpoint`` and ``activated`` are false,
     ``algorithm_state``, ``metrics`` and ``training_job_id`` are ``None``,
     both high-water values are 0 and ``consumed_ids`` is empty.
 
@@ -142,7 +144,7 @@ class CommitRecord:
     recorded_at: float = field(default_factory=time.time)
     operation: CommitOperation = "training"
     operation_verified: bool = True
-    pending: bool = False
+    activated: bool = False
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
     #: The component of the trainer that committed this step or takes this training start, or the activated
@@ -177,16 +179,16 @@ class CommitRecord:
             raise CommitHistoryError("commit record operation must be 'training', 'activate' or 'train_from'")
         if not isinstance(self.operation_verified, bool):
             raise CommitHistoryError("commit record operation_verified must be a boolean")
-        if not isinstance(self.checkpoint, bool) or not isinstance(self.pending, bool):
-            raise CommitHistoryError("commit record checkpoint and pending must be booleans")
+        if not isinstance(self.checkpoint, bool) or not isinstance(self.activated, bool):
+            raise CommitHistoryError("commit record checkpoint and activated must be booleans")
+        if self.activated and not (self.operation == "training" and self.checkpoint):
+            raise CommitHistoryError("only a training commit that made an artifact is activated with it")
         if self.metrics is not None and not isinstance(self.metrics, Mapping):
             raise CommitHistoryError("commit record metrics must be an object or null")
         if self.training_job_id is not None and (
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise CommitHistoryError("commit record training_job_id must be a non-empty string or null")
-        if self.pending and not (self.operation == "training" and self.checkpoint):
-            raise CommitHistoryError("only a training commit that made an artifact may be pending")
         if self.operation != "training":
             carried = [
                 name
@@ -231,9 +233,9 @@ class CommitRecord:
 
     @property
     def activates(self) -> bool:
-        """Whether ``artifact_ref`` is the active release after this record: an activation, or a training step that
-        made a release and is not pending."""
-        return self.operation == "activate" or (self.made_artifact and not self.pending)
+        """Whether ``artifact_ref`` is the active release after this record: an activation, or a training step whose
+        release the activation rule activated."""
+        return self.operation == "activate" or self.activated
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {
@@ -255,8 +257,8 @@ class CommitRecord:
             value["operation"] = self.operation
         if not self.operation_verified:
             value["operation_verified"] = False
-        if self.pending:
-            value["pending"] = True
+        if self.activated:
+            value["activated"] = True
         if self.metrics is not None:
             value["metrics"] = deepcopy(self.metrics)
         if self.training_job_id is not None:
@@ -302,9 +304,8 @@ class CommitRecord:
             raise CommitHistoryError("commit record recorded_at must be a number")
         operation = value.get("operation", "training")
         operation_verified = value.get("operation_verified", True)
-        pending = value.get("pending", False)
         return cls(
-            pending=pending,
+            activated=value.get("activated", False),
             scenario=scenario,
             step=step,
             artifact_ref=artifact_ref,
@@ -341,8 +342,9 @@ def active_artifact_ref(records: Sequence[CommitRecord], fallback: ArtifactRef) 
     """The release that is active after ``records``: the one :func:`active_record` names, else ``fallback``.
 
     ``fallback`` is the release that is active when no record activates one:
-    the creation artifact, or the chain tip of a store that keeps no
-    history across a restart.
+    the creation artifact, or, for a store that keeps no history across a
+    restart, the release that the artifact head's metadata names
+    (:func:`served_artifact_ref`).
     """
     record = active_record(records)
     return fallback if record is None else record.artifact_ref
@@ -362,10 +364,18 @@ def scenario_metadata_for(
     metrics: Mapping[str, Any] | None = None,
     training_job_id: str | None = None,
     component: str | None = None,
+    active_artifact: ArtifactRef | None = None,
 ) -> dict[str, object]:
-    """The scenario metadata of a registration (step zero) or of the artifact a training step made."""
+    """The scenario metadata of a registration (step zero) or of the artifact a training step made.
+
+    ``active_artifact`` is None when the activation rule activated the step's own artifact. Otherwise it names
+    the artifact that serves after the step. A recovery without the commit history reads it to find the active
+    artifact.
+    """
     if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
+    if active_artifact is not None and scenario_step == 0:
+        raise ValueError("a registration's own artifact serves; it names no active_artifact")
     metadata: dict[str, object] = {
         "format": SCENARIO_METADATA_KIND,
         "scenario": name,
@@ -391,6 +401,8 @@ def scenario_metadata_for(
         metadata["training_job_id"] = training_job_id
     if metrics is not None:
         metadata["metrics"] = deepcopy(dict(metrics))
+    if active_artifact is not None:
+        metadata["active_artifact"] = encode_artifact_ref(active_artifact)
     return metadata
 
 
@@ -455,8 +467,27 @@ def parse_scenario_metadata(
         operation_verified=operation is not None,
         component=component,
         components=components,
+        activated=value.get("active_artifact") is None,
     )
     return scenario, base_artifact, commit
+
+
+def served_artifact_ref(value: Mapping[str, Any], *, checkpoint_head: ArtifactRef) -> ArtifactRef:
+    """The artifact that serves after the commit whose scenario metadata is ``value``.
+
+    ``checkpoint_head`` is the release that carries ``value``. It serves when ``value`` names no
+    ``active_artifact``: a registration, or a step whose artifact the activation rule activated. Otherwise the
+    named artifact serves. Raise ``ValueError`` when ``active_artifact`` is not an artifact reference.
+    """
+    raw = value.get("active_artifact")
+    if raw is None:
+        return checkpoint_head
+    if not isinstance(raw, Mapping):
+        raise ValueError("scenario metadata active_artifact must be an object")
+    try:
+        return decode_artifact_ref(raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid scenario metadata active_artifact: {exc}") from exc
 
 
 __all__ = [
@@ -472,4 +503,5 @@ __all__ = [
     "parse_record_progress",
     "parse_scenario_metadata",
     "scenario_metadata_for",
+    "served_artifact_ref",
 ]

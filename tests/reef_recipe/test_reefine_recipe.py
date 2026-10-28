@@ -12,6 +12,7 @@ import pytest
 
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginReference
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
 from reef.harness.rollouts.requests import REQUESTS_ENTRY_ID
 from reef.harness.rollouts.run import RolloutResult
@@ -33,7 +34,9 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.name == "reefine"
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
-    assert built.review_kinds == ("code_extension",)
+    # By default a person activates a tree that changes an extension.
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
     # The floor: the candidate alone must pass every evaluation task; the current release is not run.
     assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
     assert [entry["id"] for entry in built.seed] == [
@@ -56,14 +59,14 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
                 "selection": "score_comparison",
                 "requests": False,
                 "version_check": False,
-                "review_kinds": [],
                 "evaluate": "reef.recipe.reefine.evolution:AnswerScorer",
             },
+            "activation": {"module": "never"},
         },
     )
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.stages().sample2job.config == {"batch_size": 3}
-    assert built.seed == () and built.review_kinds == ()
+    assert built.seed == () and isinstance(built.activation_rule(), NeverActivate)
     assert built.selection == PluginReference(ScoreComparisonPlugin)
 
 

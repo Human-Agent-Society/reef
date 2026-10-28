@@ -21,7 +21,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import WeightTrainingRecipe
@@ -1013,7 +1012,6 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest()),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,

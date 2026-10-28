@@ -25,8 +25,6 @@ recipe:
       requests: true
       # The notice at session start offers the update once the head moved.
       version_check: true
-      # An evolved extension runs in pi's process with your privileges, so a person activates it.
-      review_kinds: [code_extension]
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi, shared with the client install script.
       # Set evolution.binary to a path to use an install of your own instead.
@@ -73,6 +71,13 @@ recipe:
               '
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
+
+# Every kept tree serves at once, except one that changes an extension: an evolved extension runs in pi's process
+# with your privileges, so a person activates it (POST /reef/scenarios/{scenario}/activate).
+activation:
+  module: always
+  config:
+    review_kinds: [code_extension]
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

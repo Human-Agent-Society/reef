@@ -113,8 +113,10 @@ Behavior and configuration
   that integration and the path from invocation to a visible result, including
   state and an off command for modes. Headless trials cannot verify the dropdown;
   the agent records any unverified interactive checks in its design.
-* ``evolution.review_kinds: [code_extension]`` leaves each release with a code
-  change inactive until a person activates it. Client requirements must pass setup before installation.
+* The default activation rule, ``always`` with
+  ``review_kinds: [code_extension]``, leaves each release with a code change
+  inactive until a person activates it. A top-level ``activation`` section
+  replaces it. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
   ``evolution.floor_score`` (``1.0``). The training start is not run. A
