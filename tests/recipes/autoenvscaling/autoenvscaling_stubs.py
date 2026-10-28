@@ -35,7 +35,7 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
-from reef.harness.client.tasks import TaskEpisode
+from reef.harness.client.tasks import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -347,11 +347,11 @@ def cursor(tmp_path: Path) -> dict[str, int]:
     return json.loads((tmp_path / "state" / "cursor.json").read_text())
 
 
-class ScriptedEpisodes(StandInGenerator):
-    """A generator service whose episodes take ``outcomes`` in turn: a reward, or None for an episode that could not
-    run (no reward, the error ``episode_error``). With ``error``, each episode request fails with it instead.
+class ScriptedRollouts(StandInGenerator):
+    """A generator service whose rollouts take ``outcomes`` in turn: a reward, or None for a rollout that could not
+    run (no reward, the error ``rollout_error``). With ``error``, each rollout request fails with it instead.
 
-    Each request is recorded in ``episode_requests``.
+    Each request is recorded in ``rollout_requests``.
     """
 
     def __init__(
@@ -361,14 +361,14 @@ class ScriptedEpisodes(StandInGenerator):
         *,
         is_solvable: bool = True,
         error: str = "",
-        episode_error: str = "sandbox failed",
+        rollout_error: str = "sandbox failed",
     ) -> None:
         super().__init__(root, is_solvable=is_solvable)
         self.outcomes = list(outcomes)
         self.error = error
-        self.episode_error = episode_error
+        self.rollout_error = rollout_error
 
-    async def run_episodes(
+    async def run_rollouts(
         self,
         task_path: Path,
         *,
@@ -378,21 +378,21 @@ class ScriptedEpisodes(StandInGenerator):
         extra_instruction_files: Sequence[str],
         tags: Mapping[str, str],
         model: str | None = None,
-    ) -> tuple[TaskEpisode, ...]:
-        self.episode_requests.append(
+    ) -> tuple[TaskRollout, ...]:
+        self.rollout_requests.append(
             {"task": task_path.name, "arm": arm, "count": count, "tags": dict(tags), "model": model}
         )
         if self.error:
             raise GeneratorError(self.error)
         rewards = [self.outcomes.pop(0) for _ in range(count)]
         return tuple(
-            TaskEpisode(
+            TaskRollout(
                 task_path=task_path,
                 name=task_path.name,
-                episode_id=f"episode-{len(self.episode_requests)}-{number}",
+                rollout_id=f"rollout-{len(self.rollout_requests)}-{number}",
                 reward=reward,
                 rewards={} if reward is None else {"reward": reward},
-                error=self.episode_error if reward is None else "",
+                error=self.rollout_error if reward is None else "",
                 receipts=(),
                 failed_calls=0,
                 report_agent_record_ids=(),
@@ -403,7 +403,7 @@ class ScriptedEpisodes(StandInGenerator):
 
     @property
     def requested_counts(self) -> list[object]:
-        return [request["count"] for request in self.episode_requests]
+        return [request["count"] for request in self.rollout_requests]
 
 
 class RefusingGenerator(StandInGenerator):

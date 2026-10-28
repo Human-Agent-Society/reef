@@ -17,7 +17,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
     NoChecks,
-    ScriptedEpisodes,
+    ScriptedRollouts,
     StandInAuthor,
     agent_files,
     autoenvscaling,
@@ -286,12 +286,12 @@ def calibration(service: StandInGenerator, **settings: float | bool | str | None
 
 def calibrated(
     tmp_path: Path, outcomes: Sequence[float | None], **settings: float | bool | str | None
-) -> tuple[ScriptedEpisodes, tuple[str, ...], dict[str, Any]]:
+) -> tuple[ScriptedRollouts, tuple[str, ...], dict[str, Any]]:
     """Generate one task, calibrate it on ``outcomes`` as its last check, and close the generation.
 
     Returns the generator service, the validation errors and the generation report.
     """
-    service = ScriptedEpisodes(tmp_path / "tasks", outcomes)
+    service = ScriptedRollouts(tmp_path / "tasks", outcomes)
     generator = autoenvscaling(
         tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service, **settings),)
     )
@@ -317,7 +317,7 @@ def test_calibration_runs_only_after_the_other_checks_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str, is_solvable: bool, counts: list[int]
 ) -> None:
     reef, _ = serving_reef(reply)
-    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], is_solvable=is_solvable)
+    service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], is_solvable=is_solvable)
     monkeypatch.setattr(generator_module, "HttpGenerator", lambda url: service)
     try:
         generator = AutoEnvScalingGenerator.from_config(
@@ -335,11 +335,11 @@ def test_calibration_runs_only_after_the_other_checks_pass(
     assert (errors == ()) is (counts == [4])
 
 
-def test_a_task_inside_the_band_with_variance_is_kept_after_the_first_episodes(tmp_path: Path) -> None:
+def test_a_task_inside_the_band_with_variance_is_kept_after_the_first_rollouts(tmp_path: Path) -> None:
     service, errors, document = calibrated(tmp_path, [0.0, 1.0, 1.0, 0.0])
     assert errors == ()
-    # The episodes run on the written copy, on the calibration arm, with the model the generator service serves.
-    assert service.episode_requests == [
+    # The rollouts run on the written copy, on the calibration arm, with the model the generator service serves.
+    assert service.rollout_requests == [
         {"task": NAMES[0], "arm": "calibration", "count": 4, "tags": {"role": "calibration"}, "model": None}
     ]
     [proposal] = document["proposals"]
@@ -353,12 +353,12 @@ def test_a_task_inside_the_band_with_variance_is_kept_after_the_first_episodes(t
             "rewards": [0.0, 1.0, 1.0, 0.0],
             "mean": 0.5,
             "std": 0.5,
-            "episodes_asked": 4,
+            "rollouts_asked": 4,
             "unscored": 0,
             "expanded": False,
             "place": "inside",
             "result": "kept",
-            "episode_errors": [],
+            "rollout_errors": [],
         },
     }
 
@@ -369,21 +369,21 @@ def test_a_task_inside_the_band_with_variance_is_kept_after_the_first_episodes(t
         # A mean of 0.25 and 0.75: on each edge of the default band.
         ([0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0], {}, [4, 4]),
         ([1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0], {}, [4, 4]),
-        # Every episode the rule allows has scored already.
+        # Every rollout the rule allows has scored already.
         ([0.0, 0.0, 0.0, 1.0], {"max_rollouts": 4}, [4]),
     ],
 )
-def test_a_mean_near_either_edge_adds_episodes_up_to_the_most(
+def test_a_mean_near_either_edge_adds_rollouts_up_to_the_most(
     tmp_path: Path, outcomes: list[float], settings: dict[str, int], counts: list[int]
 ) -> None:
     service, errors, document = calibrated(tmp_path, outcomes, **settings)
     details = calibration_details(document)
     assert service.requested_counts == counts and errors == ()
-    assert details["expanded"] is (len(counts) == 2) and details["episodes_asked"] == len(outcomes)
+    assert details["expanded"] is (len(counts) == 2) and details["rollouts_asked"] == len(outcomes)
     assert details["rewards"] == outcomes and details["result"] == "kept"
 
 
-def test_a_mean_exactly_the_margin_from_an_edge_adds_episodes(tmp_path: Path) -> None:
+def test_a_mean_exactly_the_margin_from_an_edge_adds_rollouts(tmp_path: Path) -> None:
     # A mean of 0.4 is 0.15 from 0.25, though 0.4 - 0.25 is 0.15000000000000002 in floats.
     service, errors, document = calibrated(tmp_path, [0.0, 0.5, 0.5, 0.6, 0.5, 0.5, 0.0, 0.6])
     assert service.requested_counts == [4, 4] and errors == ()
@@ -405,8 +405,8 @@ def test_a_null_bound_is_no_edge(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("outcomes", "place", "error"),
     [
-        ([0.0] * 4, "below", "the solver's mean reward over 4 calibration episodes, 0.00, is below band_low 0.25"),
-        ([1.0] * 4, "above", "the solver's mean reward over 4 calibration episodes, 1.00, is above band_high 0.75"),
+        ([0.0] * 4, "below", "the solver's mean reward over 4 calibration rollouts, 0.00, is below band_low 0.25"),
+        ([1.0] * 4, "above", "the solver's mean reward over 4 calibration rollouts, 1.00, is above band_high 0.75"),
     ],
 )
 def test_tasks_below_and_above_the_band_are_refused_at_the_calibration_stage(
@@ -423,7 +423,7 @@ def test_tasks_below_and_above_the_band_are_refused_at_the_calibration_stage(
 def test_rewards_with_too_little_population_std_are_refused(tmp_path: Path) -> None:
     # The population std is 0.095 and the sample std 0.11: only the population std is below 0.1.
     _, errors, document = calibrated(tmp_path, [0.4, 0.4, 0.4, 0.62])
-    error = "the population std of the solver's rewards over 4 calibration episodes, 0.095, is below 0.1"
+    error = "the population std of the solver's rewards over 4 calibration rollouts, 0.095, is below 0.1"
     assert errors == (error,)
     details = calibration_details(document)
     assert (details["place"], details["result"]) == ("inside", "no_variance")
@@ -445,22 +445,22 @@ def test_rewards_whose_population_std_equals_the_least_are_kept(
     assert errors == () and calibration_details(document)["result"] == "kept"
 
 
-def test_unscored_episodes_are_left_out_and_asked_for_once_more(tmp_path: Path) -> None:
+def test_unscored_rollouts_are_left_out_and_asked_for_once_more(tmp_path: Path) -> None:
     service, errors, document = calibrated(tmp_path, [0.0, None, 1.0, None, 1.0, 0.0])
     assert service.requested_counts == [4, 2] and errors == ()
     details = calibration_details(document)
     assert details["rewards"] == [0.0, 1.0, 1.0, 0.0] and details["mean"] == 0.5
-    assert (details["episodes_asked"], details["unscored"]) == (6, 2)
-    assert details["episode_errors"] == ["sandbox failed"] * 2 and details["result"] == "kept"
+    assert (details["rollouts_asked"], details["unscored"]) == (6, 2)
+    assert details["rollout_errors"] == ["sandbox failed"] * 2 and details["result"] == "kept"
 
 
-def test_episodes_that_could_not_run_twice_are_made_up_by_the_added_episodes(tmp_path: Path) -> None:
-    # 3 of the first 6 episodes could not run. The 3 rewards have a mean of 0.67, near 0.75, so 5 more make 8.
+def test_rollouts_that_could_not_run_twice_are_made_up_by_the_added_rollouts(tmp_path: Path) -> None:
+    # 3 of the first 6 rollouts could not run. The 3 rewards have a mean of 0.67, near 0.75, so 5 more make 8.
     service, errors, document = calibrated(tmp_path, [0.0, None, 1.0, None, None, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
     assert service.requested_counts == [4, 2, 5] and errors == ()
     details = calibration_details(document)
     assert details["rewards"] == [0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
-    assert (details["episodes_asked"], details["unscored"], details["expanded"]) == (11, 3, True)
+    assert (details["rollouts_asked"], details["unscored"], details["expanded"]) == (11, 3, True)
 
 
 @pytest.mark.parametrize(
@@ -471,37 +471,37 @@ def test_episodes_that_could_not_run_twice_are_made_up_by_the_added_episodes(tmp
         ([None, None, None, 0.5, None, None, None], [4, 3], 1),
     ],
 )
-def test_too_few_scored_episodes_refuse_only_the_task_as_unchecked(
+def test_too_few_scored_rollouts_refuse_only_the_task_as_unchecked(
     tmp_path: Path, outcomes: list[float | None], counts: list[int], scored: int
 ) -> None:
     service, errors, document = calibrated(tmp_path, outcomes)
     outage = (
-        f"{scored} of {sum(counts)} calibration episodes of {NAMES[0]} scored, too few to measure its difficulty: "
+        f"{scored} of {sum(counts)} calibration rollouts of {NAMES[0]} scored, too few to measure its difficulty: "
         "sandbox failed"
     )
     assert errors == (f"the calibration check could not run: {outage}",)
-    # The episodes that could not run are asked for once more, and no more than once.
+    # The rollouts that could not run are asked for once more, and no more than once.
     assert service.requested_counts == counts
     [proposal] = document["proposals"]
     assert (proposal["stage"], document["error"]) == ("unchecked", "")
     assert proposal["checks"][-1]["could_not_run"] == outage
     details = calibration_details(document)
-    assert (details["result"], details["mean"], details["episodes_asked"]) == ("outage", None, sum(counts))
-    # The result keeps the errors of the first 3 episodes that could not run.
-    assert details["episode_errors"] == ["sandbox failed"] * 3
+    assert (details["result"], details["mean"], details["rollouts_asked"]) == ("outage", None, sum(counts))
+    # The result keeps the errors of the first 3 rollouts that could not run.
+    assert details["rollout_errors"] == ["sandbox failed"] * 3
 
 
-def test_the_kept_episode_errors_are_cut(tmp_path: Path) -> None:
-    service = ScriptedEpisodes(tmp_path / "tasks", [None] * 8, episode_error="x" * (checks.ERROR_CHARS + 10))
+def test_the_kept_rollout_errors_are_cut(tmp_path: Path) -> None:
+    service = ScriptedRollouts(tmp_path / "tasks", [None] * 8, rollout_error="x" * (checks.ERROR_CHARS + 10))
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
     task, errors = validated(generator)
     details = calibration_details(closed_with(generator, task, errors))
-    assert details["episode_errors"] == ["x" * checks.ERROR_CHARS] * 3
+    assert details["rollout_errors"] == ["x" * checks.ERROR_CHARS] * 3
 
 
-def test_a_failed_episode_request_stops_the_round_and_the_next_attempt_starts_again(tmp_path: Path) -> None:
-    error = "job 9 failed: the episode job did not finish"
-    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], error=error)
+def test_a_failed_rollout_request_stops_the_round_and_the_next_attempt_starts_again(tmp_path: Path) -> None:
+    error = "job 9 failed: the rollout job did not finish"
+    service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], error=error)
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
     (task,) = asyncio.run(generator.generate(REQUEST))
     with pytest.raises(GeneratorError, match=error):
@@ -523,13 +523,13 @@ def test_a_failed_episode_request_stops_the_round_and_the_next_attempt_starts_ag
     [
         ([0.0] * 4, "", "below"),
         ([None] * 8, "", "outage"),
-        ([], "job 9 failed: the episode job did not finish", "outage"),
+        ([], "job 9 failed: the rollout job did not finish", "outage"),
     ],
 )
 def test_measure_mode_records_calibration_and_never_refuses(
     tmp_path: Path, outcomes: list[float | None], error: str, result: str
 ) -> None:
-    service = ScriptedEpisodes(tmp_path / "tasks", outcomes, error=error)
+    service = ScriptedRollouts(tmp_path / "tasks", outcomes, error=error)
     check = calibration(service, is_refusing=False)
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(check,))
     task, errors = validated(generator)
@@ -543,9 +543,9 @@ def test_measure_mode_records_calibration_and_never_refuses(
     if result == "below":
         assert record["errors"] and record["could_not_run"] == ""
     elif error:
-        assert record["could_not_run"] == f"the calibration episodes of {NAMES[0]} could not run: {error}"
+        assert record["could_not_run"] == f"the calibration rollouts of {NAMES[0]} could not run: {error}"
     else:
-        assert record["could_not_run"].startswith(f"0 of 8 calibration episodes of {NAMES[0]} scored")
+        assert record["could_not_run"].startswith(f"0 of 8 calibration rollouts of {NAMES[0]} scored")
 
 
 # The instruction of every task that StandInAuthor writes: 29 word tokens.
@@ -698,11 +698,11 @@ def test_measure_mode_records_the_hit_and_never_refuses(tmp_path: Path, monkeypa
     assert document["tasks"][0]["checks"][-1] == record
 
 
-def test_a_contaminated_task_costs_no_review_call_and_no_calibration_episode(
+def test_a_contaminated_task_costs_no_review_call_and_no_calibration_rollout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reef, calls = serving_reef(json.dumps({"findings": []}))
-    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
+    service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
     try:
         generator = contamination_from_config(
             tmp_path,

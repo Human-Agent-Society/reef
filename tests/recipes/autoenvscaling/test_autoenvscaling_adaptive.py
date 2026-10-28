@@ -14,7 +14,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
     NoChecks,
-    ScriptedEpisodes,
+    ScriptedRollouts,
     ScriptedSession,
     StandInAuthor,
     agent_files,
@@ -73,7 +73,7 @@ def test_a_task_outside_the_band_gets_a_variant_from_its_own_session(
     generator = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
     asyncio.run(generator.record_results(run_tasks(generator, training, (0.5, 0.5)), generation=0))
     [parent] = parents(tmp_path)
-    assert (parent["name"], parent["direction"], parent["pass_rate"], parent["episodes"]) == (
+    assert (parent["name"], parent["direction"], parent["pass_rate"], parent["rollouts"]) == (
         NAMES[0],
         direction,
         sum(training) / 2,
@@ -85,7 +85,7 @@ def test_a_task_outside_the_band_gets_a_variant_from_its_own_session(
     tasks = asyncio.run(generator.generate(REQUEST))
     variant = author.calls[2]["variant"]
     assert isinstance(variant, TaskVariant)
-    assert (variant.parent, variant.direction, variant.episodes) == (NAMES[0], direction, 2)
+    assert (variant.parent, variant.direction, variant.rollouts) == (NAMES[0], direction, 2)
     assert variant.parent_dir == tmp_path / "state" / "parents" / NAMES[0]
     assert author.calls[2]["source"] == "session-1", "a variant comes from its parent's session"
     assert author.calls[3]["variant"] is None, "the other slot rebuilds the next session"
@@ -240,19 +240,19 @@ def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
         timeout_seconds=60.0,
         max_model_calls=5,
     )
-    variant = TaskVariant(parent="t-0", parent_dir=parent_dir, direction="simpler", pass_rate=0.125, episodes=8)
+    variant = TaskVariant(parent="t-0", parent_dir=parent_dir, direction="simpler", pass_rate=0.125, rollouts=8)
     source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
     agent.author(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
     assert seen["variant"] == variant
     assert {"inputs/parent/instruction.md", "inputs/parent/tests/test.sh", "inputs/variant.md"} <= inputs
     assert seen["variant.md"] == (
-        "The solver passed the task in ../inputs/parent/ (t-0) in 12% of 8 episodes.\n"
+        "The solver passed the task in ../inputs/parent/ (t-0) in 12% of 8 rollouts.\n"
         "Write a simpler task: the solver passes the parent too rarely to learn from it.\n"
     )
 
 
 def test_a_variant_run_gives_the_agent_the_variant_rules_and_prompt(tmp_path: Path) -> None:
-    variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, episodes=2)
+    variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
     sessions = {"variant": ScriptedSession([]), "rebuild": ScriptedSession([])}
     with_variant = agent_files(
         tmp_path / "variant", has_behaviour_rule=True, checks=NoChecks(1), session=sessions["variant"], variant=variant
@@ -271,14 +271,14 @@ def test_a_variant_run_gives_the_agent_the_variant_rules_and_prompt(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("parent", "direction", "pass_rate", "episodes"),
+    ("parent", "direction", "pass_rate", "rollouts"),
     [("t-0", "sideways", 1.0, 2), ("t-0", "harder", 1.5, 2), ("t-0", "harder", 1.0, 0), ("", "harder", 1.0, 2)],
 )
 def test_a_variant_refuses_fields_outside_its_definition(
-    tmp_path: Path, parent: str, direction: str, pass_rate: float, episodes: int
+    tmp_path: Path, parent: str, direction: str, pass_rate: float, rollouts: int
 ) -> None:
     with pytest.raises(ValueError, match="a variant's"):
-        TaskVariant(parent=parent, parent_dir=tmp_path, direction=direction, pass_rate=pass_rate, episodes=episodes)
+        TaskVariant(parent=parent, parent_dir=tmp_path, direction=direction, pass_rate=pass_rate, rollouts=rollouts)
 
 
 @pytest.mark.parametrize("name", ["", "../escape", "Upper", "a/b"])
@@ -291,7 +291,7 @@ def test_the_prompt_designer_refuses_a_variant(tmp_path: Path) -> None:
     designer = author_module.PromptAuthor(
         reef_url="http://127.0.0.1:9", token=None, scenario="autoenvscaling", model="designer", api="openai"
     )
-    variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, episodes=2)
+    variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
     source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
     with pytest.raises(ValueError, match="adaptive generation needs author: agent"):
         designer.author(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
@@ -345,7 +345,7 @@ def test_a_cancelled_variant_leaves_its_parent_its_slot(tmp_path: Path) -> None:
 def test_with_a_refusing_calibration_a_task_outside_the_band_is_refused_and_becomes_no_parent(
     tmp_path: Path,
 ) -> None:
-    service = ScriptedEpisodes(tmp_path / "tasks", [1.0] * 8)
+    service = ScriptedRollouts(tmp_path / "tasks", [1.0] * 8)
     calibration = CalibrationCheck(
         service,
         scenario="autoenvscaling",

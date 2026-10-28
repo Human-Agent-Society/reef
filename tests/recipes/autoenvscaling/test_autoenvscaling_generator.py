@@ -21,7 +21,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
     RefusingGenerator,
-    ScriptedEpisodes,
+    ScriptedRollouts,
     StandInAuthor,
     autoenvscaling,
     cursor,
@@ -586,7 +586,7 @@ def test_from_config_refuses_a_config_that_cannot_run(tmp_path: Path, fields: di
 def configured_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    service: ScriptedEpisodes,
+    service: ScriptedRollouts,
     *training: tuple[float, ...],
     **fields: object,
 ) -> tuple[AutoEnvScalingGenerator, dict[str, Any]]:
@@ -604,12 +604,12 @@ def configured_report(
 
 # YAML reads a bare off as false.
 @pytest.mark.parametrize("fields", [{}, {"calibration": "off"}, yaml.safe_load("calibration: off")])
-def test_calibration_off_runs_no_episode_and_leaves_the_report_unchanged(
+def test_calibration_off_runs_no_rollout_and_leaves_the_report_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fields: dict[str, object]
 ) -> None:
-    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
+    service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
     generator, document = configured_report(tmp_path, monkeypatch, service, **fields)
-    assert generator.calibration is None and service.episode_requests == []
+    assert generator.calibration is None and service.rollout_requests == []
     assert list(document) == ["generation", "error", "band", "next_position", "proposals", "tasks"]
     assert [check["check"] for check in document["tasks"][0]["checks"]] == ["oracle"]
 
@@ -617,7 +617,7 @@ def test_calibration_off_runs_no_episode_and_leaves_the_report_unchanged(
 def test_the_report_keeps_calibration_beside_the_training_band(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
+    service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
     _, document = configured_report(
         tmp_path,
         monkeypatch,
@@ -636,8 +636,8 @@ def test_the_report_keeps_calibration_beside_the_training_band(
         "min_std": 0.1,
         "model": "Qwen/Qwen3-8B",
     }
-    assert [request["model"] for request in service.episode_requests] == ["Qwen/Qwen3-8B"]
-    # The calibration kept the task; its training episodes then put it above the training band.
+    assert [request["model"] for request in service.rollout_requests] == ["Qwen/Qwen3-8B"]
+    # The calibration kept the task; its training rollouts then put it above the training band.
     [task] = document["tasks"]
     [proposal] = document["proposals"]
     assert task["band"] == "above" and proposal["stage"] == "band"
@@ -706,9 +706,9 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
 
 
-def test_a_task_whose_calibration_episodes_cannot_run_leaves_the_generation_complete(tmp_path: Path) -> None:
-    # The first task's episodes score; none of the second task's calibration episodes can run.
-    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0] + [None] * 8)
+def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_complete(tmp_path: Path) -> None:
+    # The first task's rollouts score; none of the second task's calibration rollouts can run.
+    service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0] + [None] * 8)
     check = CalibrationCheck(
         service,
         scenario="autoenvscaling",

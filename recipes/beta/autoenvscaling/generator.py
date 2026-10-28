@@ -4,7 +4,7 @@
 (:func:`admitted_task`) holds each reply to the generator service's parser and authoring checks and appends a
 Dockerfile step that keeps the repository's history up to the base commit only. ``validate`` runs the task checks
 on a copy under the generator service's tasks root. With ``calibration`` on, the last check runs the current
-solver's episodes on the task and holds their mean reward to the band. ``generate`` keeps the open generation in
+solver's rollouts on the task and holds their mean reward to the band. ``generate`` keeps the open generation in
 ``open-<generation>.json`` under the state directory, named by the recipe's generation number, and ``validate``
 adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
 a restart: it places each task that ran against the band ``[band_low, band_high]`` and writes the generation report.
@@ -166,7 +166,7 @@ STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission 
 STAGE_OUTAGE = "outage"  # the author could not run; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
-STAGE_CALIBRATION = "calibration"  # the solver's calibration episodes put the task outside the band, or barely vary
+STAGE_CALIBRATION = "calibration"  # the solver's calibration rollouts put the task outside the band, or barely vary
 STAGE_RUN = "run"  # the recipe could not run the task
 STAGE_BAND = "band"  # the task ran, and its pass rate is outside the band
 STAGE_UNREACHED = "unreached"  # the round ended before it ran the task
@@ -428,7 +428,7 @@ class ParentTask:
     Values: ``name`` is the task's name (a Harbor task name) and ``source_record_id`` its session's record id.
     ``generation`` is the
     generator's number of the generation that made it, a non-negative int. ``pass_rate`` is in [0, 1], the mean of
-    its ``episodes`` (a positive int) rollout rewards, and ``direction`` is ``harder`` or ``simpler``. ``varied``
+    its ``rollouts`` (a positive int) rollout rewards, and ``direction`` is ``harder`` or ``simpler``. ``varied``
     is true once a generation gave it a variant slot.
     Purpose: ``record_results`` adds one per training task outside the band and keeps the task's files under
     ``parents/<name>``; ``generate`` picks the newest unvaried parents for its variant slots.
@@ -438,7 +438,7 @@ class ParentTask:
     source_record_id: str
     generation: int
     pass_rate: float
-    episodes: int
+    rollouts: int
     direction: str
     varied: bool = False
 
@@ -448,8 +448,8 @@ class ParentTask:
             raise ValueError(f"a parent's name must be a task name matching {TASK_NAME_PATTERN.pattern}")
         if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
             raise ValueError(f"a parent's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
-        if not 0 <= self.pass_rate <= 1 or self.episodes < 1 or self.generation < 0:
-            raise ValueError("a parent needs a pass rate in [0, 1], positive episodes and a generation")
+        if not 0 <= self.pass_rate <= 1 or self.rollouts < 1 or self.generation < 0:
+            raise ValueError("a parent needs a pass rate in [0, 1], positive rollouts and a generation")
 
 
 PARENTS = TypeAdapter(list[ParentTask])
@@ -733,10 +733,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
             service = HttpGenerator(generator_url)
             band_low = band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low")
             band_high = band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high")
-            # The contamination check runs right after the oracle check: it makes no model call and runs no episode.
+            # The contamination check runs right after the oracle check: it makes no model call and runs no rollout.
             contamination = contamination_check(config)
             review = review_check(config, environ, scenario=scenario)
-            # The calibration runs last: its episodes are the costliest check.
+            # The calibration runs last: its rollouts are the costliest check.
             calibration = calibration_check(config, service, scenario=scenario, band_low=band_low, band_high=band_high)
             return cls(
                 scenario=scenario,
@@ -819,7 +819,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     parent_dir=self.state_dir / PARENTS_DIR / parent.name,
                     direction=parent.direction,
                     pass_rate=parent.pass_rate,
-                    episodes=parent.episodes,
+                    rollouts=parent.rollouts,
                 )
                 proposal = SessionProposal(
                     index, position, source.record_id, parent_task=parent.name, direction=parent.direction
@@ -950,7 +950,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
         A refusing check that finds a defect, or cannot run, makes the task invalid, and the report keeps the two
         apart. An oracle check that cannot run raises: the generator service is not usable for the round. So does
-        a refusing calibration whose episode request the generator service fails.
+        a refusing calibration whose rollout request the generator service fails.
         """
         try:
             written = await self.service.write_task(task)
@@ -1014,7 +1014,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 source_record_id=outcome.source_record_id,
                 generation=generation,
                 pass_rate=outcome.pass_rate,
-                episodes=len(outcome.rollout_rewards),
+                rollouts=len(outcome.rollout_rewards),
                 direction=VARIANT_HARDER if outcome.band == BAND_ABOVE else VARIANT_SIMPLER,
             )
             write_harbor_task(ran[name], root)

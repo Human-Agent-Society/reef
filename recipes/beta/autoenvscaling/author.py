@@ -156,7 +156,7 @@ VARIANT_PROMPT = (
     "../inputs/session.md, following your rules. Start with ../inputs/variant.md."
 )
 
-VARIANT_TEXT = """The solver passed the task in ../inputs/parent/ ({parent}) in {pass_rate:.0%} of {episodes} episodes.
+VARIANT_TEXT = """The solver passed the task in ../inputs/parent/ ({parent}) in {pass_rate:.0%} of {rollouts} rollouts.
 Write a {direction} task: {why}"""
 
 VARIANT_HARDER = "harder"
@@ -206,7 +206,7 @@ class TaskVariant:
 
     Values: ``parent`` is the name of an admitted task that the recipe ran, and ``parent_dir`` a directory that
     holds its files. ``direction`` is ``harder`` or ``simpler``. ``pass_rate`` is a float in [0, 1], the mean
-    reward of the parent's rollout episodes, and ``episodes`` a positive int, how many episodes it is over.
+    reward of the parent's rollouts, and ``rollouts`` a positive int, how many rollouts it is over.
     Purpose: the generator makes one for a variant slot of an adaptive generation; ``AgentAuthor.author`` puts the
     parent and the pass rate in the agent's inputs and asks for a task that keeps the parent's requirements.
     """
@@ -215,7 +215,7 @@ class TaskVariant:
     parent_dir: Path
     direction: str
     pass_rate: float
-    episodes: int
+    rollouts: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.parent, str) or not self.parent:
@@ -226,8 +226,8 @@ class TaskVariant:
             raise ValueError("a variant's pass rate must be a number")
         if not 0 <= self.pass_rate <= 1:
             raise ValueError("a variant's pass rate must be in [0, 1]")
-        if isinstance(self.episodes, bool) or not isinstance(self.episodes, int) or self.episodes < 1:
-            raise ValueError("a variant's episodes must be a positive int")
+        if isinstance(self.rollouts, bool) or not isinstance(self.rollouts, int) or self.rollouts < 1:
+            raise ValueError("a variant's rollouts must be a positive int")
 
 
 @dataclass(frozen=True)
@@ -574,7 +574,7 @@ class AgentAuthor(TaskAuthor):
                 VARIANT_TEXT.format(
                     parent=variant.parent,
                     pass_rate=variant.pass_rate,
-                    episodes=variant.episodes,
+                    rollouts=variant.rollouts,
                     direction=variant.direction,
                     why=VARIANT_REASONS[variant.direction],
                 )

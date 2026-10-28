@@ -8,7 +8,7 @@
   the instruction of a reference task, such as a benchmark task kept for evaluation.
 - :class:`ReviewCheck`: one model call reads the instruction, the tests and the reference solution, and lists
   each requirement that the tests check and the instruction does not state.
-- :class:`CalibrationCheck`: episodes of the current solver on the task. Their mean reward must lie inside the
+- :class:`CalibrationCheck`: rollouts of the current solver on the task. Their mean reward must lie inside the
   pass-rate band, and their rewards must vary.
 
 A refusing check keeps a task out when it finds a defect or cannot run; the two are recorded apart. A check that
@@ -30,7 +30,7 @@ from pathlib import Path
 from recipes.beta.autoenvscaling.author import ModelReplies
 from reef.core.prompts import untrusted_text
 from reef.core.tasks import HarborTask
-from reef.harness.client.tasks import TaskEpisode, rewards_of
+from reef.harness.client.tasks import TaskRollout, rewards_of
 from reef.record2sample.generator.client import Generator, GeneratorError, WrittenTask
 from reef.record2sample.generator.designer import DesignerError
 
@@ -47,17 +47,17 @@ FENCED_REPLY = re.compile(r"```(?:json)?\s*\n(.*)\n```", re.DOTALL)
 BAND_BELOW = "below"
 BAND_INSIDE = "inside"
 BAND_ABOVE = "above"
-# The generator service's arm of the calibration episodes. They are rollouts: Reef keeps no record of them.
+# The generator service's arm of the calibration rollouts. Reef keeps no record of them.
 CALIBRATION_ARM = "calibration"
 # What the calibration found, besides a mean reward below or above the band: the task is kept, its rewards vary
-# too little, or the calibration did not finish (fewer than CALIBRATION_MIN_SCORED episodes scored, or the
+# too little, or the calibration did not finish (fewer than CALIBRATION_MIN_SCORED rollouts scored, or the
 # generator service failed).
 CALIBRATION_KEPT = "kept"
 CALIBRATION_NO_VARIANCE = "no_variance"
 CALIBRATION_OUTAGE = "outage"
-# The calibration's result keeps the errors of this many episodes.
+# The calibration's result keeps the errors of this many rollouts.
 CALIBRATION_ERRORS = 3
-# The fewest scored episodes that measure a task: the std of one reward is 0, whatever the task.
+# The fewest scored rollouts that measure a task: the std of one reward is 0, whatever the task.
 CALIBRATION_MIN_SCORED = 2
 # A mean's distance from a band edge and the rewards' std are rounded to this many decimals before they are compared,
 # so float error does not move a value that equals its bound past it: 0.4 is 0.15 from 0.25, and the population std
@@ -277,23 +277,23 @@ def band_place(pass_rate: float, low: float | None, high: float | None) -> str:
 
 
 class CalibrationCheck(TaskCheck):
-    """Episodes of the current solver on the task: their mean reward must lie inside the band, and must vary.
+    """Rollouts of the current solver on the task: their mean reward must lie inside the band, and must vary.
 
     Values: ``rollouts`` is at least :data:`CALIBRATION_MIN_SCORED`, ``max_rollouts`` at least ``rollouts``,
     ``margin`` in [0, 1] and ``min_std`` in [0, 0.5]. ``band_low`` and ``band_high`` are each in [0, 1] or null, and
-    ``band_low`` does not exceed ``band_high``; a null bound is no bound and no edge. The episodes run on the
+    ``band_low`` does not exceed ``band_high``; a null bound is no bound and no edge. The rollouts run on the
     generator service ``service`` under ``scenario``, on the arm :data:`CALIBRATION_ARM`, with ``model``: a model
     name, or None for the service's default model.
     Purpose: ``from_config`` builds it from the ``calibration`` keys and puts it last in ``task_checks``.
     ``validate`` runs it once the other refusing checks pass, and ``record_results`` writes :meth:`settings` in
     the generation report.
 
-    The rule: ``rollouts`` episodes run, and the episodes that could not run are asked for once more. When the
-    mean reward is within ``margin`` of a band edge, on either side, and fewer than ``max_rollouts`` episodes
+    The rule: ``rollouts`` rollouts run, and the rollouts that could not run are asked for once more. When the
+    mean reward is within ``margin`` of a band edge, on either side, and fewer than ``max_rollouts`` rollouts
     scored, the rest up to ``max_rollouts`` run, with the same one retry. The task is kept when the mean is inside
     the band and the population standard deviation of the rewards is at least ``min_std``. When fewer than
-    :data:`CALIBRATION_MIN_SCORED` episodes scored, the task's difficulty is unknown, and the check could not run.
-    When the generator service fails an episode request, a refusing check raises ``GeneratorError``, and one that
+    :data:`CALIBRATION_MIN_SCORED` rollouts scored, the task's difficulty is unknown, and the check could not run.
+    When the generator service fails a rollout request, a refusing check raises ``GeneratorError``, and one that
     measures could not run.
     """
 
@@ -352,14 +352,14 @@ class CalibrationCheck(TaskCheck):
         )
 
     async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
-        episodes: list[TaskEpisode] = []
+        rollouts: list[TaskRollout] = []
         asked: list[int] = []
 
         async def play(count: int) -> None:
-            # count episodes, then once more as many as could not run.
+            # count rollouts, then once more as many as could not run.
             for _ in range(2):
                 asked.append(count)
-                played = await self.service.run_episodes(
+                played = await self.service.run_rollouts(
                     written.path,
                     scenario=self.scenario,
                     arm=CALIBRATION_ARM,
@@ -368,8 +368,8 @@ class CalibrationCheck(TaskCheck):
                     tags={"role": "calibration"},
                     model=self.model,
                 )
-                episodes.extend(played)
-                count = sum(episode.is_infrastructure_failure for episode in played)
+                rollouts.extend(played)
+                count = sum(rollout.is_infrastructure_failure for rollout in played)
                 if count == 0:
                     return
 
@@ -377,43 +377,43 @@ class CalibrationCheck(TaskCheck):
         failure = ""
         try:
             await play(self.rollouts)
-            rewards = rewards_of(tuple(episodes))
+            rewards = rewards_of(tuple(rollouts))
             if rewards and len(rewards) < self.max_rollouts and self.is_near_an_edge(statistics.fmean(rewards)):
                 is_expanded = True
                 await play(self.max_rollouts - len(rewards))
         except GeneratorError as exc:
             if self.is_refusing:
                 raise
-            failure = f"the calibration episodes of {task.name} could not run: {exc}"
-        rewards = rewards_of(tuple(episodes))
-        episode_errors = [episode.error for episode in episodes if episode.error]
+            failure = f"the calibration rollouts of {task.name} could not run: {exc}"
+        rewards = rewards_of(tuple(rollouts))
+        rollout_errors = [rollout.error for rollout in rollouts if rollout.error]
         details: dict[str, object] = {
             # The mode this result was made under: the report's calibration settings are those at its close.
             "mode": "refuse" if self.is_refusing else "measure",
             "rewards": list(rewards),
             "mean": None,
             "std": None,
-            "episodes_asked": sum(asked),
-            "unscored": sum(episode.is_infrastructure_failure for episode in episodes),
+            "rollouts_asked": sum(asked),
+            "unscored": sum(rollout.is_infrastructure_failure for rollout in rollouts),
             "expanded": is_expanded,
             "place": None,
             "result": CALIBRATION_OUTAGE,
-            "episode_errors": [error[:ERROR_CHARS] for error in episode_errors[:CALIBRATION_ERRORS]],
+            "rollout_errors": [error[:ERROR_CHARS] for error in rollout_errors[:CALIBRATION_ERRORS]],
         }
         if failure:
             return CheckResult(self.name, could_not_run=failure[:ERROR_CHARS], details=details)
         if len(rewards) < CALIBRATION_MIN_SCORED:
-            # The task itself may keep its episodes from running, so too few scores end this task's check, not the round.
-            first_error = episode_errors[0] if episode_errors else "no episode came back"
+            # The task itself may keep its rollouts from running, so too few scores end this task's check, not the round.
+            first_error = rollout_errors[0] if rollout_errors else "no rollout came back"
             reason = (
-                f"{len(rewards)} of {sum(asked)} calibration episodes of {task.name} scored, too few to measure its "
+                f"{len(rewards)} of {sum(asked)} calibration rollouts of {task.name} scored, too few to measure its "
                 f"difficulty: {first_error[:ERROR_CHARS]}"
             )
             return CheckResult(self.name, could_not_run=reason, details=details)
         mean = statistics.fmean(rewards)
         std = statistics.pstdev(rewards)
         place = band_place(mean, self.band_low, self.band_high)
-        measured = f"over {len(rewards)} calibration episodes"
+        measured = f"over {len(rewards)} calibration rollouts"
         if place == BAND_BELOW:
             result = place
             error = f"the solver's mean reward {measured}, {mean:.2f}, is below band_low {self.band_low}"
