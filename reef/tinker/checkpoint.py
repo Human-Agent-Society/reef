@@ -26,13 +26,13 @@ class TinkerCheckpoint:
     """One durable Tinker checkpoint of a LoRA of ``base_model`` with rank ``lora_rank``.
 
     Values: ``base_model`` is non-empty and ``lora_rank`` positive. ``state_path`` (the weights and optimizer state
-    that a later job restores) and ``sampler_path`` (the weights that Tinker's sampler serves) are ``tinker://``
-    paths. ``adapter_path`` is the ``tinker://`` path of the adapter that Tinker exported in its own key names
-    (``save_weights_external``), or ``None`` when the component exports no adapter. ``service`` is the base URL of
+    that a later job restores) and ``sampler_path`` (the LoRA adapter that Tinker's sampler serves, and that a
+    serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
     the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
-    writes them as the manifest ``MANIFEST`` of a checkpoint directory; the component, the Tinker inference
-    runtime, ``TinkerClient.download`` and a serving runtime that resolves the weights itself read them.
+    writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole release; the component,
+    the Tinker inference runtime, ``TinkerSamplerWeights`` and a serving runtime that resolves the weights itself
+    read them.
     ``check_compatible`` is how a reader refuses a checkpoint of another model or service.
     """
 
@@ -50,14 +50,12 @@ class TinkerCheckpoint:
     #: The objective whose state ``algorithm_state`` is; ``None`` exactly when the state is empty. A job of
     #: another objective starts with an empty state.
     objective: str | None = None
-    adapter_path: str | None = None
     service: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.base_model or self.lora_rank <= 0:
             raise ValueError("invalid Tinker checkpoint version or model configuration")
-        paths = (self.state_path, self.sampler_path) + (() if self.adapter_path is None else (self.adapter_path,))
-        for path in paths:
+        for path in (self.state_path, self.sampler_path):
             if not isinstance(path, str) or not path.startswith("tinker://"):
                 raise ValueError("Tinker checkpoints require remote tinker:// paths")
         if (self.objective is None) != (not self.algorithm_state):
@@ -85,8 +83,6 @@ class TinkerCheckpoint:
         if not self.algorithm_state:
             value.pop("algorithm_state")
             value.pop("objective")
-        if self.adapter_path is None:
-            value.pop("adapter_path")
         if self.service is None:
             value.pop("service")
         return value
