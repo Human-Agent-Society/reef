@@ -47,15 +47,19 @@ BAND_ABOVE = "above"
 # The generator service's arm of the calibration episodes. They are rollouts: Reef keeps no record of them.
 CALIBRATION_ARM = "calibration"
 # What the calibration found, besides a mean reward below or above the band: the task is kept, its rewards vary
-# too little, or the calibration did not finish (no episode scored, or the generator service failed).
+# too little, or the calibration did not finish (fewer than CALIBRATION_MIN_SCORED episodes scored, or the
+# generator service failed).
 CALIBRATION_KEPT = "kept"
 CALIBRATION_NO_VARIANCE = "no_variance"
 CALIBRATION_OUTAGE = "outage"
 # The calibration's result keeps the errors of this many episodes.
 CALIBRATION_ERRORS = 3
-# A mean's distance from a band edge is rounded to this many decimals, so float error does not move a mean that is
-# exactly the margin from an edge past it: 0.4 is 0.15 from 0.25, which plain float subtraction makes larger.
-MARGIN_DECIMALS = 9
+# The fewest scored episodes that measure a task: the std of one reward is 0, whatever the task.
+CALIBRATION_MIN_SCORED = 2
+# A mean's distance from a band edge and the rewards' std are rounded to this many decimals before they are compared,
+# so float error does not move a value that equals its bound past it: 0.4 is 0.15 from 0.25, and the population std
+# of [0.4, 0.6, 0.4, 0.6] is 0.1, though plain floats make them 0.15000000000000002 and 0.09999999999999998.
+COMPARISON_DECIMALS = 9
 
 REVIEW_SYSTEM_PROMPT = """You review the tests of a coding task before an agent is trained on it. The agent that \
 solves the task reads only the instruction. It never sees the tests or the reference solution. A correct solution is \
@@ -263,10 +267,11 @@ def band_place(pass_rate: float, low: float | None, high: float | None) -> str:
 class CalibrationCheck(TaskCheck):
     """Episodes of the current solver on the task: their mean reward must lie inside the band, and must vary.
 
-    Values: ``rollouts`` is at least 2, ``max_rollouts`` at least ``rollouts``, ``margin`` in [0, 1] and ``min_std``
-    in [0, 0.5]. ``band_low`` and ``band_high`` are each in [0, 1] or null, and ``band_low`` does not exceed
-    ``band_high``; a null bound is no bound and no edge. The episodes run on the generator service ``service``
-    under ``scenario``, on the arm :data:`CALIBRATION_ARM`, with the model the service serves.
+    Values: ``rollouts`` is at least :data:`CALIBRATION_MIN_SCORED`, ``max_rollouts`` at least ``rollouts``,
+    ``margin`` in [0, 1] and ``min_std`` in [0, 0.5]. ``band_low`` and ``band_high`` are each in [0, 1] or null, and
+    ``band_low`` does not exceed ``band_high``; a null bound is no bound and no edge. The episodes run on the
+    generator service ``service`` under ``scenario``, on the arm :data:`CALIBRATION_ARM`, with ``model``: a model
+    name, or None for the service's default model.
     Purpose: ``from_config`` builds it from the ``calibration`` keys and puts it last in ``task_checks``.
     ``validate`` runs it once the other refusing checks pass, and ``record_results`` writes :meth:`settings` in
     the generation report.
@@ -274,9 +279,10 @@ class CalibrationCheck(TaskCheck):
     The rule: ``rollouts`` episodes run, and the episodes that could not run are asked for once more. When the
     mean reward is within ``margin`` of a band edge, on either side, and fewer than ``max_rollouts`` episodes
     scored, the rest up to ``max_rollouts`` run, with the same one retry. The task is kept when the mean is inside
-    the band and the population standard deviation of the rewards is at least ``min_std``. When no episode scored,
-    the task's difficulty is unknown: a refusing check raises ``GeneratorError``, and one that measures could not
-    run.
+    the band and the population standard deviation of the rewards is at least ``min_std``. When fewer than
+    :data:`CALIBRATION_MIN_SCORED` episodes scored, the task's difficulty is unknown, and the check could not run.
+    When the generator service fails an episode request, a refusing check raises ``GeneratorError``, and one that
+    measures could not run.
     """
 
     def __init__(
@@ -290,10 +296,11 @@ class CalibrationCheck(TaskCheck):
         min_std: float,
         band_low: float | None,
         band_high: float | None,
+        model: str | None = None,
         is_refusing: bool = True,
     ) -> None:
-        if rollouts < 2:
-            raise ValueError("calibration_rollouts must be at least 2")
+        if rollouts < CALIBRATION_MIN_SCORED:
+            raise ValueError(f"calibration_rollouts must be at least {CALIBRATION_MIN_SCORED}")
         if max_rollouts < rollouts:
             raise ValueError("calibration_max_rollouts must be at least calibration_rollouts")
         if not 0 <= margin <= 1:
@@ -311,6 +318,7 @@ class CalibrationCheck(TaskCheck):
         self.min_std = min_std
         self.band_low = band_low
         self.band_high = band_high
+        self.model = model
 
     def settings(self) -> dict[str, object]:
         """The calibration's mode and rule, as the generation report keeps them."""
@@ -320,12 +328,13 @@ class CalibrationCheck(TaskCheck):
             "max_rollouts": self.max_rollouts,
             "margin": self.margin,
             "min_std": self.min_std,
+            "model": self.model,
         }
 
     def is_near_an_edge(self, mean: float) -> bool:
         """Whether ``mean`` is within ``margin`` of a band edge, on either side of it."""
         return any(
-            round(abs(mean - edge), MARGIN_DECIMALS) <= self.margin
+            round(abs(mean - edge), COMPARISON_DECIMALS) <= self.margin
             for edge in (self.band_low, self.band_high)
             if edge is not None
         )
@@ -345,6 +354,7 @@ class CalibrationCheck(TaskCheck):
                     count=count,
                     extra_instruction_files=(),
                     tags={"role": "calibration"},
+                    model=self.model,
                 )
                 episodes.extend(played)
                 count = sum(episode.is_infrastructure_failure for episode in played)
@@ -378,14 +388,13 @@ class CalibrationCheck(TaskCheck):
         }
         if failure:
             return CheckResult(self.name, could_not_run=failure[:ERROR_CHARS], details=details)
-        if not rewards:
+        if len(rewards) < CALIBRATION_MIN_SCORED:
+            # The task itself may keep its episodes from running, so too few scores end this task's check, not the round.
             first_error = episode_errors[0] if episode_errors else "no episode came back"
             reason = (
-                f"none of {sum(asked)} calibration episodes of {task.name} scored, so its difficulty is unknown: "
-                f"{first_error[:ERROR_CHARS]}"
+                f"{len(rewards)} of {sum(asked)} calibration episodes of {task.name} scored, too few to measure its "
+                f"difficulty: {first_error[:ERROR_CHARS]}"
             )
-            if self.is_refusing:
-                raise GeneratorError(reason)
             return CheckResult(self.name, could_not_run=reason, details=details)
         mean = statistics.fmean(rewards)
         std = statistics.pstdev(rewards)
@@ -397,7 +406,7 @@ class CalibrationCheck(TaskCheck):
         elif place == BAND_ABOVE:
             result = place
             error = f"the solver's mean reward {measured}, {mean:.2f}, is above band_high {self.band_high}"
-        elif std < self.min_std:
+        elif round(std, COMPARISON_DECIMALS) < self.min_std:
             result = CALIBRATION_NO_VARIANCE
             error = f"the population std of the solver's rewards {measured}, {std:.3f}, is below {self.min_std}"
         else:

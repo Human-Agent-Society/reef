@@ -41,6 +41,7 @@ from recipes.beta.autoenvscaling import (
     AuthoredTask,
     AuthorError,
     AutoEnvScalingGenerator,
+    CalibrationCheck,
     CandidateChecks,
     GeneratorChecks,
     PromptAuthor,
@@ -586,7 +587,7 @@ def configured_report(
     monkeypatch: pytest.MonkeyPatch,
     service: ScriptedEpisodes,
     *training: tuple[float, ...],
-    **fields: Any,
+    **fields: object,
 ) -> tuple[AutoEnvScalingGenerator, dict[str, Any]]:
     """A generator from the config on ``service``, without the test review; one generation run and closed."""
     monkeypatch.setattr(generator_module, "HttpGenerator", lambda url: service)
@@ -617,7 +618,13 @@ def test_the_report_keeps_calibration_beside_the_training_band(
 ) -> None:
     service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0])
     _, document = configured_report(
-        tmp_path, monkeypatch, service, (1.0, 1.0, 1.0, 1.0), calibration="refuse", calibration_margin=0.1
+        tmp_path,
+        monkeypatch,
+        service,
+        (1.0, 1.0, 1.0, 1.0),
+        calibration="refuse",
+        calibration_margin=0.1,
+        calibration_model="Qwen/Qwen3-8B",
     )
     assert list(document)[:5] == ["generation", "error", "band", "calibration", "next_position"]
     assert document["calibration"] == {
@@ -626,7 +633,9 @@ def test_the_report_keeps_calibration_beside_the_training_band(
         "max_rollouts": 8,
         "margin": 0.1,
         "min_std": 0.1,
+        "model": "Qwen/Qwen3-8B",
     }
+    assert [request["model"] for request in service.episode_requests] == ["Qwen/Qwen3-8B"]
     # The calibration kept the task; its training episodes then put it above the training band.
     [task] = document["tasks"]
     [proposal] = document["proposals"]
@@ -645,10 +654,18 @@ def test_the_report_keeps_calibration_beside_the_training_band(
         ({"calibration_max_rollouts": 8.0}, "calibration_max_rollouts must be an integer"),
         ({"calibration_max_rollouts": 3}, "calibration_max_rollouts must be at least calibration_rollouts"),
         ({"calibration_margin": "wide"}, "calibration_margin must be a number"),
+        ({"calibration_margin": True}, "calibration_margin must be a number"),
+        ({"calibration_min_std": False}, "calibration_min_std must be a number"),
         ({"calibration_margin": 1.5}, r"calibration_margin must be in \[0, 1\]"),
+        ({"calibration_margin": -0.1}, r"calibration_margin must be in \[0, 1\]"),
         ({"calibration_min_std": 0.6}, r"calibration_min_std must be in \[0, 0.5\]"),
         ({"calibration_min_std": float("nan")}, r"calibration_min_std must be in \[0, 0.5\]"),
+        ({"calibration_model": ""}, "calibration_model must be a model name or null"),
+        ({"calibration_model": 7}, "calibration_model must be a model name or null"),
         ({"band_high": 1.5}, r"band_high must be in \[0, 1\]"),
+        # A calibration that is off still has its keys checked.
+        ({"calibration": False, "calibration_rollouts": "junk"}, "calibration_rollouts must be an integer"),
+        ({"calibration": "off", "calibration_margin": -5}, r"calibration_margin must be in \[0, 1\]"),
     ],
 )
 def test_from_config_refuses_a_calibration_that_cannot_run(
@@ -686,6 +703,39 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     assert service.episode_requests == [], "the training component runs the training episodes"
     assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
+
+
+def test_a_task_whose_calibration_episodes_cannot_run_leaves_the_generation_complete(tmp_path: Path) -> None:
+    # The first task's episodes score; none of the second task's calibration episodes can run.
+    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0] + [None] * 8)
+    check = CalibrationCheck(
+        service,
+        scenario="autoenvscaling",
+        rollouts=4,
+        max_rollouts=8,
+        margin=0.15,
+        min_std=0.1,
+        band_low=0.25,
+        band_high=0.75,
+    )
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, task_checks=(check,))
+    session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks)
+    generation = GeneratedTaskSamples(
+        context,
+        RoundSettings(rounds=1, description=DESCRIPTION),
+        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        task_generator=generator,
+        generator_service=service,
+    )
+    generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
+    for task in generated.tasks:
+        generation.save_result(TaskRolloutResult(task.metadata["task"]["name"], (0.5, 0.5)))
+    asyncio.run(generation.deliver_results())
+    generation.close()
+    assert generated.is_complete and [task.metadata["task"]["name"] for task in generated.tasks] == [NAMES[0]]
+    assert service.requested_counts == [4, 4, 4]
+    assert [proposal["stage"] for proposal in report(tmp_path)["proposals"]] == ["", "unchecked"]
 
 
 def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(

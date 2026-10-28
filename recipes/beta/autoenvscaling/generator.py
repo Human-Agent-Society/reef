@@ -172,6 +172,7 @@ CONFIG_KEYS = frozenset(
         "calibration_max_rollouts",
         "calibration_margin",
         "calibration_min_std",
+        "calibration_model",
     }
 )
 
@@ -484,7 +485,7 @@ def review_check(config: Mapping[str, Any], environ: Mapping[str, str], *, scena
 
 
 def calibration_check(
-    config: Mapping[str, Any],
+    config: Mapping[str, object],
     service: Generator,
     *,
     scenario: str,
@@ -493,36 +494,44 @@ def calibration_check(
 ) -> CalibrationCheck | None:
     """The solver calibration the config's ``calibration`` mode asks for, on ``service`` and the band; none when off.
 
-    Raises ``ValueError`` for a key of the wrong type, or a value that :class:`CalibrationCheck` refuses.
+    Raises ``ValueError`` for a key of the wrong type, or a value that :class:`CalibrationCheck` refuses, also when
+    the mode is off, so a wrong key fails before the calibration is turned on.
     """
     mode = check_mode(config.get("calibration", DEFAULT_CALIBRATION), "calibration")
-    if mode == "off":
-        return None
-    counts = {
-        "calibration_rollouts": config.get("calibration_rollouts", DEFAULT_CALIBRATION_ROLLOUTS),
-        "calibration_max_rollouts": config.get("calibration_max_rollouts", DEFAULT_CALIBRATION_MAX_ROLLOUTS),
-    }
-    for label, value in counts.items():
-        if isinstance(value, bool) or not isinstance(value, int):
+    counts: dict[str, int] = {}
+    for label, default in (
+        ("calibration_rollouts", DEFAULT_CALIBRATION_ROLLOUTS),
+        ("calibration_max_rollouts", DEFAULT_CALIBRATION_MAX_ROLLOUTS),
+    ):
+        count = config.get(label, default)
+        if isinstance(count, bool) or not isinstance(count, int):
             raise ValueError(f"{label} must be an integer")
-    numbers = {
-        "calibration_margin": config.get("calibration_margin", DEFAULT_CALIBRATION_MARGIN),
-        "calibration_min_std": config.get("calibration_min_std", DEFAULT_CALIBRATION_MIN_STD),
-    }
-    for label, value in numbers.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        counts[label] = count
+    numbers: dict[str, float] = {}
+    for label, default in (
+        ("calibration_margin", DEFAULT_CALIBRATION_MARGIN),
+        ("calibration_min_std", DEFAULT_CALIBRATION_MIN_STD),
+    ):
+        number = config.get(label, default)
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
             raise ValueError(f"{label} must be a number")
-    return CalibrationCheck(
+        numbers[label] = float(number)
+    model = config.get("calibration_model")
+    if model is not None and not (isinstance(model, str) and model.strip()):
+        raise ValueError("calibration_model must be a model name or null")
+    check = CalibrationCheck(
         service,
         scenario=scenario,
         rollouts=counts["calibration_rollouts"],
         max_rollouts=counts["calibration_max_rollouts"],
-        margin=float(numbers["calibration_margin"]),
-        min_std=float(numbers["calibration_min_std"]),
+        margin=numbers["calibration_margin"],
+        min_std=numbers["calibration_min_std"],
         band_low=band_low,
         band_high=band_high,
+        model=None if model is None else str(model),
         is_refusing=mode == "refuse",
     )
+    return None if mode == "off" else check
 
 
 class AutoEnvScalingGenerator(TaskGenerator):
@@ -764,7 +773,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
         A refusing check that finds a defect, or cannot run, makes the task invalid, and the report keeps the two
         apart. An oracle check that cannot run raises: the generator service is not usable for the round. So does
-        a refusing calibration in which no episode scored or the generator service failed an episode request.
+        a refusing calibration whose episode request the generator service fails.
         """
         try:
             written = await self.service.write_task(task)

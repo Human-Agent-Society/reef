@@ -337,17 +337,24 @@ def cursor(tmp_path: Path) -> dict[str, int]:
 
 class ScriptedEpisodes(StandInGenerator):
     """A generator service whose episodes take ``outcomes`` in turn: a reward, or None for an episode that could not
-    run (no reward, the error "sandbox failed"). With ``error``, each episode request fails with it instead.
+    run (no reward, the error ``episode_error``). With ``error``, each episode request fails with it instead.
 
     Each request is recorded in ``episode_requests``.
     """
 
     def __init__(
-        self, root: Path, outcomes: Sequence[float | None], *, is_solvable: bool = True, error: str = ""
+        self,
+        root: Path,
+        outcomes: Sequence[float | None],
+        *,
+        is_solvable: bool = True,
+        error: str = "",
+        episode_error: str = "sandbox failed",
     ) -> None:
         super().__init__(root, is_solvable=is_solvable)
         self.outcomes = list(outcomes)
         self.error = error
+        self.episode_error = episode_error
 
     async def run_episodes(
         self,
@@ -373,7 +380,7 @@ class ScriptedEpisodes(StandInGenerator):
                 episode_id=f"episode-{len(self.episode_requests)}-{number}",
                 reward=reward,
                 rewards={} if reward is None else {"reward": reward},
-                error="sandbox failed" if reward is None else "",
+                error=self.episode_error if reward is None else "",
                 receipts=(),
                 failed_calls=0,
                 report_agent_record_ids=(),

@@ -270,9 +270,9 @@ def test_the_review_reads_capped_files_and_takes_a_fenced_reply() -> None:
     assert "[... 10 characters cut]" in prompt and "x" * (checks.REVIEW_FILE_CHARS + 1) not in prompt
 
 
-def calibration(service: StandInGenerator, **settings: Any) -> checks.CalibrationCheck:
+def calibration(service: StandInGenerator, **settings: float | bool | str | None) -> checks.CalibrationCheck:
     """A calibration check on ``service`` with the default rule and band, changed by ``settings``."""
-    rule: dict[str, Any] = {
+    rule: dict[str, float | bool | str | None] = {
         "rollouts": 4,
         "max_rollouts": 8,
         "margin": 0.15,
@@ -284,7 +284,7 @@ def calibration(service: StandInGenerator, **settings: Any) -> checks.Calibratio
 
 
 def calibrated(
-    tmp_path: Path, outcomes: Sequence[float | None], **settings: Any
+    tmp_path: Path, outcomes: Sequence[float | None], **settings: float | bool | str | None
 ) -> tuple[ScriptedEpisodes, tuple[str, ...], dict[str, Any]]:
     """Generate one task, calibrate it on ``outcomes`` as its last check, and close the generation.
 
@@ -428,6 +428,21 @@ def test_rewards_with_too_little_population_std_are_refused(tmp_path: Path) -> N
     assert document["proposals"][0]["stage"] == "calibration"
 
 
+@pytest.mark.parametrize(
+    ("outcomes", "min_std"),
+    [
+        # A population std of 0.1, though plain floats make it 0.09999999999999998.
+        ([0.4, 0.6, 0.4, 0.6], 0.1),
+        ([0.0, 1.0, 1.0, 0.0], 0.5),
+    ],
+)
+def test_rewards_whose_population_std_equals_the_least_are_kept(
+    tmp_path: Path, outcomes: list[float], min_std: float
+) -> None:
+    _, errors, document = calibrated(tmp_path, outcomes, min_std=min_std)
+    assert errors == () and calibration_details(document)["result"] == "kept"
+
+
 def test_unscored_episodes_are_left_out_and_asked_for_once_more(tmp_path: Path) -> None:
     service, errors, document = calibrated(tmp_path, [0.0, None, 1.0, None, 1.0, 0.0])
     assert service.requested_counts == [4, 2] and errors == ()
@@ -437,29 +452,68 @@ def test_unscored_episodes_are_left_out_and_asked_for_once_more(tmp_path: Path) 
     assert details["episode_errors"] == ["sandbox failed"] * 2 and details["result"] == "kept"
 
 
-def test_no_scored_episode_stops_the_round_and_names_the_outage(tmp_path: Path) -> None:
-    service = ScriptedEpisodes(tmp_path / "tasks", [None] * 8)
+def test_episodes_that_could_not_run_twice_are_made_up_by_the_added_episodes(tmp_path: Path) -> None:
+    # 3 of the first 6 episodes could not run. The 3 rewards have a mean of 0.67, near 0.75, so 5 more make 8.
+    service, errors, document = calibrated(tmp_path, [0.0, None, 1.0, None, None, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+    assert service.requested_counts == [4, 2, 5] and errors == ()
+    details = calibration_details(document)
+    assert details["rewards"] == [0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    assert (details["episodes_asked"], details["unscored"], details["expanded"]) == (11, 3, True)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "counts", "scored"),
+    [
+        ([None] * 8, [4, 4], 0),
+        # The std of one reward is 0, whatever the task.
+        ([None, None, None, 0.5, None, None, None], [4, 3], 1),
+    ],
+)
+def test_too_few_scored_episodes_refuse_only_the_task_as_unchecked(
+    tmp_path: Path, outcomes: list[float | None], counts: list[int], scored: int
+) -> None:
+    service, errors, document = calibrated(tmp_path, outcomes)
+    outage = (
+        f"{scored} of {sum(counts)} calibration episodes of {NAMES[0]} scored, too few to measure its difficulty: "
+        "sandbox failed"
+    )
+    assert errors == (f"the calibration check could not run: {outage}",)
+    # The episodes that could not run are asked for once more, and no more than once.
+    assert service.requested_counts == counts
+    [proposal] = document["proposals"]
+    assert (proposal["stage"], document["error"]) == ("unchecked", "")
+    assert proposal["checks"][-1]["could_not_run"] == outage
+    details = calibration_details(document)
+    assert (details["result"], details["mean"], details["episodes_asked"]) == ("outage", None, sum(counts))
+    # The result keeps the errors of the first 3 episodes that could not run.
+    assert details["episode_errors"] == ["sandbox failed"] * 3
+
+
+def test_the_kept_episode_errors_are_cut(tmp_path: Path) -> None:
+    service = ScriptedEpisodes(tmp_path / "tasks", [None] * 8, episode_error="x" * (checks.ERROR_CHARS + 10))
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
+    task, errors = validated(generator)
+    details = calibration_details(closed_with(generator, task, errors))
+    assert details["episode_errors"] == ["x" * checks.ERROR_CHARS] * 3
+
+
+def test_a_failed_episode_request_stops_the_round_and_the_next_attempt_starts_again(tmp_path: Path) -> None:
+    error = "job 9 failed: the episode job did not finish"
+    service = ScriptedEpisodes(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], error=error)
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
     (task,) = asyncio.run(generator.generate(REQUEST))
-    outage = f"none of 8 calibration episodes of {NAMES[0]} scored, so its difficulty is unknown: sandbox failed"
-    with pytest.raises(GeneratorError, match=outage):
+    with pytest.raises(GeneratorError, match=error):
         asyncio.run(generator.validate(task))
-    # The episodes that could not run are asked for once more, and no more than once.
-    assert service.requested_counts == [4, 4]
     assert not (tmp_path / "tasks" / NAMES[0]).exists(), "no copy is left"
     asyncio.run(generator.record_results((), generation=0))
     document = json.loads((generator.state_dir / "generation-00000.json").read_text())
-    assert document["error"] == f"the check of {NAMES[0]} could not run: {outage}"
+    assert document["error"] == f"the check of {NAMES[0]} could not run: {error}"
     [proposal] = document["proposals"]
     assert proposal["stage"] == "unreached" and [check["check"] for check in proposal["checks"]] == ["oracle"]
     # The next attempt calibrates the task again from the start.
-    service.outcomes = [0.0, 1.0, 1.0, 0.0]
+    service.error = ""
     assert asyncio.run(generator.validate(task)).is_valid
-    assert service.requested_counts == [4, 4, 4]
-    # An episode request that the generator service fails stops the round too.
-    service.error = "job 9 failed: the episode job did not finish"
-    with pytest.raises(GeneratorError, match="job 9 failed"):
-        asyncio.run(generator.validate(task))
+    assert service.requested_counts == [4, 4]
 
 
 @pytest.mark.parametrize(
@@ -489,4 +543,4 @@ def test_measure_mode_records_calibration_and_never_refuses(
     elif error:
         assert record["could_not_run"] == f"the calibration episodes of {NAMES[0]} could not run: {error}"
     else:
-        assert record["could_not_run"].startswith(f"none of 8 calibration episodes of {NAMES[0]} scored")
+        assert record["could_not_run"].startswith(f"0 of 8 calibration episodes of {NAMES[0]} scored")

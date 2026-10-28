@@ -85,7 +85,7 @@ Three kinds of failure end differently:
 
 - **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken.
 - **The agent's own limits** are not outages: a run that spent `max_model_calls`, ran out of time or hit its reply budget leaves its task as it stands, and admission checks it like any other task.
-- **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. A refusing calibration with no scored episode ends the round in the same way ([solver calibration](#solver-calibration)). A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
+- **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. So does an episode request of a refusing calibration that the generator service fails ([solver calibration](#solver-calibration)). A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
 
 ### The report and the task store
 
@@ -133,11 +133,11 @@ The band marks a task after the recipe trained on it. The calibration measures t
 
 1. 4 episodes run. The episodes that could not run (the sandbox, the agent or the verifier failed before a score) are left out and asked for once more. An episode that ran without a reward counts as 0.
 2. When the mean reward is within 0.15 of a band edge, on either side, and fewer than 8 episodes scored, the rest up to 8 run, with the same one retry. A null bound is no edge.
-3. The task is kept when the mean reward is inside `[band_low, band_high]` and the population standard deviation of the rewards is at least 0.1.
+3. The task is kept when the mean reward is inside `[band_low, band_high]` and the population standard deviation of the rewards is at least 0.1. With fewer than 2 scored episodes, the calibration could not run (below).
 
 Upstream also gives a task below the band one episode with hints from the reference solution. Only its proposer revision feedback reads that reward. This generator has no such feedback, so the calibration runs no hint episode.
 
-The calibration is the last task check in `validate`, so it runs only when the oracle check and a refusing test review pass. It asks the generator service (`POST /episodes`) for episodes of the task's copy on the arm `calibration`, with the model that the deployment serves, which is the policy in training. The agent is the generator service's own (`generator.agent`). These are rollout episodes: Reef keeps no record of them, and nothing trains on them.
+The calibration is the last task check in `validate`, so it runs only when the oracle check and a refusing test review pass. It asks the generator service (`POST /episodes`) for episodes of the task's copy on the arm `calibration`, with `calibration_model`. Without it, the episodes use the generator service's default model: its deployment's `inference.upstream-model`, else its `model-path`. In the example's Tinker deployment, that is the policy in training, `Qwen/Qwen3-8B`. In the pool build below, on [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml), it is that provider's `gpt-4o`, so the calibration measures `gpt-4o` and not the policy; name the solver in `calibration_model` when that deployment's Reef can serve it. The agent is the generator service's own (`generator.agent`). These are rollout episodes: Reef keeps no record of them, and nothing trains on them.
 
 The calibration has a mode:
 
@@ -152,20 +152,19 @@ The calibration has a mode:
 | `calibration_max_rollouts` | 8 | the most episodes that score; an integer of at least `calibration_rollouts` |
 | `calibration_margin` | 0.15 | the distance from a band edge that asks for more episodes; in [0, 1] |
 | `calibration_min_std` | 0.1 | the least population standard deviation of the rewards; in [0, 0.5] |
+| `calibration_model` | null | the model the calibration episodes ask for; null is the generator service's default model |
 
-The calibration uses the band of `band_low` and `band_high`.
+The calibration uses the band of `band_low` and `band_high`. Each key is checked also when the mode is `off`.
 
 The generation report keeps the calibration's settings under `calibration`, beside `band`, when the mode is not `off`. Each task's check results get a `calibration` entry: the rewards, their mean and standard deviation, the episodes asked for, the episodes that could not run, whether more episodes ran, the place against the band, the result (`kept`, `below`, `above`, `no_variance` or `outage`) and the errors of the first 3 episodes that failed.
 
-When no episode scored, the task's difficulty is unknown. In `refuse` mode, the round then ends, as it does for an oracle check that cannot run. An episode request that the generator service fails ends the round too. The task stays pending, and the next attempt calibrates it again from the start. In `measure` mode, the calibration could not run, with the result `outage`, and the task stays valid.
+When fewer than 2 episodes scored, the task's difficulty is unknown, and the calibration could not run, with the result `outage`. The cause can be the task itself, for example a task image in which the solver's agent cannot start, so the round goes on: in `refuse` mode the task is invalid with stage `unchecked`, and in `measure` mode it stays valid. An episode request that the generator service fails is an outage of the service. In `refuse` mode it ends the round, as an oracle check that cannot run does; the task stays pending, and the next attempt calibrates it again from the start. In `measure` mode the calibration could not run, and the task stays valid.
 
 The recipe gives a task its train/eval split after `validate`, so eval tasks are calibrated too. Eval tasks run no training episodes.
 
 Cost: each candidate runs up to `calibration_max_rollouts` full episodes that score, and one more for each episode that could not run, `generator.concurrency` (2 by default) at a time. A repository task gives the solver up to an hour per episode. `validate` checks one candidate at a time, so a generation of 8 candidates can take hours more. All attempts of one generation must finish within `pipeline.record2sample.config.generation_deadline_seconds` (1800 by default), so raise it when the calibration is on. A restart calibrates a pending candidate again from the start.
 
 No results with the calibration are published yet.
-
-Known limit: a task whose oracle passes while every solver episode fails to run, for example because the solver's agent cannot start in the task's image, ends every round in `refuse` mode until the task is removed or the mode changes.
 
 ## The task checks
 
@@ -239,7 +238,7 @@ With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a gene
 
 The built-in generated-task recipe rolls a generation's tasks out only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, build the task pool first, then train from it:
 
-1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no training episodes. With `calibration` on, `validate` runs the calibration episodes on the generator service. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
+1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no training episodes. With `calibration` on, `validate` runs the calibration episodes on the generator service, with `calibration_model` or that deployment's model (see [solver calibration](#solver-calibration)). Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
 
    ```python
    import os
