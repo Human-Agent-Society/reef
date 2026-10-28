@@ -329,15 +329,14 @@ class Trainer:
             return self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
 
     def needs_polling(self) -> bool:
-        """Whether the trainer's worker polls at a fixed interval: a job or an artifact evaluation runs, or the
-        pipeline's own work runs.
+        """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
 
         Otherwise the worker sleeps until the next accepted record.
         """
         with self._lock:
             if self._job_loop is not None:
                 state = JobLoopState.from_dict(self._state)
-                if state.job is not None or state.evaluations:
+                if state.job is not None:
                     return True
             return self._pipeline.background_jobs_running()
 
@@ -545,8 +544,7 @@ class Trainer:
             loop_state = None if self._job_loop is None else JobLoopState.from_dict(observed_state)
             job = None if loop_state is None else loop_state.job
             data = None if job is not None else self.reserve_job_data(serving_runtime_load_id)
-            # With no job and no job data, the artifact evaluations that run are polled.
-            if job is None and data is None and (loop_state is None or not loop_state.evaluations):
+            if job is None and data is None:
                 return None
         # Submitting a job, evaluating a checkpoint or preparing a harness candidate can take minutes.
         # Keep the job data reserved, but release the trainer lock so status remains live.

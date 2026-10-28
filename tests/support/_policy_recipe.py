@@ -67,7 +67,6 @@ class TestPolicyRecipe(WeightTrainingRecipe):
                 FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
                 AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
-                model_kind="model",
             ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,

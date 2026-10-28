@@ -10,33 +10,13 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import (
-    CheckpointCandidate,
-    EvaluationResult,
-    PolicyEvaluation,
-    PolicyHarness,
-    PolicyModel,
-    RolloutScore,
-    RolloutScores,
-    SelectionDecision,
-)
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.evaluation import CheckpointCandidate, EvaluationResult, SelectionDecision
+from reef.core.job_data import JobOutcome
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import (
-    ArtifactEvaluation,
-    EvaluationJob,
-    FixedJobPlan,
-    JobLoop,
-    JobLoopState,
-    JobPlan,
-    JobPlanContext,
-    JobRequest,
-    PendingEvaluation,
-    RunningJob,
-)
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlan, JobPlanContext, JobRequest, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
@@ -112,7 +92,6 @@ def loop_with(component, *, plan=None, evaluator=None, scenario="math"):
         plan or FixedJobPlan(JobRequest({"method": "sft"})),
         evaluator or AlwaysSelectCheckpointPlugin(),
         scenario=scenario,
-        model_kind="model",
     )
 
 
@@ -335,12 +314,9 @@ def test_the_committed_state_round_trips_and_checks_its_values():
         RunningJob("j", -1)
     with pytest.raises(ValueError, match="job_id"):
         RunningJob("")
-    evaluating = JobLoopState("/s", None, 3, FINISHED, (PendingEvaluation("e1", "j:1"),))
-    assert JobLoopState.from_dict(evaluating.to_dict()) == evaluating
-    with pytest.raises(ValueError, match="distinct job IDs"):
-        JobLoopState(evaluations=(PendingEvaluation("e1", "j:1"), PendingEvaluation("e1", "j:2")))
-    with pytest.raises(ValueError, match="job_id and candidate_id"):
-        JobLoopState.from_dict({**evaluating.to_dict(), "evaluations": [{"job_id": "e1"}]})
+    # An older Reef also kept its training component's evaluation jobs; Reef reads the state and drops them.
+    older = {**state.to_dict(), "evaluations": [{"job_id": "e1", "candidate_id": "j:1"}]}
+    assert JobLoopState.from_dict(older) == state
 
 
 @pytest.mark.unit
@@ -533,135 +509,3 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
         default_job_samples=1,
     )
     assert stages[-1].outcomes == ended.outcomes
-
-
-class EvalTasks(ArtifactEvaluation):
-    """Evaluates each artifact on one task, or on none when ``empty``."""
-
-    def __init__(self, tmp_path: Path, *, empty: bool = False) -> None:
-        self.task = TaskSample(tmp_path, metadata={"task": {"name": "held-out", "split": "eval"}})
-        self.empty = empty
-
-    def evaluation_job(self, candidate):
-        if self.empty:
-            return None
-        return EvaluationJob(
-            JobData(f"{candidate.candidate_id}:evaluation", (self.task,)), {"evaluation_of": candidate.candidate_id}
-        )
-
-
-def policy_evaluation(kind: str) -> PolicyEvaluation:
-    """An evaluation of the Harbor agent on a model of ``kind``: one task, scored 1.0 and 0.0."""
-    model = PolicyModel("qwen", "tinker://eval/sampler" if kind == "model_adapter" else None)
-    scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
-    return PolicyEvaluation(PolicyHarness("terminus-2"), model, scores)
-
-
-@pytest.mark.unit
-def test_every_artifact_is_evaluated_from_its_own_checkpoint_and_its_result_is_committed(component, tmp_path):
-    loop = JobLoop(
-        component,
-        FixedJobPlan(JobRequest({"method": "sft"})),
-        AlwaysSelectCheckpointPlugin(),
-        scenario="math",
-        model_kind="model",
-        artifact_evaluation=EvalTasks(tmp_path),
-    )
-    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
-    training = state.job.job_id
-    first, second = (SavedCheckpoint(step, str(tmp_path / str(step)), str(tmp_path / str(step))) for step in (1, 2))
-    component.statuses[training] = JobStatus(training, "running", (first, second))
-
-    decided = loop.poll(state).result
-    state = JobLoopState.from_dict(decided.state)
-    (evaluation,) = state.evaluations
-    submitted = component.jobs[-1]
-    assert (evaluation.candidate_id, submitted.job_id) == (f"{training}:1", evaluation.job_id)
-    assert submitted.start == first.path and submitted.parameters == {"evaluation_of": f"{training}:1"}
-    assert decided.metrics["artifact_evaluation"] == {"job_id": evaluation.job_id, "event": "submitted"}
-    state = JobLoopState.from_dict(loop.poll(state).result.state)
-    assert [pending.candidate_id for pending in state.evaluations] == [f"{training}:1", f"{training}:2"]
-    assert component.jobs[-1].start == second.path, "each artifact is scored from its own checkpoint"
-
-    # The training job ends while both evaluations run; the trainer polls them alone afterwards.
-    component.statuses[training] = JobStatus(training, "finished", (first, second))
-    state = JobLoopState.from_dict(loop.poll(state).result.state)
-    assert state.job is None and len(state.evaluations) == 2
-    assert loop.poll(state) is None
-    later = state.evaluations[1].job_id
-    report = policy_evaluation("model").to_json()
-    component.statuses[later] = JobStatus(later, "finished", metrics={"policy_evaluation": report, "rollouts": 2})
-    recorded = loop.poll(state).result
-    assert recorded.artifact is None and recorded.metrics["artifact_evaluation"] == {
-        "candidate_id": f"{training}:2",
-        "job_id": later,
-        "event": "finished",
-        "metrics": {"rollouts": 2},
-        "policy_evaluation": report,
-        "mean_score": 0.5,
-    }
-    state = JobLoopState.from_dict(recorded.state)
-    earlier = state.evaluations[0].job_id
-    component.statuses[earlier] = JobStatus(earlier, "failed", error="the sandbox did not start")
-    failed = loop.poll(state).result
-    assert failed.metrics["artifact_evaluation"]["error"] == "the sandbox did not start"
-    assert JobLoopState.from_dict(failed.state).evaluations == ()
-    # A finished evaluation job must report a policy evaluation of the kind of model that the trainer publishes.
-    for metrics, error in (
-        ({}, "no valid policy_evaluation"),
-        ({"policy_evaluation": {"scores": []}}, "no valid policy_evaluation"),
-        ({"policy_evaluation": policy_evaluation("model_adapter").to_json()}, "evaluated a model_adapter"),
-    ):
-        component.statuses[earlier] = JobStatus(earlier, "finished", metrics=metrics)
-        event = loop.poll(state).result.metrics["artifact_evaluation"]
-        assert event["event"] == "failed" and error in event["error"] and "policy_evaluation" not in event
-    with pytest.raises(ValueError, match="polls only a running job or an artifact evaluation"):
-        loop.poll(JobLoopState.from_dict(failed.state))
-    with pytest.raises(ValueError, match="model or model_adapter"):
-        JobLoop(
-            component,
-            FixedJobPlan(JobRequest()),
-            AlwaysSelectCheckpointPlugin(),
-            scenario="math",
-            model_kind="harness",
-        )
-
-
-@pytest.mark.unit
-def test_an_artifact_with_nothing_to_evaluate_on_submits_no_evaluation(component, tmp_path):
-    loop = JobLoop(
-        component,
-        FixedJobPlan(JobRequest({"method": "sft"})),
-        AlwaysSelectCheckpointPlugin(),
-        scenario="math",
-        model_kind="model",
-        artifact_evaluation=EvalTasks(tmp_path, empty=True),
-    )
-    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"))
-    component.statuses[state.job.job_id] = JobStatus(state.job.job_id, "running", (saved,))
-    decided = loop.poll(state).result
-    assert JobLoopState.from_dict(decided.state).evaluations == () and "artifact_evaluation" not in decided.metrics
-    assert len(component.jobs) == 1
-
-
-@pytest.mark.unit
-def test_a_trainer_with_no_job_polls_its_artifact_evaluations_until_they_end(component):
-    state = JobLoopState("/start", None, 1, FINISHED, (PendingEvaluation("e1", "j0:1"),))
-    trainer = Trainer.build(
-        "math",
-        SQLiteRecordStore(),
-        pipeline_factory=threshold_pipeline,
-        job_loop=loop_with(component),
-        algorithm_state=state.to_dict(),
-        default_job_samples=1,
-    )
-    component.statuses["e1"] = JobStatus("e1", "running")
-    assert trainer.needs_polling() and trainer.run_once() is None
-    component.statuses["e1"] = JobStatus(
-        "e1", "finished", metrics={"policy_evaluation": policy_evaluation("model").to_json()}
-    )
-    recorded = trainer.run_once()
-    assert recorded is not None and recorded.metrics["artifact_evaluation"]["candidate_id"] == "j0:1"
-    trainer.commit(trainer.prepare_commit(recorded))
-    assert JobLoopState.from_dict(trainer.state).evaluations == () and not trainer.needs_polling()

@@ -1522,23 +1522,9 @@ Without an ``evaluation`` section, a weight recipe uses
 every saved checkpoint and adds no metrics. ``ManualPromotionPlugin`` selects
 none, so a person promotes each release. The commit already records the
 checkpoint's ``training_metrics``, and it refuses an evaluation or decision
-metric whose key is a training metric or ``selected``, ``selection``,
-``training_job`` or ``artifact_evaluation``.
-
-A weight recipe can also evaluate every artifact asynchronously: its
-``artifact_evaluation(task_storage)`` returns an ``ArtifactEvaluation``
-(``reef.train.jobs``), whose ``evaluation_job(candidate)`` gives the data and
-parameters of an evaluation job, or ``None``. The job loop submits that job from
-the candidate's checkpoint when it decides the candidate, keeps it in
-``JobLoopState.evaluations``, and commits its result as
-``artifact_evaluation`` when it ends. The parameters must ask the component to
-score its start without training, such as Tinker's ``evaluation_of``. The
-finished job must report a ``PolicyEvaluation`` (``reef.core.evaluation``) in
-its metrics as ``policy_evaluation``: the harness and the model that its
-rollouts ran, and their ``RolloutScores``. The model must be of the serving
-runtime's ``InferenceRuntime.served_weight_kind``. The job loop commits the
-evaluation and its ``mean_score``, and records any other result as a failed
-evaluation.
+metric whose key is a training metric or ``selected``, ``selection`` or
+``training_job``. A training component only trains: it runs no evaluation of
+an artifact.
 
 A configured plugin inherits ``ConfiguredEvaluationPlugin``. It implements the
 class method ``from_config(config, *, runtime, scenario, environ)``, which
@@ -1833,11 +1819,7 @@ the optional ``scheduling``, optional ``batch_size``, ``kl_coef`` and
 ``learning_rate`` overrides, and ``save_interval``, the optimizer steps between saved
 checkpoints (by default, one checkpoint when the job ends). A saved checkpoint
 is both the start of a later job and the release Reef publishes. A job of
-Harbor tasks also takes ``rollout``, the rollouts of each task, and
-``evaluation_of``, a non-empty name: such an evaluation job rolls its tasks out
-from its start, saves no checkpoint, and reports ``evaluation_of`` and
-``policy_evaluation`` with ``rollout_rewards``. Its policy is the Harbor agent
-and the start's sampler, a ``model_adapter``.
+Harbor tasks also takes ``rollout``, the rollouts of each task.
 
 ``TinkerDeployment.default_serving`` is ``trainer``: its
 ``trainer_serving_config`` selects ``reef.inference.tinker.TinkerInferenceRuntime``

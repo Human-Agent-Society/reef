@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.evaluation import PolicyEvaluation, PolicyHarness, PolicyModel, RolloutScore, RolloutScores
+from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.harness.client.tasks import RolloutRow, TaskLab
@@ -98,9 +98,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add", "sort", "sort"]
     assert rollouts.rewards() == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": ()}
     # The sandbox of "broken" did not start: its rollouts failed, which is not the policy's failure.
-    assert rollouts.evaluation.harness == PolicyHarness("terminus-2")
-    assert rollouts.evaluation.model == PolicyModel(MODEL, "tinker://start/sampler")
-    assert rollouts.evaluation.scores.to_json() == [
+    assert rollouts.scores.to_json() == [
         {"task": "add", "scores": [1.0, 1.0]},
         {"task": "sort", "scores": [0.0, 0.0]},
         {"task": "broken", "scores": ["failed", "failed"]},
@@ -196,8 +194,7 @@ def grouped(tmp_path: Path) -> TaskJobRollouts:
         return TrajectorySample(trajectory, group_id=name)
 
     scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
-    evaluation = PolicyEvaluation(PolicyHarness("terminus-2"), PolicyModel(MODEL, "tinker://base/sampler"), scores)
-    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), evaluation)
+    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
 
 
 @pytest.mark.unit
@@ -241,7 +238,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
         # The rollouts are kept: running the job again trains them without new rollouts.
         kept = json.loads((component.job_directory("job-0") / ROLLOUTS_FILE).read_text())
-        assert kept["evaluation"] == grouped(tmp_path).evaluation.to_json()
+        assert kept["scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
         settings = component.job_parameters(parameters).rollout
         assert component.task_rollouts(job, component.job_directory("job-0"), component._base, settings) == grouped(
             tmp_path
@@ -277,39 +274,5 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
         ):
             with pytest.raises(ValueError, match=message):
                 component.submit(TrainingJob("j", "tinker", None, JobData("d", items), parameters))
-    finally:
-        component.close()
-
-
-@pytest.mark.unit
-def test_an_evaluation_job_scores_its_start_and_trains_nothing(tmp_path, monkeypatch):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
-    def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
-        return grouped(tmp_path)
-
-    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
-    client = Client()
-    component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
-    )
-    try:
-        parameters = {
-            "method": TrainingMethod("task_group").to_dict(),
-            "rollout": ROLLOUT,
-            "evaluation_of": "job-3",
-        }
-        task = harbor_task(tmp_path, "add")
-        component.submit(TrainingJob("eval-0", "tinker", None, JobData("d", (task,)), parameters))
-        status = finished(component, "eval-0")
-        assert status.state == "finished" and status.checkpoints == () and client.trained == []
-        assert status.metrics["evaluation_of"] == "job-3"
-        evaluation = PolicyEvaluation.from_json(status.metrics["policy_evaluation"])
-        assert evaluation == grouped(tmp_path).evaluation and evaluation.mean_score == 0.5
-        trajectory = grouped(tmp_path).samples[0]
-        with pytest.raises(ValueError, match="its data must be tasks"):
-            component.submit(
-                TrainingJob("j", "tinker", None, JobData("d", (trajectory,)), {**parameters, "rollout": None})
-            )
     finally:
         component.close()

@@ -168,8 +168,8 @@ def test_the_job_loop_refuses_a_plan_that_returns_no_job_request() -> None:
 
     component = StubTrainingComponent()
     with pytest.raises(TypeError, match="plan must be a JobPlan"):
-        JobLoop(component, "sft", AlwaysSelectCheckpointPlugin(), scenario="s", model_kind="model")  # type: ignore[arg-type]
-    loop = JobLoop(component, Broken(), AlwaysSelectCheckpointPlugin(), scenario="s", model_kind="model")
+        JobLoop(component, "sft", AlwaysSelectCheckpointPlugin(), scenario="s")  # type: ignore[arg-type]
+    loop = JobLoop(component, Broken(), AlwaysSelectCheckpointPlugin(), scenario="s")
     with pytest.raises(TypeError, match=r"Broken\.next_job must return a JobRequest"):
         loop.submit(JobLoopState(), batch("b"))
     assert component.submitted == []

@@ -233,8 +233,7 @@ class PolicyEvaluation:
 
     Values: ``harness`` and ``model`` are the policy that every rollout ran. ``scores`` holds the score of each
     rollout, by task, in run order. ``mean_score`` is ``mean_score(scores.rollouts())``.
-    Purpose: a training component's evaluation job reports it in its metrics as ``policy_evaluation``
-    (``to_json``), and the weight trainer's job loop reads it (``from_json``) and commits it.
+    Purpose: an evaluation of an artifact gives it; ``to_json`` and ``from_json`` keep it with the evaluation.
     """
 
     harness: PolicyHarness
