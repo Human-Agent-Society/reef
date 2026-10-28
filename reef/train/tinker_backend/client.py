@@ -58,10 +58,12 @@ class TinkerClient(ABC):
 
     @abstractmethod
     def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
-        """Raise ``ValueError`` unless every ``tinker://`` path of ``checkpoint`` resolves on the service.
+        """Raise ``ValueError`` unless ``checkpoint.state_path`` resolves on the service as a LoRA of the configured
+        model with the configured rank.
 
-        Each path must name a LoRA of the configured model with the configured rank. An artifact import calls it
-        before it publishes a Tinker manifest that came from outside Reef.
+        An artifact import calls it before it publishes a Tinker manifest that came from outside Reef. Only the
+        state path is looked up: the Tinker API describes a saved state (``weights_info``) but no sampler or
+        exported-adapter path, and Spindle refuses those paths there.
         """
 
     @abstractmethod
@@ -246,15 +248,16 @@ class TinkerSDKClient(TinkerClient):
             shutil.rmtree(staging, ignore_errors=True)
 
     def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
-        paths = (checkpoint.state_path, checkpoint.sampler_path)
+        path = checkpoint.state_path
         rest = self._service.create_rest_client()
-        for path in paths + (() if checkpoint.adapter_path is None else (checkpoint.adapter_path,)):
-            try:
-                info = rest.get_weights_info_by_tinker_path(path).result(timeout=self._config.train_timeout_s)
-            except self._sdk.NotFoundError as exc:
-                raise ValueError(f"the Tinker path {path} does not resolve on the configured service") from exc
-            if info.base_model != self._model or info.is_lora is not True or info.lora_rank != self._config.lora_rank:
-                raise ValueError(f"the Tinker path {path} is no rank {self._config.lora_rank} LoRA of {self._model}")
+        try:
+            info = rest.get_weights_info_by_tinker_path(path).result(timeout=self._config.train_timeout_s)
+        except self._sdk.NotFoundError as exc:
+            raise ValueError(f"the Tinker path {path} does not resolve on the configured service") from exc
+        except self._sdk.BadRequestError as exc:
+            raise ValueError(f"the configured service refuses the Tinker path {path}: {exc}") from exc
+        if info.base_model != self._model or info.is_lora is not True or info.lora_rank != self._config.lora_rank:
+            raise ValueError(f"the Tinker path {path} is no rank {self._config.lora_rank} LoRA of {self._model}")
 
     def close(self) -> None:
         close_service(self._sdk, self._service, "success", timeout_s=self._config.train_timeout_s)

@@ -1280,10 +1280,10 @@ component makes. The training backend and its configuration decide it:
 |                             | the configured modules                         |                  |
 +-----------------------------+------------------------------------------------+------------------+
 | Tinker                      | ``tinker-checkpoint.json`` of the configured   | allowed          |
-|                             | model, rank and service; each ``tinker://``    |                  |
-|                             | path in it resolves on that service. With      |                  |
-|                             | ``export_adapter``, also the LoRA adapter      |                  |
-|                             | above                                          |                  |
+|                             | model, rank and service; its ``state_path``    |                  |
+|                             | resolves on that service as a LoRA of that     |                  |
+|                             | model and rank. With ``export_adapter``, also  |                  |
+|                             | the LoRA adapter above                         |                  |
 +-----------------------------+------------------------------------------------+------------------+
 | Harness                     | ``reef-entries.json`` with entries that a seed | refused: the     |
 |                             | may hold                                       | other files are  |

@@ -186,7 +186,7 @@ class TinkerTrainingComponent(LocalJobComponent):
         return str(self._base)
 
     def check_release(self, directory: Path) -> None:
-        """A manifest of a checkpoint of this component's model, rank and service, whose paths resolve there.
+        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there.
 
         With ``export_adapter``, the release also holds the PEFT adapter that ``release_format`` names.
         """

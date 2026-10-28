@@ -100,8 +100,8 @@ class RemoteClient(TinkerClient, TinkerSampler):
             (release / name / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def check_remote(self, checkpoint):
-        for path in {checkpoint.state_path, checkpoint.sampler_path} & self.missing:
-            raise ValueError(f"the Tinker path {path} does not resolve on the configured service")
+        if checkpoint.state_path in self.missing:
+            raise ValueError(f"the Tinker path {checkpoint.state_path} does not resolve on the configured service")
 
     def close(self):
         self.closed = True
@@ -418,8 +418,8 @@ def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(co
         component.check_release(release)
     UNTRAINED.write(release)
     component.check_release(release)
-    client.missing = {UNTRAINED.sampler_path}
-    with pytest.raises(ValueError, match=f"{UNTRAINED.sampler_path} does not resolve"):
+    client.missing = {UNTRAINED.state_path}
+    with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
         component.check_release(release)
     TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
     with pytest.raises(ValueError, match="rank 8 LoRA"):

@@ -773,7 +773,7 @@ import accepts.
 A component's layout is the ``layout`` of its ``ComponentSurface``, an
 ``reef.surface.ArtifactLayout``. ``check(directory)`` returns when the
 directory holds an artifact in the layout of the component's releases, and
-every remote path that it names resolves. Otherwise it raises ``ValueError``,
+the remote weights that it names exist. Otherwise it raises ``ValueError``,
 and Reef answers HTTP 400. ``None``, the default, means that the component
 takes no import. The built-in recipes bind one:
 
@@ -1844,7 +1844,9 @@ loop:
        and weight files, ``adapter`` needs a PEFT adapter in ``adapter/``
        with a rank of at most ``adapter_rank`` and target modules within
        ``adapter_target_modules``. ``None`` refuses. Tinker checks its
-       manifest and that each ``tinker://`` path resolves on its service.
+       manifest and looks up its ``state_path`` on its service. The Tinker
+       API describes no sampler or exported-adapter path, so those are
+       checked only for their ``tinker://`` form.
    * - ``fresh_start(start)``
      - Return a start with the weights of ``start`` and no training state: a
        new optimizer state, the learning-rate schedule at step 0, and an
