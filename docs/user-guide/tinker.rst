@@ -30,8 +30,8 @@ Unset, Reef uses Thinking Machines' hosted Tinker. The trainer, its sampler and
 ``tinker://<run>/weights/<name>`` resolves only on the service that made it, so
 each checkpoint manifest records the service, and the component refuses a
 checkpoint that another service holds. A service may lack some calls; Spindle,
-for example, has no ``save_weights_external``, so ``export-adapter`` needs
-hosted Tinker. Reef makes a base-model sampling client only at its first use
+for example, serves no checkpoint archives, so Reef's own engines can serve
+only hosted Tinker's checkpoints (`Serve on inference engines`_). Reef makes a base-model sampling client only at its first use
 (a KL term, a task rollout or a request); on Spindle such a client starts a
 sampler pool.
 
@@ -144,8 +144,7 @@ Jobs, checkpoints, and recovery
 A job trains the optimizer steps of its data from the job's start checkpoint. It
 restores the saved weights **and optimizer state** in a new Tinker training
 session. It then saves the state (``save_state``) and the sampler weights
-(``save_weights_for_sampler``). With ``export-adapter``, it also saves the
-adapter in Tinker's key names (``save_weights_external``). Each save has one
+(``save_weights_for_sampler``). Each save has one
 explicit unique name and no expiration. Then the session closes. The job
 parameter ``save_interval``, which a recipe's job plan can set, gives the
 optimizer steps between two saved checkpoints. Without it, a job saves one checkpoint
@@ -185,8 +184,7 @@ The Reef control plane starts the engines on the component and loads each
 saved adapter into them. Tinker still trains in the HTTP service's process,
 and the trainer never talks to the engines.
 
-Set ``training.options.export-adapter: true``, so that each checkpoint's
-release holds its PEFT adapter. Then select ``inference.backend: sglang`` with
+Select ``inference.backend: sglang`` with
 the base model that Tinker trains in ``inference.model-path``,
 ``inference.num-gpus`` and, for tensor-parallel engines,
 ``inference.tensor-parallel-size``. Any engine setting selects
@@ -204,7 +202,6 @@ the base model that Tinker trains in ``inference.model-path``,
      options:
        state-dir: /var/lib/reef/tinker
        lora-rank: 32
-       export-adapter: true
 
 ``reef serve`` then starts an inference component on this host before the
 HTTP service. The component listens on a free loopback port and starts its own
@@ -215,25 +212,23 @@ they are set, and both children inherit them. The HTTP service starts the
 engines before it serves, so its readiness deadline is at least
 ``training.ready-timeout``.
 
-The engines start with LoRA serving enabled, from the release format that the
-component declares: ``max-lora-rank`` is ``lora-rank`` and
+The engines start with LoRA serving enabled: ``max-lora-rank`` is ``lora-rank`` and
 ``lora-target-modules`` is ``all``. ``max-loaded-loras`` and
 ``max-loras-per-batch`` come from ``inference.max-loaded-adapters``. The
 engines keep at most that many adapters resident. Each scenario keeps its
 served adapter resident, so this value must be at least the number of
 training scenarios; a scenario's new adapter replaces its own served adapter
-when no slot is free. Without ``export-adapter``, the HTTP service refuses
-engine serving when it starts, because the releases hold no adapter.
+when no slot is free.
 
 Each scenario trains its own adapter. A job runs the optimizer steps of its data
-on Tinker from the scenario's last saved checkpoint. At each save, it downloads
-the exported adapter into the ``tinker-adapter/`` directory of the checkpoint and
-converts it with ``tinker-cookbook`` into a PEFT adapter in its ``adapter/``
-directory. The engines load ``adapter/``. A merge into full weights, such as
-``tinker_cookbook.weights.build_hf_model``, reads ``tinker-adapter/``: the PEFT
-adapter keeps apart the projections that the engines fuse when they load it,
-such as Qwen3.5's ``in_proj_q/k/v``. When Reef selects the
-candidate, the control plane loads its ``adapter/`` into every engine under a
+on Tinker from the scenario's last saved checkpoint. A release still holds only
+its manifest. When the control plane loads a release, it downloads the adapter
+that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
+``weights.download`` does, and converts it into a PEFT adapter with
+``weights.build_lora_adapter``. It keeps the result under
+``<state-dir>/sampler-weights/``, one directory per sampler path, so a release
+downloads once. A service that serves no checkpoint archives, such as Spindle,
+fails the load. The control plane loads the PEFT adapter into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
 weight surface. The engines capture the sampled tokens and log probabilities
 as they do for Slime. A rejected candidate loads nothing. A restart starts the
@@ -290,7 +285,6 @@ sglang`` and add an ``inference.remote`` section with the component's URL:
      options:
        state-dir: /var/lib/reef/tinker
        lora-rank: 32
-       export-adapter: true
 
 ``reef serve`` then starts no local component. The control plane asks the
 remote component to start the engines with the settings described above. The
