@@ -3,23 +3,15 @@
 from __future__ import annotations
 
 import math
-import shutil
-import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
-from reef.core.weight_layout import ADAPTER_DIR
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
-
-#: The directory of a release that holds Tinker's adapter as Tinker saved it, in Tinker's key names. The cookbook's
-#: merge into full weights (``tinker_cookbook.weights.build_hf_model``) reads this form, not the PEFT conversion.
-TINKER_ADAPTER_DIR = "tinker-adapter"
 
 
 class TinkerClient(ABC):
@@ -37,23 +29,12 @@ class TinkerClient(ABC):
         learning_rates: Sequence[float],
         *,
         kl_coef: float,
-        export_adapter: bool,
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
         """Train one optimizer step per entry of ``steps`` from ``checkpoint``, step ``i`` at ``learning_rates[i]``.
 
-        ``loss`` weighs its KL term by ``kl_coef``. Return the checkpoint after the last step, whose
-        ``adapter_path`` names its exported adapter exactly when ``export_adapter`` is set, and Tinker's
+        ``loss`` weighs its KL term by ``kl_coef``. Return the checkpoint after the last step and Tinker's
         metrics of the steps. ``ValueError``: ``steps`` and ``learning_rates`` differ in length, or ``loss``
         refuses ``kl_coef``.
-        """
-
-    @abstractmethod
-    def download(self, checkpoint: TinkerCheckpoint, release: Path) -> None:
-        """Write the adapter that training exported for ``checkpoint`` into the release directory ``release``.
-
-        ``release / TINKER_ADAPTER_DIR`` gets the adapter as Tinker exported it, and ``release / ADAPTER_DIR`` its
-        conversion into a PEFT adapter in the base model's parameter names, which inference engines load. Neither
-        directory exists before the call. ``ValueError``: ``checkpoint.adapter_path`` is ``None``.
         """
 
     @abstractmethod
@@ -62,8 +43,8 @@ class TinkerClient(ABC):
         model with the configured rank.
 
         An artifact import calls it before it publishes a Tinker manifest that came from outside Reef. Only the
-        state path is looked up: the Tinker API describes a saved state (``weights_info``) but no sampler or
-        exported-adapter path, and Spindle refuses those paths there.
+        state path is looked up: the Tinker API describes a saved state (``weights_info``) but no sampler path,
+        and Spindle refuses sampler paths there.
         """
 
     @abstractmethod
@@ -95,38 +76,27 @@ class TinkerSDKClient(TinkerClient):
             api_key=self._api_key, project_id=self._config.project_id, base_url=self._config.base_url
         )
 
-    def _save(self, trainer: Any, *, export_adapter: bool) -> TinkerCheckpoint:
-        """Save ``trainer``'s weights durably, and with ``export_adapter`` also its adapter for ``download``."""
+    def _save(self, trainer: Any) -> TinkerCheckpoint:
+        """Save ``trainer``'s state and its sampler weights durably."""
         name = f"reef-{uuid.uuid4().hex}"
         # Explicit names create durable snapshots. Ephemeral sampler exports
         # cannot back Reef's versioned artifacts. None disables TTL expiry.
         timeout = self._config.train_timeout_s
         state = trainer.save_state(name, ttl_seconds=None).result(timeout=timeout)
         sampler = trainer.save_weights_for_sampler(name, ttl_seconds=None).result(timeout=timeout)
-        adapter = (
-            trainer.save_weights_external(name, ttl_seconds=None).result(timeout=timeout) if export_adapter else None
-        )
         return TinkerCheckpoint(
-            self._model,
-            self._config.lora_rank,
-            state.path,
-            sampler.path,
-            adapter_path=None if adapter is None else adapter.path,
-            service=self._config.base_url,
+            self._model, self._config.lora_rank, state.path, sampler.path, service=self._config.base_url
         )
 
     def initialize(self) -> TinkerCheckpoint:
-        """Save the untrained adapter of the configured rank: the base checkpoint, which changes nothing.
-
-        With ``export_adapter``, the checkpoint also names the exported adapter, as every saved checkpoint does.
-        """
+        """Save the untrained adapter of the configured rank: the base checkpoint, which changes nothing."""
         service = self._new_service()
         status = "errored"
         try:
             trainer = service.create_lora_training_client(
                 base_model=self._model, rank=self._config.lora_rank, seed=self._config.seed
             )
-            checkpoint = self._save(trainer, export_adapter=self._config.export_adapter)
+            checkpoint = self._save(trainer)
             status = "success"
             return checkpoint
         finally:
@@ -140,7 +110,6 @@ class TinkerSDKClient(TinkerClient):
         learning_rates: Sequence[float],
         *,
         kl_coef: float,
-        export_adapter: bool,
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
         if len(learning_rates) != len(steps):
             raise ValueError("Tinker training needs one learning rate per optimizer step")
@@ -180,7 +149,7 @@ class TinkerSDKClient(TinkerClient):
                 trainer.optim_step(self._sdk.AdamParams(learning_rate=learning_rate)).result(
                     timeout=self._config.train_timeout_s
                 )
-            result_checkpoint = self._save(trainer, export_adapter=export_adapter)
+            result_checkpoint = self._save(trainer)
             status = "success"
             return result_checkpoint, metrics
         finally:
@@ -201,51 +170,6 @@ class TinkerSDKClient(TinkerClient):
                 raise ValueError("Tinker base log probabilities must be finite for every response token")
             result.append([float(value) for value in response])
         return result
-
-    def download(self, checkpoint: TinkerCheckpoint, release: Path) -> None:
-        """Fetch the checkpoint's exported adapter into ``TINKER_ADAPTER_DIR``, then convert it into ``ADAPTER_DIR``.
-
-        ``checkpoint.adapter_path`` names the adapter that training exported
-        (``save_weights_external``) in Tinker's key names; Tinker signs one
-        download URL per file. The cookbook's converter renames the tensors to
-        the base model's parameter names, which is what SGLang and vLLM load.
-        It keeps projections that the engines fuse at load time, such as
-        Qwen3.5's ``in_proj_q/k/v``, apart, so a merge into full weights reads
-        ``TINKER_ADAPTER_DIR`` instead. ``ValueError``: the checkpoint has no
-        exported adapter, or a file path leaves the adapter's directory.
-        """
-        if checkpoint.adapter_path is None:
-            raise ValueError("the Tinker checkpoint was saved without an exported adapter (training.export_adapter)")
-        try:
-            from tinker_cookbook import weights
-        except ImportError as exc:
-            raise RuntimeError(
-                "serving Tinker checkpoints on a local engine needs tinker-cookbook: "
-                "uv pip install 'reef-infra[tinker]'"
-            ) from exc
-        urls = (
-            self._service.create_rest_client()
-            .get_external_weights_urls(checkpoint.adapter_path)
-            .result(timeout=self._config.train_timeout_s)
-            .urls
-        )
-        staging = release.parent / f".{release.name}.download"
-        shutil.rmtree(staging, ignore_errors=True)
-        raw = staging / "tinker"
-        raw.mkdir(parents=True)
-        try:
-            for name, url in urls.items():
-                target = (raw / name).resolve()
-                if not target.is_relative_to(raw.resolve()):
-                    raise ValueError(f"the exported Tinker adapter has a file outside its directory: {name}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                urllib.request.urlretrieve(url, target)
-            weights.build_lora_adapter(
-                base_model=self._model, adapter_path=str(raw), output_path=str(release / ADAPTER_DIR)
-            )
-            shutil.move(raw, release / TINKER_ADAPTER_DIR)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
 
     def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
         path = checkpoint.state_path
