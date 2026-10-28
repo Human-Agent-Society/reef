@@ -95,11 +95,11 @@ class ScenarioStore(ABC):
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:
-        """Read committed steps in increasing order, including rollbacks."""
+        """Read committed steps in increasing order: training steps, activations and new training starts."""
 
     @abstractmethod
     def training_run_position(self) -> tuple[int, int]:
-        """Return the last rollback step and subsequent training count."""
+        """Return the step of the last new training start and the training count after it."""
 
     @abstractmethod
     def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:

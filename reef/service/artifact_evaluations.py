@@ -106,7 +106,8 @@ class NewArtifacts(RecordObserver):
         self.queue: queue.SimpleQueue[NewArtifact | None] = queue.SimpleQueue()
 
     def record_committed(self, commit: CommitRecord) -> None:
-        if commit.operation == "training" and commit.checkpoint:
+        # An activation or a new training start names an artifact that exists already: it reports none.
+        if commit.made_artifact:
             self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
 
     def close(self) -> None:

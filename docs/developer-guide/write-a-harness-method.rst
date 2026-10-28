@@ -92,7 +92,7 @@ scored traces, or unscored records with the inference stages that "Two
 trace sources" below describes.
 
 Reef evaluates request mutations and applies the same ``evolution.publish``
-policy as for other steps. Pending agent proposals and periodic rollback
+policy as for other steps. Pending agent proposals and periodic
 rechecks cannot take over the step assigned to a request.
 
 Score a rollout

@@ -109,7 +109,8 @@ If you accept the change, install it:
 ```
 
 Confirm installation and complete any setup prompts. A version that changes
-an extension waits for this approval; installation promotes it before use.
+an extension does not serve until this approval; installation activates it
+before use.
 Extensions run with your privileges. Inspect declared requirements before
 providing values or allowing checks. Unmet requirements prevent installation.
 
@@ -169,7 +170,7 @@ export REEF_TOKEN=reef-local                  # Matches configs/deployment.yaml.
 `research` requests the paper-reading workflow. The exact requests are in
 [demos/bugfix.md](demos/bugfix.md) and [demos/research.md](demos/research.md).
 
-**The demos automatically promote pending extensions and run `setup --yes`.**
+**The demos automatically activate inactive extensions and run `setup --yes`.**
 They do not pause for the manual review described above. Unmet requirements
 or refused installation stop a demo with exit code `2`.
 If no change is selected, its test session uses the previously installed harness.
@@ -181,7 +182,7 @@ The script sets proposer limits of 900 seconds and 16,384 tokens by default.
 
 Measurement submits up to 12 fixed skill and rule requests, one at a time.
 It reports accepted requests, proposed changes, evaluated candidates, health
-passes, published releases, and pending releases. It does not install those
+passes, published releases, and inactive releases. It does not install those
 updates or run a session after each request.
 
 Each run saves `work/<mode>-<timestamp>.json`. Demo workspaces and receipts

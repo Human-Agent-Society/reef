@@ -148,15 +148,15 @@ async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:
 
 
 async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
-    """Create the scenario with eval tasks ``names``, and return its current release."""
+    """Create the scenario with eval tasks ``names``, and return its active artifact."""
     upload = await client.post(
         "/reef/scenarios/s/tasks?split=eval",
         headers={**AUTH, "Content-Type": "application/gzip"},
         data=archive(tmp_path, *names),
     )
     assert upload.status == 200, await upload.text()
-    releases = await (await client.get("/reef/scenarios/s/releases", headers=AUTH)).json()
-    return releases["releases"][0]["release_id"]
+    artifacts = await (await client.get("/reef/scenarios/s/artifacts", headers=AUTH)).json()
+    return next(row["artifact_id"] for row in artifacts["artifacts"] if row["active"])
 
 
 @pytest.mark.integration
@@ -359,6 +359,23 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
         session.commit_step(expected_step=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None)
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
+        # An activation, even one that publishes a composed release, and a new training start make no artifact.
+        operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
+        activation = CommitRecord(
+            step=3,
+            artifact_ref=ArtifactRef("c2", "a2", "a1"),
+            checkpoint=True,
+            operation="activate",
+            component="harness",
+            components={"harness": "c1", "weights": "c0"},
+            **operation,
+        )
+        start = CommitRecord(
+            step=4, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=False, operation="train_from", **operation
+        )
+        session.commit_step(expected_step=2, commit=activation)
+        session.commit_step(expected_step=3, commit=start)
+        assert new_artifacts.queue.empty(), "an activation or a new training start reports no artifact"
         session.close()
     finally:
         storage.close()

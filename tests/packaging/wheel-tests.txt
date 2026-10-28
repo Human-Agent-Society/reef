@@ -164,8 +164,8 @@ tests/runtime/test_runtime_ownership.py
 tests/runtime/test_shared_ray_runtime.py
 tests/scenario/test_commit_history.py
 tests/scenario/test_component_trainers.py
+tests/scenario/test_composite_activation_admission.py
 tests/scenario/test_composite_replay_parity.py
-tests/scenario/test_composite_rollback_admission.py
 tests/scenario/test_reef_concurrency.py
 tests/scenario/test_reef_scenarios.py
 tests/scenario/test_scenario_release_concurrency.py

@@ -1246,7 +1246,7 @@ The session header's ``loop`` names the loop that ran, or is null under a
 graph. In serve mode, it names the loop used on the session's first turn.
 ``graph`` still names the graph available to subagents. Loop code runs
 with the loop process's privileges. For that reason, ``native_loop``
-changes always require review: a selected change remains pending regardless
+changes always require review: a selected change stays inactive regardless
 of ``review_kinds``, and ``harness_try`` refuses to mount it.
 
 Native trajectory
@@ -1861,7 +1861,7 @@ fetch therefore cannot stop later polls.
 When a result appears, the report quotes the first 60 characters of the
 request and gives the next action:
 
-- A selected release names ``/versions <version> install``. A pending
+- A selected release names ``/versions <version> install``. An inactive
   release first asks the user to read it through ``/versions <version>``
   because it changes an extension.
 - A rejected step quotes ``selection.reason`` and suggests rephrasing or
@@ -1883,8 +1883,8 @@ When a step settles, pi offers to install its release. It waits until the
 session is idle (``ctx.isIdle()``); a busy session keeps the report's
 commands, and the next session start offers the release again.
 ``/versions <version> install`` also starts installation after a
-confirmation linking to the step page. Installing a release held back from
-the served head promotes it first. Rejected or skipped steps have no tree
+confirmation linking to the step page. Installing an inactive release
+activates it first. Rejected or skipped steps have no tree
 to install. The separate automatic update notice remains available at
 session start.
 
@@ -1934,7 +1934,7 @@ message and notice; others restart the watch. A restarted session can
 therefore still report a result missed earlier.
 
 With a UI, ``session_start`` announces the two commands and counts
-releases held back from the served head, with the install command:
+inactive releases, with the install command:
 ``N release(s) ready to install: /versions <version>[, <version>]
 (install with /versions <version> install)``.
 
@@ -1948,7 +1948,7 @@ and token query parameters. The page includes the design, review, and
 numbers. Accepting opens it through ``open``, ``xdg-open``, or
 ``rundll32``; declining prints the URL. Headless mode prints the summary
 and URL. ``/versions <version> install`` confirms before installing and
-promotes a held release first.
+activates an inactive release first.
 
 The service performs the actual edit. Its evolution step passes the filed
 request to the recipe's ``propose`` method and records it, including merged
@@ -1986,7 +1986,7 @@ Admission screens its text only for credential-shaped literals. The pi
 tutorial deployment therefore sets
 ``evolution.review_kinds: [code_extension]`` alongside ``requests: true``
 and ``version_check: true``. A selected release that changes an extension
-waits for promotion after review.
+stays inactive until a person reviews and activates it.
 
 ``propose`` receives the request's ``requires`` list beside its text.
 Each item names a requirement from the user's machine as

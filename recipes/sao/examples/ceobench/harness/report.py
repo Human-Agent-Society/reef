@@ -463,20 +463,27 @@ class ReleaseCount(ABC):
 
 
 class ScenarioReleases(ReleaseCount):
-    """The scenario's release list on the Reef service."""
+    """The scenario's commit log on the Reef service: one training commit per training step."""
 
     def __init__(self, service_url: str, scenario: str, token: str) -> None:
-        self.url = f"{service_url}/reef/scenarios/{scenario}/releases"
+        self.url = f"{service_url}/reef/scenarios/{scenario}/commits"
         self.token = token
 
     def training_releases(self) -> int | None:
-        request = urllib.request.Request(self.url, headers={"Authorization": f"Bearer {self.token}"})
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = json.loads(response.read())
-        except (urllib.error.URLError, TimeoutError, ValueError):
-            return None
-        return sum(1 for row in payload.get("releases", []) if row.get("operation") == "training")
+        count = 0
+        after_step: int | None = 0
+        while after_step is not None:
+            request = urllib.request.Request(
+                f"{self.url}?after_step={after_step}&limit=100", headers={"Authorization": f"Bearer {self.token}"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    payload = json.loads(response.read())
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                return None
+            count += sum(1 for row in payload.get("commits", []) if row.get("operation") == "training")
+            after_step = payload.get("next_after_step")
+        return count
 
 
 class TrainingPacer:

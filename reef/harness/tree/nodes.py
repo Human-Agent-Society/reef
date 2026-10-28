@@ -666,7 +666,7 @@ def validate_native_loop(config: Any) -> Mapping[str, Any]:
     The loop is code, so admission checks what a static read can: the module
     compiles, carries no credential, and defines a top level ``run_turn``
     taking the context. Whether it runs is the gate's to find out, and a
-    person promotes it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
+    person activates it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
     options = _require_mapping(config)
     _require_name(options)
     extra = sorted(set(options) - {"name", "code", "max_steps"})

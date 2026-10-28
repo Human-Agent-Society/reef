@@ -68,8 +68,8 @@ def collect(work: Path) -> dict:
         state = row.get("algorithm_state") or {}
         entries = state.get("entries") or []
         operation = row.get("operation")
-        if operation in ("rollback", "promote"):
-            # Not a step: the head moved by hand; the entries are what the row's state holds, if it holds any.
+        if operation in ("activate", "train_from"):
+            # Not a step: a person activated a release or set the training start. The row carries no state.
             ref = row.get("artifact_ref") or {}
             releases.append(
                 {
@@ -80,12 +80,10 @@ def collect(work: Path) -> dict:
                     "recorded_at": row.get("recorded_at"),
                     "mutations": [],
                     "result": None,
-                    "entries": entries or previous or [],
+                    "entries": previous or [],
                     "diff": None,
                 }
             )
-            if entries:
-                previous = entries
             continue
         if first_entries is None:
             # The seed the first step started from: the served tree before any commit.

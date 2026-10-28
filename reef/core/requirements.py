@@ -104,8 +104,8 @@ def _chain(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> list[Ma
     """The content chain of ``release_id`` through the catalog ``rows``, newest first.
 
     ``rows`` come oldest first, as ``GET /reef/harness/releases`` lists
-    them, and the row that published an id is its oldest row; a promote or
-    rollback row continues at its target, any other at its parent."""
+    them, and the row that published an id is its oldest row; the chain
+    continues at each row's parent."""
     published: dict[str, Mapping[str, Any]] = {}
     for row in rows:
         if isinstance(row, Mapping) and isinstance(row.get("release_id"), str):
@@ -116,7 +116,7 @@ def _chain(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> list[Ma
     while isinstance(current, str) and current in published and current not in seen:
         seen.add(current)
         chain.append(published[current])
-        current = published[current].get("rollback_target_release_id") or published[current].get("parent_release_id")
+        current = published[current].get("parent_release_id")
     return chain
 
 

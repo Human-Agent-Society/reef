@@ -50,7 +50,7 @@ _SERVICE_GONE = -1
 
 
 def training_release_count() -> int | None:
-    """Training releases committed so far; ``None`` while the service is busy.
+    """Training commits so far; ``None`` while the service is busy.
 
     The scenario's registry lock serializes release reads with training, so
     this request legitimately stalls for the length of an in-flight train
@@ -59,22 +59,28 @@ def training_release_count() -> int | None:
     is terminal: the stack is gone or this loop is talking to something that
     is not its deployment, and waiting cannot change either.
     """
-    request = urllib.request.Request(
-        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read())
-    except urllib.error.HTTPError:
-        return _SERVICE_GONE  # answered and rejected: not our deployment
-    except urllib.error.URLError as error:
-        if isinstance(getattr(error, "reason", None), ConnectionRefusedError):
-            return _SERVICE_GONE
-        return None  # stalled behind a train step — try again
-    except TimeoutError:
-        return None
-    return sum(1 for row in payload["releases"] if row.get("operation") == "training")
+    # Every training commit, a step that made no release included, page by page.
+    count = 0
+    after_step: int | None = 0
+    while after_step is not None:
+        request = urllib.request.Request(
+            f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/commits?after_step={after_step}&limit=100",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read())
+        except urllib.error.HTTPError:
+            return _SERVICE_GONE  # answered and rejected: not our deployment
+        except urllib.error.URLError as error:
+            if isinstance(getattr(error, "reason", None), ConnectionRefusedError):
+                return _SERVICE_GONE
+            return None  # stalled behind a train step — try again
+        except TimeoutError:
+            return None
+        count += sum(1 for row in payload["commits"] if row.get("operation") == "training")
+        after_step = payload["next_after_step"]
+    return count
 
 
 def wait_for_training(expected: int) -> None:

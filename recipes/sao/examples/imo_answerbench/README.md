@@ -205,7 +205,7 @@ chain:
 
 ```bash
 curl -s -H "Authorization: Bearer reef-local" \
-    http://127.0.0.1:8900/reef/scenarios/sao-smoke/releases
+    http://127.0.0.1:8900/reef/scenarios/sao-smoke/artifacts
 ```
 
 The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask

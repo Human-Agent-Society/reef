@@ -19,7 +19,7 @@ from threading import Lock, Thread
 from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import (
     ExperimentTracker,
-    RollbackExperimentEvent,
+    TrainFromExperimentEvent,
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
@@ -29,7 +29,7 @@ from reef.storage.scenario import ScenarioStore
 
 logger = logging.getLogger(__name__)
 
-ExperimentEvent = TrainingExperimentEvent | RollbackExperimentEvent
+ExperimentEvent = TrainingExperimentEvent | TrainFromExperimentEvent
 
 
 @dataclass(frozen=True)
@@ -89,8 +89,8 @@ class ExperimentReportQueue:
 
     def send(self, event: ExperimentEvent) -> None:
         try:
-            if isinstance(event, RollbackExperimentEvent):
-                self.tracker.record_rollback(event)
+            if isinstance(event, TrainFromExperimentEvent):
+                self.tracker.record_train_from(event)
             else:
                 self.tracker.record(event)
         except Exception:
@@ -147,27 +147,26 @@ class CommitExperimentObserver(RecordObserver):
         # the same run twice or report a training row twice in this session.
         self.last_reported_step = commit.step
         self.prepared = None
-        if not commit.pending:
+        if commit.operation == "activate" or (commit.made_artifact and not commit.pending):
             self.source_artifact_ref = commit.artifact_ref
         if self.durable:
-            if commit.operation == "rollback":
+            if commit.operation == "train_from":
                 self.run_segment, self.run_step = commit.step, 0
             elif commit.operation == "training":
                 self.run_step += 1
-        if commit.operation in ("rollback", "promote"):
-            # Promote already uses the rollback tracker event. Keep that contract.
-            target = commit.rollback_target_release_id
-            if target is None:
-                raise ValueError("a rollback or promote commit must name its target")
+        if commit.operation == "activate":
+            # An activation changes what serves, not the training run: no tracker event.
+            return
+        if commit.operation == "train_from":
             self.reports.put(
-                RollbackExperimentEvent(
+                TrainFromExperimentEvent(
                     scenario=commit.scenario,
                     recipe=self.recipe,
                     step=commit.step,
                     run_segment=run_segment,
-                    source_artifact_ref=source,
-                    produced_artifact_ref=commit.artifact_ref,
-                    target_release_id=target,
+                    served_artifact_ref=source,
+                    start_artifact_ref=commit.artifact_ref,
+                    component=commit.component,
                 )
             )
             return

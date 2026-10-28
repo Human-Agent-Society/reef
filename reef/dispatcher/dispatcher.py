@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
@@ -27,6 +27,7 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.runtime.deployment import close_runtimes
 from reef.scenario.admission import ScenarioAdmission
+from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
@@ -287,9 +288,10 @@ class Dispatcher(ScenarioLifecycle):
         # Capability probe only: file serving does not depend on the scenario.
         return self.recipe.build_surface("").files is not None
 
-    def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
+    def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
+        """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).releases()
+            return self.registry.require(scenario).artifacts()
 
     def read_records(
         self, scenario: str, *, after_sequence: int = 0, limit: int = 50, request_type: RequestType | None = None
@@ -335,13 +337,15 @@ class Dispatcher(ScenarioLifecycle):
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
             }
 
-    def promote(self, scenario: str, release_id: str) -> ArtifactRef:
-        """Serve a pending release: the rollback path under its own record operation."""
-        return self.rollback(scenario, release_id, operation="promote")
-
-    def rollback(self, scenario: str, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
+    def activate(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Make ``artifact_id`` the active artifact of ``component`` in ``scenario``; no training start moves."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).rollback(release_id, operation=operation)
+            return self.registry.require(scenario).activate(artifact_id, component)
+
+    def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).train_from(artifact_id, component)
 
     def current_artifact(
         self,

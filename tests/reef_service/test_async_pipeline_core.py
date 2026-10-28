@@ -269,9 +269,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
     _wait_for_jobs(dispatcher, 1)
 
     assert len(component.calls) == 1
-    published = [
-        row for row in dispatcher.list_releases("math") if row["checkpoint"] and row["operation"] == "training"
-    ]
+    published = [row for row in dispatcher.list_artifacts("math") if row["operation"] == "training"]
     assert len(published) == 1
     assert component.inference.current_runtime_load_id() == "w1"
 

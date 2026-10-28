@@ -197,8 +197,9 @@ def test_reef_eval_entrypoint_dispatches_the_documented_workload(
         # The entrypoint waits for training after each mocked rollout; keep that
         # query local too, regardless of what is listening on the example port.
         def _training_releases(request, timeout):
-            assert request.full_url.endswith("/reef/scenarios/sao-smoke/releases")
-            return io.BytesIO(json.dumps({"releases": [{"operation": "training"}] * (len(calls) * 6)}).encode())
+            assert request.full_url.endswith("/reef/scenarios/sao-smoke/commits?after_step=0&limit=100")
+            commits = [{"operation": "training"}] * (len(calls) * 6)
+            return io.BytesIO(json.dumps({"commits": commits, "next_after_step": None}).encode())
 
         monkeypatch.setattr(urllib.request, "urlopen", _training_releases)
 

@@ -16,13 +16,13 @@
 // filed requests not yet reported are kept beside the release file, so a
 // restarted pi reports their results at its next session start. /versions
 // lists the release chain with each step's result and request, marks the step
-// this tree runs as installed and the newest published one as current, and
+// this tree runs as installed and the one Reef serves as active, and
 // offers a step's page, which holds the design, the review and the numbers.
 // A settled step offers its install once the session is between turns, so a
 // win reaches the person who asked without them going looking; a busy session
 // keeps the report's commands instead. /versions <step> install runs the
-// same install on demand, promoting a release held back from the served head
-// first, so installing is the one decision. Nothing here writes
+// same install on demand, activating an inactive release first, so installing
+// is the one decision. Nothing here writes
 // a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
 // node can parse it in CI and pi's TS loader accepts it unchanged; pi-tui, which draws the entry, is imported
 // lazily from pi's own loader, so plain node loads the file without it. Evaluation
@@ -312,6 +312,11 @@ function metricsOf(row) {
   return row && row.metrics && typeof row.metrics === "object" ? row.metrics : {};
 }
 
+// The step whose release serves: the row the catalog marks active; -1 when no listed row is.
+function activeStep(rows) {
+  return rows.findIndex((row) => row.active);
+}
+
 // The record id of the request a step consumed; the watch keys its row by it.
 function requestIdOf(row) {
   const request = metricsOf(row).training_request;
@@ -503,17 +508,19 @@ export default function requests(pi) {
   const goneText = (id8) =>
     `reef: request ${id8} is no longer on the service (its scenario was reset); ask again with /reefine`;
 
-  // A promoted row stays pending in the catalog; the promote is a later row naming it, so with the rows given
-  // the pending row reads "promoted at vN".
+  // With the rows given, a selected step that made a release, is not active and is newer than the active row
+  // reads "inactive": its release waits for a person to activate it. The service's step label says the same.
   const resultOf = (row, rows = []) => {
-    if (row.pending) {
-      const promoted = rows.findIndex(
-        (other) => other.operation === "promote" && other.rollback_target_release_id === row.release_id,
-      );
-      return promoted >= 0 ? `promoted at v${promoted}` : "pending";
-    }
     const metrics = metricsOf(row);
-    if (typeof metrics.selected === "boolean") return metrics.selected ? "selected" : "rejected";
+    if (typeof metrics.selected === "boolean") {
+      if (!metrics.selected) return "rejected";
+      const active = activeStep(rows);
+      const position = rows.indexOf(row);
+      if (row.checkpoint && !row.active && active >= 0 && position >= 0) {
+        return position > active ? "inactive" : "selected";
+      }
+      return "selected";
+    }
     if (metrics.skipped) return "skipped";
     return String(row.operation || "unknown");
   };
@@ -532,10 +539,10 @@ export default function requests(pi) {
         details
       );
     }
-    if (selectionResult === "pending") {
+    if (selectionResult === "inactive") {
       return (
         `reef: '${ask}' is ready as release ${release}. This release changes an extension, so read it before ` +
-        `it runs: /versions v${step} opens the page, /versions v${step} install serves it.`
+        `it runs: /versions v${step} opens the page, /versions v${step} install activates it.`
       );
     }
     if (selectionResult === "rejected") {
@@ -682,45 +689,42 @@ export default function requests(pi) {
     ctx.ui.notify(`Installed release ${releaseId.slice(0, 8)}. Type /reload to load it now.`, "info");
   };
 
-  // The install after a confirmation that says why; a decline names the commands for later. A pending release
-  // is promoted first: it is held back from the served head, and installing it is the person saying it may run.
-  const offerInstall = async (releaseId, why, ctx, { pending = false } = {}) => {
+  // The install after a confirmation that says why; a decline names the commands for later. An inactive release
+  // is activated first: it does not serve yet, and installing it is the person saying it may run.
+  const offerInstall = async (releaseId, why, ctx, { inactive = false } = {}) => {
     if (!ctx.hasUI) return;
     const confirmed = await ctx.ui.confirm(`Install release ${releaseId.slice(0, 8)} now?`, why);
     if (!confirmed) {
       ctx.ui.notify(INSTALL_LATER_TEXT, "info");
       return;
     }
-    let install = releaseId;
-    if (pending) {
-      // A promote republishes the tree as a commit of its own, so the head it mints is what gets installed.
-      const head = await promoteRelease(releaseId, ctx);
-      if (!head) return; // the failure was notified; nothing was installed
-      install = head;
-    }
-    await installRelease(install, ctx);
+    // An activation mints no release, so the release activated is the one installed.
+    if (inactive && !(await activateRelease(releaseId, ctx))) return; // the failure was notified
+    await installRelease(releaseId, ctx);
   };
 
-  // The promote behind an install of a pending release: the served head moves to it, so later sessions are
+  // The activation behind an install of an inactive release: it serves from now on, so later sessions are
   // offered the same version. A failure is notified here and answers null.
-  const promoteRelease = async (releaseId, ctx) => {
+  const activateRelease = async (releaseId, ctx) => {
     let response;
     try {
-      response = await fetchWithTimeout(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote`, {
+      response = await fetchWithTimeout(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/activate`, {
         method: "POST",
         headers: { ...reefHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ release_id: releaseId }),
+        body: JSON.stringify({ artifact_id: releaseId }),
       });
     } catch (error) {
       ctx.ui.notify(`reef unreachable at ${serviceUrl}: ${message(error)}`, "error");
-      return null;
+      return false;
     }
     if (!response.ok) {
-      ctx.ui.notify(`reef refused the promote (HTTP ${response.status}): ${await response.text()}`, "error");
-      return null;
+      ctx.ui.notify(`reef refused the activation (HTTP ${response.status}): ${await response.text()}`, "error");
+      return false;
     }
     const answer = await response.json();
-    return typeof answer.release_id === "string" && answer.release_id ? answer.release_id : null;
+    if (answer.release_id === releaseId) return true;
+    ctx.ui.notify(`reef answered the activation without release ${releaseId.slice(0, 8)}`, "error");
+    return false;
   };
 
   // The install offered the moment a step settles, so a win reaches the session that asked for it without the
@@ -728,12 +732,12 @@ export default function requests(pi) {
   const offerSettledInstall = async (step, rows, ctx) => {
     const row = rows[step];
     const selectionResult = resultOf(row, rows);
-    if (selectionResult !== "selected" && selectionResult !== "pending") return;
+    if (selectionResult !== "selected" && selectionResult !== "inactive") return;
     const why =
-      selectionResult === "pending"
+      selectionResult === "inactive"
         ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`
         : `Read the change first: ${stepPageLink(step, rows)}`;
-    await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
+    await offerInstall(String(row.release_id), why, ctx, { inactive: selectionResult === "inactive" });
   };
 
   // The watch: one at a time, so a second filing replaces the first; session_shutdown clears it.
@@ -1244,14 +1248,6 @@ export default function requests(pi) {
     },
   });
 
-  // The served head: the newest row that is neither pending nor a rejected or skipped step, since those publish
-  // nothing and carry the head's id. The catalog's own current flag sits on the newest row, whatever it is.
-  const headStep = (rows) => {
-    for (let index = rows.length - 1; index >= 0; index--) {
-      if (!["pending", "rejected", "skipped"].includes(resultOf(rows[index]))) return index;
-    }
-    return -1;
-  };
 
   // Match the local tree separately from the served head; they can point at different releases.
   const installedStep = (rows) => {
@@ -1262,7 +1258,7 @@ export default function requests(pi) {
   const versionHistory = (rows) => {
     if (!rows.length) return "no release on record";
     const installed = installedStep(rows);
-    const head = headStep(rows);
+    const active = activeStep(rows);
     const results = rows.map((row) => resultOf(row, rows));
     const versionWidth = Math.max("Version".length, `v${rows.length - 1}`.length);
     const resultWidth = Math.max("Result".length, ...results.map((result) => result.length));
@@ -1271,7 +1267,7 @@ export default function requests(pi) {
     for (const [step, row] of rows.entries()) {
       const marks = [];
       if (step === installed) marks.push("installed");
-      if (step === head) marks.push("current");
+      if (step === active) marks.push("active");
       lines.push(
         `${`v${step}`.padEnd(versionWidth)}  ${String(row.release_id || "").slice(0, 8).padEnd(8)}  ` +
           `${results[step].padEnd(resultWidth)}  ${marks.join(", ") || "-"}`,
@@ -1283,7 +1279,7 @@ export default function requests(pi) {
     }
     lines.push(
       "",
-      "installed: running in this tree; current: served by Reef",
+      "installed: running in this tree; active: served by Reef",
       "Details: /versions <version>",
       "Install: /versions <version> install",
     );
@@ -1310,11 +1306,11 @@ export default function requests(pi) {
 
   // One line naming what the step is, for the dialog that offers its page: the result and where it sits.
   const stepSummary = (step, rows) => {
-    const head = headStep(rows);
+    const active = activeStep(rows);
     const installed = installedStep(rows);
     const marks = [resultOf(rows[step], rows)];
-    if (step === installed) marks.push(step === head ? `${INSTALLED_MARK}, current` : INSTALLED_MARK);
-    else if (step === head) marks.push("current");
+    if (step === installed) marks.push(step === active ? `${INSTALLED_MARK}, active` : INSTALLED_MARK);
+    else if (step === active) marks.push("active");
     return `${rows[step].release_id} (${marks.join(", ")})`;
   };
 
@@ -1349,7 +1345,7 @@ export default function requests(pi) {
       }
       const selectionResult = resultOf(row, rows);
       if (install) {
-        // A pending step installs: the confirmation promotes it first. Only a step with no tree of its own refuses.
+        // An inactive step installs: the confirmation activates it first. Only a step with no tree of its own refuses.
         if (["rejected", "skipped"].includes(selectionResult)) {
           ctx.ui.notify(
             `v${step} is ${selectionResult} and published no tree; /versions lists the ones that did`,
@@ -1358,10 +1354,10 @@ export default function requests(pi) {
           return;
         }
         const why =
-          selectionResult === "pending"
+          selectionResult === "inactive"
             ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`
             : `Read the change first: ${stepPageLink(step, rows)}`;
-        await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
+        await offerInstall(String(row.release_id), why, ctx, { inactive: selectionResult === "inactive" });
         return;
       }
       // The page holds the design, the review and the numbers, so the command offers it rather than reprinting it.
@@ -1395,7 +1391,7 @@ export default function requests(pi) {
     let rows = [];
     try {
       rows = await releases();
-      const waiting = rows.map((row, step) => (resultOf(row, rows) === "pending" ? step : -1)).filter((step) => step >= 0);
+      const waiting = rows.map((row, step) => (resultOf(row, rows) === "inactive" ? step : -1)).filter((step) => step >= 0);
       if (waiting.length) lines.push(reviewLine(waiting));
     } catch {
       // The catalog is a courtesy here: the first line stands without it, and a stored request gets the watch.

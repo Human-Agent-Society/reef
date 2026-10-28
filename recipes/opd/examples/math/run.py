@@ -96,13 +96,14 @@ class Campaign:
             write_json(self.output / "inputs.json", inputs)
 
     def releases(self) -> list[dict[str, Any]]:
+        """The scenario's artifacts, newest first; one per release in this one-component scenario."""
         try:
-            result = self.client.get(f"/reef/scenarios/{quote(self.args.scenario, safe='')}/releases")
+            result = self.client.get(f"/reef/scenarios/{quote(self.args.scenario, safe='')}/artifacts")
         except ReefClientError as error:
             if error.status == 404:
                 return []
             raise
-        return result["releases"]
+        return result["artifacts"]
 
     def wait_for_release(self, before: int) -> list[dict[str, Any]]:
         deadline = time.monotonic() + self.args.timeout
@@ -171,11 +172,10 @@ class Campaign:
         if rows and (
             rows[0].get("operation") != "creation"
             or any(row.get("operation") != "training" for row in rows[1:])
-            or any(row.get("pending") for row in rows)
-            or [row.get("current", False) for row in rows] != [False] * (len(rows) - 1) + [True]
+            or [row.get("active", False) for row in rows] != [False] * (len(rows) - 1) + [True]
             or len({row["release_id"] for row in rows}) != len(rows)
         ):
-            raise RuntimeError("Campaign requires a single current release and an unchanged training history")
+            raise RuntimeError("Campaign requires the newest release to be active and an unchanged training history")
         return rows
 
     def collect(

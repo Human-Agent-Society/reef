@@ -140,24 +140,23 @@ def test_commit_validates_expected_step(store, expected):
         store.commit_step(expected_step=expected, commit=commit())
 
 
-def test_recover_adopts_checkpoint_and_preserves_rollback_fields(store):
+def test_recover_adopts_checkpoint_and_preserves_its_fields(store):
     store.records.append(record("record-2"))
-    checkpoint = replace(commit(2), operation="rollback", rollback_target_release_id="base", metrics={"quality": 0.5})
+    checkpoint = replace(commit(2), metrics={"quality": 0.5})
     head = store.recover(checkpoint=checkpoint)
 
     assert head is checkpoint
     assert head.step == 2
     assert head.checkpoint is True
-    assert head.operation == "rollback"
+    assert head.operation == "training"
     assert head.operation_verified is True
-    assert head.rollback_target_release_id == "base"
     assert head.metrics == {"quality": 0.5}
     assert head.consumed_ids == frozenset({"record-2"})
     assert head.consumed_ids == frozenset({"record-2"})
     assert store.records.count("math") == 1
     assert store.history() == (head,)
     store.commit_step(expected_step=2, commit=commit(3))
-    assert store.training_run_position() == (2, 1)
+    assert store.training_run_position() == (0, 2)
 
 
 def test_recover_keeps_unverified_checkpoint_operation(store):
@@ -180,15 +179,25 @@ def test_recovery_rejects_commits_that_are_not_active_checkpoints(store, changes
     assert store.history() == ()
 
 
-def test_training_position_ignores_promote_and_resets_on_rollback(store):
+def operation_commit(step: int, operation: str) -> CommitRecord:
+    """An activation or a new training start at ``step``: it names an artifact and carries no trainer state."""
+    return CommitRecord(
+        scenario="math",
+        step=step,
+        artifact_ref=commit().artifact_ref,
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation=operation,
+    )
+
+
+def test_training_position_ignores_activate_and_resets_on_train_from(store):
     store.commit_step(expected_step=0, commit=commit())
-    store.commit_step(
-        expected_step=1, commit=replace(commit(2), operation="promote", rollback_target_release_id="base")
-    )
+    store.commit_step(expected_step=1, commit=operation_commit(2, "activate"))
     assert store.training_run_position() == (0, 1)
-    store.commit_step(
-        expected_step=2, commit=replace(commit(3), operation="rollback", rollback_target_release_id="base")
-    )
+    store.commit_step(expected_step=2, commit=operation_commit(3, "train_from"))
     store.commit_step(expected_step=3, commit=commit(4))
     assert store.training_run_position() == (3, 1)
 

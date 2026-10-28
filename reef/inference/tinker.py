@@ -132,7 +132,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 return self._releases[artifact.ref.release_id]
             sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             # A release that carries the served sampler forward (a step of
-            # another component, a rollback to the same weights) was never
+            # another component, an activation of the same weights) was never
             # activated; it serves under the load the engine reports now,
             # not under the first load of that sampler.
             carried = sampler_path == self._active
@@ -147,7 +147,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         with self._lock:
             sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             if sampler_path != self._active:
-                # Even a sampler served earlier in this incarnation, as after a rollback, serves under a new load.
+                # Even a sampler served earlier in this incarnation, as after an activation, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
             self._releases[artifact.ref.release_id] = (self._active, self._version)
             return self._version

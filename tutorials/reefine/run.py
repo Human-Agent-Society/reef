@@ -1,4 +1,4 @@
-"""Reefine on reef-pi, end to end: ask, step, promote, setup, install, show.
+"""Reefine on reef-pi, end to end: ask, step, activate, setup, install, show.
 
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
@@ -11,9 +11,10 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
               health task and the floor decides; the catalog row carries
               the result, the notes and the request it answered under
               ``metrics.training_request``
-    promote - a release that touches a code_extension waits as pending; its
-              page says why it exists and what it changed, and the demo
-              promotes it through the route (a person reads the page first)
+    activate - a release that touches a code_extension is made but does not
+              serve; its page says why it exists and what it changed, and
+              the demo activates it through the route (a person reads the
+              page first)
     setup   - when the head's manifest names ``requires``, ``reef-pi setup``
               checks the items off; an unmet item stops the demo
     install - the head installs through the install route into work/harness
@@ -23,7 +24,7 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
 The measurement (``./run.sh measure``) posts a fixed list of requests one
 after another, each once the step of the one before it settled, and prints
 one row per request and the counts: filed, answered, admitted, won (met the
-floor), published, pending. The won count is the first of the two things
+floor), published, inactive. The won count is the first of the two things
 RFC #310's stage 6 asks for (requests that passed the checks); the held out
 shapes are not here.
 
@@ -168,12 +169,13 @@ def _ensure_scenario(client):
 
 
 def result_of(row):
-    """The row's result as the page words it: pending, selected, rejected, skipped with its reason."""
-    if row.get("pending"):
-        return "pending"
+    """The newest row's result as the page words it: inactive, selected, rejected, skipped with its reason."""
     metrics = row.get("metrics") or {}
     if isinstance(metrics.get("selected"), bool):
-        return "selected" if metrics["selected"] else "rejected"
+        if not metrics["selected"]:
+            return "rejected"
+        # A release that passed the checks but does not serve waits for a person to activate it.
+        return "inactive" if row.get("checkpoint") and not row.get("active") else "selected"
     if metrics.get("skipped"):
         return f"skipped: {metrics['skipped']}"
     return str(row.get("operation") or "unknown")
@@ -352,16 +354,16 @@ def wait_for_step(client, text, before, deadline):
     return rows, None
 
 
-def promote(client, rows, row, run_dir):
-    """Save the pending step's page beside the run, print its URL, promote the release; the new head."""
+def activate(client, rows, row, run_dir):
+    """Save the inactive step's page beside the run, print its URL, activate the release; its id."""
     step = rows.index(row)
     page = f"/reef/harness/releases/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(_fetch_text(page), encoding="utf-8")
-    say(f"pending: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
-    say("promote: the demo is scripted; a person reads the page first")
-    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/promote", SCENARIO, {"release_id": row["release_id"]})
-    say(f"promoted: the head is {answer['release_id']}")
+    say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
+    say("activate: the demo is scripted; a person reads the page first")
+    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, {"artifact_id": row["release_id"]})
+    say(f"activated: release {answer['release_id']} serves")
     return answer["release_id"]
 
 
@@ -492,9 +494,9 @@ def _won(result):
 
 def totals_of(results):
     """The measurement's counts: filed, answered (a mutation came back), admitted (the evaluation ran), won (met the
-    floor; on a row from before the floor, more wins than losses), published, pending. Under ``selection:
+    floor; on a row from before the floor, more wins than losses), published, inactive. Under ``selection:
     always`` a publish said nothing about the evaluation, so won and published are counted apart; under the floor a
-    publish is a win, and the two agree unless a release waits as pending."""
+    publish is a win, and the two agree unless a release waits as inactive."""
     return {
         "filed": sum(1 for r in results if r.get("filed")),
         # A mutation came back: a step that skipped on a refusal or on a failed step carries none.
@@ -502,7 +504,7 @@ def totals_of(results):
         "admitted": sum(1 for r in results if was_evaluated(r)),
         "won": sum(1 for r in results if _won(r)),
         "published": sum(1 for r in results if r.get("result", r.get("verdict")) == "selected"),
-        "pending": sum(1 for r in results if r.get("result", r.get("verdict")) == "pending"),
+        "inactive": sum(1 for r in results if r.get("result", r.get("verdict")) == "inactive"),
     }
 
 
@@ -529,17 +531,17 @@ def demo(mode):
     mutations = mutations_of(metrics)
     say(f"result: {selection_result}; evaluation {tally(metrics)}; proposer {metrics.get('proposer_seconds', '-')} s")
     say(f"mutations: {'; '.join(mutations) or 'none'}")
-    promoted = None
-    if row.get("pending"):
-        promoted = promote(client, rows, row, run_dir)
+    activated = None
+    if selection_result == "inactive":
+        activated = activate(client, rows, row, run_dir)
     requires, met = setup_if_required(client)
     result = {
         "request": text,
         "result": selection_result,
         "evaluation": tally(metrics),
         "kinds": ", ".join(kinds_of(metrics)) or "-",
-        "pending": bool(row.get("pending")),
-        "promoted": promoted or "-",
+        "inactive": selection_result == "inactive",
+        "activated": activated or "-",
         "requires": _requires_of(requires),
         "proposer_seconds": metrics.get("proposer_seconds", "-"),
     }
@@ -547,7 +549,7 @@ def demo(mode):
         record["result"] = {**result, "installed": "-", "setup": "unmet"}
         _write_record(record_path, record)
         raise SystemExit(2)
-    if selection_result == "selected" or promoted:
+    if selection_result == "selected" or activated:
         installed = install()
         if installed is None:
             record["result"] = {**result, "installed": "-", "setup": "refused at install"}
@@ -631,7 +633,7 @@ def measure(n):
         ],
     )
     print()
-    _print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Pending"), [tuple(totals.values())])
+    _print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Inactive"), [tuple(totals.values())])
 
 
 def main(argv=None):

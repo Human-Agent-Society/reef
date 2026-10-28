@@ -162,24 +162,31 @@ def evaluate(client: ReefClient, rows: Sequence[dict[str, Any]], *, n: int, conc
 
 
 def training_release_count() -> int | None:
-    """Training releases committed so far; ``None`` while the service is busy, 0 before the scenario exists."""
-    request = urllib.request.Request(
-        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases", headers={"Authorization": f"Bearer {TOKEN}"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return 0  # the scenario does not exist yet: the first request creates it
-        return SERVICE_GONE  # answered and rejected: not our deployment
-    except urllib.error.URLError as error:
-        if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
-            return SERVICE_GONE  # refused, or the container cannot name the host: waiting cannot help
-        return None  # stalled behind a train step; try again
-    except TimeoutError:
-        return None
-    return sum(1 for row in payload["releases"] if row.get("operation") == "training")
+    """Training commits so far; ``None`` while the service is busy, 0 before the scenario exists."""
+    # Every training commit, a step that made no release included, page by page.
+    count = 0
+    after_step: int | None = 0
+    while after_step is not None:
+        request = urllib.request.Request(
+            f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/commits?after_step={after_step}&limit=100",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return 0  # the scenario does not exist yet: the first request creates it
+            return SERVICE_GONE  # answered and rejected: not our deployment
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
+                return SERVICE_GONE  # refused, or the container cannot name the host: waiting cannot help
+            return None  # stalled behind a train step; try again
+        except TimeoutError:
+            return None
+        count += sum(1 for row in payload["commits"] if row.get("operation") == "training")
+        after_step = payload["next_after_step"]
+    return count
 
 
 def wait_for_training(expected: int, timeout_s: float) -> int:

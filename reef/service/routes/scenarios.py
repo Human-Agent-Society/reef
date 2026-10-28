@@ -86,15 +86,10 @@ def register_scenario_routes(
         result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
         return web.json_response(result)
 
-    async def list_releases(request: web.Request) -> web.Response:
+    async def list_artifacts(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        releases = await asyncio.to_thread(request_service.dispatcher.list_releases, scenario)
-        return web.json_response(
-            {
-                "scenario": scenario,
-                "releases": releases,
-            }
-        )
+        artifacts = await asyncio.to_thread(request_service.dispatcher.list_artifacts, scenario)
+        return web.json_response({"scenario": scenario, "artifacts": artifacts})
 
     async def record_list(request: web.Request) -> web.Response:
         request_type = request.query.get("request_type")
@@ -138,34 +133,37 @@ def register_scenario_routes(
             request_service.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
         )
 
-    async def rollback_scenario(request: web.Request) -> web.Response:
-        scenario = request.match_info["scenario"]
+    async def read_artifact_selection(request: web.Request) -> tuple[str, str | None]:
+        """The ``artifact_id`` and the optional ``component`` an activation or a new training start names."""
         payload = await read_object(request)
-        release_id = payload.get("release_id")
-        if not isinstance(release_id, str) or not release_id.strip():
-            raise ValueError("release_id must be a non-empty string")
-        published = request_service.dispatcher.rollback(scenario, release_id.strip())
+        artifact_id = payload.get("artifact_id")
+        component = payload.get("component")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValueError("artifact_id must be a non-empty string")
+        if component is not None and (not isinstance(component, str) or not component.strip()):
+            raise ValueError("component must be a non-empty string")
+        return artifact_id.strip(), None if component is None else component.strip()
+
+    async def activate_artifact(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        artifact_id, component = await read_artifact_selection(request)
+        activated = await asyncio.to_thread(request_service.dispatcher.activate, scenario, artifact_id, component)
         return web.json_response(
             {
                 "scenario": scenario,
-                "release_id": published.release_id,
-                "content_id": published.content_id,
+                "component": activated.component,
+                "artifact_id": activated.artifact_id,
+                "release_id": activated.release_id,
+                "content_id": activated.content_id,
             }
         )
 
-    async def promote_scenario(request: web.Request) -> web.Response:
+    async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        payload = await read_object(request)
-        release_id = payload.get("release_id")
-        if not isinstance(release_id, str) or not release_id.strip():
-            raise ValueError("release_id must be a non-empty string")
-        published = request_service.dispatcher.promote(scenario, release_id.strip())
+        artifact_id, component = await read_artifact_selection(request)
+        start = await asyncio.to_thread(request_service.dispatcher.train_from, scenario, artifact_id, component)
         return web.json_response(
-            {
-                "scenario": scenario,
-                "release_id": published.release_id,
-                "content_id": published.content_id,
-            }
+            {"scenario": scenario, "component": start.component, "artifact_id": start.artifact_id}
         )
 
     app.router.add_get("/reef/scenarios", list_scenarios)
@@ -176,9 +174,9 @@ def register_scenario_routes(
     app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
     app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
     app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
-    app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
-    app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)
-    app.router.add_post("/reef/scenarios/{scenario}/promote", promote_scenario)
+    app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
+    app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
 
 
 __all__ = ["register_scenario_routes"]

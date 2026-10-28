@@ -301,9 +301,9 @@ method ``from_config`` once per scenario with the opaque ``config``,
 The class must implement both ``evaluate`` and ``decide``. Reef rejects
 functions, abstract classes, and objects that only have matching method names.
 The trainer calls ``evaluate`` and then ``decide`` for each saved checkpoint,
-before Reef publishes it. A rejection leaves the previous version serving and
-publishes the checkpoint as a release held for review, which a person can
-promote. The next job still starts from the rejected checkpoint: evaluation
+before Reef publishes it. A rejection leaves the active release serving and
+publishes the checkpoint as an inactive artifact, which a person can
+activate. The next job still starts from the rejected checkpoint: evaluation
 decides only what is served. `Python API
 <../reference/python-api.rst#candidate-evaluation>`__ documents the plugin
 contract: ``evaluate``, ``decide``, the fail-closed rule, and idempotency by

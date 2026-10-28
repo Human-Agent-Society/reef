@@ -10,8 +10,8 @@ each rollout. No serving engine takes part; Reef serves the Hugging Face export
 
 Training continues from the workers' own weights. A job therefore starts from
 the component's latest checkpoint; after a restart, the workers load that
-checkpoint again. A rollback to another release is refused, as Slime cannot
-load a published release back into its workers.
+checkpoint again. A new training start from another release (``train-from``)
+is refused, as Slime cannot load a published release back into its workers.
 
 Every job trains the loss family and learning-rate schedule its parameters
 name. The workers start with the recipe's startup family; a job of another

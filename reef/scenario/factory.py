@@ -34,7 +34,13 @@ from reef.observability.commits import CommitExperimentObserver, ExperimentRepor
 from reef.recipe.base import Recipe
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
+from reef.storage.commits import (
+    SCENARIO_METADATA_KEY,
+    CommitRecord,
+    active_artifact_ref,
+    parse_scenario_metadata,
+    scenario_metadata_for,
+)
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import Surface
 from reef.surface.files import REPOSITORY_FILES
@@ -65,8 +71,9 @@ def recovered_trainer_states(
     """What each component's trainer recovers from its own commits and its own stale drops.
 
     The only trainer of a one-component (or record-only) scenario owns every
-    commit and consumption receipt: the ones made before they carried a
-    component, and rollbacks, which carry its state. A drop is a step without
+    training commit and consumption receipt, which name no component.
+    Activations and new training starts carry no trainer state, so no
+    trainer recovers from them. A drop is a step without
     a commit that an earlier Reef version recorded as a consumption receipt:
     its rows count as consumed, and the state and the cursor stay the last
     commit's.
@@ -90,7 +97,10 @@ def recovered_trainer_states(
     states: dict[str, RecoveredTrainerState] = {}
     for component in components:
         own = tuple(
-            record for record in records if record.component == component or (alone and record.component is None)
+            record
+            for record in records
+            if record.operation == "training"
+            and (record.component == component or (alone and record.component is None))
         )
         last = own[-1] if own else None
         states[component] = RecoveredTrainerState(
@@ -304,13 +314,7 @@ class ScenarioFactory:
         trainers: tuple[ComponentTrainer, ...] = ()
         try:
             head_record = store.recover(checkpoint=checkpoint)
-            committed_artifact: ArtifactRef | None
-            if head_record is None:
-                scenario_step = 0
-                committed_artifact = None
-            else:
-                scenario_step = head_record.step
-                committed_artifact = head_record.artifact_ref
+            scenario_step = 0 if head_record is None else head_record.step
             recovered_states = recovered_trainer_states(store, name, head_record, surface)
 
             # Publication stages durable bytes before the commit record is durable, while
@@ -320,12 +324,13 @@ class ScenarioFactory:
                 checkpoints = [
                     record
                     for record in store.history()
-                    if record.checkpoint and not record.pending and record.step >= checkpoint_step
+                    if record.made_artifact and not record.pending and record.step >= checkpoint_step
                 ]
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].artifact_ref
-
-            current_artifact = surface.recover(committed_artifact, checkpoint_head, runtime)
+            # The active artifact is the newest activation in the log; the chain tip, the parent of the next
+            # publication, stays the checkpoint. Without a durable log the tip is the only artifact on record.
+            current_artifact = active_artifact_ref(committed_records(store, head_record), checkpoint_head)
 
             repository = Repository(
                 backend,
@@ -343,10 +348,7 @@ class ScenarioFactory:
                 scenario=name,
                 recipe=recipe.name,
                 source_artifact_ref=repository.require_current_artifact(),
-                run_segment=max(
-                    (record.step for record in store.history() if record.operation in ("rollback", "promote")),
-                    default=0,
-                ),
+                run_segment=store.training_run_position()[0] if store.durable else 0,
             )
             trainers = recipe.build_trainers(
                 name,
@@ -421,7 +423,7 @@ class ScenarioFactory:
                         up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
                 component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
-            scenario.resume_rollback_start()
+            scenario.resume_training_starts()
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()

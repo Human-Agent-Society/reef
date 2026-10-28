@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from reef.artifact.artifact import Artifact
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import JobData, TrainStepResult
 
@@ -100,6 +101,17 @@ class CandidateBackend(CandidateEvaluator, ABC):
         evaluation. The default ships nothing.
         """
         return None
+
+    def start_state(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step starts from ``artifact``, given the current ``state``.
+
+        Reef calls this when a person sets the trainer's start to an artifact
+        (``train-from``). ``artifact`` is the backend's component content as
+        a release published it, materialized, with its metadata. Raise
+        ``ValueError`` when the backend cannot start from it. The default
+        refuses every artifact.
+        """
+        raise ValueError(f"the {type(self).__name__} backend cannot start from a published artifact")
 
     def experiment_config(self) -> Mapping[str, Any]:
         """Non-secret backend identity/config attached to experiment runs."""

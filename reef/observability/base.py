@@ -38,16 +38,25 @@ class TrainingExperimentEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class RollbackExperimentEvent:
-    """A committed rollback that ends one training-curve segment."""
+class TrainFromExperimentEvent:
+    """A committed new training start, which ends one training-curve segment and opens the next.
+
+    ``step`` is the step of the ``"train_from"`` commit, which numbers the
+    next segment, and ``run_segment`` is the segment it ends.
+    ``served_artifact_ref`` is the active artifact when the start was set,
+    and ``start_artifact_ref`` is the artifact training starts from.
+    ``component`` names the trainer of a scenario with several trainers.
+    The commit observer makes the value and the tracker reads it in
+    :meth:`ExperimentTracker.record_train_from`.
+    """
 
     scenario: str
     recipe: str
     step: int
     run_segment: int
-    source_artifact_ref: ArtifactRef
-    produced_artifact_ref: ArtifactRef
-    target_release_id: str
+    served_artifact_ref: ArtifactRef
+    start_artifact_ref: ArtifactRef
+    component: str | None = None
 
 
 class ExperimentLogger:
@@ -95,7 +104,7 @@ class ExperimentTracker:
     def record(self, event: TrainingExperimentEvent) -> None:
         return None
 
-    def record_rollback(self, event: RollbackExperimentEvent) -> None:
+    def record_train_from(self, event: TrainFromExperimentEvent) -> None:
         return None
 
     def close(self) -> None:
@@ -111,7 +120,7 @@ __all__ = [
     "ExperimentTracker",
     "NullExperimentLogger",
     "NullExperimentTracker",
-    "RollbackExperimentEvent",
+    "TrainFromExperimentEvent",
     "TrainingExperimentContext",
     "TrainingExperimentEvent",
 ]

@@ -52,8 +52,9 @@ class CommitHistory(ABC):
       ``CommitHistoryError``. Otherwise ``records()`` is ``(*H, r)`` afterwards.
     - ``locked()``: no other session or process appends while the block runs.
     - ``training_run_position()`` is ``(s, n)``: ``s`` is the step of the last
-      rollback in ``H``, or 0 when there is none, and ``n`` is the number of
-      training records in ``H`` with a step above ``s``.
+      ``"train_from"`` record in ``H``, or 0 when there is none, and ``n`` is
+      the number of training records in ``H`` with a step above ``s``. An
+      activation does not start a new training run.
     """
 
     @property
@@ -79,11 +80,11 @@ class CommitHistory(ABC):
         """Serialize a read-check-append sequence with other sessions and processes."""
 
     def training_run_position(self) -> tuple[int, int]:
-        """Return the latest rollback step and the training steps after it."""
+        """Return the step of the latest new training start and the number of training steps after it."""
         run_segment = 0
         run_step = 0
         for record in self.records():
-            if record.operation == "rollback":
+            if record.operation == "train_from":
                 run_segment = record.step
                 run_step = 0
             elif record.operation == "training" and record.step > run_segment:

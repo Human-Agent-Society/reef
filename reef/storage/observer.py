@@ -39,7 +39,7 @@ class RecordObserver:
         """One record the store inserted for the first time (retries are not reported)."""
 
     def record_committed(self, commit: CommitRecord) -> None:
-        """One committed step, training or rollback, with the record ids its job data consumed."""
+        """One committed step (training, activation or new training start), with the record ids its job data consumed."""
 
     def close(self) -> None:
         pass

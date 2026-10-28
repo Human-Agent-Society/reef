@@ -86,30 +86,18 @@ def test_scenario_metadata_round_trips() -> None:
     ) == parse_scenario_metadata(metadata, checkpoint_head=checkpoint_head)
 
 
-def test_rollback_metadata_preserves_its_operation() -> None:
+@pytest.mark.parametrize("operation", ["activate", "train_from", "rollback"])
+def test_checkpoint_metadata_names_only_a_training_step(operation) -> None:
+    """An artifact is made only by a training step; its metadata names no other operation."""
+    from reef.core.artifact_ref import ArtifactRef
     from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
 
-    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
-    assert scenario is not None
-    metadata = scenario_metadata_for(
-        name=scenario.name, base_artifact=scenario.repository.base_artifact, scenario_step=scenario.scenario_step
-    )
-    metadata["operation"] = "rollback"
-    metadata["rollback_target_release_id"] = "checkpoint-v1"
-
-    metadata["scenario_step"] = 1
-    metadata["record_progress"] = {
-        "high_water_sequence": 0,
-        "high_water_offset": 0,
-        "consumed_ids": [],
-    }
-    _, _, checkpoint = parse_scenario_metadata(
-        metadata, checkpoint_head=scenario.repository.require_current_artifact()
-    )
-
-    assert checkpoint is not None
-    assert checkpoint.operation == "rollback"
-    assert checkpoint.rollback_target_release_id == "checkpoint-v1"
+    base = ArtifactRef("base", "base", None)
+    metadata = scenario_metadata_for(name="math", base_artifact=base, scenario_step=1)
+    metadata["operation"] = operation
+    metadata["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "consumed_ids": []}
+    with pytest.raises(ValueError, match="operation must be 'training'"):
+        parse_scenario_metadata(metadata, checkpoint_head=ArtifactRef("head", "head", base.release_id))
 
 
 def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) -> None:
@@ -249,7 +237,7 @@ def test_lock_instance_tells_a_replaced_instance_from_a_removed_one() -> None:
         dispatcher.close()
 
 
-@pytest.mark.parametrize("operation", [None, "training", "rollback", "promote"])
+@pytest.mark.parametrize("operation", [None, "training"])
 def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> None:
     from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
     from reef.storage.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
@@ -274,10 +262,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     }
     if operation is not None:
         metadata["operation"] = operation
-    if operation in ("rollback", "promote"):
-        metadata["rollback_target_release_id"] = base.release_id
-    else:
-        metadata["training_job_id"] = "job-3"
+    metadata["training_job_id"] = "job-3"
 
     name, registered_base, checkpoint = parse_scenario_metadata(metadata, checkpoint_head=head)
 
@@ -292,9 +277,8 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     assert checkpoint.high_water_sequence == 7
     assert checkpoint.high_water_offset == 5
     assert checkpoint.consumed_ids == frozenset({"trained-record", "old-record"})
-    assert checkpoint.operation == (operation or "training")
+    assert checkpoint.operation == "training"
     assert checkpoint.operation_verified is (operation is not None)
-    assert checkpoint.rollback_target_release_id == metadata.get("rollback_target_release_id")
     assert checkpoint.training_job_id == metadata.get("training_job_id")
     assert checkpoint.metrics == {"loss": 0.25}
 
@@ -308,14 +292,12 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
             checkpoint.high_water_offset,
             checkpoint.consumed_ids,
         ),
-        operation=checkpoint.operation,
-        rollback_target_release_id=checkpoint.rollback_target_release_id,
         metrics=checkpoint.metrics,
         training_job_id=checkpoint.training_job_id,
     )
     assert encoded == {
         **metadata,
-        "operation": operation or "training",
+        "operation": "training",
         "record_progress": {
             "high_water_sequence": 7,
             "high_water_offset": 5,
@@ -334,10 +316,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     [
         ({"record_progress": None}, "requires record_progress"),
         ({"scenario_step": True}, "scenario_step must be non-negative"),
-        (
-            {"operation": "rollback", "rollback_target_release_id": "base", "training_job_id": "job"},
-            "cannot carry training_job_id",
-        ),
+        ({"operation": "promote"}, "operation must be 'training'"),
     ],
 )
 def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) -> None:

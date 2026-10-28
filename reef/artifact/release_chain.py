@@ -16,6 +16,11 @@ class ReleaseNotRestorable(ReefError):
 class ArtifactReleaseChain:
     """Own artifact heads, parent links, staging, resolution, and publication.
 
+    ``current`` is the active artifact, the one that serves. ``checkpoint``
+    is the tip of the published chain: the parent of the next publication.
+    Publication of an activated artifact moves both; an activation moves
+    only ``current``.
+
     This layer knows nothing about scenarios, trainers, or commit histories. Its
     caller decides transaction ordering and records the outcome after each
     artifact operation.
@@ -43,8 +48,9 @@ class ArtifactReleaseChain:
     def resolve(self, ref: ArtifactRef) -> Artifact:
         return self._repository.resolve(ref)
 
-    def advance(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
-        self._repository.advance_current(ref, expected=expected)
+    def activate(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
+        """Make ``ref`` the active artifact (``current``); the checkpoint, the chain tip, stays."""
+        self._repository.activate(ref, expected=expected)
 
     def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
         self._repository.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)

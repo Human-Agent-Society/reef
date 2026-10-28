@@ -173,7 +173,7 @@ def next_action(
 ) -> NextAction | None:
     """The next action of a settled step, ``None`` for a rejected or skipped one. ``requires`` names the items the
     release still needs set up: the install refuses a release whose items are not set up, so setup comes first."""
-    if selection_result not in ("pending", "selected"):
+    if selection_result not in ("inactive", "selected"):
         return None
     if not reef_installs(adapter):
         # A batch runner with no wrapper: nothing to set up or update on this machine.
@@ -189,18 +189,18 @@ def next_action(
     install = (f"reef-{adapter} setup", f"reef-{adapter} update") if requires else (f"reef-{adapter} update",)
     if ships_version_check(adapter):
         return NextAction(
-            "Read this page, then install" if selection_result == "pending" else "Install when ready",
+            "Read this page, then install" if selection_result == "inactive" else "Install when ready",
             (f"/versions v{step} install",),
             f"Run this in your reef-{adapter} session. You can keep chatting until you are ready.",
             install,
         )
-    if selection_result == "pending":
-        serve = (f"reef-{adapter} wait {record_id}",)
+    if selection_result == "inactive":
+        activate = (f"reef-{adapter} wait {record_id}",)
         return NextAction(
-            "Read this page, then serve it",
-            serve,
-            "Run this in a terminal: it asks whether to serve this release, then installs it.",
-            serve,
+            "Read this page, then activate it",
+            activate,
+            "Run this in a terminal: it asks whether to activate this release, then installs it.",
+            activate,
         )
     if requires:
         return NextAction(

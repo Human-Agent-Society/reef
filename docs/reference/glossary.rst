@@ -67,7 +67,9 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The selected content. An artifact is of exactly one of four kinds:
+The content of one component of a release, such as a checkpoint's weights or
+a harness tree. Training makes artifacts. An artifact is of exactly one of
+four kinds:
 
 - ``harness``: a whole agent harness that Reef runs as it is, such as a Harbor
   agent or an adapter's binary.
@@ -77,31 +79,52 @@ The selected content. An artifact is of exactly one of four kinds:
 - ``model``: a whole model, such as a provider's model or full weights.
 - ``model_adapter``: a LoRA adapter on a base model.
 
-``content_id`` identifies those contents independently of when or why Reef
-published them.
+``artifact_id`` identifies an artifact. In a scenario of one component it is
+the ``release_id`` of the release that made the artifact; in a scenario of
+several components it is ``<release_id>:<component>``. ``content_id``
+identifies the contents independently of when or why Reef published them.
 
 Release
 -------
 
-One accepted publication decision in a scenario. ``release_id`` identifies the
-link in the scenario history and ``parent_release_id`` identifies its parent.
-Rollback therefore creates a new release that can point to the same
-``content_id`` as an older release; history is appended, never rewound.
+One immutable version of a scenario's content, which binds one artifact for
+each component: the creation release, the output of one training step, or,
+in a scenario of several components, an activation. ``release_id`` identifies
+it in the scenario history and ``parent_release_id`` identifies its parent.
+Making a release changes nothing else: whether it serves is a separate
+decision. History is appended, never rewound.
+
+Active release
+--------------
+
+The release that a scenario serves. It binds the active artifact of each
+component. Inference answers from it, and the harness routes serve its tree.
+``POST /reef/scenarios/{scenario}/activate`` makes another existing artifact
+active. By default Reef activates each new artifact that passes its checks.
+Every other artifact is inactive. See `Operate a deployment
+<../user-guide/operate.rst#activate-an-artifact>`__.
+
+Training start
+--------------
+
+The artifact that a trainer's next job or evolve step starts from. After each
+job or step the trainer moves its start to its own newest output.
+``POST /reef/scenarios/{scenario}/train-from`` sets it to an existing
+artifact. The training start and the active release change independently.
 
 Content ID
 ----------
 
-The identity of the bytes or logical model state selected by a release. Equal
-``content_id`` values mean equal selected content even when the ``release_id``
-values differ, such as after rollback or republication.
+The identity of the bytes or logical model state of a release. Equal
+``content_id`` values mean equal content even when the ``release_id`` values
+differ.
 
 Release chain
 -------------
 
-A scenario's history of accepted updates, each release carrying its parent. A
-durable release can be restored when its surface and runtime support rollback,
-and, in a weight-training scenario, when its training component can start from
-it.
+A scenario's history of releases, each release carrying its parent. An
+artifact of the chain can be activated when its surface and runtime can serve
+it, and a trainer can start from it when the trainer can load it.
 
 Component
 ---------
@@ -115,10 +138,10 @@ naming each component's ``content_id``.
 Candidate selection
 -------------------
 
-The decision whether a produced update should replace the current served
-release. A ``CandidateEvaluator`` measures the candidate, a
-``CandidateSelector`` makes the select-or-reject decision, and a
-``CandidateEvaluationPlugin`` implements both. Every recipe carries the
+The decision whether a produced update should become the active release. A
+``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
+the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
+both. Every recipe carries the
 plugin as ``candidate_evaluation``. For a weight recipe, each checkpoint that
 a training job saves is one candidate. Selection decides only what is served;
 the next training job starts from the newest saved checkpoint either way.
@@ -272,8 +295,8 @@ Runtime load ID
 An engine-scoped ``<incarnation>:<sequence>`` token naming the concrete weight
 load that produced a span of generated tokens. It is a serving fence, not a
 publication or content identity. Reloading the same ``content_id`` can produce
-a new runtime load ID, while rollback can create a new ``release_id`` for old
-content. A restart invalidates runtime load IDs but not the release chain.
+a new runtime load ID, for example when an older release is activated
+again. A restart invalidates runtime load IDs but not the release chain.
 
 Staleness
 ---------

@@ -46,7 +46,7 @@ class TrainStepResult:
     the commit is about, if any.
 
     ``pending`` asks for the publication to be minted into the catalog without
-    being served, for a person to promote later. It is a publication decision,
+    being activated, for a person to activate later. It is a publication decision,
     so it travels as a field rather than as a metrics key: only durable bytes
     can be held back, and a step that publishes nothing is rejected here
     instead of having the request silently dropped.

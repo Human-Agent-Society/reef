@@ -261,8 +261,8 @@ The extension points those packages expose are in `Python API
 
 - Is it a value or error needed by unrelated layers without behavior attached?
   Put it in ``reef/core/``.
-- Does it own scenario state, commit ordering, recovery, or rollback? Put it in
-  ``reef/scenario/``. ``reef/storage/commits.py`` defines the persisted ``CommitRecord`` and
+- Does it own scenario state, commit ordering, recovery, activation, or
+  training starts? Put it in ``reef/scenario/``. ``reef/storage/commits.py`` defines the persisted ``CommitRecord`` and
   ``RecordProgress`` values without storage behavior. Checkpoint recovery uses
   the same ``CommitRecord`` type; initial registration has no commit.
   ``reef/storage/scenario.py`` defines the ``ScenarioStore`` and ``ScenarioStorage``

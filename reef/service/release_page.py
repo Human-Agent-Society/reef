@@ -34,7 +34,7 @@ from reef.harness.step_result import (
     reef_installs,
     unscored_failures,
 )
-from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span, tone
+from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
 #: wins, losses and ties; a floor writes passed, failed and floor_score, and evaluation_sides when it ran one side only.
@@ -72,14 +72,12 @@ RESULT_LABELS = {
 
 #: What each result means for the person reading the step, under the headline.
 RESULT_WORDS = {
-    "pending": "Passed the checks and waits for a promote; no session installs it until then.",
-    "selected": "Passed the checks and was published as the served head.",
+    "inactive": "Passed the checks and made a release that does not serve yet; a person activates it first.",
+    "selected": "Passed the checks and made a release.",
     "rejected": "Did not pass the checks. The head stayed where it was.",
     "skipped": "No candidate reached the evaluation, so nothing changed.",
     "failed": "The step failed before evaluation. Nothing was published; see the error below before retrying.",
     "creation": "The tree this scenario started from, before any step ran.",
-    "promote": "A person promoted a pending release, which now serves.",
-    "rollback": "A person moved the head back to an earlier release.",
     "recovery": "The head this process recovered at boot.",
 }
 
@@ -192,19 +190,19 @@ def mutations_of(metrics: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
 def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
     """The row's result, including failed proposals that published no release.
 
-    A pending row stays pending in the catalog after a person promotes it;
-    the promote is a later row naming it in ``rollback_target_release_id``,
-    so with ``rows`` given such a row reads ``promoted at vN``."""
-    if row.get("pending"):
-        release_id = row.get("release_id")
-        for index, other in enumerate(rows):
-            if other.get("operation") == "promote" and other.get("rollback_target_release_id") == release_id:
-                return f"promoted at v{index}"
-        return "pending"
+    A step whose release passed the checks reads ``inactive`` when, with
+    ``rows`` given, it is newer than the active row and not active itself:
+    it waits for a person to activate it. Otherwise it reads ``selected``."""
     metrics = row.get("metrics")
     if isinstance(metrics, Mapping):
         if isinstance(metrics.get("selected"), bool):
-            return "selected" if metrics["selected"] else "rejected"
+            if not metrics["selected"]:
+                return "rejected"
+            served = served_step(rows)
+            position = next((index for index, other in enumerate(rows) if other is row), None)
+            if row.get("checkpoint") and not row.get("active") and served is not None and position is not None:
+                return "inactive" if position > served else "selected"
+            return "selected"
         if metrics.get("skipped"):
             notes = metrics.get("proposal_notes")
             failure = notes.get("failure") if isinstance(notes, Mapping) else None
@@ -216,15 +214,8 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
 
 
 def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
-    """The step whose release serves: the newest row that is neither pending nor a rejected or skipped step.
-
-    The catalog's own ``current`` flag sits on the newest row, which a
-    pending win or a failed evaluation makes the wrong one: those rows publish
-    nothing, and a rejected or skipped row carries the head's id."""
-    for index in range(len(rows) - 1, -1, -1):
-        if result_of(rows[index]) not in ("pending", "rejected", "skipped", "failed"):
-            return index
-    return None
+    """The step whose release serves: the row the catalog marks ``active``; ``None`` when no listed row is."""
+    return next((index for index, row in enumerate(rows) if row.get("active")), None)
 
 
 def before_release_id(row: Mapping[str, Any]) -> str | None:
@@ -233,7 +224,7 @@ def before_release_id(row: Mapping[str, Any]) -> str | None:
     A rejected or skipped step's row carries the head's own release id, so
     its parent would be one release too far back."""
     selection_result = result_of(row)
-    if selection_result in ("selected", "pending"):
+    if selection_result == "selected":
         parent = row.get("parent_release_id")
         return str(parent) if parent else None
     if selection_result in ("rejected", "skipped", "failed"):
@@ -257,11 +248,8 @@ def _card(name: str, body: str) -> str:
 def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     operation = row.get("operation")
     if operation != "training":
-        target = row.get("rollback_target_release_id")
         words = {
             "creation": "The tree this scenario started from; no step made it.",
-            "promote": f"A person promoted release {target} after reading it.",
-            "rollback": f"A person rolled the head back to release {target}.",
             "recovery": "The head this process recovered at boot.",
         }
         return f"<p>{escape(words.get(str(operation), f'A {operation} commit.'))}</p>"
@@ -476,10 +464,6 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     words = {**RESULT_WORDS, "failed": failed_words(metrics)}
     if declined(metrics):
         words["skipped"] = DECLINED_WORDS
-    if tone(selection_result) == "promoted":
-        words[selection_result] = (
-            f"Passed the checks and was {selection_result}; the release that step published serves it."
-        )
     # Every candidate rollout failed before a score: the checks judged nothing, so no score stands for the change.
     unscored = unscored_failures(metrics) if selection_result == "rejected" else []
     if unscored:
@@ -624,11 +608,9 @@ def _setup(
 
 
 def _ran_on(other: Mapping[str, Any], release_id: Any) -> bool:
-    """Whether ``other`` is a child of ``release_id``: a step evaluated on it, or a promote or rollback made on it."""
+    """Whether ``other`` is a child of ``release_id``: a step evaluated on it."""
     if not release_id:
         return False
-    if other.get("operation") in ("promote", "rollback"):
-        return other.get("parent_release_id") == release_id
     # Not the parent: a rejected or skipped row copies the head's ref, so its parent is the grandparent.
     return before_release_id(other) == release_id
 

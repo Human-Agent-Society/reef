@@ -202,10 +202,10 @@ def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> No
     (candidate / "SKILL.md").write_text("v1")
 
     first = repository.stage(1, Artifact.local(candidate), parent=checkpoint)
-    repository.advance_current(first.ref, expected=checkpoint)
+    repository.activate(first.ref, expected=checkpoint)
     (candidate / "SKILL.md").write_text("v2")
     second = repository.stage(2, Artifact.local(candidate), parent=checkpoint)
-    repository.advance_current(second.ref, expected=first.ref)
+    repository.activate(second.ref, expected=first.ref)
 
     first_path = repository.resolve(first.ref).local_path
     assert first_path.joinpath("SKILL.md").read_text() == "v1"

@@ -7,7 +7,7 @@ submission, which consumes the records of the job's data. While the job runs, ea
 checkpoint it saves becomes a ``CheckpointCandidate``: candidate evaluation
 decides whether Reef serves it, and the trainer commits the decision. Every
 checkpoint becomes a release (an artifact): a selected one serves, and any
-other is held for review, for a person to promote. The training component
+other is held for review, for a person to activate. The training component
 only trains; it evaluates no artifact. When the job ends, the trainer commits
 its outcome. Training is linear: the next job
 starts from the job's last saved checkpoint, whatever evaluation decided.
@@ -334,7 +334,7 @@ class JobLoop:
         The next job starts from ``checkpoint.path`` whether or not the
         evaluation selects it. The commit publishes the checkpoint's
         ``release_path``: a selected checkpoint serves, and any other is a
-        pending release, held for a person to promote. The commit's metrics are the checkpoint's training
+        pending release, held for a person to activate. The commit's metrics are the checkpoint's training
         metrics with the evaluation's and the decision's own metrics, and
         ``selected``, ``selection`` (the whole decision) and ``training_job``.
         Raise ``ValueError`` when ``state`` has no running job, or when two of
@@ -410,7 +410,7 @@ class JobLoop:
         )
 
     def import_start(self, release: Path) -> str | None:
-        """The start that the component makes of a rolled-back ``release`` (``TrainingComponent.import_start``)."""
+        """The start that the component makes of the published ``release`` (``TrainingComponent.import_start``)."""
         return self.component.import_start(release)
 
     def cancel(self, state: JobLoopState) -> None:
@@ -418,8 +418,8 @@ class JobLoop:
         if state.job is not None:
             self.component.cancel(state.job.job_id)
 
-    def restored(self, state: JobLoopState, start: str | None) -> JobLoopState:
-        """The state after a rollback whose release the component imported as ``start``.
+    def started_from(self, state: JobLoopState, start: str | None) -> JobLoopState:
+        """The state after the trainer's start is set to ``start``, a release the component imported.
 
         The running job is cancelled, and the next job starts from ``start``
         (``None``: the base model). The jobs that ended stay counted.

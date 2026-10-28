@@ -257,7 +257,8 @@ class TrainingComponent(ABC):
     def import_start(self, release: Path) -> str | None:
         """Take the published release in ``release`` as the start of later jobs; return that start.
 
-        Reef calls this for a rollback. The component copies what it trains
+        Reef calls this when a trainer starts training from an artifact
+        (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
         discarded later. A release without weights is the base model, whose
         start is ``None``. Raise ``ValueError``, and change nothing, when the

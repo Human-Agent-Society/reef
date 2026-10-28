@@ -1110,8 +1110,8 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
    evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
    evolution.promote | | optional ``Promoter`` class, in the same form as ``evolution.propose``; its ``promote(samples, *, manifest=None)`` chooses which trace prompts to promote; without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
-   evolution.publish | auto | ``review`` holds every successful evaluation as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
-   evolution.review_kinds | [] | node kinds whose wins wait for a promote while the rest publish at once; a win that touches a ``native_loop`` waits whether or not the list names it
+   evolution.publish | auto | ``auto`` activates the tree of every successful evaluation; ``review`` leaves it inactive until ``POST /reef/scenarios/{scenario}/activate`` names it
+   evolution.review_kinds | [] | node kinds whose wins stay inactive until a person activates them, while the rest serve at once; a win that touches a ``native_loop`` waits whether or not the list names it
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
@@ -1183,15 +1183,18 @@ The ``evaluation`` section
 
 Only weight-training recipes read this section; a deployment that pairs it
 with any other recipe fails at startup, because a harness recipe builds its
-evaluator in code. Every checkpoint that a training job saves becomes a
-release. Absent by default, in which case Reef serves every release. When
+evaluator in code. Every checkpoint that a training job saves becomes an
+artifact. Absent by default, in which case Reef activates every artifact. When
 present, Reef calls the named class's ``from_config`` method once per
 scenario. The plugin then receives each saved checkpoint as a
-``CheckpointCandidate`` and decides whether Reef serves its release. A release
-that the plugin does not select is held for review, and a person serves it
-with ``POST /reef/scenarios/{scenario}/promote``.
+``CheckpointCandidate`` and decides whether Reef activates its artifact. An
+artifact that the plugin does not select stays inactive, and a person can
+activate it with ``POST /reef/scenarios/{scenario}/activate``. Neither
+decision changes where training continues. `Operate a deployment
+<../user-guide/operate.rst#activate-an-artifact>`__ describes activation and
+``train-from``.
 
-For fully manual promotion, name the built-in plugin that selects no release:
+For fully manual activation, name the built-in plugin that selects no artifact:
 
 .. code:: yaml
 
@@ -1582,11 +1585,13 @@ writes syncable data below ``directory`` for a later ``wandb sync``.
 
 Each scenario maps to a group named after the scenario or
 ``<group_prefix>/<scenario>``. Within it, Reef opens one run when the scenario
-binds and another after each rollback. The deterministic run id includes those
-identities, so restarting resumes the same run with ``resume=allow``. A rollback
-finishes the current run, marks its summary with the source and target, and
-resets ``train/step`` to zero; the globally monotonic ``reef/step`` stays
-attached for joining a run back to the commit history. A scenario with several
+binds and another after each train-from. The deterministic run id includes those
+identities, so restarting resumes the same run with ``resume=allow``. A
+train-from finishes the current run, marks its summary with the new start
+(``reef/train_from_release_id``) and the active release
+(``reef/active_release_id``), and resets ``train/step`` to zero. An activation
+does not end a run. The globally monotonic ``reef/step`` stays attached for
+joining a run back to the commit history. A scenario with several
 trainers shares the run: each step's metrics carry its component name as a
 prefix (``harness/train/loss``) on the same ``train/step`` axis with
 ``reef/component`` on the row, its optimizer step rows land under

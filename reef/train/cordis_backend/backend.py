@@ -59,6 +59,7 @@ from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import LocalExecutor, ProgramExecutor
+from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.tasks import TaskStore
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
@@ -629,6 +630,41 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
         )
 
+    def start_state(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step evolves the composition of ``artifact``: its entries replace the state's.
+
+        A release a training step made records the step's state, its entries
+        included, in its scenario metadata. A tree that no step made, such as
+        the creation, carries its entries list at the adapter's ``files.tree``
+        path when the adapter declares one (``tree_files``). The recheck
+        target this search kept belongs to the old start, so it is dropped.
+        Raise ``ValueError`` when ``artifact`` records no entries, or when its
+        entries do not pass the admission a proposal meets.
+        """
+        recorded = artifact.metadata.get(SCENARIO_METADATA_KEY)
+        recorded_state = recorded.get("algorithm_state") if isinstance(recorded, Mapping) else None
+        tree_path = self._descriptor.tree_path
+        if isinstance(recorded_state, Mapping) and "entries" in recorded_state:
+            entries = recorded_state["entries"]
+        elif tree_path is not None and artifact.local_path is not None and (artifact.local_path / tree_path).is_file():
+            try:
+                entries = json.loads((artifact.local_path / tree_path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"the entries list at {tree_path} cannot be read: {exc}") from exc
+        else:
+            raise ValueError(f"release {artifact.ref.release_id!r} records no harness entries to start from")
+        if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
+            raise ValueError(f"release {artifact.ref.release_id!r} records entries that are not a list of objects")
+        admitted, refusal = admit_mutations(entries, (), self._descriptor)
+        if refusal is not None:
+            raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
+        kept = {
+            key: value
+            for key, value in state.items()
+            if key not in ("rollback_entries", "rollback_evaluation_context")
+        }
+        return {**kept, "entries": [dict(entry) for entry in admitted]}
+
     @property
     def step_progress(self) -> StepProgress | None:
         """The running step's phase, start and activity so far, ``None`` between steps (see ``StepProgress``)."""
@@ -1032,7 +1068,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if replaced is not None:
                 replaced.discard()
             self._rendered_publications[step] = artifact
-            # Under review, or when a reviewed kind is touched, the release waits for a promote; loop code is
+            # Under review, or when a reviewed kind is touched, the release waits for an activation; loop code is
             # reviewed whether or not the deployment listed it.
             pending = self._publish == "review" or bool(
                 (self._review_kinds | ALWAYS_REVIEWED_KINDS) & self._mutation_kinds(candidate)

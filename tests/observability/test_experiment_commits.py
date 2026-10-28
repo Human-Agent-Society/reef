@@ -9,7 +9,7 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import (
     ExperimentTracker,
-    RollbackExperimentEvent,
+    TrainFromExperimentEvent,
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
@@ -22,7 +22,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 class RecordingTracker(ExperimentTracker):
     def __init__(self, *, failing: bool = False) -> None:
         self.events: list[TrainingExperimentEvent] = []
-        self.rollbacks: list[RollbackExperimentEvent] = []
+        self.starts: list[TrainFromExperimentEvent] = []
         self.failing = failing
         self.close_count = 0
 
@@ -36,8 +36,8 @@ class RecordingTracker(ExperimentTracker):
         if self.failing:
             raise ConnectionError("tracker unavailable")
 
-    def record_rollback(self, event: RollbackExperimentEvent) -> None:
-        self.rollbacks.append(event)
+    def record_train_from(self, event: TrainFromExperimentEvent) -> None:
+        self.starts.append(event)
         if self.failing:
             raise ConnectionError("tracker unavailable")
 
@@ -127,7 +127,7 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
 
 @pytest.mark.unit
 @pytest.mark.parametrize("failing", [False, True])
-def test_rollback_retries_rotate_once_and_tracker_errors_do_not_fail_storage(tmp_path: Path, failing: bool) -> None:
+def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(tmp_path: Path, failing: bool) -> None:
     tracker = RecordingTracker(failing=failing)
     storage = SQLiteScenarioStorage(tmp_path)
     seed = ArtifactRef("seed-content", "seed", None)
@@ -144,28 +144,37 @@ def test_rollback_retries_rotate_once_and_tracker_errors_do_not_fail_storage(tmp
     correlation = observer.prepare(context, checkpoint_path=None)
     assert correlation == ({} if failing else {"experiment/run_id": "run-0"})
     first = training_record()
-    rollback = replace(
-        training_record(2),
-        operation="rollback",
-        rollback_target_release_id="seed",
-        component=None,
-        training_job_id=None,
-    )
+
+    def operation_record(step: int, operation: str) -> CommitRecord:
+        return CommitRecord(
+            scenario="math",
+            step=step,
+            artifact_ref=seed,
+            checkpoint=False,
+            algorithm_state=None,
+            high_water_sequence=0,
+            high_water_offset=0,
+            operation=operation,
+        )
+
+    start = operation_record(2, "train_from")
     try:
         store.commit_step(expected_step=0, commit=first)
-        store.commit_step(expected_step=1, commit=rollback)
-        store.commit_step(expected_step=1, commit=rollback)
-        store.commit_step(expected_step=2, commit=training_record(3))
+        store.commit_step(expected_step=1, commit=start)
+        store.commit_step(expected_step=1, commit=start)
+        # An activation moves what serves and leaves the training run alone.
+        store.commit_step(expected_step=2, commit=operation_record(3, "activate"))
+        store.commit_step(expected_step=3, commit=training_record(4))
         # Retrying an earlier step after a later one must not move tracking backwards.
         store.commit_step(expected_step=0, commit=first)
         observer.reports.flush()
-        assert len(store.history()) == 3
+        assert len(store.history()) == 4
         assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [(0, 0), (2, 0)]
-        (event,) = tracker.rollbacks
+        (event,) = tracker.starts
         assert event.run_segment == 0 and event.step == 2
-        assert event.source_artifact_ref == first.artifact_ref
-        assert event.target_release_id == "seed"
-        assert tracker.events[-1].context.source_artifact_ref == rollback.artifact_ref
+        assert event.served_artifact_ref == first.artifact_ref
+        assert event.start_artifact_ref == seed
+        assert tracker.events[-1].context.source_artifact_ref == seed
     finally:
         store.close()
         storage.close()

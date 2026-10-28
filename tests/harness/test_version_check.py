@@ -131,7 +131,7 @@ versionCheck({
 });
 globalThis.fetch = async () => ({
   ok: true,
-  json: async () => ({ releases: [{ release_id: "v1" }, { release_id: "v2" }] }),
+  json: async () => ({ releases: [{ release_id: "v1", active: false }, { release_id: "v2", active: true }] }),
 });
 await sessionStart(
   { type: "session_start", reason: "startup" },
@@ -221,7 +221,8 @@ const inputs = JSON.parse(process.env.TEST_INPUT || "[]");
 globalThis.fetch = async (url, init = {}) => {
   if ((init.method || "GET") === "POST") {
     events.push({ kind: "fetch", method: "POST", url, body: init.body ? JSON.parse(init.body) : null });
-    const answer = JSON.parse(process.env.TEST_PROMOTE || '{"ok": true, "release_id": "promoted"}');
+    const body = init.body ? JSON.parse(init.body) : {};
+    const answer = JSON.parse(process.env.TEST_ACTIVATE || JSON.stringify({ ok: true, release_id: body.artifact_id }));
     return { ok: answer.ok !== false, status: answer.ok === false ? 409 : 200, json: async () => answer, text: async () => JSON.stringify(answer) };
   }
   return { ok: true, json: async () => JSON.parse(process.env.TEST_RELEASES) };
@@ -268,7 +269,7 @@ console.log(JSON.stringify(events));
         "TEST_CONFIRM",
         "TEST_INPUT",
         "TEST_EXEC",
-        "TEST_PROMOTE",
+        "TEST_ACTIVATE",
     ):
         if name not in env:
             full_env.pop(name, None)
@@ -282,10 +283,10 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
     the notice prints the setup list and never offers the install."""
     requires = [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}, {"name": "notify", "kind": "permission"}]
     releases = [
-        {"release_id": "v1", "pending": False},
+        {"release_id": "v1", "active": False},
         {
             "release_id": "v2",
-            "pending": False,
+            "active": True,
             "metrics": {"training_request": {"text": "text me", "requires": requires}},
         },
         # A step that published no tree carries the head's id, so the list and the offer stay with v2.
@@ -329,19 +330,19 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
 def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup_entry(tmp_path: Path) -> None:
     """The head needs every item over its chain, as the manifest lists it: a row whose requires is not a list
     adds nothing, a null setup entry is skipped, a check off whose recorded check is not the item's is unmet, and
-    a promote row continues at the release it promoted."""
+    the chain continues at each row's parent."""
     item = {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}
     releases = [
-        {"release_id": "v1", "pending": False, "parent_release_id": None},
+        {"release_id": "v1", "active": False, "parent_release_id": None},
         {
             "release_id": "v2",
-            "pending": False,
+            "active": False,
             "parent_release_id": "v1",
             "metrics": {"training_request": {"requires": [item]}},
         },
         {
             "release_id": "v3",
-            "pending": False,
+            "active": True,
             "parent_release_id": "v2",
             "metrics": {"training_request": {"requires": "x"}},
         },
@@ -356,15 +357,14 @@ def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup
     )
     events, _ = _notice(tmp_path, releases, {"release_id": "v1", "setup": [{**stale, "check": "TWILIO_SID"}]})
     assert [event["kind"] for event in events] == ["select"] and "Latest:  v3" in events[0]["title"]
-    # The promoted head needs what the pending release it promoted named, on top of the chain's.
+    # An inactive head needs what it names itself, on top of its parent chain's.
     releases += [
         {
-            "release_id": "p1",
-            "pending": True,
+            "release_id": "v4",
+            "active": False,
             "parent_release_id": "v3",
             "metrics": {"training_request": {"requires": [{"name": "notify", "kind": "permission"}]}},
         },
-        {"release_id": "v4", "pending": False, "parent_release_id": "v3", "rollback_target_release_id": "p1"},
     ]
     events, _ = _notice(tmp_path, releases, {"release_id": "v3", "setup": [{**stale, "check": "TWILIO_SID"}]})
     assert [event["kind"] for event in events] == ["notify", "notify"]
@@ -380,66 +380,56 @@ def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_the_notice_offers_a_release_held_back_from_the_head_and_serves_it_before_installing(
-    tmp_path: Path,
-) -> None:
-    """A release held back from the served head is offered like any other, because installing one is the person's
-    decision. Taking the offer moves the head to it first, so the install route serves that tree, and the line
-    names the head the promote minted. A step that published no tree of its own is never the offer."""
+def test_the_notice_offers_an_inactive_release_and_activates_it_before_installing(tmp_path: Path) -> None:
+    """An inactive release is offered like any other, because installing one is the person's decision. Taking the
+    offer activates it first, so the install route serves that tree, and the line names that same release. A step
+    that published no tree of its own is never the offer."""
     release_info = {"release_id": "v1"}
-    pending_tail = [{"release_id": "v1"}, {"release_id": "v2", "pending": True}]
-    events, stderr = _notice(tmp_path, pending_tail, release_info)
+    inactive_tail = [{"release_id": "v1", "active": True}, {"release_id": "v2", "active": False}]
+    events, stderr = _notice(tmp_path, inactive_tail, release_info)
     assert [event["kind"] for event in events] == ["select"] and stderr == ""
     assert "Current: v1" in events[0]["title"] and "Latest:  v2" in events[0]["title"]
     # Headless says the same thing on stderr, so a scripted session sees the release too.
-    events, stderr = _notice(tmp_path, pending_tail, release_info, headless=True)
+    events, stderr = _notice(tmp_path, inactive_tail, release_info, headless=True)
     assert events == [] and "Latest:  v2" in stderr
-    # Taking the offer promotes first: the head moves to the release, and the install serves what it minted.
-    events, _ = _notice(
-        tmp_path,
-        pending_tail,
-        release_info,
-        TEST_CHOOSE_UPDATE="1",
-        TEST_PROMOTE=json.dumps({"ok": True, "release_id": "v2-head"}),
-    )
+    # Taking the offer activates first; an activation mints no release, so the install serves v2 itself.
+    events, _ = _notice(tmp_path, inactive_tail, release_info, TEST_CHOOSE_UPDATE="1")
     assert [event["kind"] for event in events] == ["select", "notify", "fetch", "notify", "exec", "notify"]
-    promote = events[2]
-    assert promote["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
-    assert promote["body"] == {"release_id": "v2"}
-    assert events[-1]["message"] == "Installed release v2-head. Type /reload to load it now."
-    # A refused promote installs nothing and says so.
+    activation = events[2]
+    assert activation["url"] == "http://reef:8900/reef/scenarios/code-repair/activate"
+    assert activation["body"] == {"artifact_id": "v2"}
+    assert events[-1]["message"] == "Installed release v2. Type /reload to load it now."
+    # A refused activation, or an answer that names another release, installs nothing and says so.
+    for answer in ({"ok": False}, {"ok": True, "release_id": "v1"}):
+        events, _ = _notice(
+            tmp_path, inactive_tail, release_info, TEST_CHOOSE_UPDATE="1", TEST_ACTIVATE=json.dumps(answer)
+        )
+        assert [event["kind"] for event in events] == ["select", "notify", "fetch", "notify"]
+        assert events[-1] == {
+            "kind": "notify",
+            "message": "Reef harness update failed: reef refused to activate release v2.",
+            "type": "error",
+        }
+    # An active release needs no activation: the install runs straight through.
     events, _ = _notice(
-        tmp_path,
-        pending_tail,
-        release_info,
-        TEST_CHOOSE_UPDATE="1",
-        TEST_PROMOTE=json.dumps({"ok": False}),
+        tmp_path, [{"release_id": "v1"}, {"release_id": "v2", "active": True}], release_info, TEST_CHOOSE_UPDATE="1"
     )
-    assert [event["kind"] for event in events] == ["select", "notify", "fetch", "notify"]
-    assert events[-1] == {
-        "kind": "notify",
-        "message": "Reef harness update failed: reef refused to serve release v2.",
-        "type": "error",
-    }
-    # A release already at the head needs no promote: the install runs straight through.
-    events, _ = _notice(tmp_path, [{"release_id": "v1"}, {"release_id": "v2"}], release_info, TEST_CHOOSE_UPDATE="1")
     assert [event["kind"] for event in events] == ["select", "notify", "exec", "notify"]
     assert events[-1]["message"] == "Installed release v2. Type /reload to load it now."
-    # A step that published no tree carries the head's id, so it is never the offer.
+    # A step that published no tree carries the active release's id, so it is never the offer.
     no_tree = [
-        {"release_id": "v1"},
-        {"release_id": "v2", "pending": True},
-        {"release_id": "v2", "metrics": {"selected": False}},
-        {"release_id": "v2", "metrics": {"skipped": "no proposal"}},
+        *inactive_tail,
+        {"release_id": "v1", "metrics": {"selected": False}},
+        {"release_id": "v1", "metrics": {"skipped": "no proposal"}},
     ]
     events, _ = _notice(tmp_path, no_tree, release_info)
     assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
     # The tree that is already installed is never offered back to itself.
-    assert _notice(tmp_path, pending_tail, {"release_id": "v2"}) == ([], "")
+    assert _notice(tmp_path, inactive_tail, {"release_id": "v2"}) == ([], "")
     # A null row is skipped, never an error; a release file that is not a record is silence.
     events, _ = _notice(tmp_path, [{"release_id": "v1"}, None, {"release_id": "v2"}], release_info)
     assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
-    assert _notice(tmp_path, pending_tail, None) == ([], "")
+    assert _notice(tmp_path, inactive_tail, None) == ([], "")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -448,10 +438,10 @@ def test_the_notice_warns_once_per_unset_variable_the_installed_release_needs(tm
     else the name) this shell lacks gets one warning line; a set variable, a checked off one included, is silent,
     and the other kinds say nothing here. The update flow follows unchanged."""
     releases = [
-        {"release_id": "v1", "pending": False, "parent_release_id": None},
+        {"release_id": "v1", "active": False, "parent_release_id": None},
         {
             "release_id": "v2",
-            "pending": False,
+            "active": False,
             "parent_release_id": "v1",
             "metrics": {
                 "training_request": {
@@ -463,7 +453,7 @@ def test_the_notice_warns_once_per_unset_variable_the_installed_release_needs(tm
                 }
             },
         },
-        {"release_id": "v3", "pending": False, "parent_release_id": "v2"},
+        {"release_id": "v3", "active": True, "parent_release_id": "v2"},
     ]
     warning = "reef: {} is not set; the installed harness needs it (reef-pi setup lists it)"
     # On the head with both variables unset: two warnings, in the chain's order, and nothing else.
@@ -497,8 +487,8 @@ SETUP_REQUIRES = [
     {"name": "notify", "kind": "permission", "check": "true"},
 ]
 SETUP_RELEASES = [
-    {"release_id": "v1", "pending": False},
-    {"release_id": "v2", "pending": False, "metrics": {"training_request": {"requires": SETUP_REQUIRES}}},
+    {"release_id": "v1", "active": False},
+    {"release_id": "v2", "active": True, "metrics": {"training_request": {"requires": SETUP_REQUIRES}}},
 ]
 # What the wrapper lists for v2 while nothing is checked off: every item unmet, the prompt beside it.
 SETUP_LISTING = {"release_id": "v2", "items": [{"prompt": None, **item, "met": False} for item in SETUP_REQUIRES]}

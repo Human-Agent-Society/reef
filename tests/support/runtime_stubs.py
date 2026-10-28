@@ -106,7 +106,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
 
     A release serves under the version its ``model.txt`` names, or under its
     release ID when it holds no such file. ``activated`` lists the versions
-    of the releases it served, at commits, rollbacks and starts, in order;
+    of the releases it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
     """
 
