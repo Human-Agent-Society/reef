@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
-from reef.core.evaluation import ArtifactKind
+from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
@@ -543,6 +543,16 @@ class InferenceRuntime(AdapterWeightRuntime):
         which is the default.
         """
         return "model"
+
+    def release_model(self, artifact: Artifact) -> PolicyModel | None:
+        """The model that this runtime serves for the release ``artifact`` on request, without serving it.
+
+        ``None``, the default, means the runtime serves only the release it has loaded, so it cannot answer a call
+        for another release. A runtime whose handler answers each call from the release that the call names, such
+        as a sampler for each checkpoint, returns that release's model. Raise ``ValueError`` when ``artifact`` is
+        not a release that this runtime can serve.
+        """
+        return None
 
     @property
     def per_scenario_adapters(self) -> bool:

@@ -290,6 +290,83 @@ class RolloutRequest:
             raise TypeError("a rollout request's record_dir is None or a Path")
 
 
+@dataclass(frozen=True)
+class ArtifactEvaluationRequest:
+    """A client's request to evaluate one artifact: a component of a release, with the other side of its policy.
+
+    Values: ``release_id`` is a non-empty release ID of the scenario, and ``component`` a non-empty name of one of
+    the release's components: the artifact. Exactly one of ``harness`` and ``model`` is set: ``harness``, the
+    Harbor agent that runs a model artifact (an object with a non-empty ``name`` or ``import_path``, as
+    ``TaskRolloutRunner``'s ``agent``), or ``model``, the non-empty name of the deployment's model binding that a
+    harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
+    ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
+    Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
+    """
+
+    release_id: str
+    component: str
+    harness: Mapping[str, Any] | None = None
+    model: str | None = None
+    task_names: tuple[str, ...] = ()
+    rollouts_per_task: int = 1
+    environment: str = "docker"
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("release_id", self.release_id),
+            ("component", self.component),
+            ("environment", self.environment),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"an artifact evaluation's {name} must be a non-empty string")
+        if (self.harness is None) == (self.model is None):
+            raise ValueError("an artifact evaluation configures exactly one of harness and model")
+        if self.harness is not None:
+            if not isinstance(self.harness, Mapping) or not any(
+                isinstance(self.harness.get(key), str) and self.harness[key] for key in ("name", "import_path")
+            ):
+                raise ValueError("an artifact evaluation's harness is a Harbor agent with a name or an import_path")
+            object.__setattr__(self, "harness", MappingProxyType(dict(self.harness)))
+        if self.model is not None and (not isinstance(self.model, str) or not self.model):
+            raise ValueError("an artifact evaluation's model is the non-empty name of a model binding")
+        if (
+            not isinstance(self.task_names, tuple)
+            or any(not isinstance(name, str) or not name for name in self.task_names)
+            or len(set(self.task_names)) != len(self.task_names)
+        ):
+            raise ValueError("an artifact evaluation's task_names are distinct non-empty strings")
+        count = self.rollouts_per_task
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("an artifact evaluation's rollouts_per_task is a positive integer")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "release_id": self.release_id,
+            "component": self.component,
+            "harness": None if self.harness is None else dict(self.harness),
+            "model": self.model,
+            "task_names": list(self.task_names),
+            "rollouts_per_task": self.rollouts_per_task,
+            "environment": self.environment,
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> ArtifactEvaluationRequest:
+        """The request that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        keys = {"release_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
+        if not isinstance(value, Mapping) or set(value) != keys or not isinstance(value["task_names"], list):
+            raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
+        return cls(
+            value["release_id"],
+            value["component"],
+            value["harness"],
+            value["model"],
+            tuple(value["task_names"]),
+            value["rollouts_per_task"],
+            value["environment"],
+        )
+
+
 class RolloutRunner[RolloutT](ABC):
     """Runs rollouts in one environment: one rollout for each ``RolloutRequest``.
 
@@ -447,6 +524,7 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
 __all__ = [
     "ARTIFACT_KINDS",
     "FAILED",
+    "ArtifactEvaluationRequest",
     "ArtifactKind",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",

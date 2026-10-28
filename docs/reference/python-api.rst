@@ -1632,6 +1632,12 @@ Neither inherits from the other, and no trainer holds a serving engine.
   kind of the weights that the runtime serves from a release: ``model``, the
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
+  ``release_model(artifact)`` is the ``PolicyModel`` that the runtime serves
+  for a release on request, without loading it, or None, the default, for a
+  runtime that serves only its loaded release. A runtime whose handler answers
+  each call from the release that the call names overrides it, as the Tinker
+  runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
+  of a model release needs it.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` orders both around each commit. It publishes a

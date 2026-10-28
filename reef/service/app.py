@@ -10,6 +10,7 @@ from aiohttp import web
 
 from reef.dispatcher import Dispatcher
 from reef.runtime.interfaces import InferenceHandler
+from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
@@ -59,6 +60,7 @@ def create_app(
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
     open_local_cycles_at: str | None = None,
+    evaluations: ArtifactEvaluations | None = None,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -66,6 +68,8 @@ def create_app(
     a connection, the dispatcher's held local cycles open (see
     ``Dispatcher(hold_local_cycles=True)``). ``evaluation_tokens`` open the
     evaluation routes only (see ``create_authentication_middleware``).
+    ``evaluations`` runs the artifact evaluations of the evaluation routes;
+    None runs them with reef-eval's Harbor lab.
     """
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     app = web.Application(
@@ -78,6 +82,7 @@ def create_app(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
+        evaluations=ArtifactEvaluations(dispatcher) if evaluations is None else evaluations,
     )
     if record_retention is not None:
 

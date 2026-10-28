@@ -6,7 +6,8 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, Thread
@@ -418,6 +419,19 @@ class Dispatcher(ScenarioLifecycle):
             published = ingest.append_tasks(current, directories, split)
             self.local_workers.wake(current)
             return published
+
+    @contextmanager
+    def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
+        """The loaded scenario ``scenario``, loaded again when it was unloaded, held under its lock.
+
+        Raise ``UnknownScenario`` when the scenario does not exist. The caller must not keep the scenario, or its
+        storage session, after the block: an unload closes the session.
+        """
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            yield current
 
     def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
         """The scenario's imported tasks in publication order, each with whether it trained."""

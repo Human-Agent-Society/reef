@@ -3,7 +3,9 @@ from __future__ import annotations
 from aiohttp import web
 
 from reef.runtime.interfaces import InferenceHandler
+from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.request_service import RequestService
+from reef.service.routes.evaluations import register_evaluation_routes
 from reef.service.routes.inference import register_inference_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.scenarios import register_scenario_routes
@@ -17,6 +19,7 @@ def register_routes(
     *,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
+    evaluations: ArtifactEvaluations,
 ) -> None:
     register_health_route(app)
     register_inference_routes(
@@ -29,6 +32,7 @@ def register_routes(
     register_record_routes(app, request_service=request_service)
     register_trajectory_routes(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)
+    register_evaluation_routes(app, evaluations=evaluations)
 
 
 __all__ = ["register_routes"]

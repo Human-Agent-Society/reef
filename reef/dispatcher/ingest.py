@@ -134,13 +134,16 @@ def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitN
     """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's ``imported-tasks`` store.
 
     Return the published tasks in the order of ``directories``. A task that the store holds with the same files
-    and split is returned as it is. Admission refuses the upload when no trainer of the scenario reads imported
-    tasks (``TrainingPipeline.accepts_imported_tasks``), since nothing would use them. The caller checks that each
+    and split is returned as it is. Admission refuses an upload to the ``train`` split when no trainer of the
+    scenario reads imported tasks (``TrainingPipeline.accepts_imported_tasks``), since nothing would train on
+    them. The ``eval`` split is always open: an artifact evaluation runs its tasks. The caller checks that each
     directory is a Harbor task. A ``TaskConflict`` (a name published with other files or in the other split)
     stops the upload; the tasks before it stay published, and a corrected upload adds the rest.
     """
-    if not any(component_trainer.trainer.pipeline.accepts_imported_tasks for component_trainer in current.trainers):
-        raise ValueError(f"the recipe of scenario {current.name!r} does not use imported tasks")
+    if split == "train" and not any(
+        component_trainer.trainer.pipeline.accepts_imported_tasks for component_trainer in current.trainers
+    ):
+        raise ValueError(f"the recipe of scenario {current.name!r} does not train on imported tasks")
     store = current.store.tasks.open(IMPORTED_TASK_STORE)
     return tuple(store.add_task(directory=directory, split=split) for directory in directories)
 

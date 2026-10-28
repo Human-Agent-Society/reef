@@ -22,7 +22,7 @@ from reef_client.sse import synthesize_sse_events
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
-from reef.core.evaluation import ArtifactKind
+from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
     InferenceHandler,
@@ -92,6 +92,10 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def served_weight_kind(self) -> ArtifactKind:
         """A Tinker sampler serves a LoRA adapter on the base model."""
         return "model_adapter"
+
+    def release_model(self, artifact: Artifact) -> PolicyModel:
+        """The base model with the sampler that the release's manifest names: each call samples its own release."""
+        return PolicyModel(self._model, checkpoint_sampler_path(artifact, self._model, self._service))
 
     @property
     def inference_handler(self) -> InferenceHandler:
