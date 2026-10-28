@@ -174,7 +174,7 @@ def test_the_designer_asks_in_the_api_the_section_names_or_the_upstreams(
     ("section", "environment", "needs"),
     [
         ({}, "docker", ["reef_eval", "harbor", "docker"]),
-        ({"environment": "e2b"}, "e2b", ["reef_eval", "harbor", "E2B_API_KEY", "e2b"]),
+        ({"environment": "e2b"}, "e2b", ["reef_eval", "harbor", "E2B_API_KEY", "e2b", "dockerfile_parse"]),
     ],
 )
 def test_the_generator_environment_reaches_the_checks_the_rollouts_and_the_readiness(

@@ -724,9 +724,9 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probes = readiness_probes(harbor="/opt/harbor", environment="e2b")
-    assert [probe.name for probe in probes] == ["reef_eval", "harbor", "E2B_API_KEY", "e2b"]
+    assert [probe.name for probe in probes] == ["reef_eval", "harbor", "E2B_API_KEY", "e2b", "dockerfile_parse"]
     assert not any(isinstance(probe, DockerProbe) for probe in probes)
-    key, package = probes[2], probes[3]
+    key, package, parser = probes[2], probes[3], probes[4]
     monkeypatch.delenv("E2B_API_KEY", raising=False)
     assert key.missing() == KEY_REASON
     monkeypatch.setenv("E2B_API_KEY", "")
@@ -749,6 +749,10 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
     reason = package.missing()
     assert reason.startswith(f"e2b under {sys.executable} lacks ALL_TRAFFIC, AsyncTemplate"), reason
     assert "SandboxNetworkOpts" in reason
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+    reason = parser.missing()
+    assert reason.startswith(f"dockerfile_parse does not import under {sys.executable}"), reason
+    assert "install reef-infra[e2b]" in reason
     with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
         readiness_probes(environment="modal")
     with pytest.raises(ValueError, match="non-empty environment variable name"):
@@ -758,12 +762,12 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
 def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The test environment may lack reef-eval and the e2b extra; a stand in spec and a stand in module make both import.
+    # The test environment may lack reef-eval and the e2b extra; stand in specs and a stand in module make them import.
     find_spec = importlib.util.find_spec
     monkeypatch.setattr(
         importlib.util,
         "find_spec",
-        lambda name, package=None: find_spec("json" if name == "reef_eval" else name, package),
+        lambda name, package=None: find_spec("json" if name in ("reef_eval", "dockerfile_parse") else name, package),
     )
     e2b = types.ModuleType("e2b")
     for name in HARBOR_E2B_NAMES:

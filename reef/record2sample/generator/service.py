@@ -220,7 +220,7 @@ def readiness_probes(*, harbor: str | None = None, environment: str = "docker") 
     """What checking a task and running its rollouts takes: reef-eval, the harbor command line, and ``environment``.
 
     ``docker`` needs a Docker daemon that answers. ``e2b`` needs its credential variables in
-    ``REMOTE_TASK_ENVIRONMENTS`` (``E2B_API_KEY``) and the e2b package, which Harbor's
+    ``REMOTE_TASK_ENVIRONMENTS`` (``E2B_API_KEY``) and the e2b and dockerfile-parse packages, which Harbor's
     e2b environment imports. Raise ``ValueError`` for a name outside ``HARBOR_ENVIRONMENTS``.
     """
     stack = (
@@ -238,6 +238,10 @@ def readiness_probes(*, harbor: str | None = None, environment: str = "docker") 
             ),
             ModuleNamesProbe(
                 "e2b", HARBOR_E2B_NAMES, hint="Harbor's e2b environment needs it; install reef-infra[e2b]"
+            ),
+            ModuleProbe(
+                "dockerfile_parse",
+                hint="Harbor's e2b environment reads each task's Dockerfile with it; install reef-infra[e2b]",
             ),
         )
     raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
