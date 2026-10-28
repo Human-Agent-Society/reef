@@ -25,7 +25,7 @@ from tests.support.artifact_versions import (
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.dispatcher import Dispatcher
-from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
+from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint
 from reef.service.app import RequestService, create_app
@@ -450,37 +450,48 @@ def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
 
 
 @pytest.mark.unit
-def test_experiment_events_follow_settled_state_and_a_new_training_start(
+def test_experiment_events_follow_durable_commits_and_a_new_training_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tracker = RecordingExperimentTracker()
     value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
     observed = []
+    recorded = Event()
+    advance_to = scenario._committer.advance_to
 
-    def record(event) -> None:
-        observed.append((event.context.step, scenario.scenario_step, scenario.current_artifact_ref()))
+    def record(event: TrainingExperimentEvent) -> None:
+        observed.append((event.context.step, scenario.store.history()[-1].step))
+        recorded.set()
 
-    def record_start(event) -> None:
-        observed.append((event.step, scenario.scenario_step, scenario.current_artifact_ref()))
+    def record_start(event: TrainFromExperimentEvent) -> None:
+        observed.append((event.step, scenario.store.history()[-1].step))
         observed.append(runtime.inference.inference_admission_status["open"])
+
+    def advance_after_report(step: int) -> None:
+        if step == 1:
+            # A stored commit can be reported before the in-memory scenario advances.
+            assert recorded.wait(5), "the tracker did not report the stored commit"
+        advance_to(step)
 
     monkeypatch.setattr(tracker, "record", record)
     monkeypatch.setattr(tracker, "record_train_from", record_start)
+    monkeypatch.setattr(scenario._committer, "advance_to", advance_after_report)
     try:
         train(value, 1)
         value.registry.experiment_reports.flush()
         trained = scenario.current_artifact_ref()
-        # Each event follows its own settled commit: the scenario is at that step or later.
-        assert [event_step for event_step, _, _ in observed] == [1, 2, 3]
-        assert all(scenario_step >= event_step for event_step, scenario_step, _ in observed)
-        assert observed[-1] == (3, 3, trained)
+        assert [event_step for event_step, _ in observed] == [1, 2, 3]
+        assert all(stored_step >= event_step for event_step, stored_step in observed)
+        assert observed[-1] == (3, 3)
         observed.clear()
         # The creation carries the base artifact, named by the repository base release.
         value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained release still serves.
-        assert observed == [(4, 4, trained), True]
+        assert observed == [(4, 4), True]
+        assert scenario.scenario_step == 4
+        assert scenario.current_artifact_ref() == trained
     finally:
         value.close()
 
