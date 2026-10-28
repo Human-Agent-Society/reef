@@ -944,9 +944,10 @@ startup, and its ``listen`` function runs at its event. It can call
 loop. Under ``sandbox``, the loop process is the rollout jail, with a
 writable workspace and session directory, network access to the model
 endpoint, and the executor's base directories and shells. Under ``local``,
-it is the host. Use ``review_kinds: [native_hook]`` to require review before
-publishing hook changes. Under ``local``, tools also run without confinement;
-include ``native_tool`` in ``review_kinds`` when reviewing those changes.
+it is the host. List ``native_hook`` in the ``always`` activation rule's
+``review_kinds`` to require review before hook changes serve. Under
+``local``, tools also run without confinement; list ``native_tool`` there
+too when reviewing those changes.
 
 ``reef.harness.runners.native.seed.SEED_TOOLS`` provides the starting
 ``read_file``, ``write_file``, ``run_bash``, and ``execute`` entries. A recipe
@@ -1038,8 +1039,9 @@ Native tree file
 
 The native descriptor declares ``files.tree: native/tree.json``. Reef
 renders the release's entries into that file as a JSON array of
-``{id, name, config}`` objects. It is the same list stored in the commit
-log under ``algorithm_state["entries"]``.
+``{id, name, config}`` objects. Every harness artifact, of every adapter,
+also holds the same list in ``reef-entries.json`` at the tree root. Reef
+reads a release's entries from that file. A client's pull leaves it out.
 
 The file accompanies evaluation rollouts, published artifacts, manifests,
 install scripts, and pulled trees. Before the first evolution step, the
@@ -1246,8 +1248,9 @@ The session header's ``loop`` names the loop that ran, or is null under a
 graph. In serve mode, it names the loop used on the session's first turn.
 ``graph`` still names the graph available to subagents. Loop code runs
 with the loop process's privileges. For that reason, ``native_loop``
-changes always require review: a selected change remains pending regardless
-of ``review_kinds``, and ``harness_try`` refuses to mount it.
+changes always require review: the ``always`` activation rule leaves a
+selected change inactive whatever its ``review_kinds`` lists, and
+``harness_try`` refuses to mount it.
 
 Native trajectory
 ~~~~~~~~~~~~~~~~~
@@ -1301,7 +1304,7 @@ Both modes use the same entries, plugins, and interpreter.
 loads ``native/tree.json`` into a compose ``Loader`` over
 ``NATIVE_PLUGINS`` and keeps a ``Run`` per session across turns. It starts
 ``client.wrapper.CaptureProxy`` in process. ``release_client.HeadWatch``
-follows the served head by polling the catalog and reading the
+follows the active release by polling the catalog and reading the
 ``x-reef-release-id`` header on inference responses.
 
 The interpreter calls ``loop.before_step(run)`` before each model stage.
@@ -1861,7 +1864,7 @@ fetch therefore cannot stop later polls.
 When a result appears, the report quotes the first 60 characters of the
 request and gives the next action:
 
-- A selected release names ``/versions <version> install``. A pending
+- A selected release names ``/versions <version> install``. An inactive
   release first asks the user to read it through ``/versions <version>``
   because it changes an extension.
 - A rejected step quotes ``selection.reason`` and suggests rephrasing or
@@ -1883,8 +1886,8 @@ When a step settles, pi offers to install its release. It waits until the
 session is idle (``ctx.isIdle()``); a busy session keeps the report's
 commands, and the next session start offers the release again.
 ``/versions <version> install`` also starts installation after a
-confirmation linking to the step page. Installing a release held back from
-the served head promotes it first. Rejected or skipped steps have no tree
+confirmation linking to the step page. Installing an inactive release
+activates it first. Rejected or skipped steps have no tree
 to install. The separate automatic update notice remains available at
 session start.
 
@@ -1934,13 +1937,13 @@ message and notice; others restart the watch. A restarted session can
 therefore still report a result missed earlier.
 
 With a UI, ``session_start`` announces the two commands and counts
-releases held back from the served head, with the install command:
+inactive releases, with the install command:
 ``N release(s) ready to install: /versions <version>[, <version>]
 (install with /versions <version> install)``.
 
 ``/versions [version] [install]`` lists releases oldest first with version
 (``v0``, ``v1``, ...), release id, result, and status. Status distinguishes
-the locally installed version from the served head. Request summaries
+the locally installed version from the active release. Request summaries
 appear under their rows with collapsed whitespace; the footer explains
 statuses and available commands. A version such as ``v3`` or ``3`` offers
 the step page at ``GET /reef/harness/releases/{step}/page`` with scenario
@@ -1948,7 +1951,7 @@ and token query parameters. The page includes the design, review, and
 numbers. Accepting opens it through ``open``, ``xdg-open``, or
 ``rundll32``; declining prints the URL. Headless mode prints the summary
 and URL. ``/versions <version> install`` confirms before installing and
-promotes a held release first.
+activates an inactive release first.
 
 The service performs the actual edit. Its evolution step passes the filed
 request to the recipe's ``propose`` method and records it, including merged
@@ -1973,20 +1976,20 @@ Seed and recovered state may contain them, but admission refuses mutations
 that create, update, or remove them.
 
 When a scenario opens, ``CordisBackend.shipped_content_update`` compares
-those reserved entries in the running Reef's seed with the served release.
+those reserved entries in the running Reef's seed with the active release.
 If an entry differs or is missing, Reef replaces or appends it, renders the
 tree, and commits a training release with metrics
 ``{"shipped_content_update": {"entries": [<ids>]}}``. This update
 consumes no records, runs no evaluation, and waits for no review because
 the content ships with Reef. The update notice offers it to installed
-trees like any other served head.
+trees like any other new active release.
 
 An evolved extension runs in pi's process with the user's privileges.
 Admission screens its text only for credential-shaped literals. The pi
-tutorial deployment therefore sets
-``evolution.review_kinds: [code_extension]`` alongside ``requests: true``
-and ``version_check: true``. A selected release that changes an extension
-waits for promotion after review.
+tutorial deployment therefore sets an ``always`` activation rule with
+``review_kinds: [code_extension]``, alongside ``evolution.requests: true``
+and ``evolution.version_check: true``. A selected release that changes an extension
+stays inactive until a person reviews and activates it.
 
 ``propose`` receives the request's ``requires`` list beside its text.
 Each item names a requirement from the user's machine as

@@ -3,7 +3,7 @@
 Slime trains in the HTTP service's process: the runtime factory builds a
 ``SlimeTrainingComponent`` that owns its Ray session and training workers.
 Serving is not Slime's: the deployment's ``inference`` section configures it
-(``reef.service.deploy.serving``), and a selected checkpoint reaches the
+(``reef.service.deploy.serving``), and an activated checkpoint reaches the
 serving engines as files. A distillation teacher runs as its own service.
 """
 
@@ -192,7 +192,7 @@ def teacher_service(settings: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 class SlimeDeployment(TrainingDeployment):
-    """Train with Slime in the HTTP service; the inference section serves its selected checkpoints."""
+    """Train with Slime in the HTTP service; the inference section serves its activated checkpoints."""
 
     supports_teacher_engine = True
     component_type = "reef.train.slime_backend.launch:component_factory"

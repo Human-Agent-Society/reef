@@ -18,6 +18,33 @@ from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.version_check import ships_version_check
 
 
+def result_of(row: Mapping[str, Any]) -> str:
+    """The result of one ``GET /reef/harness/releases`` row, one of:
+
+    - ``rejected``: ``metrics.selected`` is false.
+    - ``inactive``: ``metrics.selected`` is true, the row made an artifact
+      (``checkpoint``) and that artifact was never active (``activated`` is
+      false). A person must activate it.
+    - ``selected``: ``metrics.selected`` is true otherwise.
+    - ``skipped``: ``metrics.selected`` is absent and ``metrics.skipped`` is set.
+    - the row's ``operation`` (``creation``, ``training`` or ``recovery``) for
+      any other row, ``unknown`` when the row names none.
+
+    The wrapper, the harness pages and the tutorial driver read this function;
+    the pi extension's ``resultOf`` in ``requests.ts`` is its one copy in
+    TypeScript."""
+    metrics = row.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    selected = metrics.get("selected")
+    if selected is False:
+        return "rejected"
+    if selected is True:
+        return "inactive" if row.get("checkpoint") and not row.get("activated") else "selected"
+    if metrics.get("skipped"):
+        return "skipped"
+    return str(row.get("operation") or "unknown")
+
+
 def missed_rollouts(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """The candidate rollouts a step's evaluation names that failed or scored below its floor, from the row's
     ``candidate_rollouts`` summary (``task``, ``score``, ``failure``, ``reply``); none when the step recorded none."""
@@ -173,7 +200,7 @@ def next_action(
 ) -> NextAction | None:
     """The next action of a settled step, ``None`` for a rejected or skipped one. ``requires`` names the items the
     release still needs set up: the install refuses a release whose items are not set up, so setup comes first."""
-    if selection_result not in ("pending", "selected"):
+    if selection_result not in ("inactive", "selected"):
         return None
     if not reef_installs(adapter):
         # A batch runner with no wrapper: nothing to set up or update on this machine.
@@ -189,18 +216,18 @@ def next_action(
     install = (f"reef-{adapter} setup", f"reef-{adapter} update") if requires else (f"reef-{adapter} update",)
     if ships_version_check(adapter):
         return NextAction(
-            "Read this page, then install" if selection_result == "pending" else "Install when ready",
+            "Read this page, then install" if selection_result == "inactive" else "Install when ready",
             (f"/versions v{step} install",),
             f"Run this in your reef-{adapter} session. You can keep chatting until you are ready.",
             install,
         )
-    if selection_result == "pending":
-        serve = (f"reef-{adapter} wait {record_id}",)
+    if selection_result == "inactive":
+        activate = (f"reef-{adapter} wait {record_id}",)
         return NextAction(
-            "Read this page, then serve it",
-            serve,
-            "Run this in a terminal: it asks whether to serve this release, then installs it.",
-            serve,
+            "Read this page, then activate it",
+            activate,
+            "Run this in a terminal: it asks whether to activate this release, then installs it.",
+            activate,
         )
     if requires:
         return NextAction(
@@ -228,5 +255,6 @@ __all__ = [
     "next_action",
     "reef_installs",
     "rejection_text",
+    "result_of",
     "unscored_failures",
 ]

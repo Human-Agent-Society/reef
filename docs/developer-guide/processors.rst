@@ -617,7 +617,7 @@ loop through the stage's own-job-data hooks:
    outcome to the stage (``Sample2Job.job_ended``). The tasks leave the pool.
    The stage gives each trained task without a result its rewards from
    ``rollout_rewards``. A task without rewards, for example in a job that
-   failed or that a rollback cancelled, gets an infrastructure-failure
+   failed or that a ``train-from`` cancelled, gets an infrastructure-failure
    result, so its generation's feedback still goes out.
 
 A result that the task store fails to save is saved again by the next job. On

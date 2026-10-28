@@ -15,14 +15,15 @@ from reef.train.types import JobData
     [
         ({"job_id": ""}, ValueError, "job_id must be a non-empty string"),
         ({"backend": ""}, ValueError, "backend must be a non-empty string"),
-        ({"start": ""}, ValueError, "start must be a non-empty string or None"),
+        ({"start": ""}, ValueError, "start must be a non-empty string"),
+        ({"start": None}, ValueError, "start must be a non-empty string"),
         ({"data": ()}, TypeError, "data must be a JobData"),
         ({"parameters": [("lr", 1.0)]}, TypeError, "parameters must be a mapping"),
         ({"parameters": {"lr": float("nan")}}, ValueError, "Out of range float"),
     ],
 )
 def test_a_training_job_checks_its_values_at_construction(changes, error, message):
-    values = {"job_id": "job", "backend": "tinker", "start": None, "data": JobData("b"), "parameters": {}}
+    values = {"job_id": "job", "backend": "tinker", "start": "/base", "data": JobData("b"), "parameters": {}}
     TrainingJob(**values)
     with pytest.raises(error, match=message):
         TrainingJob(**{**values, **changes})
@@ -30,12 +31,12 @@ def test_a_training_job_checks_its_values_at_construction(changes, error, messag
 
 @pytest.mark.unit
 def test_a_job_id_names_the_backend_start_data_and_parameters():
-    job_id = job_id_for("tinker", None, ["row"], {"lr": 1.0})
-    assert job_id == job_id_for("tinker", None, ["row"], {"lr": 1.0})
-    assert job_id != job_id_for("slime", None, ["row"], {"lr": 1.0})
+    job_id = job_id_for("tinker", "/base", ["row"], {"lr": 1.0})
+    assert job_id == job_id_for("tinker", "/base", ["row"], {"lr": 1.0})
+    assert job_id != job_id_for("slime", "/base", ["row"], {"lr": 1.0})
     assert job_id != job_id_for("tinker", "/weights", ["row"], {"lr": 1.0})
-    assert job_id != job_id_for("tinker", None, ["other"], {"lr": 1.0})
-    assert job_id != job_id_for("tinker", None, ["row"], {"lr": 2.0})
+    assert job_id != job_id_for("tinker", "/base", ["other"], {"lr": 1.0})
+    assert job_id != job_id_for("tinker", "/base", ["row"], {"lr": 2.0})
 
 
 @pytest.mark.unit

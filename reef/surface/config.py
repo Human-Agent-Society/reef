@@ -101,7 +101,11 @@ class ConfigInferenceHooks(InferenceHooks):
 def create_config_surface() -> Surface:
     """Build the ``config`` component: validation and request defaults."""
     return Surface(
-        components={CONFIG_COMPONENT: ComponentSurface(validator=ConfigValidator(), inference=ConfigInferenceHooks())}
+        components={
+            CONFIG_COMPONENT: ComponentSurface(
+                validator=ConfigValidator(), inference=ConfigInferenceHooks(), kind="harness_plugin"
+            )
+        }
     )
 
 

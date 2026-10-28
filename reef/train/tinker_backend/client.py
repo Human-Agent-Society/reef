@@ -106,14 +106,17 @@ class TinkerSDKClient(TinkerClient):
         )
 
     def initialize(self) -> TinkerCheckpoint:
+        """Save the untrained adapter of the configured rank: the base checkpoint, which changes nothing.
+
+        With ``export_adapter``, the checkpoint also names the exported adapter, as every saved checkpoint does.
+        """
         service = self._new_service()
         status = "errored"
         try:
             trainer = service.create_lora_training_client(
                 base_model=self._model, rank=self._config.lora_rank, seed=self._config.seed
             )
-            # The base checkpoint is the untrained adapter: no release serves it.
-            checkpoint = self._save(trainer, export_adapter=False)
+            checkpoint = self._save(trainer, export_adapter=self._config.export_adapter)
             status = "success"
             return checkpoint
         finally:

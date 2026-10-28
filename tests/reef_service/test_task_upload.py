@@ -124,7 +124,7 @@ def test_uploaded_tasks_join_the_split_and_a_retry_changes_nothing(tmp_path: Pat
         dispatcher.close()
 
 
-def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> None:
+def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upload_does_not(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, TaskRecipe(batch_stage=RecordOnlyJobData))
 
     async def run() -> None:
@@ -133,9 +133,15 @@ def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> N
                 "/reef/scenarios/s/tasks?split=train", headers=GZIP, data=archive(tmp_path, "t")
             )
             assert response.status == 400
-            assert "does not use imported tasks" in await response.text()
+            assert "does not train on imported tasks" in await response.text()
             store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
             assert store.tasks() == ()
+            # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
+            evaluated = await client.post(
+                "/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=archive(tmp_path, "t")
+            )
+            assert evaluated.status == 200
+            assert [task.name for task in store.tasks(split="eval")] == ["t"]
 
     try:
         asyncio.run(run())

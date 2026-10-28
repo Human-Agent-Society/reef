@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
+from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
@@ -533,6 +534,25 @@ class InferenceRuntime(AdapterWeightRuntime):
         self._inference_admission.close()
 
     # -- Scenarios
+
+    @property
+    def served_weight_kind(self) -> ArtifactKind:
+        """The kind of the weights that this runtime serves from a release.
+
+        ``model_adapter`` is a LoRA adapter on the runtime's base model, and ``model`` is a whole model's weights,
+        which is the default.
+        """
+        return "model"
+
+    def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
+        """The model that this runtime serves for ``artifact`` on request, without loading it.
+
+        ``None``, the default, means the runtime serves only the artifact it has loaded, so it cannot answer a call
+        for another artifact. A runtime whose handler answers each call from the artifact that the call names, such
+        as a sampler for each checkpoint, returns that artifact's model. Raise ``ValueError`` when ``artifact`` is
+        not one that this runtime can serve.
+        """
+        return None
 
     @property
     def per_scenario_adapters(self) -> bool:

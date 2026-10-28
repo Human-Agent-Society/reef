@@ -105,10 +105,10 @@ class _FakeReef(ThreadingHTTPServer):
     ) -> None:
         self.releases[release_id] = {
             "release_id": release_id,
+            "artifact_id": release_id,
             "parent_release_id": parent,
             "content_id": f"content-{release_id}",
             "operation": "training",
-            "pending": False,
             "files": {"native/tree.json": json.dumps(entries, indent=2, sort_keys=True) + "\n"},
             "metrics": {"wins": 1, **evaluation_metrics},
         }
@@ -141,7 +141,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             rows = [{k: v for k, v in reef.releases[rid].items() if k != "files"} for rid in reef.order]
             for row in rows:
-                row["current"] = row["release_id"] == reef.head
+                # Every release here was published to serve, so each one was activated when it was made.
+                row["active"] = row["release_id"] == reef.head
+                row["activated"] = True
             self._json(200, {"scenario": SCENARIO, "releases": rows})
         elif split.path == "/reef/harness":
             if reef.hang_manifest_s:
@@ -152,7 +154,7 @@ class _Handler(BaseHTTPRequestHandler):
             if row is None:
                 self._json(404, {"error": {"message": f"unknown release {release_id}"}})
                 return
-            manifest = {k: v for k, v in row.items() if k not in ("metrics", "operation", "pending")}
+            manifest = {k: v for k, v in row.items() if k not in ("metrics", "operation")}
             manifest["evaluation"] = row["metrics"]
             self._json(200, manifest, x_reef_release_id=release_id)
         else:
@@ -1037,7 +1039,7 @@ def test_a_session_from_a_previous_process_is_not_silently_resumed(tmp_path: Pat
     assert [e["data"]["turn"] for e in events if e["type"] == "turn/start"] == [1]
 
 
-def test_the_release_client_poll_skips_rows_pending_review() -> None:
+def test_the_release_client_poll_reads_the_active_row() -> None:
     class _Catalog(serve.ReleaseClient):
         def __init__(self, rows: list[dict[str, Any]]) -> None:
             super().__init__("http://127.0.0.1:9", "tok", SCENARIO)
@@ -1047,12 +1049,12 @@ def test_the_release_client_poll_skips_rows_pending_review() -> None:
             return list(self._rows)
 
     assert _Catalog([]).poll() is None
-    assert _Catalog([{"release_id": "r1"}, {"release_id": "r2", "pending": True}]).poll() == "r1"
-    assert _Catalog([{"release_id": "r1"}, {"release_id": "r2", "pending": False}]).poll() == "r2"
-    # A rejected or skipped step carries the head's own id and names no new head.
-    assert _Catalog([{"release_id": "r1"}, {"release_id": "r2"}, {"release_id": "r2"}]).poll() == "r2"
-    assert _Catalog([{"release_id": "r1"}, {"release_id": "r1"}, {"release_id": "r2", "pending": True}]).poll() == "r1"
-    assert _Catalog([{"release_id": "r1", "pending": True}]).poll() is None
+    r1 = {"release_id": "r1", "artifact_id": "r1", "activated": True}
+    r2 = {"release_id": "r2", "artifact_id": "r2", "activated": False}
+    # A newer inactive release is not the active release.
+    assert _Catalog([{**r1, "active": True}, {**r2, "active": False}]).poll() == "r1"
+    assert _Catalog([{**r1, "active": False}, {**r2, "active": True, "activated": True}]).poll() == "r2"
+    assert _Catalog([{**r1, "active": False}]).poll() is None
 
 
 def test_a_tree_tool_cannot_take_a_self_tool_name_at_admission() -> None:

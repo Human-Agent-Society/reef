@@ -15,29 +15,14 @@ class HuggingFaceSource:
 
 
 @dataclass(frozen=True)
-class GitVersionSource:
-    version: str
-
-
-ArtifactSource = HuggingFaceSource | GitVersionSource
-
-
-@dataclass(frozen=True)
 class DownloadedSnapshot:
     local_path: Path
     version: str
 
 
-def parse_artifact_source(value: str) -> ArtifactSource:
-    source = value.strip()
-    if not source:
-        raise ArtifactSourceError("artifact source must be non-empty")
-    if source.startswith("git+lfs://"):
-        lfs_version = source.removeprefix("git+lfs://")
-        if not lfs_version:
-            raise ArtifactSourceError("Git LFS source version must be non-empty")
-        return GitVersionSource(lfs_version)
-    model = source.removeprefix("hf://")
+def parse_huggingface_source(value: str) -> HuggingFaceSource:
+    """The Hugging Face model ``value`` names: ``org/model``, optionally after ``hf://`` and before ``@<version>``."""
+    model = value.strip().removeprefix("hf://")
     version: str | None = None
     if "@" in model:
         model, version = model.rsplit("@", 1)

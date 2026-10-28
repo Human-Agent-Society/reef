@@ -42,8 +42,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-#: Kinds a win never serves without a person, whatever ``evolution.review_kinds`` lists: loop code runs in the loop
-#: process with its privileges, and no enforcer stands between it and the host.
+#: Kinds a win never serves without a person, whatever the activation rule's ``review_kinds`` lists: loop code
+#: runs in the loop process with its privileges, and no enforcer stands between it and the host.
 ALWAYS_REVIEWED_KINDS = frozenset({"native_loop"})
 #: Why a group entry is refused wherever entries are admitted: the compose loader would mount its children through
 #: the same plugins, out of sight of every check that walks the root.
@@ -666,7 +666,7 @@ def validate_native_loop(config: Any) -> Mapping[str, Any]:
     The loop is code, so admission checks what a static read can: the module
     compiles, carries no credential, and defines a top level ``run_turn``
     taking the context. Whether it runs is the gate's to find out, and a
-    person promotes it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
+    person activates it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
     options = _require_mapping(config)
     _require_name(options)
     extra = sorted(set(options) - {"name", "code", "max_steps"})

@@ -21,7 +21,6 @@ from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, RunningJob
@@ -58,6 +57,7 @@ def scenario_double(
         trainer_for=lambda component: trainer,
         runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
+        artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
     )
 
 
@@ -138,15 +138,19 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
 
 def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer() -> None:
     finished = JobOutcome("job-2", "stub", "finished")
-    running = JobLoopState(job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished)
-    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), AlwaysSelectCheckpointPlugin(), scenario="s")
+    running = JobLoopState(
+        "stub:base", job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished
+    )
+    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["training_job"] == {"job_id": "job-3", "backend": "stub", "checkpoints_handled": 1}
     assert status["finished_jobs"] == 2
 
-    dispatcher.registry.get_optional("s").trainer.state = JobLoopState(finished_jobs=3, last_job=finished).to_dict()
+    dispatcher.registry.get_optional("s").trainer.state = JobLoopState(
+        "stub:base", finished_jobs=3, last_job=finished
+    ).to_dict()
     status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["training_job"] is None
     assert status["finished_jobs"] == 3

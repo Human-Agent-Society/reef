@@ -10,20 +10,13 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.task_service_stubs import task_for
 
-from reef.core.evaluation import CheckpointCandidate
 from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.core.tasks import write_harbor_task
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.sft import SFTRecord2Record
-from reef.recipe.sft_then_rl import (
-    ImportedTaskEvaluation,
-    SFTThenRLJobData,
-    SFTThenRLJobPlan,
-    SFTThenRLJobSettings,
-    SFTThenRLRecipe,
-)
+from reef.recipe.sft_then_rl import SFTThenRLJobData, SFTThenRLJobPlan, SFTThenRLJobSettings, SFTThenRLRecipe
 from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -176,21 +169,3 @@ def test_the_recipe_refuses_a_training_component_that_runs_no_task_jobs() -> Non
 def test_tasks_per_job_must_be_positive() -> None:
     with pytest.raises(ValueError, match="tasks_per_job must be a positive int"):
         SFTThenRLJobSettings(tasks_per_job=0)
-
-
-def test_every_artifact_is_evaluated_on_the_imported_eval_tasks_with_the_rl_parameters(tmp_path: Path) -> None:
-    storage = SQLiteScenarioStorage(tmp_path / "records").open("support").tasks
-    built = recipe(task_job_parameters={"rollout": ROLLOUT})
-    evaluation = built.artifact_evaluation(storage)
-    assert isinstance(evaluation, ImportedTaskEvaluation) and built.artifact_evaluation(None) is None
-    candidate = CheckpointCandidate(candidate_id="job-1:4", training_job_id="job-1", step=4, release_path="/r")
-    assert evaluation.evaluation_job(candidate) is None, "no eval task, nothing to evaluate on"
-    import_tasks(storage, tmp_path / "tasks", "train", "task-a")
-    import_tasks(storage, tmp_path / "tasks", "eval", "held-out", "held-out-2")
-    job = evaluation.evaluation_job(candidate)
-    assert job is not None and task_names(job.data) == ["held-out", "held-out-2"]
-    assert job.parameters == {
-        "rollout": ROLLOUT,
-        "method": {"objective": "task_group", "learning_rate_schedule": None},
-        "evaluation_of": "job-1:4",
-    }

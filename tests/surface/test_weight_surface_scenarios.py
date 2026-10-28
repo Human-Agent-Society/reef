@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from tests.support.runtime_stubs import StubInferenceRuntime
 
-from reef.artifact import Artifact, ArtifactRef
+from reef.artifact import Artifact
 from reef.core.errors import ReefError
 from reef.surface import adapter_name
 from reef.surface.weights import WeightInferenceHooks, WeightLoader
@@ -63,10 +63,6 @@ def test_a_restart_serves_the_checkpoint_under_the_version_it_was_loaded_again(t
     runtime = AdapterRuntime({"math": "new:1"})
     loader = WeightLoader("math")
     saved = checkpoint(tmp_path)
-    staged = ArtifactRef(content_id="local:x", release_id="local:p:3", parent_release_id=None)
-    # A head that is not durable falls back to the checkpoint; a checkpoint head stays.
-    assert loader.recover(staged, saved.ref, runtime) == saved.ref
-    assert loader.recover(saved.ref, saved.ref, runtime) == saved.ref
     # Requests reach the adapter that holds the checkpoint, and records carry its version.
     out = WeightInferenceHooks(scenario="math", runtime=runtime).prepare_request(saved, "/v1/chat/completions", {})
     assert out["lora_path"] == adapter_name("math", "new:1")

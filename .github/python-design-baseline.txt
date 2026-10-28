@@ -2,8 +2,6 @@
 # exact AST fingerprint, so new locations or additional parameters fail the
 # design check. Delete an entry when its implementation moves to an ABC or
 # cohesive object interface.
-PYD002|reef/artifact/git_lfs.py|GitLFSRepositoryBackend.__init__|snapshot_download
-PYD002|reef/artifact/git_lfs.py|GitLFSRepositoryBackendFactory.__init__|snapshot_download
 PYD002|reef/harness/rollouts/trajectory.py|_CallableTrajectoryReader.__init__|fn
 PYD002|reef/runtime/interfaces.py|InferenceStream.__init__|close
 PYD002|reef/runtime/deployment.py|_CallableRuntimeFactory.__init__|fn

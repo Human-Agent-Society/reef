@@ -1,5 +1,5 @@
 """Harness commands use the native training route and its mode switch end to end, and a request's ``requires``
-rides the route, the commit, the manifest, the install script and the promote."""
+rides the route, the commit, the manifest, the install script and the activation."""
 
 from __future__ import annotations
 
@@ -28,8 +28,10 @@ from tests.train.test_harness_evolve_processor import harness_stages
 from tests.train.test_reef_trainer_contracts import ExampleBackend
 
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
+from reef.evaluation.activation import NeverActivate
 from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import harness
 from reef.recipe.cordis import CordisRecipe
@@ -129,7 +131,7 @@ def _manual(tmp_path: Path, propose, **overrides) -> CordisRecipe:
 def _seeded(tmp_path: Path, recipe: CordisRecipe):
     """The seed's files as the base artifact, what the service assembly does, so the base release serves."""
     initial = tmp_path / "initial"
-    for relative, text in (recipe.base_artifact_files() or {}).items():
+    for relative, text in recipe.base_artifact_source().files.items():
         (initial / relative).parent.mkdir(parents=True, exist_ok=True)
         (initial / relative).write_text(text, encoding="utf-8")
     return _dispatcher(tmp_path, recipe)
@@ -713,9 +715,9 @@ def test_a_chain_union_past_one_requests_cap_still_renders_the_install_script(tm
         dispatcher.close()
 
 
-def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path) -> None:
-    """Under review a release waits for a promote, and the promote row carries no request of its own: the manifest
-    follows the promote to its target, so the served head lists what the pending release named."""
+def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
+    """Under the never activation rule a release waits for a person to activate it; the activation serves that release itself, so the
+    served head lists what the release named."""
 
     def propose(nodes, samples, models, *, requests=()):
         return (
@@ -724,7 +726,7 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             else None
         )
 
-    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, propose, publish="review"))
+    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, propose, activation=PluginReference(NeverActivate, {})))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -738,43 +740,40 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             assert response.status == 200, await response.text()
             await _committed(scenario, 1)
             rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
-            (pending,) = [row for row in rows if row["pending"]]
-            assert pending["metrics"]["training_request"]["requires"] == REQUIRES
-            # Nothing served yet: the head is still the base and needs nothing; the pending release by id does.
+            (inactive,) = [row for row in rows if row["operation"] == "training"]
+            assert not inactive["active"] and inactive["metrics"]["training_request"]["requires"] == REQUIRES
+            # Nothing served yet: the head is still the base and needs nothing; the inactive release by id does.
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] == base and head["requires"] == []
-            waiting = await client.get("/reef/harness", params={"release_id": pending["release_id"]}, headers=headers)
+            waiting = await client.get("/reef/harness", params={"release_id": inactive["release_id"]}, headers=headers)
             assert (await waiting.json())["requires"] == REQUIRES
-            response = await client.post("/reef/scenarios/agents/promote", json={"release_id": pending["release_id"]})
-            assert response.status == 200
-            promoted = (await response.json())["release_id"]
-            assert promoted not in (base, pending["release_id"])
-            head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] == promoted and head["evaluation"] is None and head["requires"] == REQUIRES
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
-            (row,) = [row for row in rows if row["release_id"] == promoted]
-            assert row["operation"] == "promote" and row["rollback_target_release_id"] == pending["release_id"]
-            assert "metrics" not in row
-            # The promote serves the pending release's tree, so its entries are that release's: what the install
-            # binding re-renders the config from, and the base release's seed is not what it falls back to.
-            assert scenario.release_queries.entries_for_version(
-                promoted
-            ) == scenario.release_queries.entries_for_version(pending["release_id"])
-            assert any(entry["id"] == "r1" for entry in scenario.release_queries.entries_for_version(promoted))
-            assert (
-                scenario.release_queries.entries_for_version(base) is None
-                and scenario.release_queries.entries_for_version("nope") is None
+            response = await client.post(
+                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["release_id"]}
             )
-            # Installing a promoted or rolled-back release rebinds the model endpoint without losing evolved settings.
-            rolled_back = scenario.rollback(promoted).release_id
+            assert response.status == 200
+            assert (await response.json())["release_id"] == inactive["release_id"]
+            head = await (await client.get("/reef/harness", headers=headers)).json()
+            assert head["release_id"] == inactive["release_id"] and head["requires"] == REQUIRES
+            assert head["evaluation"] == inactive["metrics"]
+            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            assert [(row["release_id"], row["active"]) for row in rows] == [
+                (base, False),
+                (inactive["release_id"], True),
+            ]
+            entries = scenario.release_queries.entries_for_version(
+                inactive["release_id"], scenario.surface.files_component
+            )
+            assert entries is not None and any(entry["id"] == "r1" for entry in entries)
+            # The creation carries the base artifact's entries: the seed's, without the evolved one.
+            base_entries = scenario.release_queries.entries_for_version(base, scenario.surface.files_component)
+            assert base_entries is not None and not any(entry["id"] == "r1" for entry in base_entries)
+            # Installing the activated release rebinds the model endpoint without losing evolved settings.
             service = RequestService(dispatcher)
-            for release in (promoted, rolled_back):
-                manifest = service.harness_manifest(headers, release_id=release)
-                bound = service._install_binding(
-                    scenario, manifest, get_adapter("pi"), {**headers, "host": "localhost:8000"}
-                )
-                assert json.loads(bound["pi-agent/settings.json"])["theme"] == "light"
-
+            manifest = service.harness_manifest(headers, release_id=inactive["release_id"])
+            bound = service._install_binding(
+                scenario, manifest, get_adapter("pi"), {**headers, "host": "localhost:8000"}
+            )
+            assert json.loads(bound["pi-agent/settings.json"])["theme"] == "light"
         finally:
             await client.close()
 

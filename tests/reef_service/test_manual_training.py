@@ -21,7 +21,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import WeightTrainingRecipe
@@ -450,7 +449,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     trainer = recipe.build("s", records)
     backend = trainer.candidate_backend
     state = dict(backend.initial_state())
-    state["rollback_entries"] = state["entries"]
+    state["recheck_entries"] = state["entries"]
     backend.proposals.submit(
         "pending-proposal",
         {
@@ -1013,7 +1012,6 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest()),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,
