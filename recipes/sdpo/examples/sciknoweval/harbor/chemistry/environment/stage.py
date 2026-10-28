@@ -68,7 +68,7 @@ def main() -> None:
         f"scenario {chemistry.SCENARIO}",
         flush=True,
     )
-    releases_before = chemistry.wait_for_training(0, TRAIN_TIMEOUT_S)
+    steps_before = chemistry.wait_for_training(0, TRAIN_TIMEOUT_S)
 
     record: dict = {
         "task": "sciknoweval/chemistry",
@@ -103,13 +103,13 @@ def main() -> None:
                         "metadata": {"step": step, "group": group, "rollout": rollout, "teacher_context": ""},
                     },
                 )
-        releases = chemistry.wait_for_training(releases_before + step, TRAIN_TIMEOUT_S)
+        trained = chemistry.wait_for_training(steps_before + step, TRAIN_TIMEOUT_S)
         elapsed = time.time() - started
         training_seconds += elapsed
         record["steps"].append(
             {
                 "step": step,
-                "training_releases": releases,
+                "training_steps": trained,
                 "train_accuracy": solved / (GROUPS_PER_STEP * ROLLOUTS_PER_GROUP),
                 "step_seconds": round(elapsed, 1),
                 "training_seconds": round(training_seconds, 1),

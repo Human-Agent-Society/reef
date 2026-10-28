@@ -1868,24 +1868,29 @@ def test_main_dispatches_evolve_with_the_words_joined_and_exits_with_its_status(
 
 CREATION_ROW = {
     "release_id": "rel-0",
+    "artifact_id": "rel-0",
     "parent_release_id": None,
     "operation": "creation",
     "checkpoint": True,
     "active": True,
+    "activated": True,
 }
 
 
 def _step_row(release_id: str, metrics: dict, *, inactive: bool = False, request_id: str = "q-1") -> dict:
     """The catalog row of the step that consumed request ``request_id``, with the result ``metrics`` carry.
 
-    A selected step made a release, which is active unless ``inactive``; any other step made none."""
+    A selected step made a release, which is active unless ``inactive``, and an ``inactive`` one was never
+    activated; any other step made none."""
     made_release = metrics.get("selected") is True
     return {
         "release_id": release_id,
+        "artifact_id": release_id,
         "parent_release_id": "rel-0",
         "operation": "training",
         "checkpoint": made_release,
         "active": made_release and not inactive,
+        "activated": not inactive,
         "metrics": {"training_request": {"id": request_id, "text": "text me when you are blocked"}, **metrics},
     }
 
@@ -2071,8 +2076,8 @@ class _Tty(io.StringIO):
 @pytest.mark.unit
 def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -> None:
     """A selected release asks to install and runs the setup prompts then the update; an inactive one names its page,
-    asks to activate, activates it and installs that same release; a declined step prints the commands; a failed
-    install keeps its status."""
+    asks to activate, activates it and installs the active release the activation names; a declined step prints the
+    commands; a failed install keeps its status."""
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     calls: list[tuple[str, tuple, dict]] = []
     statuses = {"update": 0}
@@ -2102,7 +2107,7 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             inactive,
             "y\n",
             0,
-            "reef-pi: Activate now? [y/N] reef-pi: activated; release rel-3333 serves",
+            "reef-pi: Activate now? [y/N] reef-pi: activated; release rel-3333 is the active release",
         ),
         (
             "inactive-no",
@@ -2517,9 +2522,18 @@ def test_a_clear_from_the_agent_empties_what_the_wrapper_would_spool() -> None:
 
 
 def _serve_newest(rows: list[dict]) -> list[dict]:
-    """The rows as the catalog lists them: the newest row that does not say ``active`` itself is the active one."""
+    """The rows as the catalog lists them: the newest row that does not say ``active`` itself is the active one,
+    each row names its release as its artifact, and a row was activated unless it says otherwise."""
     newest = max((index for index, row in enumerate(rows) if "active" not in row), default=None)
-    return [{**row, "active": row.get("active", False) or index == newest} for index, row in enumerate(rows)]
+    return [
+        {
+            "artifact_id": row.get("release_id"),
+            "activated": True,
+            **row,
+            "active": row.get("active", False) or index == newest,
+        }
+        for index, row in enumerate(rows)
+    ]
 
 
 class _ReleasesReef:
@@ -2574,11 +2588,12 @@ class _ReleasesReef:
 
 
 def _row(release_id: str, requires: list[dict] | None = None, *, inactive: bool = False) -> dict:
-    """A step row that made a release; an ``inactive`` one says ``active`` false, so :class:`_ReleasesReef` never
-    makes it the active row."""
+    """A step row that made a release; an ``inactive`` one says ``active`` and ``activated`` false, so
+    :class:`_ReleasesReef` never makes it the active row."""
     row: dict = {"release_id": release_id, "checkpoint": True, "operation": "training"}
     if inactive:
         row["active"] = False
+        row["activated"] = False
     if requires is not None:
         row["metrics"] = {"training_request": {"id": "q-1", "text": "text me", "requires": requires}}
     return row
@@ -3833,13 +3848,17 @@ def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
 
 
 class _DoctorReef:
-    """A reef that serves only the harness routes, checks the bearer on them, and names one served head."""
+    """A reef that serves only the harness routes, checks the bearer on them, and names one active release."""
 
     def __init__(self, token: str, head: str, rows: list[dict] | None = None) -> None:
         import http.server
         import threading
 
-        catalog = rows if rows is not None else [{"release_id": head, "checkpoint": True, "active": True}]
+        catalog = (
+            rows
+            if rows is not None
+            else [{"release_id": head, "artifact_id": head, "checkpoint": True, "active": True, "activated": True}]
+        )
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -3876,8 +3895,8 @@ def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypa
 
     passed = {"metrics": {"selected": True}, "checkpoint": True}
     held = [
-        {"release_id": "rel-3", "checkpoint": True, "active": True},
-        {"release_id": "rel-4", **passed, "active": False},
+        {"release_id": "rel-3", "artifact_id": "rel-3", "checkpoint": True, "active": True, "activated": True},
+        {"release_id": "rel-4", "artifact_id": "rel-4", **passed, "active": False, "activated": False},
     ]
     reef = _DoctorReef(token="dummy", head="rel-3", rows=held)
     compose, _ = _ask_tree(tmp_path, reef.port)
@@ -3888,12 +3907,12 @@ def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypa
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
-    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-3 installed, the active release" in line for line in out)
     (review,) = [line for line in out if line.startswith("ok  review")]
     assert f"rel-4 waits for your review: http://127.0.0.1:{reef.port}/reef/harness/releases/1/page" in review
     reef.close()
 
-    activated = [{**held[0], "active": False}, {**held[1], "active": True}]
+    activated = [{**held[0], "active": False}, {**held[1], "active": True, "activated": True}]
     reef = _DoctorReef(token="dummy", head="rel-3", rows=activated)
     (tmp_path / "activated").mkdir()
     compose, _ = _ask_tree(tmp_path / "activated", reef.port)
@@ -3920,7 +3939,7 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
     assert any(line.startswith("ok  binary") and "0.84.2" in line for line in out)
     assert any(line.startswith("ok  tool") and "rg at /usr/bin/rg" in line for line in out)
     assert any(line.startswith("!!  tool") and "fd missing: install fd" in line for line in out)
-    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-3 installed, the active release" in line for line in out)
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     # A wrong token in the shell wins over the binding's, and the service says so.
@@ -3970,7 +3989,7 @@ def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, ca
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
-    assert any(line.startswith("ok  release") and "rel-1 installed, the served head" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-1 installed, the active release" in line for line in out)
     page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={PAGE_KEY}"
     assert out[-1].startswith("ok  review") and out[-1].endswith(f"rel-2222 waits for your review: {page}")
     reef.close()

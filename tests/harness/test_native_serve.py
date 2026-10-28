@@ -105,6 +105,7 @@ class _FakeReef(ThreadingHTTPServer):
     ) -> None:
         self.releases[release_id] = {
             "release_id": release_id,
+            "artifact_id": release_id,
             "parent_release_id": parent,
             "content_id": f"content-{release_id}",
             "operation": "training",
@@ -140,7 +141,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             rows = [{k: v for k, v in reef.releases[rid].items() if k != "files"} for rid in reef.order]
             for row in rows:
+                # Every release here was published to serve, so each one was activated when it was made.
                 row["active"] = row["release_id"] == reef.head
+                row["activated"] = True
             self._json(200, {"scenario": SCENARIO, "releases": rows})
         elif split.path == "/reef/harness":
             if reef.hang_manifest_s:
@@ -1046,10 +1049,12 @@ def test_the_release_client_poll_reads_the_active_row() -> None:
             return list(self._rows)
 
     assert _Catalog([]).poll() is None
-    # A newer release that does not serve yet is not the head.
-    assert _Catalog([{"release_id": "r1", "active": True}, {"release_id": "r2", "active": False}]).poll() == "r1"
-    assert _Catalog([{"release_id": "r1", "active": False}, {"release_id": "r2", "active": True}]).poll() == "r2"
-    assert _Catalog([{"release_id": "r1", "active": False}]).poll() is None
+    r1 = {"release_id": "r1", "artifact_id": "r1", "activated": True}
+    r2 = {"release_id": "r2", "artifact_id": "r2", "activated": False}
+    # A newer inactive release is not the active release.
+    assert _Catalog([{**r1, "active": True}, {**r2, "active": False}]).poll() == "r1"
+    assert _Catalog([{**r1, "active": False}, {**r2, "active": True, "activated": True}]).poll() == "r2"
+    assert _Catalog([{**r1, "active": False}]).poll() is None
 
 
 def test_a_tree_tool_cannot_take_a_self_tool_name_at_admission() -> None:

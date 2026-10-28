@@ -178,43 +178,34 @@ def evaluate(client: ReefClient, task: str, *, concurrency: int = 64) -> dict[st
     }
 
 
-def training_release_count() -> int | None:
-    """Training commits so far; ``None`` while the service is busy, 0 before the scenario exists."""
-    # Every training commit, a step that made no release included, page by page.
-    count = 0
-    after_step: int | None = 0
-    while after_step is not None:
-        request = urllib.request.Request(
-            f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/commits?after_step={after_step}&limit=100",
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = json.loads(response.read())
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                return 0  # the scenario does not exist yet: the first request creates it
-            return SERVICE_GONE  # answered and rejected: not our deployment
-        except urllib.error.URLError as error:
-            if isinstance(getattr(error, "reason", None), ConnectionRefusedError):
-                return SERVICE_GONE
-            return None  # stalled behind a train step; try again
-        except TimeoutError:
-            return None
-        count += sum(1 for row in payload["commits"] if row.get("operation") == "training")
-        after_step = payload["next_after_step"]
-    return count
+def training_step_count() -> int | None:
+    """Training steps committed so far; ``None`` while the service is busy, 0 before the scenario exists."""
+    request = urllib.request.Request(f"{SERVICE_URL}/reef/status", headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError:
+        return SERVICE_GONE  # answered and rejected: not our deployment
+    except urllib.error.URLError as error:
+        if isinstance(getattr(error, "reason", None), ConnectionRefusedError):
+            return SERVICE_GONE
+        return None  # stalled behind a train step; try again
+    except TimeoutError:
+        return None
+    # This run activates nothing and sets no training start, so each commit of the scenario is a training step.
+    scenario = payload["scenarios"].get(SCENARIO)
+    return 0 if scenario is None else int(scenario["scenario_step"])
 
 
 def wait_for_training(expected: int, timeout_s: float) -> int:
-    """Block until the scenario has committed ``expected`` training releases; return the count seen."""
+    """Block until the scenario has committed ``expected`` training steps; return the count seen."""
     deadline = time.time() + timeout_s
     while True:
-        count = training_release_count()
+        count = training_step_count()
         if count == SERVICE_GONE:
             raise RuntimeError(f"the Reef service at {SERVICE_URL} is gone or rejects scenario {SCENARIO}")
         if count is not None and count >= expected:
             return count
         if time.time() > deadline:
-            raise TimeoutError(f"training release {expected} did not commit within {timeout_s:.0f}s (seen: {count})")
+            raise TimeoutError(f"training step {expected} did not commit within {timeout_s:.0f}s (seen: {count})")
         time.sleep(5.0)

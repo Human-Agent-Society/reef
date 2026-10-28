@@ -2163,7 +2163,7 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch):
 
 
 def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:
-    """A real publish records the tree it replaced as the rollback target, so
+    """A real publish records the tree it replaced as the recheck target, so
     a later health recheck has somewhere to revert to."""
     b = CordisBackend(
         descriptor=get_adapter("pi"),
@@ -2179,15 +2179,15 @@ def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:
     )
     result = run_backend_step(b, batch(), b.initial_state())
     assert result.metrics["selected"] is True
-    # The rollback target is the pre-publish tree: the seed, without the rules
+    # The recheck target is the pre-publish tree: the seed, without the rules
     # node this step added.
-    target_ids = {entry["id"] for entry in result.state["rollback_entries"]}
+    target_ids = {entry["id"] for entry in result.state["recheck_entries"]}
     assert target_ids == {"models", "settings"}
 
 
 def test_healthy_recheck_keeps_the_published_tree(tmp_path: Path) -> None:
     """When the published tree still wins on the suite, the recheck publishes
-    nothing and keeps the rollback target on file for next time."""
+    nothing and keeps the recheck target on file for next time."""
     b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(
@@ -2208,7 +2208,7 @@ def test_healthy_recheck_keeps_the_published_tree(tmp_path: Path) -> None:
     assert second.metrics["selected"] is False
     # The marker tree is still live and the target is retained.
     assert any(entry.get("id") == "r1" for entry in second.state["entries"])
-    assert {entry["id"] for entry in second.state["rollback_entries"]} == {"models", "settings"}
+    assert {entry["id"] for entry in second.state["recheck_entries"]} == {"models", "settings"}
 
 
 def test_recheck_rolls_back_a_regression_the_grown_suite_reveals(tmp_path: Path) -> None:
@@ -2246,7 +2246,7 @@ def test_recheck_rolls_back_a_regression_the_grown_suite_reveals(tmp_path: Path)
     live_ids = {entry["id"] for entry in second.state["entries"]}
     assert "r1" not in live_ids and {"models", "settings"} <= live_ids
     # The target is consumed once used.
-    assert "rollback_entries" not in second.state
+    assert "recheck_entries" not in second.state
 
 
 def test_recipe_parses_recheck_config(tmp_path: Path, monkeypatch) -> None:
@@ -2305,12 +2305,12 @@ def test_recheck_fires_when_the_served_model_changes(tmp_path: Path) -> None:
     b = build(MODEL)
     first = run_backend_step(b, batch(), b.initial_state())
     assert first.metrics["selected"] is True
-    assert first.state["rollback_evaluation_context"]["model"] == MODEL.model
+    assert first.state["recheck_evaluation_context"]["model"] == MODEL.model
     # Same model, step 2 of a 100 step cadence: no recheck, and the stamp
     # rides through the skipped step.
     same = run_backend_step(b, batch(), first.state)
     assert "recheck" not in same.metrics
-    assert same.state["rollback_evaluation_context"]["model"] == MODEL.model
+    assert same.state["recheck_evaluation_context"]["model"] == MODEL.model
     # A different served model: the stamp differs, so the recheck fires now.
     moved = ModelBinding(base_url=MODEL.base_url, model="qwen3-32b", api_key=MODEL.api_key)
     drift = run_backend_step(build(moved), batch(), same.state)

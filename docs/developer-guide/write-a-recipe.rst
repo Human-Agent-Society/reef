@@ -3,7 +3,7 @@ Write a recipe
 
 A recipe is the method a deployment runs: how recorded traffic is processed,
 how it becomes the data of a training job, what signal that data carries, and whether the
-candidate it produces replaces the served version.
+candidate it produces becomes the active release.
 
 `Quickstart <../getting-started/quickstart.rst>`__ defines the term.
 

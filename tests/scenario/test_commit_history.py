@@ -219,18 +219,26 @@ def test_each_operation_names_its_artifact_exactly() -> None:
     # A one-component activation names the release that made the artifact; a composed one names the release it
     # published, with the component and the manifest.
     operation_record("activate", 1, "r1")
-    operation_record("activate", 1, "r1", checkpoint=True, component="harness", components={"harness": "c"})
-    for changes in ({"checkpoint": True}, {"component": "harness"}, {"components": {"harness": "c"}}):
-        with pytest.raises(CommitHistoryError, match="an activate commit names"):
+    operation_record("activate", 1, "r1", component="harness", components={"harness": "c", "weights": "w"})
+    for changes in (
+        {"component": "harness"},
+        {"components": {"harness": "c"}},
+        {"component": "config", "components": {"harness": "c"}},
+    ):
+        with pytest.raises(CommitHistoryError, match="an activate commit names a component"):
             operation_record("activate", 1, "r1", **changes)
+    for operation in ("activate", "train_from"):
+        with pytest.raises(CommitHistoryError, match="makes no artifact"):
+            operation_record(operation, 1, "r1", checkpoint=True)
     # A new start names a trainer's component and publishes nothing.
     operation_record("train_from", 1, "r1", component="weights")
-    for changes in ({"checkpoint": True}, {"components": {"weights": "c"}}):
-        with pytest.raises(CommitHistoryError, match="publishes no release"):
-            operation_record("train_from", 1, "r1", **changes)
+    with pytest.raises(CommitHistoryError, match="publishes no release"):
+        operation_record("train_from", 1, "r1", components={"weights": "c"})
     for operation in ("rollback", "promote", "creation"):
-        with pytest.raises(CommitHistoryError, match="operation must be one of"):
+        with pytest.raises(CommitHistoryError, match="operation must be"):
             operation_record(operation, 1, "r1")
+    with pytest.raises(CommitHistoryError, match="scenario must be a non-empty string"):
+        operation_record("activate", 1, "r1", scenario="")
     with pytest.raises(CommitHistoryError, match="only a training commit that made an artifact may be pending"):
         replace(sample_record(), pending=True)
 

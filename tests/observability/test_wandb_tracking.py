@@ -207,7 +207,6 @@ def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> N
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            served_artifact_ref=_event().produced_artifact_ref,
             start_artifact_ref=_context().source_artifact_ref,
         )
     )
@@ -255,7 +254,6 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            served_artifact_ref=_event().produced_artifact_ref,
             start_artifact_ref=_context().source_artifact_ref,
         )
     )
@@ -429,7 +427,6 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
             recipe=context.recipe,
             step=8,
             run_segment=0,
-            served_artifact_ref=_event().produced_artifact_ref,
             start_artifact_ref=context.source_artifact_ref,
         )
     )

@@ -268,7 +268,6 @@ class WandbExperimentTracker(ExperimentTracker):
                             "reef/ended_by": "train_from",
                             "reef/train_from_step": event.step,
                             "reef/train_from_release_id": event.start_artifact_ref.release_id,
-                            "reef/active_release_id": event.served_artifact_ref.release_id,
                         }
                     )
                     run.finish()
@@ -277,7 +276,7 @@ class WandbExperimentTracker(ExperimentTracker):
             scenario_logger = self._scenario_loggers.get(event.scenario)
             if scenario_logger is not None:
                 scenario_logger._rotate(
-                    source_artifact_ref=event.served_artifact_ref,
+                    source_artifact_ref=event.start_artifact_ref,
                     run_segment=event.step,
                 )
                 context = scenario_logger._context()

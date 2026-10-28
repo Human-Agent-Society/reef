@@ -160,18 +160,20 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
 
 
 def test_the_driver_reads_results_and_mutations_as_the_page_does(run_module) -> None:
+    base = {"release_id": "rel-1", "artifact_id": "rel-1", "active": False, "activated": True, "checkpoint": False}
     inactive = {
+        **base,
         "checkpoint": True,
-        "active": False,
+        "activated": False,
         "metrics": {"selected": True, "mutation": {"op": "create", "id": "x", "options": {"name": "code_extension"}}},
     }
-    rejected = {"metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
-    skipped = {"metrics": {"skipped": "no proposal"}}
+    rejected = {**base, "metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
+    skipped = {**base, "metrics": {"skipped": "no proposal"}}
     assert run_module.result_of(inactive) == "inactive"
-    assert run_module.result_of({**inactive, "active": True}) == "selected"
+    assert run_module.result_of({**inactive, "active": True, "activated": True}) == "selected"
     assert run_module.result_of(rejected) == "rejected"
-    assert run_module.result_of(skipped) == "skipped: no proposal"
-    assert run_module.result_of({"operation": "creation"}) == "creation"
+    assert run_module.result_of(skipped) == "skipped"
+    assert run_module.result_of({**base, "checkpoint": True, "activated": True, "operation": "creation"}) == "creation"
     assert run_module.mutations_of(inactive["metrics"]) == ["create x (code_extension)"]
     assert run_module.kinds_of({"mutations": [{"options": {"name": "rules"}}, {"options": {"name": "skill"}}]}) == [
         "rules",

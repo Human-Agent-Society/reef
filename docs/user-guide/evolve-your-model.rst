@@ -166,8 +166,10 @@ keep it.
 Training is linear: each job continues from the workers' latest checkpoint,
 whether or not Reef selected it. The workers cannot load a published release,
 so Reef refuses a ``train-from`` on a Slime scenario. Activating an older
-artifact still works: it changes what serves, not where training continues
-(see `Operate a deployment <operate.rst#activate-an-artifact>`__).
+artifact still works: it changes what serves, not where training continues.
+Under the default rule, Reef activates the next checkpoint again; `Go back to
+an older artifact <operate.rst#go-back-to-an-older-artifact>`__ describes how
+to keep the older one serving.
 
 A Slime stack trains one scenario for its lifetime: its workers hold one set
 of weights. To train another scenario, run another stack on different ports.

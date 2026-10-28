@@ -168,9 +168,9 @@ def document(
     ``style`` is appended to :data:`BASE_STYLE`, so a page declares only what
     its own sections need. ``breadcrumb`` is the section the page sits under
     and ``context`` the scenario shown beside it. ``home`` is where the logo
-    and the "Harness" crumb lead, the served head's page; both stay plain
-    text when it is empty, since the only pages a browser can open are the
-    two ``/page`` routes and a catalog may have no served head to point at.
+    and the "Harness" crumb lead, the page of the active release; both stay
+    plain text when it is empty, since the only pages a browser can open are
+    the two ``/page`` routes and a catalog may have no active release.
     ``head`` adds elements to
     the document head, a reload for instance, and ``tail`` follows the footer,
     where the release page puts its inline data. ``subtitle``, ``body``,

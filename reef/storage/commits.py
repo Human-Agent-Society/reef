@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
@@ -79,45 +79,46 @@ def to_json_value(value: Any) -> Any:
         raise CommitHistoryError(f"commit record values must be JSON values: {exc}") from exc
 
 
-#: The operations a commit record names: a training step, the activation of an artifact, and the start of a trainer.
-COMMIT_OPERATIONS = ("training", "activate", "train_from")
+#: What a commit record does: a training step, the activation of an artifact, or a trainer's new training start.
+CommitOperation = Literal["training", "activate", "train_from"]
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
-    """One committed step of a scenario: a training step, an activation, or a trainer's new start.
+    """One committed step of a scenario: a training step, an activation, or a new training start.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
-    ``operation`` is one of ``COMMIT_OPERATIONS``. ``component`` is ``None``
-    or a non-empty name, and ``components`` is ``None`` or a mapping of
-    non-empty component names to non-empty content ids.
+    ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
+    ``CommitOperation``. ``operation_verified`` is false only for a commit
+    read from release metadata that names no operation. ``component`` is
+    ``None`` or a non-empty name, and ``components`` is ``None`` or a
+    mapping of non-empty component names to non-empty content ids.
     ``high_water_sequence`` and ``high_water_offset`` are non-negative ints.
     Each operation adds its own conditions:
 
-    - ``"training"``: one trainer's step. ``artifact_ref`` is the artifact
-      the step made when ``checkpoint`` is true, and the active artifact
-      when the step made none. ``pending`` is true only for an artifact
-      that the step did not activate. ``algorithm_state``,
-      ``record_progress``, ``consumed_ids``, ``metrics`` and
-      ``training_job_id`` are the trainer's state and the step's outcome.
-      ``component`` names the trainer of a scenario with several trainers.
-    - ``"activate"``: ``artifact_ref`` is the release that serves after the
-      activation. In a scenario of one component it is the release that
-      made the activated artifact, exactly as that row records it, and
-      ``checkpoint`` is false and ``component`` and ``components`` are
-      ``None``. In a scenario of several components it is a release the
-      activation published, which binds ``component``'s activated artifact
-      and the active release's other components; ``checkpoint`` is true and
-      ``components`` is its manifest. ``pending`` is false. The record
-      carries no trainer state: ``algorithm_state``, ``metrics`` and
-      ``training_job_id`` are ``None``, both high-water values are 0 and
-      ``consumed_ids`` is empty.
-    - ``"train_from"``: ``artifact_ref`` is the release that holds the
-      trainer's new start artifact, exactly as the row that made it records
-      it. ``component`` names the trainer as a training row of it does
-      (``None`` for a lone trainer). ``checkpoint`` and ``pending`` are
-      false, ``components`` is ``None``, and it carries no trainer state, as
-      an ``"activate"`` record does.
+    - ``"training"``: one trainer's step. ``artifact_ref`` is the release
+      the step made when ``checkpoint`` is true, and the active release when
+      the step made none. ``pending`` is true only for a release that the
+      step did not activate. ``algorithm_state``, the high-water values,
+      ``consumed_ids``, ``metrics`` and ``training_job_id`` are the
+      trainer's state and the step's outcome. ``component`` names the
+      trainer in a scenario of several components.
+    - ``"activate"``: ``artifact_ref`` is the release that is active after
+      the activation. In a scenario of one component it is the release that
+      made the activated artifact, as that row records it, and
+      ``component`` and ``components`` are ``None``. In a scenario of
+      several components it is a release that the activation published:
+      ``component`` names the activated component, and ``components`` is
+      the release's manifest, which contains ``component``.
+    - ``"train_from"``: ``artifact_ref`` is the release that holds the new
+      training start, as the row that made it records it. ``component``
+      names the trainer as its training rows do (``None`` for a lone
+      trainer), and ``components`` is ``None``.
+
+    An ``"activate"`` or ``"train_from"`` record makes no artifact and
+    carries no trainer state: ``checkpoint`` and ``pending`` are false,
+    ``algorithm_state``, ``metrics`` and ``training_job_id`` are ``None``,
+    both high-water values are 0 and ``consumed_ids`` is empty.
 
     ``algorithm_state`` and ``metrics`` hold JSON values: the constructor
     converts them as a JSON round trip does, so a record equals itself after
@@ -126,8 +127,8 @@ class CommitRecord:
 
     Purpose: the scenario committer makes the records and appends them to the
     commit history. Recovery reads them back: trainer state from training
-    records, the active artifact from :func:`active_artifact_ref`, and each
-    trainer's start from its newest ``"train_from"`` record.
+    records, the active release from :func:`active_record`, and each
+    trainer's training start from its newest ``"train_from"`` record.
     """
 
     scenario: str
@@ -139,18 +140,21 @@ class CommitRecord:
     high_water_offset: int
     consumed_ids: frozenset[str] = frozenset()
     recorded_at: float = field(default_factory=time.time)
-    operation: str = "training"
+    operation: CommitOperation = "training"
     operation_verified: bool = True
     pending: bool = False
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
-    #: The release component whose trainer committed this step or takes this start; ``None`` for a flat scenario.
+    #: The component of the trainer that committed this step or takes this training start, or the activated
+    #: component; ``None`` in a scenario of one component.
     component: str | None = None
     #: The content id of every component the published release binds, by
     #: name; ``None`` for a flat release and for a step that published none.
     components: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.scenario, str) or not self.scenario:
+            raise CommitHistoryError("commit record scenario must be a non-empty string")
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
             raise CommitHistoryError("commit record step must be a positive integer")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -169,8 +173,8 @@ class CommitRecord:
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise CommitHistoryError(f"commit record {name} must be a non-negative integer")
-        if self.operation not in COMMIT_OPERATIONS:
-            raise CommitHistoryError(f"commit record operation must be one of {list(COMMIT_OPERATIONS)}")
+        if self.operation not in ("training", "activate", "train_from"):
+            raise CommitHistoryError("commit record operation must be 'training', 'activate' or 'train_from'")
         if not isinstance(self.operation_verified, bool):
             raise CommitHistoryError("commit record operation_verified must be a boolean")
         if not isinstance(self.checkpoint, bool) or not isinstance(self.pending, bool):
@@ -184,11 +188,10 @@ class CommitRecord:
         if self.pending and not (self.operation == "training" and self.checkpoint):
             raise CommitHistoryError("only a training commit that made an artifact may be pending")
         if self.operation != "training":
-            # An activation or a new start carries no trainer state.
             carried = [
                 name
                 for name, value in (
-                    ("pending", self.pending),
+                    ("checkpoint", self.checkpoint),
                     ("algorithm_state", self.algorithm_state is not None),
                     ("metrics", self.metrics is not None),
                     ("training_job_id", self.training_job_id is not None),
@@ -199,15 +202,15 @@ class CommitRecord:
                 if value
             ]
             if carried:
-                raise CommitHistoryError(f"a {self.operation} commit must not carry {carried}")
-        if self.operation == "train_from" and (self.checkpoint or self.components is not None):
-            raise CommitHistoryError("a train_from commit names an artifact and publishes no release")
-        if self.operation == "activate" and not (
-            self.checkpoint == (self.component is not None) == (self.components is not None)
+                raise CommitHistoryError(f"a {self.operation} commit makes no artifact and must not carry {carried}")
+        if self.operation == "train_from" and self.components is not None:
+            raise CommitHistoryError("a train_from commit publishes no release and carries no components")
+        if self.operation == "activate" and (
+            (self.component is None) != (self.components is None)
+            or (self.components is not None and self.component not in self.components)
         ):
             raise CommitHistoryError(
-                "an activate commit names the release that made the artifact (no checkpoint, component or components) "
-                "or a release it published (checkpoint, component and components)"
+                "an activate commit names a component exactly when it carries the manifest that binds it"
             )
         # Hold state and metrics as a stored record reads them back, so a record
         # equals itself after storage, and a caller mutating its values
@@ -225,6 +228,12 @@ class CommitRecord:
     def made_artifact(self) -> bool:
         """Whether this record made its artifact: a training step that saved a checkpoint."""
         return self.operation == "training" and self.checkpoint
+
+    @property
+    def activates(self) -> bool:
+        """Whether ``artifact_ref`` is the active release after this record: an activation, or a training step that
+        made a release and is not pending."""
+        return self.operation == "activate" or (self.made_artifact and not self.pending)
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {
@@ -322,20 +331,21 @@ class CommitRecord:
         return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.artifact_ref.release_id!r})"
 
 
-def active_artifact_ref(records: Sequence[CommitRecord], creation: ArtifactRef) -> ArtifactRef:
-    """The artifact that serves after ``records``, a commit history in step order.
+def active_record(records: Sequence[CommitRecord]) -> CommitRecord | None:
+    """The newest record of ``records``, a commit history in step order, that activates a release; ``None`` when
+    no record does (the creation artifact is active)."""
+    return next((record for record in reversed(records) if record.activates), None)
 
-    It is the ``artifact_ref`` of the newest record that activated an
-    artifact: an ``"activate"`` record, or a training record that made an
-    artifact and is not pending. With no such record it is ``creation``,
-    the artifact the scenario started from. A store that keeps no history
-    across a restart passes only the commit adopted from the artifact head,
-    so the active artifact is then that head.
+
+def active_artifact_ref(records: Sequence[CommitRecord], fallback: ArtifactRef) -> ArtifactRef:
+    """The release that is active after ``records``: the one :func:`active_record` names, else ``fallback``.
+
+    ``fallback`` is the release that is active when no record activates one:
+    the creation artifact, or the chain tip of a store that keeps no
+    history across a restart.
     """
-    for record in reversed(records):
-        if record.operation == "activate" or (record.made_artifact and not record.pending):
-            return record.artifact_ref
-    return creation
+    record = active_record(records)
+    return fallback if record is None else record.artifact_ref
 
 
 SCENARIO_METADATA_KEY = "scenario_commit_record"
@@ -450,14 +460,15 @@ def parse_scenario_metadata(
 
 
 __all__ = [
-    "COMMIT_OPERATIONS",
     "RECORD_KIND",
     "SCENARIO_METADATA_KEY",
     "SCENARIO_METADATA_KIND",
     "CommitHistoryError",
+    "CommitOperation",
     "CommitRecord",
     "RecordProgress",
     "active_artifact_ref",
+    "active_record",
     "parse_record_progress",
     "parse_scenario_metadata",
     "scenario_metadata_for",

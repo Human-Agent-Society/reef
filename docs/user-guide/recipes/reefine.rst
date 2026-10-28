@@ -117,7 +117,7 @@ Behavior and configuration
   change inactive until a person activates it. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
-  ``evolution.floor_score`` (``1.0``). The current release is not run. A
+  ``evolution.floor_score`` (``1.0``). The training start is not run. A
   rollout that gave no answer misses the floor; one that the environment
   could not run does not.
 * What only you can provide (a phone number, a credential, a permission, an
@@ -417,7 +417,7 @@ nothing about whether the change does what was asked; the step's design and
 review notes and the person judge that. Set both ``evolution.tasks`` and
 ``evolution.evaluate`` for a workload of your own, and
 ``evolution.selection: score_comparison`` to require the candidate to beat
-the current release on them instead.
+the training start on them instead.
 
 An adapter whose prompt is a Harbor task directory, ``terminus``, cannot
 take this prompt. There the recipe runs the same check as the task

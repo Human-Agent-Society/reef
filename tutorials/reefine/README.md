@@ -100,7 +100,7 @@ Use the version shown in the result in place of `<version>`:
 Read the design, usage instructions, and review notes. The default evaluation
 checks that the harness can run `echo reef-ok` and return its output.
 Passing this health task does not prove that your requested behavior works.
-Rejected or skipped requests leave the served version unchanged.
+Rejected or skipped requests leave the active release unchanged.
 
 If you accept the change, install it:
 

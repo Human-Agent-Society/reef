@@ -93,7 +93,8 @@ class ReleaseClient:
         return [dict(row) for row in rows if isinstance(row, Mapping)]
 
     def poll(self) -> str | None:
-        """The head: the release of the catalog row marked ``active``, or None while no release serves."""
+        """The active release: the ``release_id`` of the catalog row marked ``active``, or None while no row is
+        active."""
         release = next((row.get("release_id") for row in self.releases() if row.get("active")), None)
         return str(release) if release else None
 

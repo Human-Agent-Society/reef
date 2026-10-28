@@ -64,12 +64,16 @@ def _record(text: str = TEXT, requires: list | None = None) -> dict:
 
 
 def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
+    """A catalog row of a one-component scenario, where the artifact id is the release id; activated unless
+    ``rest`` says otherwise."""
     return {
         "release_id": release_id,
+        "artifact_id": release_id,
         "parent_release_id": parent,
         "operation": "training",
         "checkpoint": True,
         "active": False,
+        "activated": True,
         "recorded_at": 1_050.0,
         "metrics": metrics,
         **rest,
@@ -106,7 +110,7 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
     assert logo in build_release_page(0, [CREATION])
 
 
-def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> None:
+def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
     rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION), active=True)]
     page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
@@ -115,8 +119,8 @@ def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> Non
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
         assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
-    # A catalog with no served head leaves the crumb as text rather than a broken link.
-    inactive_only = [_row(_answered(selected=True), release_id="rel-0", parent=None)]
+    # A catalog with no active release leaves the crumb as text rather than a broken link.
+    inactive_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, activated=False)]
     bare = build_request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
 
@@ -227,14 +231,14 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
 
 
 def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is_active() -> None:
-    inactive = _row(_answered(selected=True, mutation=MUTATION))
+    inactive = _row(_answered(selected=True, mutation=MUTATION), activated=False)
     page = build_request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0)
     assert '<span class="inactive">Waiting for activation</span>' in page
     assert "Proposed changes" in _sections(page)
     assert "Release rel-1 is ready but does not serve yet. This change includes an extension" in page
     assert REFRESH not in page
     assert "<code>/versions v1 install</code>" in page
-    page = build_request_page(_record(), [CREATION, {**inactive, "active": True}], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
     assert '<span class="selected">Published</span>' in page
     assert "Published as release rel-1" in page
     assert "What changed" in _sections(page)
@@ -322,7 +326,7 @@ def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_s
     result = _section(page, "Result")
     assert "<code>reef-hermes update</code>" in result and "start reef-hermes again" in result
     assert "/versions" not in page and "reef-pi" not in page
-    inactive = _row(_answered(selected=True, mutation=MUTATION))
+    inactive = _row(_answered(selected=True, mutation=MUTATION), activated=False)
     page = build_request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0, adapter="hermes")
     assert f"<code>reef-hermes wait {RECORD_ID}</code>" in _section(page, "Result")
     requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]

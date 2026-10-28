@@ -1301,7 +1301,7 @@ Both modes use the same entries, plugins, and interpreter.
 loads ``native/tree.json`` into a compose ``Loader`` over
 ``NATIVE_PLUGINS`` and keeps a ``Run`` per session across turns. It starts
 ``client.wrapper.CaptureProxy`` in process. ``release_client.HeadWatch``
-follows the served head by polling the catalog and reading the
+follows the active release by polling the catalog and reading the
 ``x-reef-release-id`` header on inference responses.
 
 The interpreter calls ``loop.before_step(run)`` before each model stage.
@@ -1940,7 +1940,7 @@ inactive releases, with the install command:
 
 ``/versions [version] [install]`` lists releases oldest first with version
 (``v0``, ``v1``, ...), release id, result, and status. Status distinguishes
-the locally installed version from the served head. Request summaries
+the locally installed version from the active release. Request summaries
 appear under their rows with collapsed whitespace; the footer explains
 statuses and available commands. A version such as ``v3`` or ``3`` offers
 the step page at ``GET /reef/harness/releases/{step}/page`` with scenario
@@ -1973,13 +1973,13 @@ Seed and recovered state may contain them, but admission refuses mutations
 that create, update, or remove them.
 
 When a scenario opens, ``CordisBackend.shipped_content_update`` compares
-those reserved entries in the running Reef's seed with the served release.
+those reserved entries in the running Reef's seed with the active release.
 If an entry differs or is missing, Reef replaces or appends it, renders the
 tree, and commits a training release with metrics
 ``{"shipped_content_update": {"entries": [<ids>]}}``. This update
 consumes no records, runs no evaluation, and waits for no review because
 the content ships with Reef. The update notice offers it to installed
-trees like any other served head.
+trees like any other new active release.
 
 An evolved extension runs in pi's process with the user's privileges.
 Admission screens its text only for credential-shaped literals. The pi

@@ -1084,7 +1084,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 
    evolution.propose | a ``Proposer`` class: ``package.module:ClassName``, or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives
    evolution.evaluate | an ``RolloutScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory rollout by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest`` or ``evolution.eval_task_store``
-   evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every evaluation task; the current release is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a ``SelectionPlugin`` class in the same form as ``evolution.propose``
+   evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every evaluation task; the training start is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a ``SelectionPlugin`` class in the same form as ``evolution.propose``
    evolution.floor_score | 1.0 | the score every evaluation task must reach under ``selection: floor``; a positive number, refused with any other selection, as ``min_win_margin`` is outside ``score_comparison``
    evolution.tasks | non-empty list of rollout prompts, scored once per tree per step
    evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the evaluation's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it
@@ -1190,11 +1190,15 @@ scenario. The plugin then receives each saved checkpoint as a
 ``CheckpointCandidate`` and decides whether Reef activates its artifact. An
 artifact that the plugin does not select stays inactive, and a person can
 activate it with ``POST /reef/scenarios/{scenario}/activate``. Neither
-decision changes where training continues. `Operate a deployment
-<../user-guide/operate.rst#activate-an-artifact>`__ describes activation and
-``train-from``.
+decision changes where training continues. `Activate an artifact
+<../user-guide/operate.rst#activate-an-artifact>`__ describes activation, and
+`Go back to an older artifact
+<../user-guide/operate.rst#go-back-to-an-older-artifact>`__ describes how to
+make an older artifact serve for good.
 
-For fully manual activation, name the built-in plugin that selects no artifact:
+For fully manual activation, name the built-in plugin that selects no
+artifact. The plugin keeps its name until the activation rule moves out of
+training (RFC #965, step 3).
 
 .. code:: yaml
 

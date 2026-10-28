@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -19,8 +18,6 @@ from reef.surface.base import (
     Surface,
     WeightRuntime,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class RuntimeLoadMismatch(ReefError):

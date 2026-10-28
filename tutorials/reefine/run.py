@@ -11,13 +11,14 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
               health task and the floor decides; the catalog row carries
               the result, the notes and the request it answered under
               ``metrics.training_request``
-    activate - a release that touches a code_extension is made but does not
-              serve; its page says why it exists and what it changed, and
+    activate - a release that touches a code_extension is made but is not
+              the active release; its page says why it exists and what it changed, and
               the demo activates it through the route (a person reads the
               page first)
-    setup   - when the head's manifest names ``requires``, ``reef-pi setup``
-              checks the items off; an unmet item stops the demo
-    install - the head installs through the install route into work/harness
+    setup   - when the active release's manifest names ``requires``,
+              ``reef-pi setup`` checks the items off; an unmet item stops the demo
+    install - the active release installs through the install route into
+              work/harness
     show    - one ``reef-pi -p`` session on the installed tree, with the
               session's tool calls in order and its final answer
 
@@ -29,7 +30,7 @@ RFC #310's stage 6 asks for (requests that passed the checks); the held out
 shapes are not here.
 
 Start this through ./run.sh: it starts the Reef these constants point at
-from configs/deployment.yaml, installs the served tree, and runs a mode.
+from configs/deployment.yaml, installs the active release, and runs a mode.
 Every mode writes work/<mode>-<timestamp>.json with the raw rows it read.
 """
 
@@ -47,6 +48,7 @@ from pathlib import Path
 from reef_client import ReefClient, ReefClientError
 
 from reef.harness.client.wrapper import wrapper_directory
+from reef.harness.step_result import result_of
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
@@ -168,19 +170,6 @@ def _ensure_scenario(client):
     return _manifest(client)
 
 
-def result_of(row):
-    """The newest row's result as the page words it: inactive, selected, rejected, skipped with its reason."""
-    metrics = row.get("metrics") or {}
-    if isinstance(metrics.get("selected"), bool):
-        if not metrics["selected"]:
-            return "rejected"
-        # A release that passed the checks but does not serve waits for a person to activate it.
-        return "inactive" if row.get("checkpoint") and not row.get("active") else "selected"
-    if metrics.get("skipped"):
-        return f"skipped: {metrics['skipped']}"
-    return str(row.get("operation") or "unknown")
-
-
 def mutations_of(metrics):
     """The step's mutations as ``op id (kind)``: ``mutation`` for one, ``mutations`` for a composite."""
     single = metrics.get("mutation")
@@ -276,7 +265,7 @@ def _installed_release():
 
 
 def install(release_id=None):
-    """Install the head (or ``release_id``) through the install route into work/harness.
+    """Install the active release (or ``release_id``) through the install route into work/harness.
 
     Return the release id from its metadata file, or None when the script
     refused (an unmet requires item prints the setup list).
@@ -355,20 +344,26 @@ def wait_for_step(client, text, before, deadline):
 
 
 def activate(client, rows, row, run_dir):
-    """Save the inactive step's page beside the run, print its URL, activate the release; its id."""
+    """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
+    active release that the activation names."""
     step = rows.index(row)
     page = f"/reef/harness/releases/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(_fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
     say("activate: the demo is scripted; a person reads the page first")
-    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, {"artifact_id": row["release_id"]})
-    say(f"activated: release {answer['release_id']} serves")
+    body = {"artifact_id": row["artifact_id"]}
+    if row.get("component"):
+        body["component"] = row["component"]
+    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, body)
+    if answer.get("artifact_id") != row["artifact_id"]:
+        raise SystemExit(f"reef answered the activation without artifact {row['artifact_id']}: {answer}")
+    say(f"activated: release {answer['release_id']} is the active release")
     return answer["release_id"]
 
 
 def setup_if_required(client):
-    """``reef-pi setup --yes`` when the head's manifest names requires; the items and whether every one is met."""
+    """``reef-pi setup --yes`` when the active release's manifest names requires; the items and whether every one is met."""
     requires = _manifest(client).get("requires") or []
     say(f"requires: {_requires_of(requires)}")
     if not requires:
@@ -556,7 +551,7 @@ def demo(mode):
             _write_record(record_path, record)
             raise SystemExit(2)
     else:
-        say(f"the head did not move: release {installed_before} stays installed")
+        say(f"the active release did not change: release {installed_before} stays installed")
         installed = installed_before
     # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
@@ -642,7 +637,7 @@ def main(argv=None):
         description="Reefine on reef-pi: the two demos and the measurement; start it through ./run.sh",
     )
     modes = parser.add_subparsers(dest="mode", required=True)
-    modes.add_parser("install", help="install the served head into work/harness (run.sh does this first)")
+    modes.add_parser("install", help="install the active release into work/harness (run.sh does this first)")
     modes.add_parser("bugfix", help="the bug fix flow demo: demos/bugfix.md")
     modes.add_parser("research", help="the research loop demo: demos/research.md")
     measured = modes.add_parser("measure", help="file the fixed request list and count what passed the checks")

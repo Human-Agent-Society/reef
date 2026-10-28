@@ -7,8 +7,8 @@ requires and undeclared variables) also gets a Design section after Why and
 a Review section after What changed, and why the proposer produced nothing,
 when the step recorded that, is a row of the Result section. The step is the
 row's position in the catalog oldest first, the creation row being 0: a
-rejected step publishes nothing and its row carries the head's release id,
-so only the step names it.
+rejected step publishes nothing and its row carries the id of the release it
+ran on, so only the step names it.
 
 The layout, the palette and the status wording come from
 :mod:`reef.service.page_layout`, which the request page draws with too, so a
@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
+from reef.harness import step_result
 from reef.harness.step_result import (
     design_sections,
     floor_tasks_note,
@@ -74,11 +75,11 @@ RESULT_LABELS = {
 RESULT_WORDS = {
     "inactive": "Passed the checks and made a release that does not serve yet; a person activates it first.",
     "selected": "Passed the checks and made a release.",
-    "rejected": "Did not pass the checks. The head stayed where it was.",
+    "rejected": "Did not pass the checks. The active release did not change.",
     "skipped": "No candidate reached the evaluation, so nothing changed.",
     "failed": "The step failed before evaluation. Nothing was published; see the error below before retrying.",
     "creation": "The tree this scenario started from, before any step ran.",
-    "recovery": "The head this process recovered at boot.",
+    "recovery": "The release this process recovered at boot.",
 }
 
 
@@ -187,44 +188,35 @@ def mutations_of(metrics: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
     return []
 
 
-def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
-    """The row's result, including failed proposals that published no release.
-
-    A step whose release passed the checks reads ``inactive`` when, with
-    ``rows`` given, it is newer than the active row and not active itself:
-    it waits for a person to activate it. Otherwise it reads ``selected``."""
-    metrics = row.get("metrics")
-    if isinstance(metrics, Mapping):
-        if isinstance(metrics.get("selected"), bool):
-            if not metrics["selected"]:
-                return "rejected"
-            served = served_step(rows)
-            position = next((index for index, other in enumerate(rows) if other is row), None)
-            if row.get("checkpoint") and not row.get("active") and served is not None and position is not None:
-                return "inactive" if position > served else "selected"
-            return "selected"
-        if metrics.get("skipped"):
-            notes = metrics.get("proposal_notes")
-            failure = notes.get("failure") if isinstance(notes, Mapping) else None
-            error = metrics.get("error")
-            if any(isinstance(value, str) and value.strip() for value in (failure, error)):
-                return "failed"
-            return "skipped"
-    return str(row.get("operation") or "unknown")
+def result_of(row: Mapping[str, Any]) -> str:
+    """The row's result as the harness pages show it: :func:`reef.harness.step_result.result_of`, except that a
+    ``skipped`` step that recorded a failure (``proposal_notes.failure`` or ``error``, a non-blank string) reads
+    ``failed``."""
+    selection_result = step_result.result_of(row)
+    if selection_result != "skipped":
+        return selection_result
+    metrics = row["metrics"]
+    notes = metrics.get("proposal_notes")
+    failure = notes.get("failure") if isinstance(notes, Mapping) else None
+    if any(isinstance(value, str) and value.strip() for value in (failure, metrics.get("error"))):
+        return "failed"
+    return "skipped"
 
 
 def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
-    """The step whose release serves: the row the catalog marks ``active``; ``None`` when no listed row is."""
+    """The step of the active release: the index of the row the catalog marks ``active``; ``None`` when no
+    listed row is active."""
     return next((index for index, row in enumerate(rows) if row.get("active")), None)
 
 
 def before_release_id(row: Mapping[str, Any]) -> str | None:
-    """The release the step ran on: the parent of a release that won, the head a rejected or skipped step ran on.
+    """The release the step ran on: the parent of a release the step made, the release a rejected or skipped step
+    ran on.
 
-    A rejected or skipped step's row carries the head's own release id, so
-    its parent would be one release too far back."""
+    A rejected or skipped step's row carries the id of the release it ran
+    on, so its parent would be one release too far back."""
     selection_result = result_of(row)
-    if selection_result == "selected":
+    if selection_result in ("selected", "inactive"):
         parent = row.get("parent_release_id")
         return str(parent) if parent else None
     if selection_result in ("rejected", "skipped", "failed"):
@@ -250,7 +242,7 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     if operation != "training":
         words = {
             "creation": "The tree this scenario started from; no step made it.",
-            "recovery": "The head this process recovered at boot.",
+            "recovery": "The release this process recovered at boot.",
         }
         return f"<p>{escape(words.get(str(operation), f'A {operation} commit.'))}</p>"
     request = metrics.get("training_request")
@@ -390,7 +382,7 @@ def _what_changed(
         return '<p class="empty">no mutation on record</p>'
     if row.get("operation") == "creation":
         return '<p class="empty">nothing: the seed as the recipe rendered it</p>'
-    return '<p class="empty">no mutation: the head moved without a step</p>'
+    return '<p class="empty">no mutation: the release changed without a step</p>'
 
 
 def _listed(items: Sequence[str], empty: str) -> str:
@@ -458,9 +450,9 @@ def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | Non
     return (inputs, outputs) if inputs or outputs else None
 
 
-def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
+def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     """The Result section: the headline and what it means, then the evaluation's numbers and the step's record."""
-    selection_result = result_of(row, rows)
+    selection_result = result_of(row)
     words = {**RESULT_WORDS, "failed": failed_words(metrics)}
     if declined(metrics):
         words["skipped"] = DECLINED_WORDS
@@ -469,7 +461,7 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     if unscored:
         words["rejected"] = (
             "The evaluation could not run: every candidate rollout failed before it was scored, so nothing judged "
-            "the change. The head stayed where it was."
+            "the change. The active release did not change."
         )
     summary = (
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
@@ -564,8 +556,8 @@ def _setup(
     The install script, ``reef-<adapter> setup`` and the update notice read
     the union over the release's chain (``required_by``), so the page lists
     the same items split by the step that named them. A rejected or skipped
-    row carries the head's id and published nothing, so only its own items
-    show. The items the step dropped, the backend's under
+    row carries the id of the release it ran on and published nothing, so
+    only its own items show. The items the step dropped, the backend's under
     ``training_request.refused_requires`` and the method's under
     ``proposal_notes.refused_requires``, close the section with their reason."""
     request = metrics.get("training_request")
@@ -611,7 +603,8 @@ def _ran_on(other: Mapping[str, Any], release_id: Any) -> bool:
     """Whether ``other`` is a child of ``release_id``: a step evaluated on it."""
     if not release_id:
         return False
-    # Not the parent: a rejected or skipped row copies the head's ref, so its parent is the grandparent.
+    # Not the parent: a rejected or skipped row carries the id of the release it ran on, so its parent is the
+    # grandparent.
     return before_release_id(other) == release_id
 
 
@@ -621,11 +614,12 @@ def _chain(
     release_id = row.get("release_id")
     selection_result = result_of(row)
     if selection_result in ("rejected", "skipped", "failed"):
-        # The row carries the head's id and published nothing, so the head's parent and children are not its own.
+        # The row carries the id of the release it ran on and published nothing, so that release's parent and
+        # children are not its own.
         if selection_result == "rejected":
-            ran_on = "the head at this step; the candidate published nothing"
+            ran_on = "the active release at this step; the candidate published nothing"
         else:
-            ran_on = "the head at this step; nothing was evaluated"
+            ran_on = "the active release at this step; nothing was evaluated"
         return (
             '<dl class="details">'
             f'<div><dt>Ran on</dt><dd class="id">{escape(before_release_id(row) or "-")} ({escape(ran_on)})</dd></div>'
@@ -634,7 +628,7 @@ def _chain(
         )
     children = [
         f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">v{index}</a>'
-        f'<span class="id">{escape(other.get("release_id"))}</span>{status_span(result_of(other, rows))}</li>'
+        f'<span class="id">{escape(other.get("release_id"))}</span>{status_span(result_of(other))}</li>'
         for index, other in enumerate(rows)
         if index != step and _ran_on(other, release_id)
     ]
@@ -722,11 +716,12 @@ def build_release_page(
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
     entries = {str(entry["id"]): entry for entry in before_entries if isinstance(entry, Mapping) and "id" in entry}
-    selection_result = result_of(row, rows)
+    selection_result = result_of(row)
+    served = served_step(rows)
     recorded = row.get("recorded_at")
     headline = [f'<span class="id">{escape(row.get("release_id"))}</span>']
-    if served_step(rows) == step:
-        headline.append('<span class="chip">Currently served</span>')
+    if served == step:
+        headline.append('<span class="chip">Active release</span>')
     subtitle = f'<span class="headline">{"".join(headline)}</span>'
     if isinstance(recorded, (int, float)):
         subtitle += f"Recorded {stamp(recorded)}"
@@ -734,7 +729,6 @@ def build_release_page(
         subtitle += f"{escape(status_label(selection_result))} in this scenario's catalog"
     # Every "<" leaves the JSON as \\u003c: a code text holding "</script>" would otherwise close the data block.
     data = json.dumps(row, ensure_ascii=True, sort_keys=True).replace("<", "\\u003c")
-    served = served_step(rows)
     return document(
         title=f"Harness v{step}",
         style=STYLE,
@@ -744,7 +738,7 @@ def build_release_page(
         eyebrow="Harness evolution",
         heading=f"Harness v{step}",
         subtitle=subtitle,
-        # The served head is this scenario's home; on its own page the crumb stays text.
+        # The active release is this scenario's home; on its own page the crumb stays text.
         home="" if served is None or served == step else step_href(served, link_query),
         body=_steps_nav(step, rows, link_query)
         + '<div class="stack">\n'
@@ -752,7 +746,7 @@ def build_release_page(
         + _design(metrics)
         + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")
         + _review(metrics)
-        + _card("Result", f"{result_html(row, metrics, rows)}\n")
+        + _card("Result", f"{result_html(row, metrics)}\n")
         + _card("Setup", f"{_setup(row, metrics, rows, adapter)}\n")
         + _card("Chain", f"{_chain(step, row, rows, link_query)}\n")
         + "</div>\n",

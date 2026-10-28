@@ -59,7 +59,6 @@ from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import LocalExecutor, ProgramExecutor
-from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.tasks import TaskStore
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
@@ -630,38 +629,34 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
         )
 
-    def start_state(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
-        """The state whose next step evolves the composition of ``artifact``: its entries replace the state's.
+    def started_from(
+        self, state: Mapping[str, Any], artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None
+    ) -> Mapping[str, Any]:
+        """The state whose next step evolves ``entries``, the composition the commit that made ``artifact`` recorded.
 
-        A release a training step made records the step's state, its entries
-        included, in its scenario metadata. A tree that no step made, such as
-        the creation, carries its entries list at the adapter's ``files.tree``
-        path when the adapter declares one (``tree_files``). The recheck
-        target this search kept belongs to the old start, so it is dropped.
-        Raise ``ValueError`` when ``artifact`` records no entries, or when its
-        entries do not pass the admission a proposal meets.
+        Only the creation artifact has no such commit (``entries`` is
+        ``None``); its tree carries its entries list at the adapter's
+        ``files.tree`` path (``tree_files``), when the adapter declares one.
+        The recheck target belongs to the old start, so it is dropped. Raise
+        ``ValueError`` when there are no entries to start from, or when they
+        do not pass the admission a proposal meets.
         """
-        recorded = artifact.metadata.get(SCENARIO_METADATA_KEY)
-        recorded_state = recorded.get("algorithm_state") if isinstance(recorded, Mapping) else None
-        tree_path = self._descriptor.tree_path
-        if isinstance(recorded_state, Mapping) and "entries" in recorded_state:
-            entries = recorded_state["entries"]
-        elif tree_path is not None and artifact.local_path is not None and (artifact.local_path / tree_path).is_file():
+        if entries is None:
+            tree_path = self._descriptor.tree_path
+            if tree_path is None or artifact.local_path is None or not (artifact.local_path / tree_path).is_file():
+                raise ValueError(f"release {artifact.ref.release_id!r} records no harness entries to start from")
             try:
-                entries = json.loads((artifact.local_path / tree_path).read_text(encoding="utf-8"))
+                listed = json.loads((artifact.local_path / tree_path).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise ValueError(f"the entries list at {tree_path} cannot be read: {exc}") from exc
-        else:
-            raise ValueError(f"release {artifact.ref.release_id!r} records no harness entries to start from")
-        if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
-            raise ValueError(f"release {artifact.ref.release_id!r} records entries that are not a list of objects")
+            if not isinstance(listed, list) or not all(isinstance(entry, Mapping) for entry in listed):
+                raise ValueError(f"the entries list at {tree_path} is not a list of objects")
+            entries = listed
         admitted, refusal = admit_mutations(entries, (), self._descriptor)
         if refusal is not None:
             raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
         kept = {
-            key: value
-            for key, value in state.items()
-            if key not in ("rollback_entries", "rollback_evaluation_context")
+            key: value for key, value in state.items() if key not in ("recheck_entries", "recheck_evaluation_context")
         }
         return {**kept, "entries": [dict(entry) for entry in admitted]}
 
@@ -741,12 +736,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         promoted_clients = dict(state.get("promoted_clients", {}))
         if promoted_clients:
             carried["promoted_clients"] = promoted_clients
-        # Carried through skips so a no-commit step keeps the rollback target.
-        rollback_entries = state.get("rollback_entries")
-        rollback_evaluation_context = state.get("rollback_evaluation_context")
-        if rollback_entries is not None:
-            carried["rollback_entries"] = rollback_entries
-            carried["rollback_evaluation_context"] = rollback_evaluation_context
+        # Carried through skips so a no-commit step keeps the recheck target.
+        recheck_entries = state.get("recheck_entries")
+        recheck_evaluation_context = state.get("recheck_evaluation_context")
+        if recheck_entries is not None:
+            carried["recheck_entries"] = recheck_entries
+            carried["recheck_evaluation_context"] = recheck_evaluation_context
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
@@ -812,10 +807,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             step_record=None if step_dir is None else str(step_dir),
         )
         # Re-evaluate the last-good tree against the published one on cadence or when the served model changed.
-        drifted = rollback_evaluation_context is not None and rollback_evaluation_context != self.evaluation_context()
+        drifted = recheck_evaluation_context is not None and recheck_evaluation_context != self.evaluation_context()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
-        if data.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
-            target = [dict(entry) for entry in rollback_entries]
+        if data.request is None and self._recheck_every and recheck_entries is not None and (due or drifted):
+            target = [dict(entry) for entry in recheck_entries]
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
             metrics["recheck_reason"] = "drift" if drifted else "cadence"
@@ -1003,26 +998,26 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         else:
             streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
         metrics["evaluation_context"] = self.evaluation_context()
-        # A publish stores the replaced tree and its evaluation stamp as the rollback target; a rollback consumes it.
-        rollback_entries = prepared.state.get("rollback_entries")
-        rollback_evaluation_context = prepared.state.get("rollback_evaluation_context")
+        # A publish stores the replaced tree and its evaluation stamp as the recheck target; a recheck consumes it.
+        recheck_entries = prepared.state.get("recheck_entries")
+        recheck_evaluation_context = prepared.state.get("recheck_evaluation_context")
         if candidate.recheck and decision.selected:
             metrics["rolled_back"] = True
-            rollback_entries = None
-            rollback_evaluation_context = None
+            recheck_entries = None
+            recheck_evaluation_context = None
         elif candidate.recheck:
             metrics["rolled_back"] = False
         elif decision.selected and self._recheck_every:
-            rollback_entries = list(candidate.current_entries)
-            rollback_evaluation_context = metrics["evaluation_context"]
+            recheck_entries = list(candidate.current_entries)
+            recheck_evaluation_context = metrics["evaluation_context"]
         state = {**prepared.state, "failure_streak": streak}
         if manifest is not None:
             state["failure_manifest"] = manifest.to_state()
-        state.pop("rollback_entries", None)
-        state.pop("rollback_evaluation_context", None)
-        if rollback_entries is not None:
-            state["rollback_entries"] = rollback_entries
-            state["rollback_evaluation_context"] = rollback_evaluation_context
+        state.pop("recheck_entries", None)
+        state.pop("recheck_evaluation_context", None)
+        if recheck_entries is not None:
+            state["recheck_entries"] = recheck_entries
+            state["recheck_evaluation_context"] = recheck_evaluation_context
         # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))

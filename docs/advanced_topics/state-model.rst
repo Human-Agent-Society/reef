@@ -29,9 +29,9 @@ survive a restart.
 The release chain
 -----------------
 
-Every release that a training step makes has a parent. A release binds one
-*artifact*, the content of one component, for each component. Four
-identities stay separate: ``release_id`` names the release, ``artifact_id``
+A scenario's first release holds the *creation artifact* of each component.
+Every later release has a parent. A release binds one *artifact*, the content
+of one component, for each component. Four identities stay separate: ``release_id`` names the release, ``artifact_id``
 names an artifact, ``content_id`` names the model or harness content, and
 ``runtime_load_id`` names a concrete serving-engine weight load. In a
 scenario of one component, ``artifact_id`` is the ``release_id`` of the
@@ -45,10 +45,11 @@ Serving and training each read artifacts of the chain:
 - The *active release* serves. It binds the active artifact of each
   component. ``activate`` makes an existing artifact active and leaves every
   trainer's start alone.
-- Each trainer has a *start*, the artifact that its next job or evolve step
-  starts from. After each job or step, the trainer moves its start to its own
-  newest output. ``train-from`` sets the start to an existing artifact and
-  leaves the active release alone.
+- Each trainer has a *training start*, the artifact that its next job or
+  evolve step starts from. The first training start is the creation artifact.
+  After each job or step, the trainer moves its start to its own newest
+  output. ``train-from`` sets the start to an existing artifact and leaves the
+  active release alone.
 
 The training component decides which checkpoints a job saves. A Slime or
 Tinker job saves a checkpoint every ``save_interval`` optimizer steps when
@@ -66,22 +67,27 @@ one, so its releases are flat: the release holds one artifact, and its
 (``weights`` and ``harness``, say) serves releases that keep one directory
 per component and carry a component manifest in their metadata. Each step
 publishes one component and the committer carries the others forward from
-the previous checkpoint, so the release still binds the whole combination:
+the chain tip, so the release still binds the whole combination:
 its ``content_id`` derives from the component content ids, and only a
 component whose content the engine does not already serve is loaded. An
 activation in such a scenario publishes a new release: the active release
 with the activated component bound to the artifact. It makes no new content
-and does not change the training chain.
+and does not move the chain tip.
 
 Durable releases are Git-backed, one ref per scenario, with LFS patterns for
 weight files and a ``reef-artifact.json`` manifest in every release. The
-repository keeps two heads: the active release, and the checkpoint, which is
-the tip of the published chain and the parent of the next publication. Heads
-move only by compare-and-swap: ``activate`` requires the expected active
-release, ``publish`` requires the expected parent, and the push carries a
-lease, so a stale publication conflicts instead of overwriting. In a
-scenario of one component, activation moves only the active release and
-writes nothing to the repository. The commit history records every
+repository keeps two heads: the active release, and the *chain tip*. The chain
+tip is the newest release on the chain, and the parent of the next release
+that a training step publishes. A training step that makes an artifact and
+activates it moves both heads to its release. The release of an inactive
+artifact, and the release that an activation publishes in a scenario of
+several components, are published beside the chain: they move neither the
+chain tip nor the backend head. Heads move only by compare-and-swap:
+``activate`` requires the expected active release, ``publish`` requires the
+expected parent, and the push carries a lease, so a stale publication
+conflicts instead of overwriting. In a scenario of one component, activation
+writes no artifact or release: it appends an ``activate`` record and moves
+only the active release. The commit history records every
 activation, and recovery reads the active release back from the history: it
 is the release of the newest activation. A training step that makes an
 artifact and activates it counts as an activation.
@@ -136,14 +142,16 @@ durable store, the order is:
        record. A restart before the trainer's next training commit takes the
        start again from that record.
    * - No artifact
-     - Commit the store, apply trainer state; keep the artifact head. A job
-       submission, a rejected harness candidate, and a job's end commit this
-       way.
+     - Commit the store, apply trainer state; keep the active release and the
+       chain tip. A job submission, a rejected harness candidate, and a job's
+       end commit this way.
    * - Inactive artifact
      - Publish durable bytes, commit the store with ``pending: true``, apply
-       trainer state; leave the active release and the checkpoint head in
-       place. A weight checkpoint that evaluation rejects, and a harness win
-       held for review, commit this way.
+       trainer state; keep the active release and the chain tip. A weight
+       checkpoint that evaluation rejects commits this way. So does a harness
+       win under ``evolution.publish: review`` or ``evolution.review_kinds``.
+       The ``pending`` field keeps its name until the activation rule moves
+       out of training (RFC #965, step 3).
 
 Every trainer is bound to a release component (``records`` when the recipe
 serves none). With several trainers, every commit record names the
@@ -162,7 +170,7 @@ trainers:
 - An activation or a train-from refuses to run while a training result
   waits for its commit.
 
-Thus the head does not move under a step, and every step commits on the
+Thus the chain tip does not move under a step, and every step commits on the
 release that it was prepared against.
 
 When a commit fails, the worker rebuilds the scenario from durable state at
@@ -178,9 +186,9 @@ that names its component. On restart each trainer recovers its state and
 read cursor from its own commits and skips the rows its own commits and
 receipts name, which needs durable commit storage.
 
-Without a durable store, a saved release advances the serving head before
-the in-memory commit settles. A conflicting head therefore rejects the step
-before its records are consumed. In-memory commit history supports retries
+Without a durable store, a saved release advances the active release and the
+chain tip before the in-memory commit settles. A conflicting chain tip
+therefore rejects the step before its records are consumed. In-memory commit history supports retries
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data

@@ -466,17 +466,21 @@ RELEASES = {
     "releases": [
         {
             "release_id": "rel-0000-creation",
+            "artifact_id": "rel-0000-creation",
             "parent_release_id": None,
             "operation": "creation",
             "checkpoint": True,
             "active": False,
+            "activated": True,
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
             "checkpoint": True,
             "active": True,
+            "activated": True,
             "metrics": {
                 "steps": 1,
                 "selected": True,
@@ -489,26 +493,32 @@ RELEASES = {
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
             "checkpoint": False,
             "active": False,
+            "activated": True,
             "metrics": {"steps": 2, "selected": False, "training_request": {"id": "q-2", "text": "answer with care"}},
         },
         {
             "release_id": "rel-3333-inactive",
+            "artifact_id": "rel-3333-inactive",
             "parent_release_id": "rel-1111-selected",
             "operation": "training",
             "checkpoint": True,
             "active": False,
+            "activated": False,
             "metrics": {"steps": 3, "selected": True, "training_request": {"id": "q-3", "text": "log when blocked"}},
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
             "checkpoint": False,
             "active": False,
+            "activated": True,
             "metrics": {"steps": 4, "skipped": "no proposal"},
         },
     ],
@@ -567,7 +577,16 @@ def test_versions_lists_aligned_columns_with_requests_below_each_row(tmp_path: P
 
 @pytest.mark.parametrize("headless", ["0", "1"])
 def test_versions_keeps_multiline_requests_out_of_columns(tmp_path: Path, headless: str) -> None:
-    rows = [{"release_id": f"release-{step}", "operation": "creation"} for step in range(11)]
+    rows = [
+        {
+            "release_id": f"release-{step}",
+            "artifact_id": f"release-{step}",
+            "operation": "creation",
+            "active": False,
+            "activated": True,
+        }
+        for step in range(11)
+    ]
     rows[9]["metrics"] = {"training_request": {"text": "  支持复制图片\n\n Clarification...\t完成  "}}
     rows[10]["active"] = True
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": _listed({"releases": rows})}}
@@ -616,7 +635,7 @@ def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> No
 
 def test_versions_install_activates_an_inactive_release_before_installing_it(tmp_path: Path) -> None:
     """An inactive release installs like any other: the confirmation is the person saying it may run, so the
-    install activates it first and then installs that same release."""
+    install activates it first and then installs the active release that the activation names."""
     agent_dir = _install_root(tmp_path)
     confirmed = _versions(
         tmp_path, agent_dir, {**CATALOG, **ACTIVATED}, args="3 install", TEST_CONFIRM="1", REEF_TOKEN="tok"
@@ -657,6 +676,23 @@ def test_versions_install_activates_an_inactive_release_before_installing_it(tmp
     assert [event["kind"] for event in refused["events"]] == ["fetch", "confirm", "fetch", "notify"]
     assert refused["events"][3]["type"] == "error"
     assert refused["events"][3]["message"].startswith("reef refused the activation (HTTP 409)")
+
+    # A composite row names its component; an answer that names another artifact installs nothing.
+    composite = {**RELEASES["releases"][3], "artifact_id": "rel-3333-inactive:harness", "component": "harness"}
+    composite_catalog = _listed({"scenario": "code-repair", "releases": [*RELEASES["releases"][:3], composite]})
+    mismatched = _versions(
+        tmp_path,
+        agent_dir,
+        {"GET /reef/harness/releases": {"status": 200, "body": composite_catalog}, **ACTIVATED},
+        args="3 install",
+        TEST_CONFIRM="1",
+    )
+    assert mismatched["events"][2]["body"] == {"artifact_id": "rel-3333-inactive:harness", "component": "harness"}
+    assert mismatched["events"][3] == {
+        "kind": "notify",
+        "message": "reef answered the activation without artifact rel-3333-inactive:harness",
+        "type": "error",
+    }
 
     # An active release needs no activation: the install runs straight through.
     published = _versions(tmp_path, agent_dir, {**CATALOG, **ACTIVATED}, args="1 install", TEST_CONFIRM="1")
@@ -701,41 +737,51 @@ NEWEST_INACTIVE = {
     "releases": [
         {
             "release_id": "rel-0000-creation",
+            "artifact_id": "rel-0000-creation",
             "parent_release_id": None,
             "operation": "creation",
             "checkpoint": True,
             "active": False,
+            "activated": True,
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
             "checkpoint": True,
             "active": True,
+            "activated": True,
             "metrics": {"steps": 1, "selected": True, "training_request": {"id": "q-1", "text": "say when blocked"}},
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
             "checkpoint": False,
             "active": False,
+            "activated": True,
             "metrics": {"steps": 2, "selected": False},
         },
         {
             "release_id": "rel-1111-selected",
+            "artifact_id": "rel-1111-selected",
             "parent_release_id": "rel-0000-creation",
             "operation": "training",
             "checkpoint": False,
             "active": False,
+            "activated": True,
             "metrics": {"steps": 3, "selected": False},
         },
         {
             "release_id": "rel-4444-win",
+            "artifact_id": "rel-4444-win",
             "parent_release_id": "rel-1111-selected",
             "operation": "training",
             "checkpoint": True,
             "active": False,
+            "activated": False,
             "metrics": {"steps": 4, "selected": True},
         },
     ],
@@ -748,7 +794,7 @@ AFTER_ACTIVATION = {
         *NEWEST_INACTIVE["releases"][:1],
         {**NEWEST_INACTIVE["releases"][1], "active": False},
         *NEWEST_INACTIVE["releases"][2:4],
-        {**NEWEST_INACTIVE["releases"][4], "active": True},
+        {**NEWEST_INACTIVE["releases"][4], "active": True, "activated": True},
     ],
 }
 
@@ -772,7 +818,7 @@ def test_versions_marks_the_active_release_and_never_the_inactive_row(tmp_path: 
     assert _dialogs(inactive)[0]["message"] == "rel-4444-win (inactive)"
 
 
-def test_versions_marks_the_installed_release_apart_from_the_head(tmp_path: Path) -> None:
+def test_versions_marks_the_installed_release_apart_from_the_active_release(tmp_path: Path) -> None:
     # The tree runs rel-1111; its row is marked installed (and active, since it serves). A row that is
     # neither the installed release nor the active one stays unmarked, and the fallback release file.
     installed = _install_root(tmp_path, with_release_file=False)
@@ -811,16 +857,6 @@ def test_versions_distinguishes_an_installed_older_release_from_the_active_one(t
     ]
     shown = _versions(tmp_path, installed, catalog, args="4")
     assert _dialogs(shown)[0]["message"] == "rel-4444-win (selected, active)"
-
-
-def test_versions_installs_an_active_release_without_activating_it_again(tmp_path: Path) -> None:
-    """An activation adds no row: the release it activated reads "selected" and carries the active flag, so
-    installing it needs no second activation."""
-    agent_dir = _install_root(tmp_path)
-    catalog = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_ACTIVATION}}
-    installed = _versions(tmp_path, agent_dir, {**catalog, **ACTIVATED}, args="4 install", TEST_CONFIRM="1")
-    assert [event["kind"] for event in installed["events"]] == ["fetch", "confirm", "notify"]
-    assert installed["events"][2] == {"kind": "notify", "message": NO_WRAPPER, "type": "warning"}
 
 
 def test_versions_takes_only_a_run_of_digits_as_the_step(tmp_path: Path) -> None:
@@ -1181,10 +1217,12 @@ REVIEW = {
 }
 SELECTED_ROW = {
     "release_id": "rel-1111-selected",
+    "artifact_id": "rel-1111-selected",
     "parent_release_id": "rel-0000-creation",
     "operation": "training",
     "checkpoint": True,
     "active": True,
+    "activated": True,
     "metrics": {
         "selected": True,
         **REQUEST_ROW,
@@ -1197,14 +1235,18 @@ SELECTED_ROW = {
 INACTIVE_ROW = {
     **SELECTED_ROW,
     "release_id": "rel-3333-inactive",
+    "artifact_id": "rel-3333-inactive",
     "active": False,
+    "activated": False,
     "metrics": {"selected": True, **REQUEST_ROW},
 }
 REJECTED_ROW = {
     **SELECTED_ROW,
     "release_id": "rel-0000-creation",
+    "artifact_id": "rel-0000-creation",
     "checkpoint": False,
     "active": False,
+    "activated": True,
     "metrics": {
         "selected": False,
         "selection": {"policy": "floor", "reason": "candidate missed the floor on 1 of 1 tasks"},
@@ -1797,8 +1839,8 @@ def install_step(tmp_path: Path, agent_dir: Path, row: dict[str, object], **env:
 
 @pytest.mark.parametrize("row", [REJECTED_ROW, SKIPPED_ROW], ids=["rejected", "skipped"])
 def test_versions_install_refuses_a_step_that_published_no_tree(tmp_path: Path, row: dict[str, object]) -> None:
-    """A rejected or skipped step commits no tree of its own: its row carries the head's id, so installing it
-    would install the version already there. An inactive release is not refused."""
+    """A rejected or skipped step commits no tree of its own: its row carries the active release's id, so
+    installing it would install the version already there. An inactive release is not refused."""
     events = install_step(tmp_path, _install_root(tmp_path), row, TEST_CONFIRM="1")
     assert len(events) == 1
     assert events[0]["kind"] == "notify" and events[0]["type"] == "warning"
@@ -2053,7 +2095,7 @@ def test_a_settle_offers_the_install_only_when_the_session_is_between_turns(
         )
         if inactive:
             assert events[1]["url"] == "http://reef:8900/reef/scenarios/code-repair/activate"
-            assert events[1]["body"] == {"artifact_id": row["release_id"]}
+            assert events[1]["body"] == {"artifact_id": row["artifact_id"]}
         assert events[-1]["message"].endswith("Type /reload to load it now.")
 
 

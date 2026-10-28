@@ -1462,7 +1462,8 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     }
     assert [e["id"] for e in first_update["releases"][0]["entries"]] == ["read_file", "main", "answer-format"]
 
-    # An activation row is not a step: it is shown as its own kind, with no verdict and the entries before it.
+    # An activation row is not a step: it is shown as its own kind, with no verdict and the tree of the release it
+    # activated, here the seed.
     activation = {
         "recorded_at": 1060.0,
         "operation": "activate",
@@ -1479,7 +1480,8 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         ("activate", 2, "r1"),
     ]
     assert with_activation["releases"][2]["result"] is None
-    assert with_activation["releases"][2]["entries"] == with_activation["releases"][1]["entries"]
+    assert with_activation["releases"][2]["entries"] == with_activation["releases"][0]["entries"]
+    assert with_activation["releases"][2]["entries"] != with_activation["releases"][1]["entries"]
 
     # An empty work directory still renders a page.
     empty = replay.collect(tmp_path / "nothing")

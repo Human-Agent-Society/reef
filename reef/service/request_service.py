@@ -160,7 +160,7 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
         self._retry_policy = retry_policy or InferenceRetryPolicy()
-        # The harness head of a scenario with several components, by scenario step and served release: it is
+        # The harness head of a scenario with several components, by scenario step and active release: it is
         # read on every inference answer and changes only when a commit lands.
         self.harness_heads: dict[str, tuple[int, str, str]] = {}
 
@@ -634,7 +634,7 @@ class RequestService:
         serving head, so a consumer can pin or go back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
         naming it. The ``evaluation`` field carries the metrics of the training step
-        that published the served release, so a consumer can audit what a
+        that published the active release, so a consumer can audit what a
         pulled tree changed and why it was admitted before running it.
         Read-only: never creates a scenario.
         """
@@ -683,89 +683,58 @@ class RequestService:
 
     @staticmethod
     def harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
-        """The catalog rows a client pulls, newest first, and the release among them that serves.
+        """The catalog rows a client pulls, newest first, and the release of the active harness artifact.
 
-        A flat scenario lists every row, and the served release is the
-        active one. With several components, another component's step
-        carries the pulled tree forward unchanged, so it is no harness
-        release: a client that compared release ids would pull the same tree
-        again. A row is kept when the content id of its files component
-        differs from its parent's, as their commit records name them (the
-        creation's is read from the release); a row whose manifests are not
-        both known is kept when it names the files component or no
-        component. The creation row is always kept. A kept row names the
-        nearest kept ancestor as ``parent_release_id``, with the release's
-        own parent beside it as ``composed_parent_release_id``. A step that
-        made no artifact names the kept release its active artifact
-        carried, with the artifact's own id as ``composed_release_id``. The
-        served release is the kept release whose files component the active
-        release binds.
+        A row names the harness artifact it holds or ran on: ``artifact_id``
+        and ``component`` from ``Scenario.artifacts``, with ``active`` and
+        ``activated``. ``active`` is true on exactly one row, the row that
+        made the active harness artifact. In a scenario of several
+        components, a release that minted no harness artifact (another
+        component's step, an activation) is not listed. A listed row names
+        the release that minted its artifact as ``release_id`` and the
+        release that minted its parent's harness artifact as
+        ``parent_release_id``; the ids it had are kept beside them as
+        ``composed_release_id`` and ``composed_parent_release_id``. A step
+        that made no artifact is listed when the harness trainer made it.
         """
-        rows = list(scenario.releases())
         files_component = scenario.surface.files_component
-        if scenario.surface.single or files_component is None:
-            return rows, next((str(row["release_id"]) for row in rows if row.get("active")), None)
-        creation = scenario.release_queries.creation_components(scenario.scenario_step)
-        active = scenario.release_queries.active_components(scenario.scenario_step)
-        served_files = None if active is None else active.get(files_component)
-        oldest_first = list(reversed(rows))
-        manifests = {
-            str(row["release_id"]): (
-                dict(creation)
-                if row.get("operation") == "creation" and creation is not None
-                else row.get("components")
-            )
-            for row in oldest_first
-            if row.get("checkpoint")
-        }
-        parents = {
-            str(row["release_id"]): row.get("parent_release_id") for row in oldest_first if row.get("checkpoint")
-        }
-        carried_by: dict[str, str] = {}  # each release, to the nearest kept release whose pulled tree it carries
+        single = scenario.surface.single
+        harness = [row for row in scenario.artifacts() if single or row["component"] == files_component]
+        by_release = {row["release_id"]: row for row in harness}
+        by_content = {row["content_id"]: row for row in harness if row["content_id"] is not None}
+        manifests = scenario.release_queries.manifests(scenario.scenario_step)
+
+        def artifact_of(release_id: str | None) -> dict[str, Any] | None:
+            """The harness artifact that the release ``release_id`` binds, or ``None`` when it is not known."""
+            if release_id is None or release_id in by_release:
+                return None if release_id is None else by_release[release_id]
+            return by_content.get((manifests.get(release_id) or {}).get(str(files_component)))
+
         kept: list[dict[str, Any]] = []
-        head: str | None = None
-        for row in oldest_first:
-            release_id = str(row["release_id"])
-            if not row.get("checkpoint"):
-                # A step that made no artifact is the files trainer's when it names that component or none; it ran on
-                # the active artifact and reads as the kept release that artifact carried.
-                if row.get("component") not in (None, files_component):
-                    continue
-                listed = dict(row)
-                carried = carried_by.get(release_id)
-                if carried is not None and carried != release_id:
-                    listed["composed_release_id"] = release_id
-                    listed["release_id"] = carried
-                parent = parents.get(carried) if carried is not None else listed.get("parent_release_id")
-                if listed.get("parent_release_id") != parent:
-                    listed["composed_parent_release_id"] = listed.get("parent_release_id")
-                    listed["parent_release_id"] = parent
-                kept.append(listed)
+        for row in scenario.releases():
+            if row["checkpoint"] and row["release_id"] not in by_release:
                 continue
-            parent_id = row.get("parent_release_id")
-            ancestor = None if parent_id is None else carried_by.get(str(parent_id))
-            own = (manifests.get(release_id) or {}).get(files_component)
-            before = None if parent_id is None else (manifests.get(str(parent_id)) or {}).get(files_component)
-            if row.get("operation") == "creation" or ancestor is None:
-                changed = True
-            elif own is not None and before is not None:
-                changed = own != before
-            else:
-                changed = row.get("component") in (None, files_component)
-            if changed:
-                listed = dict(row)
-                if ancestor is not None and ancestor != parent_id:
-                    listed["composed_parent_release_id"] = parent_id
-                    listed["parent_release_id"] = ancestor
-                parents[release_id] = listed.get("parent_release_id")
-                carried_by[release_id] = release_id
-                kept.append(listed)
-                if own is not None and own == served_files:
-                    head = release_id
-            elif ancestor is not None:
-                carried_by[release_id] = ancestor
-        kept.reverse()
-        return kept, head
+            if not row["checkpoint"] and row.get("component") not in (None, files_component):
+                continue
+            artifact = artifact_of(row["release_id"])
+            if artifact is None:
+                continue
+            listed = {
+                **row,
+                "artifact_id": artifact["artifact_id"],
+                "component": artifact["component"],
+                "active": row["checkpoint"] and artifact["active"],
+                "activated": artifact["activated"],
+            }
+            if artifact["release_id"] != row["release_id"]:
+                listed["composed_release_id"] = row["release_id"]
+                listed["release_id"] = artifact["release_id"]
+            parent = artifact_of(artifact["parent_release_id"])
+            if parent is not None and parent["release_id"] != row["parent_release_id"]:
+                listed["composed_parent_release_id"] = row["parent_release_id"]
+                listed["parent_release_id"] = parent["release_id"]
+            kept.append(listed)
+        return kept, next((row["release_id"] for row in harness if row["active"]), None)
 
     @classmethod
     def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
@@ -774,7 +743,7 @@ class RequestService:
         return rows
 
     def harness_release_id(self, scenario: Scenario) -> str:
-        """The release that serves what a client pulls: the active artifact, or the kept release it carried."""
+        """The release that a client pulls: the release that minted the active harness artifact."""
         current = scenario.repository.require_current_artifact().release_id
         if scenario.surface.single or scenario.surface.files_component is None:
             return current
@@ -998,7 +967,7 @@ class RequestService:
                 "request_id": record_id,
                 "settled": True,
                 "step": step,
-                "state": result_of(rows[step], rows),
+                "state": result_of(rows[step]),
                 "meaning": None,
                 "started_at": None,
                 "rollouts_total": None,

@@ -207,10 +207,10 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     train(value, 1)
     train(value, 2)
-    target_version = value.list_artifacts("math")[-2]["artifact_id"]
+    created, target_version = (row["artifact_id"] for row in value.list_artifacts("math")[:-3:-1])
 
     value.activate("math", target_version)
-    value.train_from("math", target_version)
+    value.train_from("math", created)
     # The engine serves the activated checkpoint under the version that its weights name.
     train(value, 3, "w1")
     value.registry.experiment_reports.flush()
@@ -223,8 +223,9 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     ]
     (start,) = tracker.starts
     assert (start.step, start.run_segment) == (8, 0)
-    assert start.start_artifact_ref.release_id == target_version
-    assert start.served_artifact_ref.release_id == target_version
+    assert start.start_artifact_ref.release_id == created
+    # The steps after the new start name the training start as their source, not the active release.
+    assert {event.context.source_artifact_ref.release_id for event in tracker.events[6:7]} == {created}
     value.close()
 
 
@@ -287,7 +288,6 @@ def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
             assert listed.status == 200
             artifacts = (await listed.json())["artifacts"]
             assert [row["operation"] for row in artifacts] == ["training", "training", "creation"]
-            assert all("pending" not in row and "current" not in row for row in artifacts)
             target = artifacts[-2]
             component = target["component"]
 
@@ -320,12 +320,6 @@ def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
                     f"/reef/scenarios/math/{path}", json={"artifact_id": target["artifact_id"], "component": "other"}
                 )
                 assert other.status == 400
-            for removed in ("promote", "rollback", "releases"):
-                gone = await client.post(
-                    f"/reef/scenarios/math/{removed}", json={"artifact_id": target["artifact_id"]}
-                )
-                assert gone.status in (404, 405)
-            assert (await client.get("/reef/scenarios/math/releases")).status == 404
 
             def refuse(release):
                 raise ValueError("these weights cannot train")

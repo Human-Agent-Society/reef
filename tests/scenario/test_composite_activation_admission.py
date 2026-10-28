@@ -179,7 +179,8 @@ def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_compl
         assert scenario.current_artifact_ref().release_id == activated.release_id
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
         record = scenario.store.history()[-1]
-        assert (record.operation, record.component, record.checkpoint) == ("activate", WEIGHTS, True)
+        assert (record.operation, record.component, record.checkpoint) == ("activate", WEIGHTS, False)
+        assert record.components is not None and WEIGHTS in record.components
         assert runtime.inference_admission_status["open"]
     finally:
         dispatcher.close()

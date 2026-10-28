@@ -43,9 +43,8 @@ class TrainFromExperimentEvent:
 
     ``step`` is the step of the ``"train_from"`` commit, which numbers the
     next segment, and ``run_segment`` is the segment it ends.
-    ``served_artifact_ref`` is the active artifact when the start was set,
-    and ``start_artifact_ref`` is the artifact training starts from.
-    ``component`` names the trainer of a scenario with several trainers.
+    ``start_artifact_ref`` is the new training start. ``component`` names
+    the trainer in a scenario of several components.
     The commit observer makes the value and the tracker reads it in
     :meth:`ExperimentTracker.record_train_from`.
     """
@@ -54,7 +53,6 @@ class TrainFromExperimentEvent:
     recipe: str
     step: int
     run_segment: int
-    served_artifact_ref: ArtifactRef
     start_artifact_ref: ArtifactRef
     component: str | None = None
 

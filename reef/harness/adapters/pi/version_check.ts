@@ -1,17 +1,17 @@
-// Prompt when the pulled tree is behind the channel head. An update runs only
+// Prompt when the pulled tree is behind the newest release. An update runs only
 // after the user explicitly selects it:
 // Kept annotation-free on purpose: plain JavaScript in a .ts file, so plain
 // node can parse-check it in CI and pi's TS loader accepts it unchanged.
 // Interactive sessions offer to run the update or skip before accepting input.
 // Headless sessions print the instructions instead. Hermetic rollouts
 // set PI_OFFLINE and this extension then makes no network calls at all.
-// While the head requires setup not checked off, an interactive session offers to set it up here through the
+// While that release requires setup not checked off, an interactive session offers to set it up here through the
 // reef-pi wrapper (each item asked once, the answer stored by the wrapper), then offers the update; without a
 // wrapper on disk, or headless, the setup list replaces the update: the install would refuse. The update itself
 // runs through the wrapper when one is on disk and through the install pipeline otherwise.
 // Before that, an env variable the installed release requires and this shell lacks gets one warning line.
-// An inactive release (one that does not serve yet) is offered like any other: selecting the update activates it
-// first, so installing is the one decision a person makes about it.
+// An inactive release (one that is not the active release) is offered like any other: selecting the update
+// activates it first, so installing is the one decision a person makes about it.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -112,16 +112,20 @@ function requiredBy(releases, releaseId) {
 }
 
 // Whether a row published a tree of its own. A rejected or skipped step commits no tree and its row carries the
-// head's release id, so offering it would offer the version already installed.
+// id of the release it ran on, so offering it would offer the version already installed.
 function publishedTree(row) {
   const metrics = row.metrics || {};
   return metrics.selected !== false && !metrics.skipped;
 }
 
-// Make an inactive release serve, so the update installs that tree and later sessions are offered the same version.
-// An activation mints no release. Answers whether the release serves now: false when reef refused or could not be
-// reached.
-async function activateRelease(serviceUrl, scenario, token, releaseId) {
+// Activate the artifact of a catalog row, so the update installs that tree and later sessions are offered the
+// same version. The body names the row's artifact_id, and its component when the row has one. The activation
+// succeeds when the answer names the same artifact_id. Answers the release_id of the answer, the active release
+// (a composite activation publishes a new release), or null when reef refused or could not be reached.
+// requests.ts has the same function: each extension ships as one file, so the two cannot share a module.
+async function activateRelease(serviceUrl, scenario, token, row) {
+  const body = { artifact_id: row.artifact_id };
+  if (row.component) body.component = row.component;
   let response;
   try {
     response = await fetch(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/activate`, {
@@ -131,14 +135,14 @@ async function activateRelease(serviceUrl, scenario, token, releaseId) {
         "content-type": "application/json",
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ artifact_id: releaseId }),
+      body: JSON.stringify(body),
     });
   } catch {
-    return false;
+    return null;
   }
-  if (!response.ok) return false;
+  if (!response.ok) return null;
   const answer = await response.json();
-  return answer.release_id === releaseId;
+  return answer.artifact_id === row.artifact_id ? String(answer.release_id) : null;
 }
 
 export default function versionCheck(pi) {
@@ -234,8 +238,8 @@ export default function versionCheck(pi) {
     const updateOption = `Update with ${wrapper ? "reef-pi update" : instruction}`;
     const title =
       "Reef harness update available\n\n" +
-      `Current: ${pinned}\n` +
-      `Latest:  ${head.release_id}`;
+      `Installed: ${pinned}\n` +
+      `Latest:    ${head.release_id}`;
 
     if (!ctx.hasUI) {
       console.error(`${title}\n\nUpdate with:\n  ${instruction}`);
@@ -247,9 +251,11 @@ export default function versionCheck(pi) {
 
     // The install routes serve the active release, so an inactive one is activated first; installing it is the
     // person saying it may run, which the selection above just recorded.
+    let installed = head.release_id;
     if (!head.active) {
       ctx.ui.notify(`Activating release ${id8}...`, "info");
-      if (!(await activateRelease(serviceUrl, scenario, token, head.release_id))) {
+      installed = await activateRelease(serviceUrl, scenario, token, head);
+      if (!installed) {
         ctx.ui.notify(`Reef harness update failed: reef refused to activate release ${id8}.`, "error");
         return;
       }
@@ -283,6 +289,6 @@ export default function versionCheck(pi) {
       return;
     }
     // pi's /reload re-runs session_start on the installed tree; only the person can type it.
-    ctx.ui.notify(`Installed release ${id8}. Type /reload to load it now.`, "info");
+    ctx.ui.notify(`Installed release ${String(installed).slice(0, 8)}. Type /reload to load it now.`, "info");
   });
 }

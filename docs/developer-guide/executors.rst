@@ -152,7 +152,7 @@ The serving runtime checks the component's health every 30 seconds. The
 component names its process in each health report, so the control plane sees
 a component that restarted and runs no engines. After a failed check, the
 runtime pauses generation, starts the lost engines again (or replaces the
-dead ones), loads each scenario's served release into them, and resumes.
+dead ones), loads each scenario's active release into them, and resumes.
 
 Engine supervision
 ------------------

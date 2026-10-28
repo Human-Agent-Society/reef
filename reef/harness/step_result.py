@@ -18,6 +18,33 @@ from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.version_check import ships_version_check
 
 
+def result_of(row: Mapping[str, Any]) -> str:
+    """The result of one ``GET /reef/harness/releases`` row, one of:
+
+    - ``rejected``: ``metrics.selected`` is false.
+    - ``inactive``: ``metrics.selected`` is true, the row made an artifact
+      (``checkpoint``) and that artifact was never active (``activated`` is
+      false). A person must activate it.
+    - ``selected``: ``metrics.selected`` is true otherwise.
+    - ``skipped``: ``metrics.selected`` is absent and ``metrics.skipped`` is set.
+    - the row's ``operation`` (``creation``, ``training`` or ``recovery``) for
+      any other row, ``unknown`` when the row names none.
+
+    The wrapper, the harness pages and the tutorial driver read this function;
+    the pi extension's ``resultOf`` in ``requests.ts`` is its one copy in
+    TypeScript."""
+    metrics = row.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    selected = metrics.get("selected")
+    if selected is False:
+        return "rejected"
+    if selected is True:
+        return "inactive" if row.get("checkpoint") and not row.get("activated") else "selected"
+    if metrics.get("skipped"):
+        return "skipped"
+    return str(row.get("operation") or "unknown")
+
+
 def missed_rollouts(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """The candidate rollouts a step's evaluation names that failed or scored below its floor, from the row's
     ``candidate_rollouts`` summary (``task``, ``score``, ``failure``, ``reply``); none when the step recorded none."""
@@ -228,5 +255,6 @@ __all__ = [
     "next_action",
     "reef_installs",
     "rejection_text",
+    "result_of",
     "unscored_failures",
 ]

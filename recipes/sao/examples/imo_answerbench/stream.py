@@ -121,23 +121,19 @@ def artifacts() -> list[dict] | None:
         return None
 
 
-def training_commit_count() -> int | None:
-    """The scenario's training commits so far, page by page, or None while the service cannot answer."""
-    count = 0
-    after_step: int | None = 0
-    while after_step is not None:
-        request = urllib.request.Request(
-            f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/commits?after_step={after_step}&limit=100",
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = json.loads(response.read())
-        except (urllib.error.URLError, TimeoutError):
-            return None
-        count += sum(1 for row in payload["commits"] if row.get("operation") == "training")
-        after_step = payload["next_after_step"]
-    return count
+def training_step_count() -> int | None:
+    """The scenario's training steps so far, or None while the service cannot answer.
+
+    The stream activates nothing and sets no training start, so each commit of the scenario is a training step.
+    """
+    request = urllib.request.Request(f"{SERVICE_URL}/reef/status", headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError):
+        return None
+    scenario = payload["scenarios"].get(SCENARIO)
+    return 0 if scenario is None else int(scenario["scenario_step"])
 
 
 def serving_release() -> str | None:
@@ -191,7 +187,7 @@ def wait_for_training(expected: int) -> None:
     deadline = time.time() + TRAIN_DRAIN_TIMEOUT_S
     trained = None
     while time.time() < deadline:
-        trained = training_commit_count()
+        trained = training_step_count()
         if trained is not None and trained >= expected:
             print(f"trained: {trained}/{expected} steps committed", flush=True)
             return

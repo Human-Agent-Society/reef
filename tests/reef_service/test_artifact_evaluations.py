@@ -364,7 +364,7 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
         activation = CommitRecord(
             step=3,
             artifact_ref=ArtifactRef("c2", "a2", "a1"),
-            checkpoint=True,
+            checkpoint=False,
             operation="activate",
             component="harness",
             components={"harness": "c1", "weights": "c0"},

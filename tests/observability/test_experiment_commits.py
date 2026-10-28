@@ -145,11 +145,11 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
     assert correlation == ({} if failing else {"experiment/run_id": "run-0"})
     first = training_record()
 
-    def operation_record(step: int, operation: str) -> CommitRecord:
+    def operation_record(step: int, operation: str, artifact_ref: ArtifactRef) -> CommitRecord:
         return CommitRecord(
             scenario="math",
             step=step,
-            artifact_ref=seed,
+            artifact_ref=artifact_ref,
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=0,
@@ -157,13 +157,13 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
             operation=operation,
         )
 
-    start = operation_record(2, "train_from")
+    start = operation_record(2, "train_from", seed)
     try:
         store.commit_step(expected_step=0, commit=first)
         store.commit_step(expected_step=1, commit=start)
         store.commit_step(expected_step=1, commit=start)
-        # An activation moves what serves and leaves the training run alone.
-        store.commit_step(expected_step=2, commit=operation_record(3, "activate"))
+        # An activation of another artifact moves what serves and leaves the training run and its start alone.
+        store.commit_step(expected_step=2, commit=operation_record(3, "activate", first.artifact_ref))
         store.commit_step(expected_step=3, commit=training_record(4))
         # Retrying an earlier step after a later one must not move tracking backwards.
         store.commit_step(expected_step=0, commit=first)
@@ -172,8 +172,8 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [(0, 0), (2, 0)]
         (event,) = tracker.starts
         assert event.run_segment == 0 and event.step == 2
-        assert event.served_artifact_ref == first.artifact_ref
         assert event.start_artifact_ref == seed
+        # The step after the new start names the training start as its source, not the active release.
         assert tracker.events[-1].context.source_artifact_ref == seed
     finally:
         store.close()
@@ -181,7 +181,8 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
 
 
 @pytest.mark.unit
-def test_pending_and_rejected_commits_keep_the_served_source_and_resume_without_replay(tmp_path: Path) -> None:
+def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps_it(tmp_path: Path) -> None:
+    """Training goes on from its own output, active or not; a step that made nothing leaves the start alone."""
     storage = SQLiteScenarioStorage(tmp_path)
     tracker = RecordingTracker()
     seed = ArtifactRef("seed-content", "seed", None)
@@ -195,14 +196,14 @@ def test_pending_and_rejected_commits_keep_the_served_source_and_resume_without_
     )
     store = observer.store
     pending = replace(training_record(), pending=True)
-    rejected = replace(training_record(2), artifact_ref=seed, metrics={"selected": False})
+    rejected = replace(training_record(2), artifact_ref=seed, checkpoint=False, metrics={"selected": False})
     try:
         store.commit_step(expected_step=0, commit=pending)
         store.commit_step(expected_step=1, commit=rejected)
         observer.reports.flush()
-        assert [event.produced_artifact_ref for event in tracker.events] == [seed, seed]
+        assert [event.produced_artifact_ref for event in tracker.events] == [pending.artifact_ref] * 2
         assert tracker.events[-1].outcome == "rejected"
-        assert tracker.events[-1].context.source_artifact_ref == seed
+        assert tracker.events[-1].context.source_artifact_ref == pending.artifact_ref
     finally:
         store.close()
     inner = storage.open("math")

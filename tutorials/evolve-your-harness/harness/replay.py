@@ -63,6 +63,8 @@ def collect(work: Path) -> dict:
     commits.sort(key=lambda row: row.get("recorded_at") or 0)
     previous = None
     first_entries = None
+    # The tree of each release by id, so an activation or a new training start shows the tree it names.
+    entries_by_release: dict[str, list] = {}
     for row in commits:
         metrics = row.get("metrics") or {}
         state = row.get("algorithm_state") or {}
@@ -71,6 +73,7 @@ def collect(work: Path) -> dict:
         if operation in ("activate", "train_from"):
             # Not a step: a person activated a release or set the training start. The row carries no state.
             ref = row.get("artifact_ref") or {}
+            named = entries_by_release.get(ref.get("release_id"), previous or [])
             releases.append(
                 {
                     "release_id": ref.get("release_id"),
@@ -80,15 +83,19 @@ def collect(work: Path) -> dict:
                     "recorded_at": row.get("recorded_at"),
                     "mutations": [],
                     "result": None,
-                    "entries": previous or [],
+                    "entries": named,
                     "diff": None,
                 }
             )
+            if operation == "train_from":
+                # The next step evolves the tree the new training start names.
+                previous = named
             continue
         if first_entries is None:
             # The seed the first step started from: the served tree before any commit.
             first_entries = _seed_before(entries, metrics)
             previous = first_entries
+            entries_by_release[row.get("artifact_ref", {}).get("parent_release_id") or "seed"] = first_entries
             releases.append(
                 {
                     "release_id": row.get("artifact_ref", {}).get("parent_release_id") or "seed",
@@ -130,6 +137,7 @@ def collect(work: Path) -> dict:
         )
         if published:
             previous = entries
+            entries_by_release[ref.get("release_id")] = entries
     if not releases and seed_entries:
         releases.append(
             {"release_id": "seed", "step": 0, "kind": "seed", "entries": seed_entries, "diff": None, "result": None}

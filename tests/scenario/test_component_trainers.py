@@ -1068,7 +1068,9 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     assert manifest["release_id"] == harness_release
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_releases(headers)["releases"]
-    assert [row.get("component") for row in catalog] == [None, HARNESS]
+    assert [row["operation"] for row in catalog] == ["creation", "training"]
+    assert [row["artifact_id"] for row in catalog] == [f"{row['release_id']}:{HARNESS}" for row in catalog]
+    assert [row["active"] for row in catalog] == [False, True]
 
 
 @pytest.mark.unit
@@ -1171,6 +1173,62 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert required_by(catalog, h3) == [{"name": "TOKEN", "kind": "env"}]
     script = service.harness_install_script(headers, adapter="pi")
     assert all(release not in script for release in (w1, w2, held, combined, activated.release_id))
+
+
+@pytest.mark.unit
+def test_a_training_step_carries_the_active_release_and_keeps_an_activated_component(
+    dispatchers: _Dispatchers,
+) -> None:
+    """After an older weights artifact is activated, a harness step carries the active weights, not the chain tip's."""
+    dispatcher, _ = dispatchers.open()
+    scenario = _scenario(dispatcher, 1)
+    base = scenario.current_artifact_ref().release_id
+    assert _commit_step(scenario, WEIGHTS) is not None
+    assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
+    scenario.activate(f"{base}:{WEIGHTS}", WEIGHTS)
+    assert _commit_step(scenario, HARNESS) is not None
+    assert component_files(scenario, scenario.current_artifact_ref()) == {
+        WEIGHTS: "weights seed",
+        HARNESS: "harness step 1",
+    }
+    active = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
+    assert active == {WEIGHTS: f"{base}:{WEIGHTS}", HARNESS: f"{scenario.current_artifact_ref().release_id}:{HARNESS}"}
+
+
+@pytest.mark.unit
+def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activates_a_row(
+    dispatchers: _Dispatchers,
+) -> None:
+    """Each catalog row names its harness artifact; exactly one row is active, and posting a row's artifact_id and
+    component to the activate route makes that row the active one."""
+    from aiohttp.test_utils import TestClient
+
+    dispatcher, _ = dispatchers.open()
+    scenario = _scenario(dispatcher, 1)
+    assert _commit_step(scenario, HARNESS) is not None
+    assert _commit_step(scenario, WEIGHTS) is not None
+    _append_records(scenario, 2)
+    assert _commit_step(scenario, HARNESS) is not None
+    headers = {"x-reef-scenario": "agent"}
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            assert [row["active"] for row in rows] == [False, False, True]
+            assert all(row["component"] == HARNESS and row["activated"] for row in rows)
+            first = rows[1]
+            body = {"artifact_id": first["artifact_id"], "component": first["component"]}
+            answer = await client.post("/reef/scenarios/agent/activate", json=body)
+            assert answer.status == 200, await answer.text()
+            assert (await answer.json())["artifact_id"] == first["artifact_id"]
+            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            assert [row["artifact_id"] for row in rows if row["active"]] == [first["artifact_id"]]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit

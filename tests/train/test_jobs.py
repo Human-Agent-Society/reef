@@ -288,16 +288,6 @@ def test_a_failed_or_unknown_job_ends_and_keeps_the_start(component):
 
 
 @pytest.mark.unit
-def test_a_new_start_cancels_the_running_job_and_restarts_from_the_imported_start(component):
-    loop = loop_with(component)
-    state = JobLoopState("/start", RunningJob("job-1"), 1, FINISHED)
-    started = loop.started_from(state, "fake:old")
-    assert component.cancelled == ["job-1"]
-    assert started == JobLoopState("fake:old", None, 1, FINISHED)
-    assert loop.started_from(JobLoopState(), None) == JobLoopState()
-
-
-@pytest.mark.unit
 def test_the_committed_state_round_trips_and_checks_its_values():
     state = JobLoopState("/s", RunningJob("j", 2), 3, FINISHED)
     assert state.to_dict()["job"] == {"job_id": "j", "checkpoints_handled": 2}
@@ -384,11 +374,12 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
 
 @pytest.mark.unit
 def test_start_from_imports_the_release_cancels_the_running_job_and_restarts_from_it(component):
-    trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
-    trainer.start_from(Artifact.local(Path("/releases/old")))
+    trainer = job_trainer(JobLoopState("/start", RunningJob("job-1"), 1, FINISHED), component)
+    trainer.start_from(Artifact.local(Path("/releases/old")), None)
     assert component.imported == [Path("/releases/old")]
     assert component.cancelled == ["job-1"]
-    assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old")
+    # The jobs that ended stay counted.
+    assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old", None, 1, FINISHED)
 
 
 @pytest.mark.unit
@@ -400,13 +391,13 @@ def test_start_from_is_refused_without_a_change_when_the_trainer_cannot_start(co
 
     monkeypatch.setattr(component, "import_start", refuse)
     with pytest.raises(TrainingStartRefused, match="these weights cannot train"):
-        trainer.start_from(Artifact.local(Path("/releases/old")))
+        trainer.start_from(Artifact.local(Path("/releases/old")), None)
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("/start", RunningJob("job-1"))
     # A trainer that trains nothing has no start to set.
     observer = Trainer.build("math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline)
     with pytest.raises(TrainingStartRefused, match="trains nothing"):
-        observer.start_from(Artifact.local(Path("/releases/old")))
+        observer.start_from(Artifact.local(Path("/releases/old")), None)
 
 
 @pytest.mark.unit
@@ -417,7 +408,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
     assert pending.run_once() is not None
     assert pending.has_pending_commit
     with pytest.raises(CommitPending, match="waits for its commit"):
-        pending.start_from(Artifact.local(Path("/releases/old")))
+        pending.start_from(Artifact.local(Path("/releases/old")), None)
     assert component.imported == []
 
 
@@ -430,7 +421,7 @@ def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tm
 
         def status(self, job_id: str) -> JobStatus:
             # A new training start lands while the trainer waits on the component.
-            self.trainer.start_from(Artifact.local(Path("/releases/old")))
+            self.trainer.start_from(Artifact.local(Path("/releases/old")), None)
             return JobStatus(job_id, "running", (saved,))
 
     component = StartDuringStatus()

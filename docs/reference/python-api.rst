@@ -1523,7 +1523,8 @@ its ``evaluation`` section (`Configuration
 Without an ``evaluation`` section, a weight recipe uses
 ``AlwaysSelectCheckpointPlugin`` (``reef.evaluation.evaluators``): it selects
 every saved checkpoint and adds no metrics. ``ManualPromotionPlugin`` selects
-none, so a person activates each artifact. The commit already records the
+none, so a person activates each artifact. It keeps this name until the
+activation rule moves out of training (RFC #965, step 3). The commit already records the
 checkpoint's ``training_metrics``, and it refuses an evaluation or decision
 metric whose key is a training metric or ``selected``, ``selection`` or
 ``training_job``. A training component only trains: it runs no evaluation of

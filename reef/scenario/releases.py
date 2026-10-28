@@ -12,6 +12,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef, is_local_release
 from reef.artifact.release_chain import ArtifactReleaseChain
+from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
 
 
@@ -62,26 +63,37 @@ class ScenarioReleases:
                 self.recorded_creation_components = manifest.content_ids
         return self.recorded_creation_components
 
+    def records(self) -> tuple[CommitRecord, ...]:
+        """The durable commit history; empty for a store that keeps none."""
+        return self._store.history() if self._store.durable else ()
+
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List the creation and every training step, newest first; activations and new training starts are not listed.
 
-        ``active`` is true on exactly one row when the active artifact is
-        listed: the row that made it. A step that made no artifact records
-        the active artifact's id but is never ``active``; nor is a pending
-        artifact until a person activates it. Without a durable log a
-        recovered scenario lists its creation and a ``recovery`` row for the
-        artifact it serves.
+        ``active`` is true on the row that made the active release (see
+        :func:`active_record`), and ``activated`` on each row whose release
+        has been active at some point; the creation always has been. A step
+        that made no artifact names the release it ran on. Without a durable
+        log a scenario past step zero lists its creation and a ``recovery``
+        row for the active release.
         """
         with self.publication_lock:
-            records = () if not self._store.durable else self._store.history()
-            active = self._artifacts.current
+            records = self.records()
+            # Without a durable log nothing names the active release but the chain: a recovery row stands for it.
+            recovered = not records and scenario_step > 0
+            activating = [record for record in records if record.activates]
+            active_id = activating[-1].artifact_ref.release_id if activating else self._creation_artifact.release_id
+            activated = {self._creation_artifact.release_id} | {
+                record.artifact_ref.release_id for record in activating
+            }
             rows = [
                 self._release_row(
                     artifact_ref=self._creation_artifact,
                     checkpoint=True,
                     recorded_at=None,
                     operation="creation",
-                    active=self._creation_artifact.release_id == active.release_id,
+                    active=not recovered and active_id == self._creation_artifact.release_id,
+                    activated=True,
                 )
             ]
             rows.extend(
@@ -90,7 +102,8 @@ class ScenarioReleases:
                     checkpoint=record.checkpoint,
                     recorded_at=record.recorded_at,
                     operation=record.operation,
-                    active=record.made_artifact and record.artifact_ref.release_id == active.release_id,
+                    active=record.checkpoint and record.artifact_ref.release_id == active_id,
+                    activated=record.artifact_ref.release_id in activated,
                     high_water_sequence=record.high_water_sequence,
                     high_water_offset=record.high_water_offset,
                     metrics=record.metrics,
@@ -100,85 +113,106 @@ class ScenarioReleases:
                 for record in records
                 if record.operation == "training"
             )
-            if not records and scenario_step > 0:
+            if recovered:
                 rows.append(
                     self._release_row(
-                        artifact_ref=active,
+                        artifact_ref=self._artifacts.current,
                         checkpoint=True,
                         recorded_at=None,
                         operation="recovery",
                         active=True,
+                        activated=True,
                     )
                 )
             return tuple(reversed(rows))
 
-    def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
-        """The content id of each component the active release binds; ``None`` for a flat release or when unknown.
+    def manifests(self, scenario_step: int) -> dict[str, Mapping[str, str]]:
+        """The content id of each component, by release, for every release whose manifest is known.
 
-        The newest record that activated a release names its manifest: an
-        ``"activate"`` record that published a release, or a training record
-        that made a release and is not pending. With none, the active
-        release is the creation, whose manifest is read from the release.
+        A training record that made a release and an activation that
+        published one carry their manifest; the creation's is read from the
+        release. A flat scenario's releases carry none.
         """
-        records = () if not self._store.durable else self._store.history()
-        for record in reversed(records):
-            if record.operation == "activate" or (record.made_artifact and not record.pending):
-                return record.components
-        return self.creation_components(scenario_step)
+        known: dict[str, Mapping[str, str]] = {}
+        creation = self.creation_components(scenario_step)
+        if creation is not None:
+            known[self._creation_artifact.release_id] = creation
+        for record in self.records():
+            if record.components is not None:
+                known[record.artifact_ref.release_id] = record.components
+        return known
+
+    def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
+        """The content id of each component the active release binds; ``None`` for a flat release or when unknown."""
+        record = active_record(self.records())
+        if record is None:
+            return self.creation_components(scenario_step)
+        return record.components
 
     def artifacts(self, scenario_step: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
-        """List the artifacts of each component in ``components``, newest first; ``active`` marks each component's.
+        """List the artifacts of each component in ``components``, newest first, with each component's active one.
 
         An artifact is one component's content. In a scenario of one
         component each release a training step made, and the creation, is
         one artifact whose ``artifact_id`` is its ``release_id``. In a
-        scenario of several components a release holds a new artifact of a
-        component when that component's content id differs from the one its
-        parent release binds (the creation holds one of each), and its
-        ``artifact_id`` is ``<release_id>:<component>``. A component whose
-        content ids the records do not name is listed for the component of
-        the trainer that made the release.
+        scenario of several components a release mints an artifact of a
+        component when no earlier release binds that component's content id
+        (the creation mints one of each), and the ``artifact_id`` is
+        ``<release_id>:<component>``. When the release's manifest is unknown,
+        it mints an artifact of the component its trainer named, with
+        ``content_id`` ``None``.
+        ``activated`` marks an artifact that has been active at some point.
         """
         with self.publication_lock:
-            rows = list(reversed(self.releases(scenario_step)))
-            made = [row for row in rows if row["checkpoint"]]
+            made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
             if len(components) == 1:
                 return tuple(
-                    self.artifact_row(row, components[0], row["release_id"], row["content_id"], row["active"])
-                    for row in reversed(made)
+                    self.artifact_row(
+                        row, components[0], row["release_id"], row["content_id"], row["active"], row["activated"]
+                    )
+                    for row in made
                 )
-            creation = self.creation_components(scenario_step)
-            active = self.active_components(scenario_step)
-            manifests = {
-                row["release_id"]: (creation if row["operation"] == "creation" else row.get("components"))
-                for row in made
-            }
+            manifests = self.manifests(scenario_step)
+            active = self.active_components(scenario_step) or {}
+            activated = {name: self.activated_contents(name, scenario_step) for name in components}
+            seen: dict[str, set[str]] = {name: set() for name in components}
             listed: list[dict[str, Any]] = []
-            for row in made:
-                manifest = manifests[row["release_id"]]
-                parent = manifests.get(row["parent_release_id"]) if row["operation"] != "creation" else None
+            for row in reversed(made):
+                manifest = manifests.get(row["release_id"])
                 for component in components:
                     content_id = None if manifest is None else manifest.get(component)
-                    if row["operation"] == "creation" or content_id is None or parent is None:
-                        new = row["operation"] == "creation" or row.get("component") in (None, component)
+                    if content_id is None:
+                        minted = row["operation"] == "creation" or row.get("component") in (None, component)
                     else:
-                        new = parent.get(component) != content_id
-                    if not new:
-                        continue
-                    listed.append(
-                        self.artifact_row(
-                            row,
-                            component,
-                            f"{row['release_id']}:{component}",
-                            content_id or row["content_id"],
-                            active is not None and content_id is not None and active.get(component) == content_id,
+                        minted = content_id not in seen[component]
+                        seen[component].add(content_id)
+                    if minted:
+                        listed.append(
+                            self.artifact_row(
+                                row,
+                                component,
+                                f"{row['release_id']}:{component}",
+                                content_id,
+                                content_id is not None and active.get(component) == content_id,
+                                content_id in activated[component],
+                            )
                         )
-                    )
             return tuple(reversed(listed))
+
+    def activated_contents(self, component: str, scenario_step: int) -> set[str]:
+        """The content ids that ``component`` has served: the creation's, and each activating record's."""
+        creation = self.creation_components(scenario_step) or {}
+        served = {record.components[component] for record in self.records() if record.activates and record.components}
+        return served | ({creation[component]} if component in creation else set())
 
     @staticmethod
     def artifact_row(
-        row: Mapping[str, Any], component: str, artifact_id: str, content_id: str, active: bool
+        row: Mapping[str, Any],
+        component: str,
+        artifact_id: str,
+        content_id: str | None,
+        active: bool,
+        activated: bool,
     ) -> dict[str, Any]:
         """One artifact row: the release row's fields that describe the step that made it, under its own identity."""
         listed: dict[str, Any] = {
@@ -190,6 +224,7 @@ class ScenarioReleases:
             "operation": row["operation"],
             "recorded_at": row["recorded_at"],
             "active": active,
+            "activated": activated,
         }
         if row["operation"] == "training":
             listed["record_progress"] = dict(row["record_progress"])
@@ -211,7 +246,7 @@ class ScenarioReleases:
         activation, a new training start) only name an artifact, so the
         newest of them answers without bytes when nothing made it.
         """
-        records = () if not self._store.durable else self._store.history()
+        records = self.records()
         found: tuple[ArtifactRef, bool] | None = None
         for record in reversed(records):
             if record.artifact_ref.release_id == release_id:
@@ -226,7 +261,7 @@ class ScenarioReleases:
             return found
         current = self._artifacts.current
         if current.release_id == release_id:
-            # Without a durable log the served release is known by the chain alone.
+            # Without a durable log the active release is known by the chain alone.
             return current, False
         return None
 
@@ -244,7 +279,7 @@ class ScenarioReleases:
         """
         if scenario_step == 0:
             return self._artifacts.current
-        records = () if not self._store.durable else self._store.history()
+        records = self.records()
         if records and records[0].step == 1:
             first = records[0]
             ref = first.artifact_ref
@@ -259,23 +294,15 @@ class ScenarioReleases:
 
     def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
         """Metrics of the training step that published ``release_id``, if logged."""
-        if not self._store.durable:
-            return None
-        for record in self._store.history():
+        for record in self.records():
             if record.artifact_ref.release_id == release_id and record.operation == "training":
                 return record.metrics
         return None
 
     def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
         """The composition entries of the training step that made ``release_id``, if logged; ``None`` for the creation."""
-        if not self._store.durable:
-            return None
         record = next(
-            (
-                item
-                for item in self._store.history()
-                if item.made_artifact and item.artifact_ref.release_id == release_id
-            ),
+            (item for item in self.records() if item.made_artifact and item.artifact_ref.release_id == release_id),
             None,
         )
         if record is None:
@@ -330,6 +357,7 @@ class ScenarioReleases:
         recorded_at: float | None,
         operation: str,
         active: bool,
+        activated: bool,
         high_water_sequence: int = 0,
         high_water_offset: int = 0,
         metrics: Mapping[str, Any] | None = None,
@@ -345,6 +373,7 @@ class ScenarioReleases:
             "recorded_at": recorded_at,
             "operation": operation,
             "active": active,
+            "activated": activated,
             "record_progress": {
                 "high_water_sequence": high_water_sequence,
                 "high_water_offset": high_water_offset,

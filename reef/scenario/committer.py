@@ -26,6 +26,7 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
+    CommitOperation,
     CommitRecord,
     RecordProgress,
     active_artifact_ref,
@@ -47,8 +48,8 @@ class ComponentArtifact:
     ``artifact_id`` is the artifact's identity: ``release_id`` of the release that made it in a scenario of one
     component, ``<release_id>:<component>`` in a scenario of several. ``content_id`` is the artifact's content id:
     the release's own with one component, the component entry's with several. ``release_id`` names a release that
-    binds the artifact as ``component``: the release that serves after an activation, and the release a new
-    training start reads. Every field is a non-empty string.
+    binds the artifact as ``component``: the active release after an activation, and the release that minted the
+    artifact for a new training start. Every field is a non-empty string.
 
     Purpose: ``ScenarioCommitter.activate`` and ``train_from`` make it, and the service routes answer with it.
     """
@@ -238,116 +239,105 @@ class ScenarioCommitter:
         """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
         return self._binding.surface.names or (self.trainers[0].component,)
 
-    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
-        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that holds it.
+    def require_no_pending_commit(self, action: str) -> None:
+        """Raise ``CommitPending`` while any trainer's result waits for its commit; ``action`` names what waits."""
+        if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
+            raise CommitPending(f"cannot {action} while a training result waits for its commit")
 
-        With one component, ``component`` may be ``None`` and ``artifact_id``
-        is the ``release_id`` of the release that made the artifact. With
-        several, ``component`` is required and ``artifact_id`` is
-        ``<release_id>:<component>``. Raise ``ValueError`` for a missing or
-        unknown component, ``ArtifactNotFound`` for an ``artifact_id`` the
-        scenario does not hold, and ``ReleaseNotRestorable`` for a release
-        without durable bytes or without every component the scenario serves.
+    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
+        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+
+        With one component, ``component`` may be ``None`` and
+        ``artifact_id`` is the ``release_id`` of the release that made the
+        artifact. With several, ``component`` is required and ``artifact_id``
+        is ``<release_id>:<component>`` for a release that minted that
+        component's content (``ScenarioReleases.artifacts``). Raise
+        ``ValueError`` for a missing or unknown component,
+        ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
+        list, and ``ReleaseNotRestorable`` for a release without durable
+        bytes or without every component the scenario serves.
         """
-        if not isinstance(artifact_id, str) or not artifact_id.strip():
-            raise ValueError("artifact_id must be a non-empty string")
-        artifact_id = artifact_id.strip()
         names = self.component_names()
         if component is None:
             if len(names) > 1:
                 raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
             component = names[0]
-        elif component not in names:
+        if component not in names:
             raise ValueError(f"scenario {self._name!r} has no component {component!r}")
-        suffix = "" if len(names) == 1 else f":{component}"
-        if not artifact_id.endswith(suffix) or len(artifact_id) == len(suffix):
+        listed = self.release_queries.artifacts(self._step, names)
+        row = next((row for row in listed if (row["artifact_id"], row["component"]) == (artifact_id, component)), None)
+        if row is None:
             raise ArtifactNotFound(
                 f"scenario {self._name!r} has no artifact {artifact_id!r} of component {component!r}"
             )
-        release_id = artifact_id[: len(artifact_id) - len(suffix)]
-        found = self.release_queries.find_release(release_id)
-        if found is None:
-            raise ArtifactNotFound(f"scenario {self._name!r} has no artifact {artifact_id!r}")
-        release_ref, durable = found
-        if not durable:
+        found = self.release_queries.find_release(row["release_id"])
+        if found is None or not found[1]:
             raise ReleaseNotRestorable(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
-        release = self._artifacts.resolve(release_ref)
+        release = self._artifacts.resolve(found[0])
         try:
             self.require_components(release)
         except ReefError as exc:
             raise ReleaseNotRestorable(str(exc)) from exc
         content_id = self._binding.surface.component_artifact(release, component).ref.content_id
-        return ComponentArtifact(component, artifact_id, content_id, release_ref.release_id), release
+        return ComponentArtifact(component, artifact_id, content_id, release.ref.release_id), release
 
     def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Make ``artifact_id`` the active artifact of ``component``; return it with the release that serves after.
+        """Make ``artifact_id`` the active artifact of ``component``; return it with the release that is active after.
 
-        In a scenario of one component the release that made the artifact
-        serves: no artifact or release is written. In a scenario of several
-        components the activation publishes a release: the active release
-        with ``component`` bound to the artifact, every other component
-        taken from the active release. It reuses the components' content and
-        leaves the chain tip, the parent of the next training publication,
-        where it is. No trainer's start changes. The runtime activates the
-        release first, then the ``"activate"`` record lands at the next
-        step, then the active release moves; a crash before the record
-        leaves the active release the log names. Activating the active
-        artifact changes nothing. Raise as :meth:`resolve_artifact` does,
-        and ``CommitPending`` while a training result waits for its commit.
+        With one component the release that made the artifact becomes the
+        active release: no artifact or release is written. With several, the
+        activation publishes a release: the active release with
+        ``component`` bound to the artifact. It reuses the components'
+        content, and the chain tip, the parent of the next training
+        publication, stays. No training start changes. The runtime activates
+        the release first, then the ``"activate"`` record lands at the next
+        step, then the active release moves; a crash before the record leaves
+        the active release that the log names. Activating the active artifact
+        changes nothing. Raise as :meth:`resolve_artifact` does, and
+        ``CommitPending`` while a training result waits for its commit.
         """
         with self._lock, self._publication_lock:
             selected, release = self.resolve_artifact(artifact_id, component)
             surface = self._binding.surface
             current_ref = self._artifacts.current
             served = Artifact(current_ref, self._artifacts.repository)
-            if surface.single:
-                unchanged = current_ref.release_id == release.ref.release_id
-            else:
-                unchanged = (
-                    surface.component_artifact(served, selected.component).ref.content_id == selected.content_id
-                )
-            if unchanged:
+            if surface.component_artifact(served, selected.component).ref.content_id == selected.content_id:
                 return replace(selected, release_id=current_ref.release_id)
-            if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
-                raise CommitPending("cannot activate an artifact while a training result waits for its commit")
+            self.require_no_pending_commit("activate an artifact")
             if surface.single:
                 # The release's own admission check, as at its publication.
                 surface.validate(release)
-                surface.activate(release, self._binding.runtime, previous=served)
-                record = self.append_operation_record("activate", release.ref, component=None)
-                self._artifacts.activate(release.ref, expected=current_ref)
-                self.advance_to(record.step)
-                return selected
-            next_step = self._step + 1
-            components = {name: served.component(name) for name in surface.names}
-            components[selected.component] = release.component(selected.component)
-            staged = self._artifacts.stage_composed(next_step, components, parent=self._artifacts.checkpoint)
-            try:
-                surface.validator.validate(staged)
+                target, recorded_component, components = release, None, None
+            else:
+                staged = self.stage_combination(
+                    self._step + 1, served, selected.component, release.component(selected.component)
+                )
                 manifest = self.release_manifest(staged)
-                # Published beside the chain, as a pending release is: the chain tip and the backend head stay.
+                # Published beside the chain, as an inactive release is: the chain tip and the backend head stay.
                 published_ref = self._artifacts.publish(
                     staged,
                     expected_parent=self._artifacts.checkpoint,
                     metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: manifest.to_dict()},
                     advance_heads=False,
                 )
-            except Exception:
-                self._artifacts.discard(staged)
-                raise
-            published = self._artifacts.resolve(published_ref)
-            surface.activate(published, self._binding.runtime, previous=served)
+                target, recorded_component, components = (
+                    self._artifacts.resolve(published_ref),
+                    selected.component,
+                    manifest.content_ids,
+                )
+            surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
-                "activate", published_ref, component=selected.component, components=manifest.content_ids
+                "activate", target.ref, component=recorded_component, components=components
             )
-            self._artifacts.activate(published_ref, expected=current_ref)
+            self._artifacts.activate(target.ref, expected=current_ref)
             self.advance_to(record.step)
-            return replace(selected, release_id=published_ref.release_id)
+            return replace(selected, release_id=target.ref.release_id)
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Set ``component``'s trainer to start its next job or step from ``artifact_id``; return the artifact.
+        """Set ``component``'s training start to ``artifact_id``; return the artifact.
 
-        The running job is cancelled. The active artifact does not change.
+        The trainer's running job is cancelled, and its next job or step
+        starts from the artifact. The active release does not change.
         ``component`` may be left out when the scenario has one component.
         The trainer takes the start first, then the ``"train_from"`` record
         lands at the next step; a restart before the trainer's next training
@@ -356,60 +346,56 @@ class ScenarioCommitter:
         trainer cannot start from the artifact, and ``CommitPending`` while
         a training result waits for its commit.
         """
-        with self._lock, self._publication_lock:
+        # The start can import weights for minutes: readers of the releases wait only for the record.
+        with self._lock:
             selected, release = self.resolve_artifact(artifact_id, component)
             component_trainer = self.component_trainer(selected.component)
-            if any(trainer.trainer.has_pending_commit for trainer in self.trainers):
-                raise CommitPending("cannot set the training start while a training result waits for its commit")
-            component_trainer.trainer.start_from(self.start_artifact(component_trainer, release))
-            record = self.append_operation_record(
-                "train_from", release.ref, component=self.component_on_record(component_trainer.component)
-            )
-            self.advance_to(record.step)
+            self.require_no_pending_commit("set the training start")
+            self.start_trainer(component_trainer, release)
+            with self._publication_lock:
+                record = self.append_operation_record(
+                    "train_from", release.ref, component=self.component_on_record(component_trainer.component)
+                )
+                self.advance_to(record.step)
             return selected
 
     def resume_training_starts(self) -> None:
-        """After a restart, give each trainer the start of its newest ``"train_from"`` record newer than its own last training record.
+        """After a restart, give each trainer its newest ``"train_from"`` start that its training records do not hold.
 
         The trainer's next training commit records the start in its state;
         a restart before that commit recovers the state of the earlier
         commit, so the start is taken again here.
         """
-        if not self._store.durable:
-            return
-        records = self._store.history()
+        records = self._store.history() if self._store.durable else ()
         for component_trainer in self.trainers:
             name = self.component_on_record(component_trainer.component)
-            last_training = next((record.step for record in reversed(records) if self.own_record(record, name)), 0)
+            last = self.last_record_for(component_trainer.component)
+            last_step = 0 if last is None else last.step
             start = next(
                 (
                     record
                     for record in reversed(records)
-                    if record.step > last_training and record.operation == "train_from" and record.component == name
+                    if record.step > last_step and record.operation == "train_from" and record.component == name
                 ),
                 None,
             )
             if start is not None:
-                component_trainer.trainer.start_from(
-                    self.start_artifact(component_trainer, self._artifacts.resolve(start.artifact_ref))
-                )
+                self.start_trainer(component_trainer, self._artifacts.resolve(start.artifact_ref))
 
-    def start_artifact(self, component_trainer: ComponentTrainer, release: Artifact) -> Artifact:
-        """``component_trainer``'s component of ``release``, materialized: the files it trains from."""
+    def start_trainer(self, component_trainer: ComponentTrainer, release: Artifact) -> None:
+        """Start ``component_trainer`` from its component of ``release``, with the entries its commit recorded."""
         artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
-        if artifact.local_path is None:
-            raise ReleaseNotRestorable(
-                f"scenario {self._name!r} release {release.ref.release_id!r} has no local files to train from"
-            )
-        return artifact
+        component_trainer.trainer.start_from(
+            artifact, self.release_queries.entries_for_version(release.ref.release_id)
+        )
 
     def publish_shipped_content(self) -> ArtifactRef | None:
-        """Commit the backend's update of the content this Reef ships, when the served release is stale.
+        """Commit the backend's update of the content this Reef ships, when the active release is stale.
 
         The update is a training commit with no job data behind it: it consumes no
         records and runs no evaluation, since its content is Reef's own. It is
-        served at once rather than held for review for the same reason. Returns the
-        new head, or ``None`` when the served release already carries the content.
+        activated at once for the same reason. Returns the new active release, or
+        ``None`` when the active release already carries the content.
         """
         with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
@@ -502,7 +488,7 @@ class ScenarioCommitter:
             scenario=self._name,
             recipe=observer.recipe,
             step=step,
-            source_artifact_ref=self._artifacts.current,
+            source_artifact_ref=observer.start_artifact_ref,
             run_segment=observer.run_segment,
             run_step=observer.run_step,
             backend=backend_name,
@@ -553,9 +539,9 @@ class ScenarioCommitter:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # A pending release is recorded but never activated and moves no head.
+            # A pending release is recorded as an inactive artifact and moves no head.
             # The engine must confirm the new revision before anything moves
-            # the served head: the staged bytes load first, and the version
+            # the active release: the staged bytes load first, and the version
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
@@ -651,12 +637,13 @@ class ScenarioCommitter:
     def stage_publication(
         self, next_step: int, publication: SavedArtifactPublication, checkpoint: ArtifactRef
     ) -> Artifact:
-        """Admit the published component and stage the release it belongs to.
+        """Admit the published component and stage the release it belongs to, with ``checkpoint`` as its parent.
 
         A flat scenario stages the artifact as published. A multi-component
-        scenario replaces the named component and carries every other
-        component forward from the checkpoint, so one step changes one
-        component and the release still binds the whole combination.
+        scenario binds the named component to the publication and carries
+        every other component from the active release
+        (:meth:`stage_combination`), so a step changes one component and
+        never brings back what an activation replaced.
         """
         surface = self._binding.surface
         component = publication.component
@@ -668,14 +655,22 @@ class ScenarioCommitter:
             surface.validate(publication.artifact)
             return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         surface.components[component].validator.validate(publication.artifact)
-        carried = self._artifacts.resolve(checkpoint)
-        self.require_components(carried)
+        active = self._artifacts.resolve(self._artifacts.current)
+        self.require_components(active)
+        return self.stage_combination(next_step, active, component, publication.artifact)
+
+    def stage_combination(self, next_step: int, carried: Artifact, component: str, content: Artifact) -> Artifact:
+        """Stage the release ``carried`` with ``component`` bound to ``content``, on the chain tip as its parent.
+
+        The release's own check runs on the staged release; the carried
+        components were admitted when they were published. A refused release
+        is discarded.
+        """
+        surface = self._binding.surface
         components = {name: carried.component(name) for name in surface.names}
-        components[component] = publication.artifact
-        staged = self._artifacts.stage_composed(next_step, components, parent=checkpoint)
+        components[component] = content
+        staged = self._artifacts.stage_composed(next_step, components, parent=self._artifacts.checkpoint)
         try:
-            # The release's own check, which an activation of this release runs too; the carried
-            # components were admitted when they were published.
             surface.validator.validate(staged)
         except BaseException:
             self._artifacts.discard(staged)
@@ -684,7 +679,7 @@ class ScenarioCommitter:
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         # A component the engine already serves is not activated again, so a
-        # harness step never reloads weights; the served head is compared by
+        # harness step never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
         self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
@@ -765,7 +760,7 @@ class ScenarioCommitter:
 
     def append_operation_record(
         self,
-        operation: str,
+        operation: CommitOperation,
         artifact_ref: ArtifactRef,
         *,
         component: str | None,
@@ -773,14 +768,14 @@ class ScenarioCommitter:
     ) -> CommitRecord:
         """Append an ``"activate"`` or ``"train_from"`` record at the next step; it carries no trainer state.
 
-        ``components`` is the manifest of a release an activation published; the record then names it as a
-        checkpoint, a release with durable bytes.
+        ``components`` is the manifest of a release that an activation published, and ``component`` then names
+        the activated component.
         """
         record = CommitRecord(
             scenario=self._name,
             step=self._step + 1,
             artifact_ref=artifact_ref,
-            checkpoint=components is not None,
+            checkpoint=False,
             algorithm_state=None,
             high_water_sequence=0,
             high_water_offset=0,

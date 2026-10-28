@@ -120,7 +120,8 @@ class Scenario:
     def repository(self) -> Repository:
         """The release chain's scenario-scoped artifact repository.
 
-        The public read path to artifact heads (base, current, checkpoint);
+        The public read path to the repository base, the active release (``current``) and the chain tip
+        (``checkpoint``);
         mutation goes through Scenario methods so it stays serialized with
         activation and commit.
         """
@@ -212,7 +213,7 @@ class Scenario:
             return trainer.run_once(self.scenario_step, serving_runtime_load_id=self.serving_runtime_load_id())
 
     def serving_runtime_load_id(self) -> str | None:
-        """Return the runtime load ID that serves the committed release, or None when it is unknown."""
+        """Return the runtime load ID that serves the active release, or None when it is unknown."""
         artifact = Artifact(self.current_artifact_ref(), self.repository)
         return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
 
@@ -248,10 +249,11 @@ class Scenario:
             return self.release_queries.artifacts(self._committer.step, self._committer.component_names())
 
     def current_artifact_ref(self) -> ArtifactRef:
+        """The active release."""
         return self._artifact_chain.current
 
     def resume_training_starts(self) -> None:
-        """Give each trainer the start of a ``train_from`` record that its own training commits do not record yet."""
+        """Give each trainer the training start of a ``train_from`` record that its own training commits do not hold yet."""
         with self._committer.lock:
             self._committer.resume_training_starts()
 
