@@ -243,6 +243,31 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
    reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2sample.config.rounds 4
    ```
 
+## Evaluate checkpoints on Terminal-Bench 2.1
+
+The recipe can score every checkpoint that it publishes on a held-out benchmark, such as Terminal-Bench 2.1. Start the example in the environment of [Run it](#run-it) with 5 rollouts of each eval task for each checkpoint, and create the scenario as there:
+
+```bash
+reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --recipe.config.checkpoint_eval_rollouts_per_task 5
+```
+
+Then download the benchmark's tasks and upload them to the eval split of the scenario's imported tasks. Each top-level entry of the archive is one task directory:
+
+```bash
+harbor download terminal-bench/terminal-bench-2-1 -o tb
+tar -czf tb.tar.gz -C tb/terminal-bench-2-1 $(ls tb/terminal-bench-2-1)
+curl -f "http://127.0.0.1:8900/reef/scenarios/autoenvscaling/tasks?split=eval" \
+  -H "Authorization: Bearer $REEF_TOKEN" -H 'Content-Type: application/gzip' --data-binary @tb.tar.gz
+```
+
+Upload before the first checkpoint: an artifact is evaluated on the eval tasks that the scenario holds when its checkpoint is decided. Reef refuses an upload to the train split, since the recipe trains only on generated tasks. One upload holds at most 1000 tasks and 256 MiB. For a larger benchmark, or to import the tasks at each start, use the `task-import` section ([Import Harbor tasks](../../../docs/user-guide/operate.rst#import-harbor-tasks)) with a manifest that lists only eval tasks:
+
+```json
+{"version": 1, "seed": 0, "eval_fraction": 1.0, "train": [], "eval": ["<task name>", "<task name>"]}
+```
+
+For each checkpoint, Tinker runs 5 rollouts of every benchmark task between training jobs. The commit of each evaluation holds the metric `artifact_evaluation` with the checkpoint's `candidate_id` ([generated tasks](../../../docs/reference/configuration.rst#generated-tasks)). With 5 rollouts of each task, `evaluation_reward_mean` is avg@5 when every rollout ran, and `rollout_rewards` gives each task's rewards, for pass@5. The scores compare across the checkpoints of one run, not with the paper's numbers, for two reasons: a verifier timeout scores `rollout.verifier_timeout_reward` (0.0 by default), where the upstream evaluation drops it as an infrastructure error; and the agent is the training rollout agent (`rollout.agent`), not pi.
+
 ## Requirements
 
 - For the agent, a cloud sandbox: an E2B API key in `E2B_API_KEY` and the `e2b` extra (`pip install 'reef-infra[e2b]'`), or with `agent_sandbox: modal`, Modal's credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or `~/.modal.toml`) and the `modal` extra. The sandbox runs pi from an image Reef builds on first use.

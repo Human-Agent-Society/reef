@@ -366,9 +366,12 @@ Use this route to give a scenario your own Harbor tasks, for training or as
 held-out tasks. It adds the tasks to the scenario's task store
 ``imported-tasks``, the same store that the `task-import section
 <../user-guide/operate.rst#import-harbor-tasks>`__ fills. The scenario's recipe
-must read imported tasks, such as the SFT-then-RL recipe (`SFT then RL
-<configuration.rst#sft-then-rl>`__). If it does not, Reef refuses the upload
-with 400.
+must read imported tasks of the split, such as the SFT-then-RL recipe (`SFT
+then RL <configuration.rst#sft-then-rl>`__), which reads both splits. The
+generated-task recipe reads the eval split only, with
+``recipe.config.checkpoint_eval_rollouts_per_task`` set (`Generated tasks
+<configuration.rst#generated-tasks>`__). If the recipe does not read the
+split, Reef refuses the upload with 400.
 
 The body is a gzip-compressed tar archive with ``Content-Type:
 application/gzip``. The archive and the files it unpacks to are each at most

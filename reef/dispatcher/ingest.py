@@ -19,6 +19,7 @@ from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
 from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
+from reef.train.trainer import Trainer
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -130,17 +131,28 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
 
 
+def reads_imported_tasks(trainer: Trainer, split: SplitName) -> bool:
+    """Whether ``trainer`` reads the tasks of ``split`` in the scenario's ``imported-tasks`` store."""
+    if trainer.pipeline.accepts_imported_tasks:
+        return True
+    job_loop = trainer.job_loop
+    evaluation = None if job_loop is None else job_loop.artifact_evaluation
+    return evaluation is not None and split in evaluation.imported_task_splits
+
+
 def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
     """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's ``imported-tasks`` store.
 
     Return the published tasks in the order of ``directories``. A task that the store holds with the same files
     and split is returned as it is. Admission refuses the upload when no trainer of the scenario reads imported
-    tasks (``TrainingPipeline.accepts_imported_tasks``), since nothing would use them. The caller checks that each
-    directory is a Harbor task. A ``TaskConflict`` (a name published with other files or in the other split)
-    stops the upload; the tasks before it stay published, and a corrected upload adds the rest.
+    tasks of ``split``, since nothing would use them. A trainer reads them when its pipeline reads imported tasks
+    (``TrainingPipeline.accepts_imported_tasks``), or when its artifact evaluation reads ``split``
+    (``ArtifactEvaluation.imported_task_splits``). The caller checks that each directory is a Harbor task. A
+    ``TaskConflict`` (a name published with other files or in the other split) stops the upload; the tasks before
+    it stay published, and a corrected upload adds the rest.
     """
-    if not any(component_trainer.trainer.pipeline.accepts_imported_tasks for component_trainer in current.trainers):
-        raise ValueError(f"the recipe of scenario {current.name!r} does not use imported tasks")
+    if not any(reads_imported_tasks(component_trainer.trainer, split) for component_trainer in current.trainers):
+        raise ValueError(f"the recipe of scenario {current.name!r} does not use imported tasks of split {split!r}")
     store = current.store.tasks.open(IMPORTED_TASK_STORE)
     return tuple(store.add_task(directory=directory, split=split) for directory in directories)
 

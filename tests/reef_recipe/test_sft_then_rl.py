@@ -16,14 +16,9 @@ from reef.core.reports import TeacherContextReport
 from reef.core.tasks import write_harbor_task
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.imported_tasks import ImportedTaskEvaluation
 from reef.recipe.sft import SFTRecord2Record
-from reef.recipe.sft_then_rl import (
-    ImportedTaskEvaluation,
-    SFTThenRLJobData,
-    SFTThenRLJobPlan,
-    SFTThenRLJobSettings,
-    SFTThenRLRecipe,
-)
+from reef.recipe.sft_then_rl import SFTThenRLJobData, SFTThenRLJobPlan, SFTThenRLJobSettings, SFTThenRLRecipe
 from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.sqlite import SQLiteScenarioStorage
