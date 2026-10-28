@@ -118,9 +118,7 @@ def make_recipe(platform, tmp_path):
     managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key="platform-key", model="platform-model")
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
-        evolution=EvolutionSettings(
-            binary=str(binary), state_dir=str(tmp_path / "harness")
-        ),
+        evolution=EvolutionSettings(binary=str(binary), state_dir=str(tmp_path / "harness")),
         evaluation=EvaluationSettings(tasks=("test task",)),
         scorer=resolve_episode_scorer(judge),
         runtime=InferenceProxyRuntime(base_url=managed.base_url, api_key=managed.api_key, model_path=managed.model),

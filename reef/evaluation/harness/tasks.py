@@ -164,4 +164,4 @@ class EvaluationTasks:
         return StepTasks(tasks, tuple(collected), counts, screened)
 
 
-__all__ = ["EvaluationTasks", "TaskCollector", "StepTasks", "client_of", "prompt_of"]
+__all__ = ["EvaluationTasks", "StepTasks", "TaskCollector", "client_of", "prompt_of"]

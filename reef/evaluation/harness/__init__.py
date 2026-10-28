@@ -37,7 +37,7 @@ from reef.evaluation.harness.scoring import (
     verifier_reward,
 )
 from reef.evaluation.harness.settings import EvaluationSettings
-from reef.evaluation.harness.tasks import EvaluationTasks, TaskCollector, StepTasks
+from reef.evaluation.harness.tasks import EvaluationTasks, StepTasks, TaskCollector
 
 __all__ = [
     "EVALUATION_SIDES",
@@ -59,9 +59,9 @@ __all__ = [
     "HarnessEpisodeEvaluator",
     "History",
     "NoEvaluationPolicy",
-    "TaskCollector",
     "ScoredEpisode",
     "StepTasks",
+    "TaskCollector",
     "VerifierRewardScorer",
     "evaluation_selection",
     "verifier_reward",
