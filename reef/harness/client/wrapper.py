@@ -64,16 +64,18 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
   ``--wait`` the wrapper polls the release catalog every 5 s for the step
   that consumed the request (``--timeout`` seconds, 1800 by default), says
   once when the request's progress shows a step took it, and prints the
-  result with the next action (a pending release says it is not installed
-  until promoted and names its page link; a skipped step's line quotes why
-  the proposer produced nothing): exit 0 for a selected or pending release,
+  result with the next action (an inactive release says it does not serve
+  until a person activates it and names its page link; a skipped step's line
+  quotes why the proposer produced nothing): exit 0 for a selected or
+  inactive release,
   1 for a rejected or skipped step, 2 when the timeout passes first. On a
   terminal the result hands over the next step: a selected release asks
   ``Install now? [Y/n]`` and, on yes, runs the setup prompts for it and
   then ``update``, closing with ``Installed release <id>. Restart reef-pi
-  to use it.``; a pending release names its page, asks ``Promote now?
-  [y/N]`` and, on yes, posts the promote and installs the new head the same
-  way. Declined, or without a terminal, the next commands are printed.
+  to use it.``; an inactive release names its page, asks ``Activate now?
+  [y/N]`` and, on yes, activates it and installs the active release that
+  the activation names the same way. Declined, or without a terminal, the
+  next commands are printed.
 
 When invoked with ``wait`` (e.g. ``reef-claude wait <request id> --timeout 500``):
 
@@ -100,7 +102,7 @@ When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
   the interpreter behind the wrapper and whether it imports reef and
   reef-client, the service address and whether the token is accepted, the
   agent binary and its version, the tools the adapter wants on PATH, the
-  installed release against the served head, every program a ``binary``
+  installed release against the active release, every program a ``binary``
   requires item of the installed release names (looked for on PATH, never
   run), and any release that waits for a person's review with its step page.
 
@@ -108,8 +110,8 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
 ``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``, ``reef-pi setup --json``,
 ``reef-pi setup --set NAME=VALUE``, ``reef-pi setup --run NAME``):
 
-  1. Reads what the newest release that is not pending (``--release <id>``
-     names any catalog release instead, a pending one included) requires of
+  1. Reads what the active release (``--release <id>`` names any catalog
+     release instead, an inactive one included) requires of
      you: every ``training_request.requires`` item over the release's chain
      in ``GET /reef/harness/releases``, merged by name as the manifest merges
      them (``permission``, ``env``, ``service`` or ``binary`` items, each with
@@ -235,7 +237,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
 from reef.harness.rollouts.vendor_install import version_probe_env
 from reef.harness.rollouts.version_check import ships_version_check
-from reef.harness.step_result import design_sections, next_action, rejection_text
+from reef.harness.step_result import design_sections, next_action, rejection_text, result_of
 
 
 #: The commands a client reports as on its PATH or not, so a proposer builds for the machine the change runs on,
@@ -764,7 +766,7 @@ def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
-#: The response header Reef sets on every inference answer of a file serving scenario: the head release id.
+#: The response header Reef sets on every inference answer of a file serving scenario: the active release id.
 RELEASE_HEADER = "x-reef-release-id"
 #: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
 #: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
@@ -840,7 +842,8 @@ class _TaggedStore(CaptureStore):
 def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObserver) -> type[BaseHTTPRequestHandler]:
     class Handler(base):  # type: ignore[valid-type,misc]
         def _relay(self, response: Any, *args: Any) -> None:
-            # Before the body reaches the agent: a head the answer names is queued by the time the agent reads it.
+            # Before the body reaches the agent: the active release the answer names is queued by the time the
+            # agent reads it.
             release = response.getheader(RELEASE_HEADER)
             if release:
                 observer.observe(str(release))
@@ -1633,28 +1636,6 @@ def _request_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
     return request if isinstance(request, Mapping) else {}
 
 
-def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
-    """A row's result as the extension reads it.
-
-    A pending row stays pending in the catalog; a later promote row naming
-    it makes it ``promoted at vN``. A settled step is ``selected``,
-    ``rejected`` or ``skipped``; any other row reads as its operation."""
-    if row.get("pending"):
-        for step, other in enumerate(rows):
-            if other.get("operation") == "promote" and other.get("rollback_target_release_id") == row.get(
-                "release_id"
-            ):
-                return f"promoted at v{step}"
-        return "pending"
-    metrics = _metrics_of(row)
-    selected = metrics.get("selected")
-    if isinstance(selected, bool):
-        return "selected" if selected else "rejected"
-    if metrics.get("skipped"):
-        return "skipped"
-    return str(row.get("operation") or "unknown")
-
-
 def review_points(row: Mapping[str, Any], key: str) -> list[str]:
     """One list the step's review recorded: ``uncovered`` for what the entries left uncovered, ``limits`` for what
     the harness's notes put out of reach; empty when the review recorded none."""
@@ -1697,12 +1678,12 @@ def result_line(
 
     The extension's watch says the same in the session; ``evolve --wait``
     and ``doctor`` say it here. ``page`` is the step's page link, which the
-    pending line names as the review; ``unmet`` names the items the release still needs set up."""
+    inactive line names as the review; ``unmet`` names the items the release still needs set up."""
     row = rows[step]
     metrics = _metrics_of(row)
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
     release = str(row.get("release_id") or "")[:8]
-    selection_result = result_of(row, rows)
+    selection_result = result_of(row)
     notice = ships_version_check(adapter)
     if selection_result == "selected":
         if notice:
@@ -1713,9 +1694,9 @@ def result_line(
         action = next_action(adapter, step, selection_result, str(_request_of(row).get("id") or ""), unmet)
         commands = ", then ".join(action.terminal) if action is not None else f"reef-{adapter} update"
         return f"'{ask}' is published as release {release}. Run {commands}, then restart reef-{adapter}."
-    if selection_result == "pending":
+    if selection_result == "inactive":
         where = (
-            f"/versions v{step} opens the page, /versions v{step} install serves it"
+            f"/versions v{step} opens the page, /versions v{step} install activates it"
             if notice
             else f"reef-{adapter} page {step} opens the page"
         )
@@ -1841,11 +1822,24 @@ def _confirm(adapter: str, question: str, *, default_yes: bool) -> bool:
     return answer in ("y", "yes")
 
 
-def _promote(upstream: str, scenario: str, adapter: str, token: str | None, release: str) -> str | None:
-    """Promote a pending release through ``POST /reef/scenarios/<scenario>/promote``; the new head's id, or None, said."""
+def activate_release(
+    upstream: str, scenario: str, adapter: str, token: str | None, row: Mapping[str, Any]
+) -> str | None:
+    """Activate the artifact of the catalog ``row`` through ``POST /reef/scenarios/<scenario>/activate``.
+
+    The body names the row's ``artifact_id`` and, when the row has one, its
+    ``component``. The activation succeeds when the answer names the same
+    ``artifact_id``. Returns the ``release_id`` of the answer, the active
+    release to install, or ``None`` when the activation failed. In a
+    composite scenario the activation publishes a new release, so that id
+    can differ from the row's ``release_id``."""
+    artifact_id = str(row["artifact_id"])
+    body = {"artifact_id": artifact_id}
+    if row.get("component"):
+        body["component"] = str(row["component"])
     req = urllib.request.Request(
-        f"{upstream}/reef/scenarios/{urllib.parse.quote(scenario, safe='')}/promote",
-        data=json.dumps({"release_id": release}).encode(),
+        f"{upstream}/reef/scenarios/{urllib.parse.quote(scenario, safe='')}/activate",
+        data=json.dumps(body).encode(),
         headers=_reef_headers(scenario, token),
         method="POST",
     )
@@ -1853,20 +1847,20 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
         with urllib.request.urlopen(req, timeout=60) as response:
             answer = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        print(f"reef-{adapter}: promote failed ({exc.code}): {exc.read().decode(errors='replace')}", file=sys.stderr)
+        print(f"reef-{adapter}: activate failed ({exc.code}): {exc.read().decode(errors='replace')}", file=sys.stderr)
         return None
     except (OSError, ValueError) as exc:
-        print(f"reef-{adapter}: promote failed: {exc}", file=sys.stderr)
+        print(f"reef-{adapter}: activate failed: {exc}", file=sys.stderr)
         return None
-    head = answer.get("release_id") if isinstance(answer, Mapping) else None
-    if not isinstance(head, str) or not head:
+    if not isinstance(answer, Mapping) or answer.get("artifact_id") != artifact_id or not answer.get("release_id"):
         print(
-            f"reef-{adapter}: reef answered the promote without a release_id: {json.dumps(answer)[:200]}",
+            f"reef-{adapter}: reef answered the activate without artifact {artifact_id}: {json.dumps(answer)[:200]}",
             file=sys.stderr,
         )
         return None
-    print(f"reef-{adapter}: promoted; the served head is release {head[:8]}")
-    return head
+    release = str(answer["release_id"])
+    print(f"reef-{adapter}: activated; release {release[:8]} is the active release")
+    return release
 
 
 def next_commands(adapter: str, step: int, selection_result: str, record_id: str, unmet: Sequence[str]) -> str:
@@ -1876,7 +1870,7 @@ def next_commands(adapter: str, step: int, selection_result: str, record_id: str
     if action is None:
         return ""
     terminal = ", then ".join(action.terminal)
-    if selection_result != "pending":
+    if selection_result != "inactive":
         return terminal
     if ships_version_check(adapter):
         return f"{action.commands[0]} in a reef-{adapter} session, or {' and '.join(action.terminal)}"
@@ -1918,27 +1912,27 @@ def _next_step(
     selection_result: str,
     unmet: Sequence[str],
 ) -> int:
-    """After a release, hand the person the next step: install a selected one, promote then install a pending one.
+    """After a release, hand the person the next step: install a selected one, activate then install an inactive one.
 
     On a terminal each step is a question; declined, or without a terminal,
     the commands are printed for later. 0 unless a step the person took
     failed, then its status."""
     release = str(row.get("release_id") or "")
-    if selection_result not in ("selected", "pending") or not release:
+    if selection_result not in ("selected", "inactive") or not release:
         return 0
     record_id = str(_request_of(row).get("id") or "")
     if not sys.stdin.isatty():
         print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
-    if selection_result == "pending":
+    if selection_result == "inactive":
         print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
-        if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
+        if not _confirm(adapter, "Activate now? [y/N]", default_yes=False):
             print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
             return 0
-        head = _promote(upstream, scenario, adapter, token, release)
-        if head is None:
+        activated = activate_release(upstream, scenario, adapter, token, row)
+        if activated is None:
             return 1
-        release = head
+        release = activated
     elif not _confirm(adapter, "Install now? [Y/n]", default_yes=True):
         print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
@@ -2069,9 +2063,9 @@ def report_request(
     page = _step_page_link(upstream, scenario, rows, step)
     print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
     uncovered = review_points(rows[step], "uncovered")
-    selection_result = result_of(rows[step], rows)
+    selection_result = result_of(rows[step])
     usage = release_usage(rows[step])
-    if usage and selection_result in ("selected", "pending"):
+    if usage and selection_result in ("selected", "inactive"):
         # The form the release is used by, so nobody guesses it from the request (codex takes $chat, not /chat).
         print(f"reef-{adapter}: how to use: {usage}")
     if uncovered:
@@ -2183,10 +2177,10 @@ def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> l
 
 
 def _release_to_set_up(rows: Sequence[Mapping[str, Any]], release: str | None) -> Mapping[str, Any] | None:
-    """The row ``setup`` reads: the one named, else the newest that is not pending; a pending release waits for a promote."""
+    """The row ``setup`` reads: the one named, else the active row; an inactive release waits for an activation."""
     if release is not None:
         return next((row for row in rows if row.get("release_id") == release), None)
-    return next((row for row in reversed(rows) if not row.get("pending")), None)
+    return next((row for row in rows if row.get("active")), None)
 
 
 @dataclass
@@ -2244,9 +2238,9 @@ def service_display_url(url: str) -> str:
 def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | None, prog: str) -> _Setup | None:
     """Load setup state from the active session, or from the installed configuration outside that session.
 
-    The release is ``release`` when named (a pending or trial release
+    The release is ``release`` when named (an inactive or trial release
     included, so its items are checked off before its install), else the
-    newest that is not pending; what it requires is its chain's union, as
+    active one; what it requires is its chain's union, as
     the manifest lists it. A tree without a release file exits: it did not
     come through the install channel, so there is nothing to set up or
     update."""
@@ -2710,20 +2704,20 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             )
         )
     elif catalog is not None:
-        head = next((row.get("release_id") for row in reversed(catalog) if not row.get("pending")), None)
-        if head == installed:
-            rows.append((True, "release", f"{installed[:8]} installed, the served head"))
+        active = next((row.get("release_id") for row in catalog if row.get("active")), None)
+        if active == installed:
+            rows.append((True, "release", f"{installed[:8]} installed, the active release"))
         else:
             rows.append(
                 (
                     True,
                     "release",
-                    f"{installed[:8]} installed; served head {str(head)[:8]}, the next session offers it",
+                    f"{installed[:8]} installed; active release {str(active)[:8]}, the next session offers it",
                 )
             )
     else:
         rows.append((True, "release", f"{installed[:8]} installed"))
-    # A release held for review is not something the install needs, but it is what the person is waiting on.
+    # An inactive release is not something the install needs, but it is what the person is waiting on.
     if catalog is not None and upstream is not None:
         for step, waiting in _waiting_for_review(catalog):
             page = _step_page_link(upstream, scenario, catalog, step)
@@ -2734,11 +2728,8 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
 
 
 def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Mapping[str, Any]]]:
-    """The pending rows no later promote row names, each with its step: held for a person, served to nobody."""
-    promoted = {row.get("rollback_target_release_id") for row in rows if row.get("operation") == "promote"}
-    return [
-        (step, row) for step, row in enumerate(rows) if row.get("pending") and row.get("release_id") not in promoted
-    ]
+    """The inactive rows, each with its step: releases that passed the checks and wait for a person to activate them."""
+    return [(step, row) for step, row in enumerate(rows) if result_of(row) == "inactive"]
 
 
 def _usage(adapter: str) -> str:
@@ -2834,7 +2825,7 @@ def main() -> None:
             "--mark", action="append", default=[], metavar="NAME", help="check an item off by hand, running nothing"
         )
         parser.add_argument(
-            "--release", default=None, metavar="ID", help="the release to set up (default: the newest not pending)"
+            "--release", default=None, metavar="ID", help="the release to set up (default: the active one)"
         )
         form = parser.add_mutually_exclusive_group()
         form.add_argument(
@@ -2858,7 +2849,7 @@ def main() -> None:
     elif args and args[0] == "update":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} update")
         parser.add_argument(
-            "--release", default=None, metavar="ID", help="the release to install (default: the served head)"
+            "--release", default=None, metavar="ID", help="the release to install (default: the active release)"
         )
         ns = parser.parse_args(args[1:])
         chosen = {"release": ns.release} if ns.release is not None else {}

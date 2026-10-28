@@ -1198,7 +1198,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
 def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolution, monkeypatch) -> None:
     """The deployment sets the harness requests defaults: the seed carries the ask
     command and the API skill, the notice offers the update, and a win that
-    touches a code_extension waits for a promote. The recipe folds the two
+    touches a code_extension waits for a person to activate it. The recipe folds the two
     booleans into its seed, so they are read back as the entries they append.
     The two demo files run in auto, where an ask is refused, so they set none
     of the three. The ``evolution`` fixture puts the tutorial's harness package
@@ -1462,24 +1462,26 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     }
     assert [e["id"] for e in first_update["releases"][0]["entries"]] == ["read_file", "main", "answer-format"]
 
-    # A rollback row is not a step: it is shown as its own kind, with no verdict.
-    rollback = {
+    # An activation row is not a step: it is shown as its own kind, with no verdict and the tree of the release it
+    # activated, here the seed.
+    activation = {
         "recorded_at": 1060.0,
-        "operation": "rollback",
+        "operation": "activate",
         "step": 2,
-        "artifact_ref": {"release_id": "r1", "parent_release_id": "r2"},
+        "artifact_ref": {"release_id": "r1", "parent_release_id": None},
         "metrics": None,
         "algorithm_state": None,
     }
-    write_commits(work / "agent-record", commit, rollback)
-    with_rollback = replay.collect(work)
-    assert [(r["kind"], r["step"], r["release_id"]) for r in with_rollback["releases"]] == [
+    write_commits(work / "agent-record", commit, activation)
+    with_activation = replay.collect(work)
+    assert [(r["kind"], r["step"], r["release_id"]) for r in with_activation["releases"]] == [
         ("seed", 0, "r1"),
         ("published", 1, "r2"),
-        ("rollback", 2, "r1"),
+        ("activate", 2, "r1"),
     ]
-    assert with_rollback["releases"][2]["result"] is None
-    assert with_rollback["releases"][2]["entries"] == with_rollback["releases"][1]["entries"]
+    assert with_activation["releases"][2]["result"] is None
+    assert with_activation["releases"][2]["entries"] == with_activation["releases"][0]["entries"]
+    assert with_activation["releases"][2]["entries"] != with_activation["releases"][1]["entries"]
 
     # An empty work directory still renders a page.
     empty = replay.collect(tmp_path / "nothing")

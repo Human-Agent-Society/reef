@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from reef.artifact.artifact import Artifact
+from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.core.job_data import JobOutcome, TrajectorySample
 from reef.core.plugins import PluginConfigError
@@ -560,7 +562,7 @@ class Trainer:
                 result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data).result
         with self._lock:
             if data is None:
-                # A rollback that ran meanwhile replaced the state this poll read: its result is stale.
+                # A new training start set meanwhile replaced the state this poll read: its result is stale.
                 if result is None or self._state is not observed_state:
                     return None
                 self._pending = _PendingStep(data=None, result=result, ended=ended)
@@ -753,27 +755,43 @@ class Trainer:
             state = JobLoopState.from_dict(self._state)
         self._job_loop.cancel(state)
 
-    def import_rollback_release(self, release: Path) -> str | None:
-        """Import a rolled-back release into the weight trainer's component and return it as a start.
+    def start_from(self, artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None) -> None:
+        """Set the training start to ``artifact``, and cancel the running job.
 
-        The component raises ``ValueError`` for weights it cannot start from.
+        ``artifact`` is the trainer's component of a release, materialized.
+        ``entries`` is the harness composition that the commit which made
+        the release recorded, or ``None`` when no commit recorded one. A
+        weight trainer's next job starts from what its training component
+        imports of ``artifact`` (``TrainingComponent.import_start``). A
+        harness trainer's next step starts from the state its backend gives
+        (``CandidateBackend.started_from``). Raise ``TrainingStartRefused``,
+        and change nothing, when this trainer cannot start from ``artifact``;
+        raise ``CommitPending`` while a commit is in preparation.
         """
-        if self._job_loop is None:
-            raise RuntimeError("only a weight trainer imports a rolled-back release")
-        return self._job_loop.import_start(release)
-
-    def apply_rollback_start(self, start: str | None) -> None:
-        """Start the next job from an imported rolled-back release, after the rollback committed.
-
-        The running job is cancelled. The trainer's next commit records the
-        new start; until then, recovery reads it back from the rollback.
-        """
-        if self._job_loop is None:
-            raise RuntimeError("only a weight trainer takes a rolled-back start")
+        tree = artifact.local_path
+        if tree is None:
+            raise TrainingStartRefused(f"artifact {artifact.ref.release_id!r} has no local files to train from")
         with self._lock:
             if self._pending is not None:
-                raise RuntimeError("cannot restore a start while a commit is pending")
-            self._state = self._job_loop.restored(JobLoopState.from_dict(self._state), start).to_dict()
+                raise CommitPending("cannot set the training start while a training result waits for its commit")
+            observed_state = self._state
+        job_loop, backend = self._job_loop, self._candidate_backend
+        if job_loop is None and backend is None:
+            raise TrainingStartRefused(f"the trainer of scenario {self.scenario!r} trains nothing to start")
+        # An import copies weights, which can take minutes: the trainer lock stays free meanwhile.
+        try:
+            imported = None if job_loop is None else job_loop.component.import_start(tree)
+            started = None if backend is None else backend.started_from(observed_state, artifact, entries)
+        except ValueError as exc:
+            raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
+        with self._lock:
+            if self._pending is not None or self._state is not observed_state:
+                raise CommitPending("a training result reached its commit while the training start was being set")
+            # The running job is cancelled only once the new start is sure to apply.
+            if job_loop is not None:
+                self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
+            elif started is not None:
+                self._state = dict(started)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit history."""

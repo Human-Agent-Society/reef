@@ -14,7 +14,6 @@ import pytest
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactPublicationError, InMemoryRepositoryBackend, Repository
 from reef.artifact.artifact import ArtifactRef, ArtifactValidator
 from reef.artifact.composite import compose_release
-from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core import RequestType
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, release_components
 from reef.core.errors import ReefError
@@ -55,11 +54,6 @@ class _RecordingActivator(ArtifactLoader):
 
     def __init__(self) -> None:
         self.activated: list[str] = []
-
-    def recover(
-        self, current: ArtifactRef | None, checkpoint: ArtifactRef, runtime: ServingRuntime | None
-    ) -> ArtifactRef:
-        return checkpoint
 
     def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         self.activated.append(artifact.ref.content_id)
@@ -398,68 +392,79 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         with pytest.raises(ReefError, match="serves no component"):
             scenario.commit(TrainStepResult(state={}, artifact=evolved, component="config"))
 
-        # Rolling back to the harness-only step restores the base weights and evolved harness together.
+        # Activating the harness-only step's harness binds it to the weights served now: no weights reload.
         served_before = len(activator.activated)
-        scenario.rollback(after_harness.ref.release_id)
-        restored = scenario.repository.materialize(scenario.current_artifact_ref())
-        assert restored.ref.content_id == after_harness.ref.content_id
-        assert restored.ref.release_id != after_harness.ref.release_id
-        assert activator.activated[served_before:] == [base_weights]
-        assert surface.files.read_files(restored) == {"AGENTS.md": "evolved"}
+        tip = scenario.repository.checkpoint_artifact
+        assert tip is not None
+        activated = scenario.activate(f"{after_harness.ref.release_id}:{HARNESS}", HARNESS)
+        assert (activated.artifact_id, activated.content_id) == (
+            f"{after_harness.ref.release_id}:{HARNESS}",
+            evolved.ref.content_id,
+        )
+        served = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert served.ref.release_id == activated.release_id
+        assert served.components is not None
+        assert served.components.entries[WEIGHTS].content_id == trained.ref.content_id
+        assert surface.files.read_files(served) == {"AGENTS.md": "evolved"}
+        assert activator.activated[served_before:] == []
+        assert service.harness_head(headers) == after_harness.ref.release_id
 
-        # Rolling back to the base keeps the served weights and only restores the seed harness.
-        scenario.rollback(base.ref.release_id)
-        seed = scenario.repository.materialize(scenario.current_artifact_ref())
+        # Activating the base's weights loads them and keeps the served harness; the chain tip stays.
+        scenario.activate(f"{base.ref.release_id}:{WEIGHTS}", WEIGHTS)
+        served = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert served.components is not None
+        assert served.components.entries[WEIGHTS].content_id == base_weights
+        assert surface.files.read_files(served) == {"AGENTS.md": "evolved"}
         assert activator.activated[served_before:] == [base_weights]
-        assert surface.files.read_files(seed) == {"AGENTS.md": "seed"}
+        assert scenario.repository.checkpoint_artifact == tip
 
-        # A harness step held for review is promoted onto the weights served by then, not the weights of its day.
+        # A harness step held for review is made on the chain tip; activating its harness binds it to the weights
+        # served now.
         held = Artifact.local(_tree(tmp_path / "h3", {"AGENTS.md": "held"}))
         scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
         assert surface.files.read_files(scenario.repository.materialize(scenario.current_artifact_ref())) == {
-            "AGENTS.md": "seed"
+            "AGENTS.md": "evolved"
         }
-        held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
-        later = Artifact.local(
-            _tree(tmp_path / "w2", {"adapter_config.json": '{"r": 16}'}), metadata={"runtime_load_id": "inc:2"}
-        )
-        scenario.commit(TrainStepResult(state={}, artifact=later, component=WEIGHTS))
-        scenario.rollback(held_release, operation="promote")
-        promoted = scenario.repository.materialize(scenario.current_artifact_ref())
-        assert promoted.components is not None
-        assert promoted.components.entries[WEIGHTS].content_id == later.ref.content_id
-        assert surface.files.read_files(promoted) == {"AGENTS.md": "held"}
-        promote_release = scenario.current_artifact_ref().release_id
-        assert service.harness_head(headers) == promote_release
+        held_ref = scenario.store.history()[-1].artifact_ref
+        assert held_ref.parent_release_id == tip.release_id
+        scenario.activate(f"{held_ref.release_id}:{HARNESS}", HARNESS)
+        served = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert served.components is not None
+        assert served.components.entries[WEIGHTS].content_id == base_weights
+        assert surface.files.read_files(served) == {"AGENTS.md": "held"}
+        assert service.harness_head(headers) == held_ref.release_id
 
-        # Weights held for review by the harness trainer are promoted as weights, onto the tree served by then.
+        # Weights held for review are activated as weights, under the tree served by then.
         held_weights = Artifact.local(
             _tree(tmp_path / "w3", {"adapter_config.json": '{"r": 32}'}), metadata={"runtime_load_id": "inc:3"}
         )
         scenario.commit(TrainStepResult(state={}, artifact=held_weights, component=WEIGHTS, pending=True))
-        held_weights_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        held_weights_release = scenario.store.history()[-1].artifact_ref.release_id
         newest = Artifact.local(_tree(tmp_path / "h4", {"AGENTS.md": "newest"}))
         scenario.commit(TrainStepResult(state={}, artifact=newest, component=HARNESS))
         newest_release = scenario.current_artifact_ref().release_id
-        scenario.rollback(held_weights_release, operation="promote")
-        promoted_weights = scenario.repository.materialize(scenario.current_artifact_ref())
-        assert promoted_weights.components is not None
-        assert promoted_weights.components.entries[WEIGHTS].content_id == held_weights.ref.content_id
-        assert surface.files.read_files(promoted_weights) == {"AGENTS.md": "newest"}
+        scenario.activate(f"{held_weights_release}:{WEIGHTS}", WEIGHTS)
+        served = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert served.components is not None
+        assert served.components.entries[WEIGHTS].content_id == held_weights.ref.content_id
+        assert surface.files.read_files(served) == {"AGENTS.md": "newest"}
         assert activator.activated[-1] == held_weights.ref.content_id
-        # That promote changed no tree: the harness head and catalog stay at the newest harness step.
+        # That activation changed no tree: the harness head and catalog stay at the newest harness step.
         assert service.harness_head(headers) == newest_release
         assert service.harness_manifest(headers)["release_id"] == newest_release
         catalog = service.harness_releases(headers)["releases"]
         assert catalog[-1]["release_id"] == newest_release
         assert held_weights_release not in {row["release_id"] for row in catalog}
+        # The artifact listing marks each component's active artifact.
+        active = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
+        assert active == {WEIGHTS: f"{held_weights_release}:{WEIGHTS}", HARNESS: f"{newest_release}:{HARNESS}"}
     finally:
         dispatcher.close()
 
 
 @pytest.mark.unit
-def test_a_held_release_whose_parent_manifest_is_unavailable_is_not_promoted(tmp_path: Path) -> None:
-    """The creation artifact has no record; when its bytes are gone too, the promote is refused, not guessed."""
+def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
+    """An activation reads the active release and the artifact's release only: the creation's bytes may be gone."""
     initial = tmp_path / "initial"
     _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
     _tree(initial / HARNESS, {"AGENTS.md": "seed"})
@@ -477,27 +482,26 @@ def test_a_held_release_whose_parent_manifest_is_unavailable_is_not_promoted(tmp
         creation = scenario.repository.materialize(scenario.current_artifact_ref())
         held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
         scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
-        held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        held_release = scenario.store.history()[-1].artifact_ref.release_id
         later = Artifact.local(
             _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
         scenario.commit(TrainStepResult(state={}, artifact=later, component=WEIGHTS))
         assert creation.local_path is not None
         shutil.rmtree(creation.local_path)
-        with pytest.raises(ReleaseNotRestorable, match="manifest of its parent"):
-            scenario.rollback(held_release, operation="promote")
+        scenario.activate(f"{held_release}:{HARNESS}", HARNESS)
         served = scenario.repository.materialize(scenario.current_artifact_ref())
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == later.ref.content_id
-        assert surface.files.read_files(served) == {"AGENTS.md": "seed"}
-        assert scenario.scenario_step == 2
+        assert surface.files.read_files(served) == {"AGENTS.md": "held"}
+        assert scenario.scenario_step == 3
     finally:
         dispatcher.close()
 
 
 @pytest.mark.unit
-def test_a_rollback_of_the_weights_after_a_rejected_harness_step_is_not_a_harness_release(tmp_path: Path) -> None:
-    """The tree a rejected step served is the last one named; a rollback that keeps it stays off the catalog."""
+def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp_path: Path) -> None:
+    """The tree a rejected step served is the last one named; activating the served artifact changes nothing."""
     initial = tmp_path / "initial"
     _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
     _tree(initial / HARNESS, {"AGENTS.md": "seed"})
@@ -521,18 +525,20 @@ def test_a_rollback_of_the_weights_after_a_rejected_harness_step_is_not_a_harnes
         )
         scenario.commit(TrainStepResult(state={}, artifact=weights, component=WEIGHTS))
         scenario.commit(TrainStepResult(state={}, metrics={"selected": False}), component=HARNESS)
-        scenario.rollback(first_harness)
+        steps = scenario.scenario_step
+        # The first harness artifact serves already: activating it changes nothing.
+        assert scenario.activate(f"{first_harness}:{HARNESS}", HARNESS).artifact_id == f"{first_harness}:{HARNESS}"
+        assert scenario.scenario_step == steps
         rows, head = RequestService.harness_lineage(scenario)
         assert head == first_harness
         # Newest first: the rejected step's row (named by the first harness release), that release, the creation.
         assert [row["operation"] for row in rows] == ["training", "training", "creation"]
-        assert all(row.get("rollback_target_release_id") is None for row in rows)
     finally:
         dispatcher.close()
 
 
 @pytest.mark.unit
-def test_a_promote_refused_by_validation_leaves_no_staged_release(tmp_path: Path, monkeypatch: Any) -> None:
+def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
     initial = tmp_path / "initial"
     _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
     _tree(initial / HARNESS, {"AGENTS.md": "seed"})
@@ -548,18 +554,20 @@ def test_a_promote_refused_by_validation_leaves_no_staged_release(tmp_path: Path
         assert scenario is not None
         held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
         scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
-        held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        held_release = scenario.store.history()[-1].artifact_ref.release_id
+        served = scenario.current_artifact_ref()
         before = {path for path in staged_root.rglob("*") if path.is_dir()}
 
         def refuse(self: ArtifactValidator, artifact: Artifact) -> None:
             raise ReefError("refused by the validator")
 
-        # The promote runs the checks its commit ran: the release's own and the held component's.
+        # An activation runs the release's own check, as its publication did.
         monkeypatch.setattr(AcceptAnyArtifact, "validate", refuse)
         with pytest.raises(ReefError, match="refused by the validator"):
-            scenario.rollback(held_release, operation="promote")
+            scenario.activate(f"{held_release}:{HARNESS}", HARNESS)
         assert {path for path in staged_root.rglob("*") if path.is_dir()} == before
         assert scenario.scenario_step == 1
+        assert scenario.current_artifact_ref() == served
     finally:
         dispatcher.close()
 

@@ -462,7 +462,7 @@ def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) ->
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
             assert head["release_id"] == manifest["release_id"]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["published"] is True
             assert head["metrics"]["wins"] == 1
@@ -524,7 +524,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             )
             assert current == pinned == first
             head = catalog["releases"][-1]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["release_id"] == first["release_id"]
             assert head["content_id"] == first["content_id"]
             assert head["metrics"] == first["evaluation"]
@@ -533,9 +533,9 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             second = await asyncio.wait_for(second_step, _ASYNC_UPDATE_TIMEOUT_S)
             updated = await read_release("/reef/harness/releases")
             assert len(updated["releases"]) == len(catalog["releases"]) + 1
-            assert updated["releases"][-2]["current"] is False
+            assert updated["releases"][-2]["active"] is False
             head = updated["releases"][-1]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["release_id"] == second["release_id"] != first["release_id"]
             assert head["content_id"] == second["content_id"]
             assert head["metrics"] == second["evaluation"]
@@ -2917,8 +2917,8 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
         )
         await client.start_server()
         try:
-            rows = (await (await client.get("/reef/scenarios/delivery/releases")).json())["releases"]
-            current = next(row["release_id"] for row in rows if row["current"])
+            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
+            current = next(row["release_id"] for row in rows if row["active"])
             body = {"messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "delivery"}, json=body)
             assert response.status == 200 and response.headers["x-reef-release-id"] == current

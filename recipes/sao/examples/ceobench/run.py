@@ -37,7 +37,7 @@ SCENARIO = os.environ.get("REEF_SCENARIO", "ceobench-sao")
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")
 SEED = int(os.environ.get("CEOBENCH_SEED", "42"))
 DAYS = int(os.environ.get("CEOBENCH_DAYS", "500"))
-#: Training is quiescent once the release count holds for this long: longer than one
+#: Training is quiescent once the step count holds for this long: longer than one
 #: step, or the drain would return while the rollout's last batch is still training.
 TRAIN_QUIET_S = 900.0
 #: Ceiling on waiting for one rollout's training steps before moving on with a warning.
@@ -48,17 +48,15 @@ TRAIN_DRAIN_TIMEOUT_S = 7200.0
 SERVICE_GONE = -1
 
 
-def training_release_count() -> int | None:
-    """Training releases committed so far; ``None`` while the service is busy.
+def training_step_count() -> int | None:
+    """Training steps committed so far; ``None`` while the service is busy.
 
-    The scenario's registry lock serializes release reads with training, so a
+    The scenario's registry lock serializes status reads with training, so a
     timeout is "try again". A refused connection or an HTTP rejection is
     terminal: the stack is gone, or this loop is talking to something that is
     not its deployment.
     """
-    request = urllib.request.Request(
-        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases", headers={"Authorization": f"Bearer {TOKEN}"}
-    )
+    request = urllib.request.Request(f"{SERVICE_URL}/reef/status", headers={"Authorization": f"Bearer {TOKEN}"})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read())
@@ -70,19 +68,21 @@ def training_release_count() -> int | None:
         return None
     except TimeoutError:
         return None
-    return sum(1 for row in payload["releases"] if row.get("operation") == "training")
+    # This run activates nothing and sets no training start, so each commit of the scenario is a training step.
+    scenario = payload["scenarios"].get(SCENARIO)
+    return 0 if scenario is None else int(scenario["scenario_step"])
 
 
 def wait_for_training() -> int:
-    """Block until the training release count stops moving; return that count."""
+    """Block until the training step count stops moving; return that count."""
     deadline = time.time() + TRAIN_DRAIN_TIMEOUT_S
-    last, last_change = training_release_count(), time.time()
+    last, last_change = training_step_count(), time.time()
     while time.time() < deadline:
         if last == SERVICE_GONE:
             print("    WARNING: the Reef service is not reachable; skipping the training drain")
             return 0
         time.sleep(10)
-        current = training_release_count()
+        current = training_step_count()
         if current is not None and current != last:
             last, last_change = current, time.time()
         elif time.time() - last_change >= TRAIN_QUIET_S:
@@ -103,7 +103,7 @@ async def main() -> None:
     if os.environ.get("CEOBENCH_REPORTS", "1") == "0":
         print("    untrained: no reports posted")
         return
-    print(f"    trained: {wait_for_training()} releases committed")
+    print(f"    trained: {wait_for_training()} steps committed")
 
 
 asyncio.run(main())

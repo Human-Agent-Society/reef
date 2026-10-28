@@ -450,7 +450,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     trainer = recipe.build("s", records)
     backend = trainer.candidate_backend
     state = dict(backend.initial_state())
-    state["rollback_entries"] = state["entries"]
+    state["recheck_entries"] = state["entries"]
     backend.proposals.submit(
         "pending-proposal",
         {

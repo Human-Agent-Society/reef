@@ -106,18 +106,19 @@ class CampaignService:
 
         from reef_client import ReefClientError
 
-        if path.endswith("/releases"):
+        if path.endswith("/artifacts"):
             if not self.initialized:
                 raise ReefClientError(404, "No scenario")
             rows = [
                 {
+                    "artifact_id": f"r{i}",
                     "release_id": f"r{i}",
                     "operation": "training" if i else "creation",
-                    "current": i == len(self.commits),
+                    "active": i == len(self.commits),
                 }
                 for i in range(len(self.commits) + 1)
             ]
-            return {"releases": list(reversed(rows))}
+            return {"artifacts": list(reversed(rows))}
         if "/records/" in path:
             return self.records[path.rsplit("/", 1)[-1]]
         if "/commits?" in path:

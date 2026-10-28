@@ -1,4 +1,4 @@
-"""Rollback and inference admission in a composite whose weights load into a runtime."""
+"""Activation, new training starts and inference admission in a composite whose weights load into a runtime."""
 
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ from tests.support.component_trainers import _TwoTrainerRecipe, component_files,
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import ReefError
+from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -78,20 +77,6 @@ def _step(scenario, component: str, step: int) -> str:
     return scenario.current_artifact_ref().release_id
 
 
-def _fail_next_install(scenario) -> None:
-    chain = scenario._committer._artifacts
-    install = chain.install_checkpoint
-    failed = {"done": False}
-
-    def fail_once(ref, *, expected, expected_checkpoint):
-        if not failed["done"]:
-            failed["done"] = True
-            raise RuntimeError("artifact backend away")
-        return install(ref, expected=expected, expected_checkpoint=expected_checkpoint)
-
-    chain.install_checkpoint = fail_once
-
-
 @pytest.mark.unit
 def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> None:
     """The weights worker's failure stays in the status while a harness cycle runs after the wake."""
@@ -121,21 +106,26 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_the_retry_of_a_promote_over_the_creation_leaves_held_admission_closed(tmp_path: Path) -> None:
-    """The release served before the promote is the creation: its manifest names the weights the promote kept."""
+def test_activating_a_held_harness_release_leaves_held_admission_closed(tmp_path: Path) -> None:
+    """The activation binds the held harness to the weights that serve now, so it loads nothing."""
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path)
     try:
         scenario = _scenario(dispatcher, runtime)
         dispatcher.recipe.backends[HARNESS].hold_next = True
         _step(scenario, HARNESS, 1)
-        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        held = next(row for row in scenario.artifacts() if row["operation"] == "training")
+        assert held["component"] == HARNESS and not held["active"]
         runtime.close_admission()
         runtime.served = "before"
-        _fail_next_install(scenario)
-        with pytest.raises(RuntimeError, match="artifact backend away"):
-            scenario.rollback(held, operation="promote")
-        scenario.rollback(held, operation="promote")
+        activated = scenario.activate(held["artifact_id"], HARNESS)
+        assert activated.artifact_id == f"{held['release_id']}:{HARNESS}"
+        # The activation publishes the combination: the held harness on the weights served now.
+        assert activated.release_id != held["release_id"]
+        assert component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights seed",
+            HARNESS: "harness step 1",
+        }
         assert not runtime.inference_admission_status["open"]
         assert runtime.current_runtime_load_id() == "before"
     finally:
@@ -143,8 +133,8 @@ def test_the_retry_of_a_promote_over_the_creation_leaves_held_admission_closed(t
 
 
 @pytest.mark.unit
-def test_a_harness_only_rollback_leaves_held_admission_closed(tmp_path: Path) -> None:
-    """A rollback that restores nothing neither resumes admission nor calls a version served."""
+def test_a_harness_only_activation_leaves_held_admission_closed(tmp_path: Path) -> None:
+    """An activation that changes no loaded weights neither resumes admission nor calls a version served."""
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path)
     try:
@@ -154,32 +144,7 @@ def test_a_harness_only_rollback_leaves_held_admission_closed(tmp_path: Path) ->
         # Another publication holds admission: published, not yet committed.
         runtime.close_admission()
         runtime.served = "before"
-        scenario.rollback(first)
-        assert not runtime.inference_admission_status["open"]
-        assert runtime.current_runtime_load_id() == "before"
-    finally:
-        dispatcher.close()
-
-
-@pytest.mark.unit
-def test_the_recorded_retry_of_a_harness_only_rollback_leaves_held_admission_closed(tmp_path: Path) -> None:
-    """The first attempt records the rollback and fails after; the retry has nothing to resume either."""
-    runtime = StubInferenceRuntime()
-    dispatcher = _dispatcher(tmp_path)
-    try:
-        scenario = _scenario(dispatcher, runtime)
-        first = _step(scenario, HARNESS, 1)
-        _step(scenario, HARNESS, 2)
-        runtime.close_admission()
-        runtime.served = "before"
-        _fail_next_install(scenario)
-        with pytest.raises(RuntimeError, match="artifact backend away"):
-            scenario.rollback(first)
-        records = scenario.store.history()
-        assert records[-1].operation == "rollback" and records[-1].rollback_target_release_id == first
-        assert not runtime.inference_admission_status["open"]
-
-        assert scenario.rollback(first) == records[-1].artifact_ref
+        scenario.activate(f"{first}:{HARNESS}", HARNESS)
         assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness step 1"
         assert not runtime.inference_admission_status["open"]
         assert runtime.current_runtime_load_id() == "before"
@@ -188,80 +153,43 @@ def test_the_recorded_retry_of_a_harness_only_rollback_leaves_held_admission_clo
 
 
 @pytest.mark.unit
-def test_a_rejected_step_before_the_rollback_does_not_make_its_retry_look_like_a_restore(tmp_path: Path) -> None:
-    """The release served before the rollback is the newest published one, not a rejected step's empty record."""
+def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The weights load first; an append that fails leaves the log, and so the active artifact, as they were."""
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path)
     try:
         scenario = _scenario(dispatcher, runtime)
-        first = _step(scenario, HARNESS, 1)
-        _step(scenario, HARNESS, 2)
-        dispatcher.recipe.backends[HARNESS].reject_next = True
-        _step(scenario, HARNESS, 3)
-        assert scenario.store.history()[-1].components is None
-        runtime.close_admission()
-        _fail_next_install(scenario)
-        with pytest.raises(RuntimeError, match="artifact backend away"):
-            scenario.rollback(first)
-        scenario.rollback(first)
-        assert not runtime.inference_admission_status["open"]
-    finally:
-        dispatcher.close()
+        base = scenario.current_artifact_ref()
+        trained = _step(scenario, WEIGHTS, 1)
+        commit_step = scenario.store.commit_step
 
+        def store_away(**keywords):
+            raise OSError("commit storage away")
 
-@pytest.mark.unit
-def test_a_composite_without_loaded_weights_never_resumes_admission_on_a_recorded_retry(tmp_path: Path) -> None:
-    runtime = StubInferenceRuntime()
-    initial = tmp_path / "initial"
-    for component in (WEIGHTS, HARNESS):
-        (initial / component).mkdir(parents=True)
-        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
-    dispatcher = Dispatcher(
-        _TwoTrainerRecipe(backends=backends),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-    )
-    try:
-        scenario = _scenario(dispatcher, runtime)
-        first = _step(scenario, WEIGHTS, 1)
-        _step(scenario, WEIGHTS, 2)
-        runtime.close_admission()
-        _fail_next_install(scenario)
-        with pytest.raises(RuntimeError, match="artifact backend away"):
-            scenario.rollback(first)
-        scenario.rollback(first)
-        assert not runtime.inference_admission_status["open"]
-    finally:
-        dispatcher.close()
+        monkeypatch.setattr(scenario.store, "commit_step", store_away)
+        with pytest.raises(OSError, match="commit storage away"):
+            scenario.activate(f"{base.release_id}:{WEIGHTS}", WEIGHTS)
+        assert scenario.current_artifact_ref().release_id == trained
+        assert scenario.store.history()[-1].operation == "training"
+        monkeypatch.setattr(scenario.store, "commit_step", commit_step)
 
-
-@pytest.mark.unit
-def test_the_recorded_retry_of_a_weights_rollback_installs_the_restored_head(tmp_path: Path) -> None:
-    """The attempt that restored the weights records the rollback and fails after; its retry installs the head."""
-    runtime = StubInferenceRuntime()
-    dispatcher = _dispatcher(tmp_path)
-    try:
-        scenario = _scenario(dispatcher, runtime)
-        base = scenario.current_artifact_ref().release_id
-        _step(scenario, WEIGHTS, 1)
-        _fail_next_install(scenario)
-        served_before = len(runtime.activated)
-        with pytest.raises(RuntimeError, match="artifact backend away"):
-            scenario.rollback(base)
-        assert len(runtime.activated) == served_before + 1
-        assert scenario.rollback(base) == scenario.store.history()[-1].artifact_ref
+        activated = scenario.activate(f"{base.release_id}:{WEIGHTS}", WEIGHTS)
+        assert scenario.current_artifact_ref().release_id == activated.release_id
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
+        record = scenario.store.history()[-1]
+        assert (record.operation, record.component, record.checkpoint) == ("activate", WEIGHTS, False)
+        assert record.components is not None and WEIGHTS in record.components
         assert runtime.inference_admission_status["open"]
     finally:
         dispatcher.close()
 
 
 @pytest.mark.unit
-def test_a_weights_rollback_the_training_component_refuses_is_refused_before_admission_closes(tmp_path: Path) -> None:
-    """The training component imports a rolled-back release as the next job's start; one it cannot train from
-    refuses the rollback before the weights load and admission closes."""
+def test_a_weights_start_the_training_component_refuses_is_refused_before_anything_changes(tmp_path: Path) -> None:
+    """The training component imports the release as the next job's start; one it cannot train from refuses the
+    new start before any record lands, and serving stays as it was."""
     dispatcher, _ = two_trainer_dispatcher(
         tmp_path, training=RefusingImports(tmp_path / "checkpoints"), hold_local_cycles=True
     )
@@ -273,10 +201,14 @@ def test_a_weights_rollback_the_training_component_refuses_is_refused_before_adm
             assert result is not None
             scenario.commit(result, component=WEIGHTS)
         served = scenario.current_artifact_ref().release_id
+        steps = scenario.scenario_step
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights job 1"
-        with pytest.raises(ReleaseNotRestorable, match="cannot train from these weights"):
-            scenario.rollback(base)
+        with pytest.raises(TrainingStartRefused, match="cannot train from these weights"):
+            scenario.train_from(f"{base}:{WEIGHTS}", WEIGHTS)
+        with pytest.raises(ValueError, match="name the component"):
+            scenario.train_from(base)
         assert scenario.current_artifact_ref().release_id == served
+        assert scenario.scenario_step == steps
         assert dispatcher.recipe.runtime is not None
         assert dispatcher.recipe.runtime.inference_admission_status["open"]
     finally:
@@ -284,8 +216,8 @@ def test_a_weights_rollback_the_training_component_refuses_is_refused_before_adm
 
 
 @pytest.mark.unit
-def test_a_rollback_is_refused_while_the_weight_trainer_has_a_prepared_job_commit(tmp_path: Path) -> None:
-    """A job's checkpoint decision is prepared without a reserved batch; the rollback still waits for its commit."""
+def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared_job_commit(tmp_path: Path) -> None:
+    """A job's checkpoint decision is prepared without a reserved batch; both operations still wait for its commit."""
     dispatcher, _ = two_trainer_dispatcher(
         tmp_path, training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True
     )
@@ -303,12 +235,14 @@ def test_a_rollback_is_refused_while_the_weight_trainer_has_a_prepared_job_commi
         assert decided is not None and decided.metrics["training_job"]["event"] == "checkpoint"
         trainer = scenario.trainer_for(WEIGHTS)
         assert trainer.pending_job_data is None and trainer.has_pending_commit
-        with pytest.raises(ReefError, match="pending commit"):
-            scenario.rollback(base)
+        with pytest.raises(CommitPending, match="waits for its commit"):
+            scenario.activate(f"{base}:{WEIGHTS}", WEIGHTS)
+        with pytest.raises(CommitPending, match="waits for its commit"):
+            scenario.train_from(f"{base}:{WEIGHTS}", WEIGHTS)
         assert scenario.current_artifact_ref().release_id == served
         scenario.commit(decided, component=WEIGHTS)
         assert not trainer.has_pending_commit
-        scenario.rollback(base)
+        scenario.activate(f"{base}:{WEIGHTS}", WEIGHTS)
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
     finally:
         dispatcher.close()

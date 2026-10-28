@@ -41,19 +41,19 @@ class TrainStepResult:
     for a commit outside a training step that keeps the current state; a
     training step's result needs a mapping (``Trainer.prepare_commit``
     refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
-    commit that publishes nothing, such as a job submission or a checkpoint
-    that evaluation did not select. ``training_job_id`` names the training job
-    the commit is about, if any.
+    commit that publishes nothing, such as a job submission or a job's end.
+    ``training_job_id`` names the training job the commit is about, if any.
 
-    ``pending`` asks for the publication to be minted into the catalog without
-    being served, for a person to promote later. It is a publication decision,
-    so it travels as a field rather than as a metrics key: only durable bytes
-    can be held back, and a step that publishes nothing is rejected here
+    ``pending`` publishes the artifact without activating it: it stays an
+    inactive artifact until a person activates it. The field keeps its name
+    until RFC #965 step 3 moves this decision into the activation rule. It
+    travels as a field rather than as a metrics key: only durable bytes can
+    stay inactive, and a step that publishes nothing is rejected here
     instead of having the request silently dropped.
 
     ``component`` names the release component ``artifact`` replaces. A scenario
     serving several components requires it; the committer carries the other
-    components forward from the previous checkpoint. A flat scenario may leave
+    components from the active release. A flat scenario may leave
     it unset.
     """
 

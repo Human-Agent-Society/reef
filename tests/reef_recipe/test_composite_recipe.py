@@ -1038,7 +1038,7 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
     tmp_path: Path,
 ) -> None:
     """Flat, such a recipe's release is the whole artifact; inside a composite its release is its component, so its
-    check admits that component's steps as it admitted its whole release flat, and a rollback runs it again."""
+    check admits that component's steps as it admitted its whole release flat."""
     composite = CompositeRecipe(
         components={
             "notes": _LegacyTreeRecipe(label="notes", artifact_dir=tmp_path / "steps"),
@@ -1070,9 +1070,9 @@ class _ReleaseCheckedComposite(CompositeRecipe):
 
 
 @pytest.mark.unit
-def test_a_commit_runs_the_release_check_a_rollback_to_that_release_runs(tmp_path: Path) -> None:
-    """The release's own check runs on the composed release a step publishes, as a rollback or promote to it runs
-    it: a release the commit admits can be rolled back to, and one the rollback would refuse is never published."""
+def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_path: Path) -> None:
+    """The release's own check runs on the composed release a step publishes, as an activation of it runs it: a
+    release the commit admits can be activated again, and one the activation would refuse is never published."""
     composite = _ReleaseCheckedComposite(
         components={
             "harness": _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
@@ -1090,9 +1090,12 @@ def test_a_commit_runs_the_release_check_a_rollback_to_that_release_runs(tmp_pat
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
         published = scenario.current_artifact_ref()
         assert published != seed
-        scenario.rollback(seed.release_id)
-        scenario.rollback(published.release_id)
-        assert scenario.current_artifact_ref().content_id == published.content_id
+        scenario.activate(f"{seed.release_id}:harness", "harness")
+        scenario.activate(f"{published.release_id}:harness", "harness")
+        served = scenario.repository.materialize(scenario.current_artifact_ref()).components
+        made = scenario.repository.materialize(published).components
+        assert served is not None and made is not None
+        assert served.content_ids == made.content_ids
     finally:
         dispatcher.close()
 
@@ -1128,13 +1131,10 @@ class _UnseededConfigRecipe(_ConfigRecipe):
 
 
 @pytest.mark.unit
-def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a_carried_component_again(
-    tmp_path: Path,
-) -> None:
-    """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. A
-    rollback to one of those steps and a promote of a held one run what that step's commit ran, the release check and
-    the check of the component it published, so both go through; judging the carried component would refuse releases
-    their commits admitted."""
+def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
+    """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. An
+    activation of one of those steps, or of a held one, runs only the release's own check: each component was
+    admitted when its step published it, and judging the carried one would refuse releases their commits admitted."""
     checks = _CountedChecks()
     composite = CompositeRecipe(
         components={
@@ -1152,18 +1152,19 @@ def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a
         first = scenario.current_artifact_ref()
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
         checks.count = 0
-        dispatcher.rollback("agent", first.release_id)
-        assert scenario.current_artifact_ref().content_id == first.content_id
-        assert checks.count == 1
+        dispatcher.activate("agent", f"{first.release_id}:harness", "harness")
+        served = scenario.repository.materialize(scenario.current_artifact_ref()).components
+        assert served is not None
+        assert served.content_ids == scenario.store.history()[0].components
+        assert checks.count == 0
         head = scenario.current_artifact_ref()
         scenario.commit(
             TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), pending=True), component="harness"
         )
         assert scenario.current_artifact_ref() == head
-        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
-        checks.count = 0
-        promoted = dispatcher.promote("agent", held)
-        assert promoted.release_id != head.release_id and checks.count == 1
+        held = scenario.store.history()[-1].artifact_ref.release_id
+        assert dispatcher.activate("agent", f"{held}:harness", "harness").artifact_id == f"{held}:harness"
+        assert checks.count == 1
     finally:
         dispatcher.close()
 

@@ -494,7 +494,7 @@ def test_a_group_wrapped_loop_is_refused_wherever_entries_are_admitted(tmp_path:
 
 def test_harness_try_refuses_an_update_that_renames_a_live_loops_kind(tmp_path: Path) -> None:
     trial = _Trial([*SEED_NODES, {"id": "main-loop", "name": "native_loop", "config": LOOP[1]}])
-    reason = "native_loop is reviewed code: propose it, a person promotes it"
+    reason = "native_loop is reviewed code: propose it, a person activates it"
     skill = {"name": "skill", "config": {"name": "s", "text": "# s"}}
     # The live entry's kind counts as the options' does: an update that renames the loop's kind is refused before
     # the admission that would refuse the rename, and a skill updated into a loop is refused by its new kind.
@@ -1065,7 +1065,7 @@ def test_harness_try_refuses_a_native_loop_mutation(tmp_path: Path, reef: _FakeR
         assert sorted(server.host.tools) == ["harness_inspect", "harness_propose", "harness_try", "shout"]
     assert _typed(streamed, "loop/enter") == [{"name": "main"}]
     results = _typed(streamed, "tool/result")
-    reason = "native_loop is reviewed code: propose it, a person promotes it"
+    reason = "native_loop is reviewed code: propose it, a person activates it"
     assert [r["error"]["code"] for r in results] == ["TOOL_FAILED"] * 3
     assert all(r["content"] == f"Error: {reason}" for r in results)
     # The refusal is whole: the tool beside the loop mutation did not mount either, and nothing was tried.

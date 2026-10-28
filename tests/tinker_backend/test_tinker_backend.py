@@ -17,6 +17,7 @@ import yaml
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
 from reef.cli import main
+from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
 from reef.recipe.sft import SftObjective
@@ -625,6 +626,9 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     # An in-flight request on the older release keeps its sampler and load.
     assert inference.snapshot(base) == (None, first)
     assert inference.snapshot(published) == ("tinker://update-1/sampler", selected)
+    # Each release's model is the base with that release's sampler, whichever release is served.
+    assert inference.artifact_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
+    assert inference.artifact_model(base) == PolicyModel(MODEL, None)
     rollback = Artifact.local(base.local_path)
     latest = inference.activate_checkpoint(rollback)
     assert int(first.split(":")[-1]) < int(selected.split(":")[-1]) < int(latest.split(":")[-1])
@@ -745,7 +749,7 @@ def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_
     }
 
 
-def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, objective):
+def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(tmp_path, objective):
     from dataclasses import dataclass
 
     from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
@@ -843,9 +847,11 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         assert loop_state(scenario) == state
         artifact = scenario.release_queries.artifact_for_version(published.release_id)
         assert inference.snapshot(artifact)[1] == inference.current_runtime_load_id()
-        scenario.rollback(base)
-        assert scenario.scenario_step == step + 1
+        scenario.activate(base)
+        scenario.train_from(base)
+        assert scenario.scenario_step == step + 2
         current = scenario.release_queries.artifact_for_version(scenario.current_artifact_ref().release_id)
+        assert current.ref.release_id == base
         assert inference.snapshot(current)[0] is None
         # The base tree imports as the base model: the next job starts from the base checkpoint.
         assert loop_state(scenario).start is None

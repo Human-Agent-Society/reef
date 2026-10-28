@@ -5,9 +5,9 @@ recipe's ``JobPlan`` gives the job's parameters, and the ``JobLoop`` submits
 the job to the trainer's ``TrainingComponent``. The trainer commits the
 submission, which consumes the records of the job's data. While the job runs, each
 checkpoint it saves becomes a ``CheckpointCandidate``: candidate evaluation
-decides whether Reef serves it, and the trainer commits the decision. Every
-checkpoint becomes a release (an artifact): a selected one serves, and any
-other is held for review, for a person to promote. The training component
+decides whether Reef activates it, and the trainer commits the decision. Every
+checkpoint becomes a release (an artifact): a selected one is activated, and
+any other stays an inactive artifact until a person activates it. The training component
 only trains; it evaluates no artifact. When the job ends, the trainer commits
 its outcome. Training is linear: the next job
 starts from the job's last saved checkpoint, whatever evaluation decided.
@@ -329,12 +329,12 @@ class JobLoop:
         return None
 
     def decide(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
-        """The commit that decides whether Reef serves ``checkpoint``, the running job's next undecided one.
+        """The commit that decides whether Reef activates ``checkpoint``, the running job's next undecided one.
 
         The next job starts from ``checkpoint.path`` whether or not the
         evaluation selects it. The commit publishes the checkpoint's
-        ``release_path``: a selected checkpoint serves, and any other is a
-        pending release, held for a person to promote. The commit's metrics are the checkpoint's training
+        ``release_path``: a selected checkpoint is activated, and any other is
+        an inactive artifact until a person activates it. The commit's metrics are the checkpoint's training
         metrics with the evaluation's and the decision's own metrics, and
         ``selected``, ``selection`` (the whole decision) and ``training_job``.
         Raise ``ValueError`` when ``state`` has no running job, or when two of
@@ -409,17 +409,13 @@ class JobLoop:
             ended=outcome,
         )
 
-    def import_start(self, release: Path) -> str | None:
-        """The start that the component makes of a rolled-back ``release`` (``TrainingComponent.import_start``)."""
-        return self.component.import_start(release)
-
     def cancel(self, state: JobLoopState) -> None:
         """Cancel the running job of ``state`` at the component; nothing when no job runs."""
         if state.job is not None:
             self.component.cancel(state.job.job_id)
 
-    def restored(self, state: JobLoopState, start: str | None) -> JobLoopState:
-        """The state after a rollback whose release the component imported as ``start``.
+    def started_from(self, state: JobLoopState, start: str | None) -> JobLoopState:
+        """The state after the training start is set to ``start``, which the component imported of a release.
 
         The running job is cancelled, and the next job starts from ``start``
         (``None``: the base model). The jobs that ended stay counted.

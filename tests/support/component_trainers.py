@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,13 @@ class _ComponentBackend(CandidateBackend):
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0}
+
+    def started_from(
+        self, state: Mapping[str, Any], artifact: Artifact, entries: Sequence[Mapping[str, Any]] | None
+    ) -> Mapping[str, Any]:
+        """The state whose next step starts from ``artifact``: it records the file the artifact holds."""
+        assert artifact.local_path is not None
+        return {**state, "start": (artifact.local_path / f"{self.component}.txt").read_text(encoding="utf-8")}
 
     def prepare_step(self, batch, state, scenario_step):
         step = int(state["steps"]) + 1
@@ -142,7 +149,7 @@ class _TwoTrainerRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return Surface(
             components={
-                # A training component's weights load through the runtime, so a rollback moves the next job's start.
+                # A training component's weights load through the runtime, so train-from imports them as a start.
                 WEIGHTS: (
                     ComponentSurface()
                     if self.training_component is None
@@ -214,7 +221,7 @@ class _RecordingTracker(ExperimentTracker):
     def record(self, event):
         self.events.append(event)
 
-    def record_rollback(self, event):
+    def record_train_from(self, event):
         pass
 
     def close(self):

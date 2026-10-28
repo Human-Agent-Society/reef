@@ -12,32 +12,33 @@ from reef.artifact import Artifact
 from reef.train import TrainStepResult
 
 
-def test_rollbacks_and_reads_finish_while_the_tracker_blocks(tmp_path, monkeypatch):
+def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, monkeypatch):
     tracker = RecordingExperimentTracker()
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
     initial = scenario.current_artifact_ref()
     entered, release = Event(), Event()
-    record_rollback = tracker.record_rollback
+    record_train_from = tracker.record_train_from
 
     def blocked(event):
         entered.set()
         release.wait(10)
-        record_rollback(event)
+        record_train_from(event)
 
     try:
         train(value, 1)
-        monkeypatch.setattr(tracker, "record_rollback", blocked)
-        promoted = scenario.current_artifact_ref()
-        value.rollback("math", initial.release_id)
+        monkeypatch.setattr(tracker, "record_train_from", blocked)
+        trained = scenario.current_artifact_ref()
+        value.train_from("math", initial.release_id)
         assert entered.wait(5)
-        value.rollback("math", promoted.release_id)
+        value.train_from("math", trained.release_id)
+        value.activate("math", initial.release_id)
         assert value.get_or_create_scenario("math") is scenario
-        assert tracker.rollbacks == []
+        assert tracker.starts == []
         release.set()
         value.registry.experiment_reports.flush()
         # The job's submission, checkpoint and end are steps 1 to 3.
-        assert [event.step for event in tracker.rollbacks] == [4, 5]
+        assert [event.step for event in tracker.starts] == [4, 5]
     finally:
         release.set()
         value.close()

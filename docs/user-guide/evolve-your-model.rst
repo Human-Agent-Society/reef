@@ -153,8 +153,8 @@ publishes it, loads it into the engines, and records a new version.
    export SCENARIO=<the x-reef-scenario you sent>   # examples/imo_answerbench uses sao-smoke
 
    curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/releases
-   # {"scenario": "...", "releases": [{"operation": "training", "current": true, ...}, ...]}
+     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/artifacts
+   # {"scenario": "...", "artifacts": [{"operation": "training", "active": true, ...}, ...]}
 
 You are training when a new ``training`` entry appears, which happens once
 ``global_batch_size`` eligible samples have arrived. Later requests use the current
@@ -165,7 +165,11 @@ keep it.
 
 Training is linear: each job continues from the workers' latest checkpoint,
 whether or not Reef selected it. The workers cannot load a published release,
-so Reef refuses a rollback of a Slime scenario.
+so Reef refuses a ``train-from`` on a Slime scenario. Activating an older
+artifact still works: it changes what serves, not where training continues.
+Under the default rule, Reef activates the next checkpoint again; `Go back to
+an older artifact <operate.rst#go-back-to-an-older-artifact>`__ describes how
+to keep the older one serving.
 
 A Slime stack trains one scenario for its lifetime: its workers hold one set
 of weights. To train another scenario, run another stack on different ports.

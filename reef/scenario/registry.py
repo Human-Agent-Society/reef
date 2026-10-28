@@ -308,6 +308,17 @@ class ScenarioRegistry:
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current
 
+    def set_artifact_evaluation(self, scenario: str, settings: Mapping[str, object] | None) -> None:
+        """Store the settings that Reef evaluates each new artifact of an existing scenario with; ``None`` stops it."""
+        with self.lock_for(scenario):
+            self.require(scenario)
+            stored = self._storage.read_settings(scenario)
+            self._storage.write_settings(scenario, replace(stored, artifact_evaluation=settings))
+
+    def artifact_evaluation(self, scenario: str) -> Mapping[str, object] | None:
+        """The stored settings that Reef evaluates each new artifact of ``scenario`` with, or ``None``."""
+        return self._storage.read_settings(scenario).artifact_evaluation
+
     def configure_model(
         self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
     ) -> Scenario:

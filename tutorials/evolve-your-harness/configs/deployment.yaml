@@ -25,7 +25,7 @@ recipe:
       requests: true
       # The notice at session start offers the update once the head moved.
       version_check: true
-      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
+      # An evolved extension runs in pi's process with your privileges, so a person activates it.
       review_kinds: [code_extension]
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi, shared with the client install script.

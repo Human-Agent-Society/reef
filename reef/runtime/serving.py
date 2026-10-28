@@ -6,7 +6,7 @@ service. They reach the engines through an ``InferenceBackend`` (for an
 inference component, ``reef.inference.remote.service.RemoteInferenceBackend``)
 and load only weights that a training job saved and Reef published: a
 release's files, when a scenario starts, when a release is committed, or
-when one is rolled back. No trainer holds a serving engine.
+when one is activated. No trainer holds a serving engine.
 
 ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
 base model; ``FullWeightServingRuntime`` serves one scenario's full weights.
@@ -365,9 +365,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
                 return self._version
             if not holds_weights(path):
                 if self._served_content is not None:
-                    raise ReefError(
-                        "the serving engines cannot return to the base model; roll back to a saved release"
-                    )
+                    raise ReefError("the serving engines cannot return to the base model; activate a saved release")
                 return self._version
             version = self.next_version()
             files = WeightFiles(path, "full")

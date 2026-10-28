@@ -18,7 +18,7 @@ from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.committer import ScenarioCommitter
+from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -120,9 +120,10 @@ class Scenario:
     def repository(self) -> Repository:
         """The release chain's scenario-scoped artifact repository.
 
-        The public read path to artifact heads (base, current, checkpoint);
+        The public read path to the repository base, the active release (``current``) and the chain tip
+        (``checkpoint``);
         mutation goes through Scenario methods so it stays serialized with
-        rollback and commit.
+        activation and commit.
         """
         return self._artifact_chain.repository
 
@@ -142,7 +143,7 @@ class Scenario:
         The first trainer that trains, else the first: the status, the
         contract and the operational metrics speak of the trainer that
         trains, not of a component that only carries files. Every mutating path goes
-        through a Scenario method so it is serialized against rollback and
+        through a Scenario method so it is serialized against activation and
         commit by the committer lock. The one exception is the preparation of
         a local step in a scenario with several trainers; the dispatcher still
         runs one step of the scenario at a time. Reading state that is
@@ -201,7 +202,7 @@ class Scenario:
 
         The caller runs one step of the scenario at a time, as the
         dispatcher's cycle lock does. Thus no training commit of another
-        trainer lands while the step runs, and a rollback refuses to run
+        trainer lands while the step runs, and an activation refuses to run
         while the job data is reserved. A lone trainer also holds the commit
         lock. With several trainers the step runs outside that lock, so a
         trainer without a backend advances its record cursor without waiting
@@ -212,7 +213,7 @@ class Scenario:
             return trainer.run_once(self.scenario_step, serving_runtime_load_id=self.serving_runtime_load_id())
 
     def serving_runtime_load_id(self) -> str | None:
-        """Return the runtime load ID that serves the committed release, or None when it is unknown."""
+        """Return the runtime load ID that serves the active release, or None when it is unknown."""
         artifact = Artifact(self.current_artifact_ref(), self.repository)
         return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
 
@@ -242,16 +243,27 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self.release_queries.releases(self._committer.step)
 
+    def artifacts(self) -> tuple[dict[str, Any], ...]:
+        """Each component's artifacts, newest first, with each component's active one marked."""
+        with self.release_queries.publication_lock:
+            return self.release_queries.artifacts(self._committer.step, self._committer.component_names())
+
     def current_artifact_ref(self) -> ArtifactRef:
+        """The active release."""
         return self._artifact_chain.current
 
-    def resume_rollback_start(self) -> None:
-        """Start the next training job from a rollback that the weight trainer's commits do not record yet."""
+    def resume_training_starts(self) -> None:
+        """Give each trainer the training start of a ``train_from`` record that its own training commits do not hold yet."""
         with self._committer.lock:
-            self._committer.resume_rollback_start()
+            self._committer.resume_training_starts()
 
-    def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
-        return self._committer.rollback(release_id, operation=operation)
+    def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Make ``artifact_id`` serve as ``component``; see :meth:`ScenarioCommitter.activate`."""
+        return self._committer.activate(artifact_id, component)
+
+    def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
+        return self._committer.train_from(artifact_id, component)
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""

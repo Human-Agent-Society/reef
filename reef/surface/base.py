@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
@@ -57,8 +57,8 @@ class WeightRuntime(ServingRuntime):
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the published release ``artifact``; return the runtime load ID that serves it.
 
-        Reef calls it once a release is published, at a commit, a rollback, a
-        promote or a start, and before traffic routes to it. ``scenario`` names
+        Reef calls it at a commit that activates a release, at an activation
+        and at a start, before traffic routes to the release. ``scenario`` names
         the release's scenario exactly when the runtime serves a separate
         adapter per scenario. A raise leaves the runtime serving what it served
         before.
@@ -73,25 +73,17 @@ class AdapterWeightRuntime(WeightRuntime):
 
 
 class ArtifactLoader(ABC):
-    """Make a component's published releases servable on the runtime, and recover the serving head at a start."""
-
-    @abstractmethod
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef: ...
+    """Make a component's published releases servable on the runtime."""
 
     @abstractmethod
     def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         """Make the published release ``artifact`` servable; return the runtime load ID that serves it.
 
-        Called once a release is final: after startup recovery has a
-        materializable head, and after a commit, rollback or promote has
-        published its release. It runs before the scenario routes traffic to
-        the release. ``source`` names the artifact whose bytes a rollback
-        republished.
+        Called once a release is final: after startup recovery has read the
+        active artifact from the commit history, after a commit has published
+        its release, and at an activation. It runs before the scenario routes
+        traffic to the release. ``source`` names the staged artifact whose
+        bytes a commit published.
         """
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
@@ -257,7 +249,7 @@ class Surface:
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
     harness: HarnessInfo | None = None
     #: The whole release's own admission check, run before each component's: on the release a step publishes and
-    #: on a release a rollback or promote restores. A recipe binds its checks on ``ComponentSurface.validator``; this
+    #: on a release an activation serves. A recipe binds its checks on ``ComponentSurface.validator``; this
     #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
     #: a whole, as every recipe's did before components existed (a composite moves it onto that recipe's component).
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
@@ -408,16 +400,6 @@ class Surface:
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
         return current.entries[name].content_id != before.entries[name].content_id
-
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef:
-        """The head the runtime can still serve after a restart; the checkpoint without a loader."""
-        loader = self.loader
-        return checkpoint if loader is None else loader.recover(current, checkpoint, runtime)
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
         """Return the runtime load ID that serves the committed release, or None when no component has a loader."""

@@ -159,8 +159,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes["reef.training_job_id"] = commit.training_job_id
         if commit.component is not None:
             attributes["reef.component"] = commit.component
-        if commit.rollback_target_release_id is not None:
-            attributes["reef.rollback_target_release_id"] = commit.rollback_target_release_id
         for key, value in (commit.metrics or {}).items():
             metric = _attribute_value(value)
             if metric is not None:

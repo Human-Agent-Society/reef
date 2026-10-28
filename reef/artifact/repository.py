@@ -229,7 +229,7 @@ class Repository(ArtifactRepository):
         # be serialized behind a publish.
         self._head_lock = Lock()
         # Non-checkpointed pull-surface releases remain process-local. Keep
-        # every staged artifact addressable for snapshot and rollback reads; a
+        # every staged artifact addressable for snapshot and activation reads; a
         # single "latest local" slot would make an older snapshot dangle as
         # soon as the next release is staged.
         self._local_artifacts: dict[str, Artifact] = {}
@@ -272,20 +272,20 @@ class Repository(ArtifactRepository):
             raise ArtifactPublicationError("repository has no checkpoint artifact")
         return self._checkpoint_artifact
 
-    def advance_current(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
-        """Move serving state without changing the last durable checkpoint.
+    def activate(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
+        """Make ``ref`` the active artifact; the checkpoint and the backend head stay where they are.
 
-        The move is a compare-and-swap: ``expected`` is the head the caller
-        observed when it prepared the new release. A mismatch means a
-        concurrent writer advanced the head in between, and fails loudly
-        instead of blind-overwriting it (lost update).
+        No storage I/O runs: the commit history records the activation, and
+        recovery reads the active artifact back from it. The move is a
+        compare-and-swap: ``expected`` is the active artifact the caller
+        observed. A mismatch raises ``ArtifactConflict`` and changes nothing.
         """
         with self._head_lock:
             if self._current_artifact != expected:
                 raise ArtifactConflict(
-                    f"serving head advanced from {expected.release_id} to "
+                    f"active artifact moved from {expected.release_id} to "
                     f"{None if self._current_artifact is None else self._current_artifact.release_id}; "
-                    f"refusing to advance to {ref.release_id}"
+                    f"refusing to activate {ref.release_id}"
                 )
             self._current_artifact = ref
 

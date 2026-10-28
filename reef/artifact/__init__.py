@@ -9,11 +9,11 @@ level up. Boundaries this package holds:
   here knows what a scenario, trainer, or commit history is;
   ``ArtifactReleaseChain``'s caller decides transaction ordering.
 - Releases are immutable and heads move only by compare-and-swap
-  (``advance_current`` takes ``expected``; ``publish`` takes
+  (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
   (``ArtifactConflict``) instead of losing a release.
-- A ``local:`` release has identity but no durable bytes; recovery and
-  rollback refuse it as a restore source (``ReleaseNotRestorable``).
+- A ``local:`` release has identity but no durable bytes; activation and
+  a new training start refuse it as a source (``ReleaseNotRestorable``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes

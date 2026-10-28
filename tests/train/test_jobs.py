@@ -9,7 +9,9 @@ import pytest
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 
+from reef.artifact import Artifact
 from reef.core import AgentRecord, RequestType
+from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.evaluation import CheckpointCandidate, EvaluationResult, SelectionDecision
 from reef.core.job_data import JobOutcome
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
@@ -286,16 +288,6 @@ def test_a_failed_or_unknown_job_ends_and_keeps_the_start(component):
 
 
 @pytest.mark.unit
-def test_a_rollback_cancels_the_running_job_and_restarts_from_the_imported_start(component):
-    loop = loop_with(component)
-    state = JobLoopState("/start", RunningJob("job-1"), 1, FINISHED)
-    restored = loop.restored(state, "fake:old")
-    assert component.cancelled == ["job-1"]
-    assert restored == JobLoopState("fake:old", None, 1, FINISHED)
-    assert loop.restored(JobLoopState(), None) == JobLoopState()
-
-
-@pytest.mark.unit
 def test_the_committed_state_round_trips_and_checks_its_values():
     state = JobLoopState("/s", RunningJob("j", 2), 3, FINISHED)
     assert state.to_dict()["job"] == {"job_id": "j", "checkpoints_handled": 2}
@@ -381,44 +373,58 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
 
 
 @pytest.mark.unit
-def test_a_rollback_release_is_imported_into_the_trainer_component(component):
-    trainer = job_trainer(JobLoopState("/start"), component)
-    assert trainer.import_rollback_release(Path("/releases/old")) == "fake:old"
+def test_start_from_imports_the_release_cancels_the_running_job_and_restarts_from_it(component):
+    trainer = job_trainer(JobLoopState("/start", RunningJob("job-1"), 1, FINISHED), component)
+    trainer.start_from(Artifact.local(Path("/releases/old")), None)
     assert component.imported == [Path("/releases/old")]
-    observer = Trainer.build("math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline)
-    with pytest.raises(RuntimeError, match="only a weight trainer"):
-        observer.import_rollback_release(Path("/releases/old"))
+    assert component.cancelled == ["job-1"]
+    # The jobs that ended stay counted.
+    assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old", None, 1, FINISHED)
 
 
 @pytest.mark.unit
-def test_a_rollback_start_cancels_the_running_job_and_is_refused_while_a_commit_is_pending(component):
+def test_start_from_is_refused_without_a_change_when_the_trainer_cannot_start(component, monkeypatch):
     trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
-    trainer.apply_rollback_start("fake:old")
-    assert component.cancelled == ["job-1"]
-    assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old")
 
+    def refuse(release):
+        raise ValueError("these weights cannot train")
+
+    monkeypatch.setattr(component, "import_start", refuse)
+    with pytest.raises(TrainingStartRefused, match="these weights cannot train"):
+        trainer.start_from(Artifact.local(Path("/releases/old")), None)
+    assert component.cancelled == []
+    assert JobLoopState.from_dict(trainer.state) == JobLoopState("/start", RunningJob("job-1"))
+    # A trainer that trains nothing has no start to set.
+    observer = Trainer.build("math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline)
+    with pytest.raises(TrainingStartRefused, match="trains nothing"):
+        observer.start_from(Artifact.local(Path("/releases/old")), None)
+
+
+@pytest.mark.unit
+def test_start_from_is_refused_while_a_commit_is_pending(component):
     pending = job_trainer(JobLoopState(job=RunningJob("job-2")), component)
     component.statuses["job-2"] = JobStatus("job-2", "finished")
     assert not pending.has_pending_commit
     assert pending.run_once() is not None
     assert pending.has_pending_commit
-    with pytest.raises(RuntimeError, match="commit is pending"):
-        pending.apply_rollback_start("fake:old")
+    with pytest.raises(CommitPending, match="waits for its commit"):
+        pending.start_from(Artifact.local(Path("/releases/old")), None)
+    assert component.imported == []
 
 
 @pytest.mark.unit
-def test_a_poll_result_is_dropped_when_a_rollback_ran_while_the_poll_ran(tmp_path):
+def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tmp_path):
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
 
-    class RollbackDuringStatus(FakeComponent):
+    class StartDuringStatus(FakeComponent):
         trainer: Trainer
 
         def status(self, job_id: str) -> JobStatus:
-            # A rollback commits while the trainer waits on the component.
-            self.trainer.apply_rollback_start("fake:old")
+            # A new training start lands while the trainer waits on the component.
+            self.trainer.start_from(Artifact.local(Path("/releases/old")), None)
             return JobStatus(job_id, "running", (saved,))
 
-    component = RollbackDuringStatus()
+    component = StartDuringStatus()
     trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
     component.trainer = trainer
     assert trainer.run_once() is None

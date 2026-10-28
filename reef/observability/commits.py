@@ -19,7 +19,7 @@ from threading import Lock, Thread
 from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import (
     ExperimentTracker,
-    RollbackExperimentEvent,
+    TrainFromExperimentEvent,
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
@@ -29,7 +29,7 @@ from reef.storage.scenario import ScenarioStore
 
 logger = logging.getLogger(__name__)
 
-ExperimentEvent = TrainingExperimentEvent | RollbackExperimentEvent
+ExperimentEvent = TrainingExperimentEvent | TrainFromExperimentEvent
 
 
 @dataclass(frozen=True)
@@ -89,8 +89,8 @@ class ExperimentReportQueue:
 
     def send(self, event: ExperimentEvent) -> None:
         try:
-            if isinstance(event, RollbackExperimentEvent):
-                self.tracker.record_rollback(event)
+            if isinstance(event, TrainFromExperimentEvent):
+                self.tracker.record_train_from(event)
             else:
                 self.tracker.record(event)
         except Exception:
@@ -111,11 +111,19 @@ class CommitExperimentObserver(RecordObserver):
         store: ScenarioStore,
         reports: ExperimentReportQueue | None = None,
     ) -> None:
-        """``reports`` delivers the events; the dispatcher shares one queue across its scenarios."""
+        """``reports`` delivers the events; the dispatcher shares one queue across its scenarios.
+
+        ``start_artifact_ref`` is the training start: the newest artifact a
+        record made or a ``train_from`` record named, else
+        ``source_artifact_ref``. Each event names it as its source.
+        """
         self.tracker = tracker
         self.scenario = scenario
         self.recipe = recipe
-        self.source_artifact_ref = source_artifact_ref
+        records = store.history() if store.durable else ()
+        self.start_artifact_ref = next(
+            (record.artifact_ref for record in reversed(records) if self.moves_start(record)), source_artifact_ref
+        )
         self.last_reported_step = scenario_step
         self.run_segment, self.run_step = store.training_run_position() if store.durable else (0, 0)
         self.durable = store.durable
@@ -137,37 +145,40 @@ class CommitExperimentObserver(RecordObserver):
             logger.exception("experiment tracker failed to prepare correlation metadata")
             return {}
 
+    @staticmethod
+    def moves_start(commit: CommitRecord) -> bool:
+        """Whether ``commit`` moves the training start: a new start, or an artifact the trainer goes on from."""
+        return commit.operation == "train_from" or commit.made_artifact
+
     def record_committed(self, commit: CommitRecord) -> None:
         if commit.step <= self.last_reported_step:
             return
         prepared = self.prepared
-        source = self.source_artifact_ref
+        source = self.start_artifact_ref
         run_segment, run_step = self.run_segment, self.run_step
         # Advance even when the provider fails: a storage retry must not rotate
         # the same run twice or report a training row twice in this session.
         self.last_reported_step = commit.step
         self.prepared = None
-        if not commit.pending:
-            self.source_artifact_ref = commit.artifact_ref
+        if self.moves_start(commit):
+            self.start_artifact_ref = commit.artifact_ref
         if self.durable:
-            if commit.operation == "rollback":
+            if commit.operation == "train_from":
                 self.run_segment, self.run_step = commit.step, 0
             elif commit.operation == "training":
                 self.run_step += 1
-        if commit.operation in ("rollback", "promote"):
-            # Promote already uses the rollback tracker event. Keep that contract.
-            target = commit.rollback_target_release_id
-            if target is None:
-                raise ValueError("a rollback or promote commit must name its target")
+        if commit.operation == "activate":
+            # An activation changes what serves, not the training run: no tracker event.
+            return
+        if commit.operation == "train_from":
             self.reports.put(
-                RollbackExperimentEvent(
+                TrainFromExperimentEvent(
                     scenario=commit.scenario,
                     recipe=self.recipe,
                     step=commit.step,
                     run_segment=run_segment,
-                    source_artifact_ref=source,
-                    produced_artifact_ref=commit.artifact_ref,
-                    target_release_id=target,
+                    start_artifact_ref=commit.artifact_ref,
+                    component=commit.component,
                 )
             )
             return
@@ -190,7 +201,7 @@ class CommitExperimentObserver(RecordObserver):
         self.reports.put(
             TrainingExperimentEvent(
                 context=context,
-                produced_artifact_ref=self.source_artifact_ref,
+                produced_artifact_ref=self.start_artifact_ref,
                 metrics=metrics,
                 outcome="rejected" if metrics.get("selected") is False else "committed",
                 training_job_id=commit.training_job_id,

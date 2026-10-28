@@ -181,22 +181,10 @@ def _checkpoint_artifact(tmp_path):
     return Artifact.local(d)
 
 
-def _release_without_files():
-    from reef.artifact import Artifact, ArtifactRef
-
-    return Artifact(ArtifactRef(content_id="artifact:release", release_id="release:1", parent_release_id=None), None)
-
-
 def _weight_hooks(surface: Surface | None = None):
     hooks = (surface or create_weight_surface(kind="model")).inference
     assert hooks is not None
     return hooks
-
-
-def _weight_loader(surface: Surface | None = None):
-    loader = (surface or create_weight_surface(kind="model")).loader
-    assert loader is not None
-    return loader
 
 
 def test_weight_surface_without_an_adapter_leaves_requests_alone(tmp_path) -> None:
@@ -356,12 +344,6 @@ class _StubAdapterRuntime(_StubTrainingRuntime, AdapterWeightRuntime):
         return self._adapters.get(scenario)
 
 
-def _checkpoint_ref(version: str = "checkpoint:step-7"):
-    from reef.artifact import ArtifactRef
-
-    return ArtifactRef(content_id="artifact:ckpt", release_id=version, parent_release_id=None)
-
-
 def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
     from reef.artifact import Artifact
 
@@ -377,21 +359,6 @@ def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_p
     assert surface.served_runtime_load_id(release, adapters) == "e:4"
     # An engine that holds no adapter for the scenario leaves the served version unknown.
     assert surface.served_runtime_load_id(release, _StubAdapterRuntime("e:6", {})) is None
-
-
-def test_recover_serves_the_checkpoint_when_the_head_is_not_durable() -> None:
-    local = _release_without_files().ref
-    checkpoint = _checkpoint_ref()
-    assert _weight_loader().recover(local, checkpoint, _StubTrainingRuntime("session:1")) is checkpoint
-    assert _weight_loader().recover(local, checkpoint, None) is checkpoint
-
-
-def test_recover_short_circuits_when_already_at_the_head() -> None:
-    surface = create_weight_surface(kind="model")
-    checkpoint = _checkpoint_ref()
-    assert _weight_loader(surface).recover(None, checkpoint, _StubTrainingRuntime("wv-1")) is checkpoint
-    same = _checkpoint_ref(checkpoint.release_id)
-    assert _weight_loader(surface).recover(same, checkpoint, _StubTrainingRuntime("nope")) is checkpoint
 
 
 def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision(tmp_path) -> None:

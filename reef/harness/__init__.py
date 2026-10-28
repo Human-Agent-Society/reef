@@ -34,7 +34,7 @@ recipes, scenario coordination, or the HTTP service.
 
 The evolution loop itself, propose, gate and publish, is
 ``reef.train.cordis_backend``; versioning (staging, publishing, the commit
-log, recovery and rollback) is reef's artifact stack (``reef.artifact``,
+log, recovery and activation) is reef's artifact stack (``reef.artifact``,
 ``reef.scenario.committer``), not here.
 
 Vocabulary note: ``reef.surface.harnesses`` delivers a *harness artifact* to

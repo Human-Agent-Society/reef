@@ -289,6 +289,157 @@ class RolloutRequest:
             raise TypeError("a rollout request's record_dir is None or a Path")
 
 
+@dataclass(frozen=True)
+class ArtifactEvaluationRequest:
+    """A client's request to evaluate one artifact: a component of a release, with the other side of its policy.
+
+    Values: ``artifact_id`` is the non-empty ID of one of the scenario's artifacts, and ``component`` a
+    non-empty name of one of its components: the evaluated artifact. Exactly one of ``harness`` and ``model`` is set: ``harness``, the
+    Harbor agent that runs a model artifact (an object with a non-empty ``name`` or ``import_path``, as
+    ``TaskRolloutRunner``'s ``agent``), or ``model``, the non-empty name of the deployment's model binding that a
+    harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
+    ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
+    Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
+    """
+
+    artifact_id: str
+    component: str
+    harness: Mapping[str, Any] | None = None
+    model: str | None = None
+    task_names: tuple[str, ...] = ()
+    rollouts_per_task: int = 1
+    environment: str = "docker"
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("artifact_id", self.artifact_id),
+            ("component", self.component),
+            ("environment", self.environment),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"an artifact evaluation's {name} must be a non-empty string")
+        if (self.harness is None) == (self.model is None):
+            raise ValueError("an artifact evaluation configures exactly one of harness and model")
+        if self.harness is not None:
+            if not isinstance(self.harness, Mapping) or not any(
+                isinstance(self.harness.get(key), str) and self.harness[key] for key in ("name", "import_path")
+            ):
+                raise ValueError("an artifact evaluation's harness is a Harbor agent with a name or an import_path")
+            object.__setattr__(self, "harness", MappingProxyType(dict(self.harness)))
+        if self.model is not None and (not isinstance(self.model, str) or not self.model):
+            raise ValueError("an artifact evaluation's model is the non-empty name of a model binding")
+        if (
+            not isinstance(self.task_names, tuple)
+            or any(not isinstance(name, str) or not name for name in self.task_names)
+            or len(set(self.task_names)) != len(self.task_names)
+        ):
+            raise ValueError("an artifact evaluation's task_names are distinct non-empty strings")
+        count = self.rollouts_per_task
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("an artifact evaluation's rollouts_per_task is a positive integer")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "artifact_id": self.artifact_id,
+            "component": self.component,
+            "harness": None if self.harness is None else dict(self.harness),
+            "model": self.model,
+            "task_names": list(self.task_names),
+            "rollouts_per_task": self.rollouts_per_task,
+            "environment": self.environment,
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> ArtifactEvaluationRequest:
+        """The request that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        keys = {"artifact_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
+        if not isinstance(value, Mapping) or set(value) != keys or not isinstance(value["task_names"], list):
+            raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
+        return cls(
+            value["artifact_id"],
+            value["component"],
+            value["harness"],
+            value["model"],
+            tuple(value["task_names"]),
+            value["rollouts_per_task"],
+            value["environment"],
+        )
+
+
+@dataclass(frozen=True)
+class ArtifactEvaluationSettings:
+    """How to evaluate an artifact that is not named yet: an ``ArtifactEvaluationRequest`` without its
+    ``artifact_id``.
+
+    Values: ``component`` is None, for the one component of the releases that has a kind, or a non-empty
+    component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task`` and ``environment`` meet the
+    conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation request is these settings and an
+    artifact ID, and a scenario keeps settings to evaluate each new artifact with; ``request`` makes the request
+    of one artifact.
+    """
+
+    component: str | None = None
+    harness: Mapping[str, Any] | None = None
+    model: str | None = None
+    task_names: tuple[str, ...] = ()
+    rollouts_per_task: int = 1
+    environment: str = "docker"
+
+    def __post_init__(self) -> None:
+        if self.component is not None and (not isinstance(self.component, str) or not self.component):
+            raise ValueError("an artifact evaluation's component is None or a non-empty string")
+        # The request of any release checks every other field.
+        checked = self.request("any", self.component or "any")
+        object.__setattr__(self, "harness", checked.harness)
+
+    def request(self, artifact_id: str, component: str) -> ArtifactEvaluationRequest:
+        """The request to evaluate ``component`` of the artifact ``artifact_id`` with these settings."""
+        return ArtifactEvaluationRequest(
+            artifact_id,
+            component,
+            self.harness,
+            self.model,
+            self.task_names,
+            self.rollouts_per_task,
+            self.environment,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "component": self.component,
+            "harness": None if self.harness is None else dict(self.harness),
+            "model": self.model,
+            "task_names": list(self.task_names),
+            "rollouts_per_task": self.rollouts_per_task,
+            "environment": self.environment,
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> ArtifactEvaluationSettings:
+        """The settings of a JSON object of these fields, each left-out field at its default.
+
+        Raise ``ValueError`` for a value that is not an object, has a field of another name, or has
+        ``task_names`` that is not a list.
+        """
+        if not isinstance(value, Mapping):
+            raise ValueError("artifact evaluation settings are a JSON object")
+        known = {"component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
+        unknown = sorted(set(value) - known)
+        if unknown:
+            raise ValueError(f"artifact evaluation settings take no {unknown}; they take {sorted(known)}")
+        task_names = value.get("task_names", [])
+        if not isinstance(task_names, list):
+            raise ValueError("task_names is a list of task names")
+        return cls(
+            value.get("component"),
+            value.get("harness"),
+            value.get("model"),
+            tuple(task_names),
+            value.get("rollouts_per_task", 1),
+            value.get("environment", "docker"),
+        )
+
+
 class RolloutRunner[RolloutT](ABC):
     """Runs rollouts in one environment: one rollout for each ``RolloutRequest``.
 
@@ -446,6 +597,8 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
 __all__ = [
     "ARTIFACT_KINDS",
     "FAILED",
+    "ArtifactEvaluationRequest",
+    "ArtifactEvaluationSettings",
     "ArtifactKind",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",

@@ -301,10 +301,7 @@ def test_a_scenario_opened_by_an_upgraded_reef_commits_the_shipped_entries_once(
     releases, served, entries = open_scenario()
     assert served == UPGRADED and entries[0]["config"]["code"] == UPGRADED
     # Newest first: the update is a served training commit on top of the creation release, held for no review.
-    assert [(row["operation"], row["current"], row["pending"]) for row in releases] == [
-        ("training", True, False),
-        ("creation", False, False),
-    ]
+    assert [(row["operation"], row["active"]) for row in releases] == [("training", True), ("creation", False)]
     assert releases[0]["metrics"] == {"shipped_content_update": {"entries": [REQUESTS_ENTRY_ID]}}
 
     releases_again, served, _ = open_scenario()

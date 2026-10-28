@@ -1534,8 +1534,8 @@ def _paged(rows: list[dict], scenario: str, keyed: bool) -> list[dict]:
 class _FakeReef:
     """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
     ``GET /reef/harness/releases`` with ``rows``, the request's progress route with ``progress`` (404 without
-    one; a list is answered in order, its last reading repeated) and the scenario's promote route with
-    ``promote``."""
+    one; a list is answered in order, its last reading repeated) and the scenario's activate route with the release
+    it names."""
 
     def __init__(
         self,
@@ -1545,7 +1545,6 @@ class _FakeReef:
         receipt: str = "ask-receipt",
         rows: list[dict] | None = None,
         progress: dict | list[dict] | None = None,
-        promote: dict | None = None,
     ) -> None:
         import http.server
         import threading
@@ -1591,8 +1590,18 @@ class _FakeReef:
                     key = f"&key={PAGE_KEY}" if "Authorization" in self.headers else ""
                     page = f"/reef/harness/requests/{answer.get('agent_record_id')}/page?scenario=ask-scenario{key}"
                     self._answer(status, {**answer, "page_path": page} if status == 200 else answer)
-                elif self.path == "/reef/scenarios/ask-scenario/promote" and promote is not None:
-                    self._answer(200, promote)
+                elif self.path == "/reef/scenarios/ask-scenario/activate":
+                    # In a one-component scenario an activation mints no release: the release that made it serves.
+                    activated = body["artifact_id"]
+                    self._answer(
+                        200,
+                        {
+                            "scenario": "ask-scenario",
+                            "artifact_id": activated,
+                            "release_id": activated,
+                            "content_id": "c",
+                        },
+                    )
                 else:
                     self._answer(200, {})
 
@@ -1857,26 +1866,46 @@ def test_main_dispatches_evolve_with_the_words_joined_and_exits_with_its_status(
     ]
 
 
-CREATION_ROW = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation", "pending": False}
+CREATION_ROW = {
+    "release_id": "rel-0",
+    "artifact_id": "rel-0",
+    "parent_release_id": None,
+    "operation": "creation",
+    "checkpoint": True,
+    "active": True,
+    "activated": True,
+}
 
 
-def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_id: str = "q-1") -> dict:
-    """The catalog row of the step that consumed request ``request_id``, with the result ``metrics`` carry."""
+def _step_row(release_id: str, metrics: dict, *, inactive: bool = False, request_id: str = "q-1") -> dict:
+    """The catalog row of the step that consumed request ``request_id``, with the result ``metrics`` carry.
+
+    A selected step made a release, which is active unless ``inactive``, and an ``inactive`` one was never
+    activated; any other step made none."""
+    made_release = metrics.get("selected") is True
     return {
         "release_id": release_id,
+        "artifact_id": release_id,
         "parent_release_id": "rel-0",
         "operation": "training",
-        "pending": pending,
+        "checkpoint": made_release,
+        "active": made_release and not inactive,
+        "activated": not inactive,
         "metrics": {"training_request": {"id": request_id, "text": "text me when you are blocked"}, **metrics},
     }
 
 
+def _catalog(row: dict) -> list[dict]:
+    """The creation row, then ``row``: the creation release is active while ``row`` is not."""
+    return [{**CREATION_ROW, "active": not row["active"]}, row]
+
+
 @pytest.mark.unit
-def test_a_pending_release_off_pi_names_the_wait_command_with_its_request() -> None:
-    """Without the update notice a pending release is served through the wrapper's wait, which takes the request id;
-    on pi the session's /versions install comes first, the terminal commands after it."""
-    assert next_commands("claude", 3, "pending", "q-1", []) == "reef-claude wait q-1 in a terminal"
-    assert next_commands("pi", 3, "pending", "q-1", ["X"]) == (
+def test_an_inactive_release_off_pi_names_the_wait_command_with_its_request() -> None:
+    """Without the update notice an inactive release is activated through the wrapper's wait, which takes the request
+    id; on pi the session's /versions install comes first, the terminal commands after it."""
+    assert next_commands("claude", 3, "inactive", "q-1", []) == "reef-claude wait q-1 in a terminal"
+    assert next_commands("pi", 3, "inactive", "q-1", ["X"]) == (
         "/versions v3 install in a reef-pi session, or reef-pi setup and reef-pi update"
     )
 
@@ -1897,11 +1926,11 @@ def test_a_published_release_that_requires_setup_names_setup_before_update() -> 
     requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
     row = _step_row("rel-1", {"selected": True, "published": True})
     row["metrics"]["training_request"]["requires"] = requires
-    line = result_line("dsh", 1, [CREATION_ROW, row], "page", ["DEEPSEEK_API_KEY"])
+    line = result_line("dsh", 1, _catalog(row), "page", ["DEEPSEEK_API_KEY"])
     assert "Run reef-dsh setup, then reef-dsh update, then restart reef-dsh." in line
-    assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, [CREATION_ROW, row], "page")
+    assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, _catalog(row), "page")
     plain = _step_row("rel-1", {"selected": True, "published": True})
-    assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, [CREATION_ROW, plain], "page")
+    assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, _catalog(plain), "page")
 
 
 @pytest.mark.unit
@@ -1923,12 +1952,12 @@ def test_a_published_release_that_requires_setup_names_setup_before_update() -> 
             ],
         ),
         (
-            _step_row("rel-3333-pending", {"selected": True}, pending=True),
+            _step_row("rel-3333-inactive", {"selected": True}, inactive=True),
             0,
             [
                 "reef-pi: 'text me when you are blocked' is ready as release rel-3333. This release changes an "
                 "extension, so read it before it runs: /versions v1 opens the page, /versions v1 install "
-                "serves it. Page: {page}",
+                "activates it. Page: {page}",
                 "reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi update",
             ],
         ),
@@ -1963,11 +1992,11 @@ def test_a_published_release_that_requires_setup_names_setup_before_update() -> 
             ],
         ),
     ],
-    ids=["selected", "pending", "rejected", "skipped", "skipped-failure"],
+    ids=["selected", "inactive", "rejected", "skipped", "skipped-failure"],
 )
 def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, row, status, lines) -> None:
     reef = _FakeReef(
-        {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}, rows=[CREATION_ROW, row]
+        {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}, rows=_catalog(row)
     )
     compose, captures = _ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -1984,7 +2013,7 @@ def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, r
         f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={PAGE_KEY}",
         "reef-pi: reef is running the step; waiting up to 5 s for its result",
     ]
-    # The pending line names the step's page link, the scenario and the token as query parameters.
+    # The inactive line names the step's page link, the scenario and the token as query parameters.
     page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&key={PAGE_KEY}"
     # Without a terminal (pytest's stdin is none) the next step is printed as commands, never asked.
     assert out[3:] == [line.replace("{page}", page) for line in lines]
@@ -2023,7 +2052,7 @@ def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_th
     ]
     for index, (rollout, tail) in enumerate(cases):
         row = _step_row("rel-0", {**floor, **review, "candidate_rollouts": [rollout]})
-        reef = _FakeReef(answer, rows=[CREATION_ROW, row])
+        reef = _FakeReef(answer, rows=_catalog(row))
         (tmp_path / str(index)).mkdir()
         compose, captures = _ask_tree(tmp_path / str(index), reef.port)
         with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -2046,9 +2075,9 @@ class _Tty(io.StringIO):
 
 @pytest.mark.unit
 def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -> None:
-    """A selected release asks to install and runs the setup prompts then the update; a pending one names its page,
-    asks to promote, promotes and installs the new head; a declined step prints the commands; a failed install
-    keeps its status."""
+    """A selected release asks to install and runs the setup prompts then the update; an inactive one names its page,
+    asks to activate, activates it and installs the active release the activation names; a declined step prints the
+    commands; a failed install keeps its status."""
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     calls: list[tuple[str, tuple, dict]] = []
     statuses = {"update": 0}
@@ -2057,8 +2086,7 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
         return lambda *args, **kwargs: calls.append((name, args, kwargs)) or statuses.get(name, 0)
 
     selected = _step_row("rel-1111-selected", {"selected": True})
-    pending = _step_row("rel-3333-pending", {"selected": True}, pending=True)
-    promoted = {"scenario": "ask-scenario", "release_id": "rel-4444-promoted", "content_id": "c"}
+    inactive = _step_row("rel-3333-inactive", {"selected": True}, inactive=True)
     cases = [
         (
             "selected-yes",
@@ -2075,25 +2103,25 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             "reef-pi: Install now? [Y/n] reef-pi: next: reef-pi update",
         ),
         (
-            "pending-yes",
-            pending,
+            "inactive-yes",
+            inactive,
             "y\n",
             0,
-            "reef-pi: Promote now? [y/N] reef-pi: promoted; the served head is release rel-4444",
+            "reef-pi: Activate now? [y/N] reef-pi: activated; release rel-3333 is the active release",
         ),
         (
-            "pending-no",
-            pending,
+            "inactive-no",
+            inactive,
             "\n",
             0,
-            "reef-pi: Promote now? [y/N] reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi update",
+            "reef-pi: Activate now? [y/N] reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi update",
         ),
         ("selected-failed", selected, "yes\n", 3, "reef-pi: Install now? [Y/n] "),
     ]
     for name, row, typed, status, line in cases:
         calls.clear()
         statuses["update"] = 3 if name == "selected-failed" else 0
-        reef = _FakeReef(answer, rows=[CREATION_ROW, row], promote=promoted)
+        reef = _FakeReef(answer, rows=_catalog(row))
         (tmp_path / name).mkdir()
         compose, captures = _ask_tree(tmp_path / name, reef.port)
         with (
@@ -2115,16 +2143,16 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
                 ("update", {"release": "rel-1111-selected"}),
             ]
             assert all(args == ("ask-scenario", "pi", compose) for _, args, _ in calls)
-        elif name == "pending-yes":
+        elif name == "inactive-yes":
             assert "reef-pi: read the change first: reef-pi page 1" in out
-            (promote_call,) = reef.posts("/reef/scenarios/ask-scenario/promote")
-            assert promote_call["body"] == {"release_id": "rel-3333-pending"}
-            assert promote_call["headers"]["authorization"] == "Bearer dummy"
+            (activate_call,) = reef.posts("/reef/scenarios/ask-scenario/activate")
+            assert activate_call["body"] == {"artifact_id": "rel-3333-inactive"}
+            assert activate_call["headers"]["authorization"] == "Bearer dummy"
             assert installed == [
-                ("setup", {"release": "rel-4444-promoted"}),
-                ("update", {"release": "rel-4444-promoted"}),
+                ("setup", {"release": "rel-3333-inactive"}),
+                ("update", {"release": "rel-3333-inactive"}),
             ]
-            assert out[-1] == "reef-pi: Installed release rel-4444. Restart reef-pi to use it."
+            assert out[-1] == "reef-pi: Installed release rel-3333. Restart reef-pi to use it."
         elif name == "selected-failed":
             assert installed == [
                 ("setup", {"release": "rel-1111-selected"}),
@@ -2132,13 +2160,13 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             ]
             assert not any("Installed release" in item for item in out)
         else:
-            assert installed == [] and not reef.posts("/reef/scenarios/ask-scenario/promote")
+            assert installed == [] and not reef.posts("/reef/scenarios/ask-scenario/activate")
 
 
 @pytest.mark.unit
 def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(tmp_path, capsys) -> None:
     # The catalog holds another request's step only: ours is still running.
-    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    rows = _catalog(_step_row("rel-1111-selected", {"selected": True}, request_id="q-other"))
     reef = _FakeReef(
         {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"},
         rows=rows,
@@ -2166,7 +2194,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     """Until a step takes the request its progress reads queued; once a step works on it (a backend phase such as
     proposing, or the trainer's reserved batch, running) the wait says so, once, and keeps reading it for the phase
     its timeout line names. A progress the service does not answer is no reason to stop waiting."""
-    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    rows = _catalog(_step_row("rel-1111-selected", {"selected": True}, request_id="q-other"))
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     record_path = "/reef/harness/requests/q-1/progress"
     for state in ("proposing", "running"):
@@ -2208,7 +2236,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
 @pytest.mark.unit
 def test_the_timeout_line_names_the_phase_the_step_is_in_now(tmp_path, capsys) -> None:
     """The phase a timeout names is the last progress read, not the one the step started in."""
-    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    rows = _catalog(_step_row("rel-1111-selected", {"selected": True}, request_id="q-other"))
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     started_at = time.time() - 30
     progress = [
@@ -2227,7 +2255,7 @@ def test_the_timeout_line_names_the_phase_the_step_is_in_now(tmp_path, capsys) -
 def test_a_wait_on_a_running_step_names_its_phase_and_its_time_so_far(tmp_path, capsys) -> None:
     """Each wait on a running step ends with the phase and the time the step has run, which grows between waits, so
     a harness that stops a repeated identical call never reads the waits as a loop; the link holds no token."""
-    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    rows = _catalog(_step_row("rel-1111-selected", {"selected": True}, request_id="q-other"))
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     progress = {"state": "evaluating", "settled": False, "started_at": time.time() - 125}
     reef = _FakeReef(answer, rows=rows, progress=progress)
@@ -2263,7 +2291,7 @@ def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_pat
         "rel-0", {"selected": False, "selection": selection, "candidate_rollouts": [failed], "proposal_notes": notes}
     )
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
-    reef = _FakeReef(answer, rows=[CREATION_ROW, rejected])
+    reef = _FakeReef(answer, rows=_catalog(rejected))
     compose, captures = _claude_ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
         assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 1
@@ -2298,7 +2326,7 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
     """``wait`` reports the step of a request evolve filed, as ``evolve --wait`` does; an adapter without pi's
     update notice and /versions is told the wrapper commands instead."""
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
-    running = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    running = _catalog(_step_row("rel-1111-selected", {"selected": True}, request_id="q-other"))
     reef = _FakeReef(answer, rows=running, progress={"state": "queued", "settled": False})
     compose, captures = _claude_ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -2314,7 +2342,7 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
         "reef-claude: no result yet for 'request q-1' after 0.05 s; reef-claude wait q-1 waits again",
     ]
 
-    reef = _FakeReef(answer, rows=[CREATION_ROW, _step_row("rel-1111-selected", {"selected": True})])
+    reef = _FakeReef(answer, rows=_catalog(_step_row("rel-1111-selected", {"selected": True})))
     (tmp_path / "settled").mkdir()
     compose, captures = _claude_ask_tree(tmp_path / "settled", reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -2353,7 +2381,7 @@ def test_wait_names_the_release_how_to_use_and_a_declined_step_is_answered_with_
     review = {"result": "partial", "covered": [], "uncovered": ["no idle check.", "Two way replies."]}
     notes = {"design": design, "review": review}
     reef = _FakeReef(
-        answer, rows=[CREATION_ROW, _step_row("rel-1111-selected", {"selected": True, "proposal_notes": notes})]
+        answer, rows=_catalog(_step_row("rel-1111-selected", {"selected": True, "proposal_notes": notes}))
     )
     compose, captures = _claude_ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -2364,7 +2392,7 @@ def test_wait_names_the_release_how_to_use_and_a_declined_step_is_answered_with_
     assert out[3] == "reef-claude: not covered: no idle check; two way replies"
     declined = {"declined": "the design says no entry this harness takes can deliver the request", "design": design}
     row = _step_row("rel-0", {"skipped": "no proposal", "proposal_notes": declined})
-    reef = _FakeReef(answer, rows=[CREATION_ROW, row])
+    reef = _FakeReef(answer, rows=_catalog(row))
     (tmp_path / "declined").mkdir()
     compose, captures = _claude_ask_tree(tmp_path / "declined", reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -2389,7 +2417,7 @@ def test_the_next_step_names_setup_only_while_the_release_requires_something_unm
         ({}, "reef-claude setup, then reef-claude update"),
         ({"SMTP_HOST": "x"}, "reef-claude update"),
     ):
-        reef = _FakeReef(answer, rows=[CREATION_ROW, row])
+        reef = _FakeReef(answer, rows=_catalog(row))
         (tmp_path / line[:14].replace(" ", "-")).mkdir()
         compose, captures = _claude_ask_tree(tmp_path / line[:14].replace(" ", "-"), reef.port)
         env = {**_ask_env(captures, compose), **shell}
@@ -2493,13 +2521,31 @@ def test_a_clear_from_the_agent_empties_what_the_wrapper_would_spool() -> None:
 # -- reef-<adapter> setup: check off what the newest release requires ---------------------------
 
 
+def _serve_newest(rows: list[dict]) -> list[dict]:
+    """The rows as the catalog lists them: the newest row that does not say ``active`` itself is the active one,
+    each row names its release as its artifact, and a row was activated unless it says otherwise."""
+    newest = max((index for index, row in enumerate(rows) if "active" not in row), default=None)
+    return [
+        {
+            "artifact_id": row.get("release_id"),
+            "activated": True,
+            **row,
+            "active": row.get("active", False) or index == newest,
+        }
+        for index, row in enumerate(rows)
+    ]
+
+
 class _ReleasesReef:
-    """A reef whose GET /reef/harness/releases answers ``rows``, whose step pages are ``pages`` and whose install
-    route serves ``install``; every request is recorded, and a step without a page answers the route's 404 text."""
+    """A reef whose GET /reef/harness/releases answers ``rows`` (see :func:`_serve_newest`), whose step pages are
+    ``pages`` and whose install route serves ``install``; every request is recorded, and a step without a page
+    answers the route's 404 text."""
 
     def __init__(self, rows: list[dict], *, pages: dict[int, str] | None = None, install: str | None = None) -> None:
         import http.server
         import threading
+
+        rows = _serve_newest(rows)
 
         self.seen: list[dict] = []
         seen = self.seen
@@ -2541,8 +2587,13 @@ class _ReleasesReef:
         self._server.shutdown()
 
 
-def _row(release_id: str, requires: list[dict] | None = None, *, pending: bool = False) -> dict:
-    row: dict = {"release_id": release_id, "pending": pending, "current": False, "operation": "training"}
+def _row(release_id: str, requires: list[dict] | None = None, *, inactive: bool = False) -> dict:
+    """A step row that made a release; an ``inactive`` one says ``active`` and ``activated`` false, so
+    :class:`_ReleasesReef` never makes it the active row."""
+    row: dict = {"release_id": release_id, "checkpoint": True, "operation": "training"}
+    if inactive:
+        row["active"] = False
+        row["activated"] = False
     if requires is not None:
         row["metrics"] = {"training_request": {"id": "q-1", "text": "text me", "requires": requires}}
     return row
@@ -2558,7 +2609,7 @@ def _setup_tree(tmp_path: Path, port: int, release_info: dict) -> tuple[str, Pat
 
 @pytest.mark.unit
 def test_setup_lists_the_head_rows_items_runs_checks_after_yes_and_records_the_check_offs(tmp_path, capsys) -> None:
-    """The newest row that is not pending is the head; ``--yes`` runs each unmet check; a passing one is checked
+    """The active row is the head; ``--yes`` runs each unmet check; a passing one is checked
     off in the release file, a failing one is not; a later run does not run a checked off item again."""
     ran = tmp_path / "ran"
     rows = [
@@ -2571,7 +2622,7 @@ def test_setup_lists_the_head_rows_items_runs_checks_after_yes_and_records_the_c
                 {"name": "twilio", "kind": "service", "check": "exit 3"},
             ],
         ),
-        _row("v3", [{"name": "later", "kind": "env"}], pending=True),
+        _row("v3", [{"name": "later", "kind": "env"}], inactive=True),
     ]
     reef = _ReleasesReef(rows)
     compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1", "requires": [], "setup": []})
@@ -2657,7 +2708,7 @@ def test_setup_asks_before_running_a_check_and_asks_for_an_unset_variables_value
 def test_setup_without_a_release_file_a_reef_or_any_item_says_so(tmp_path, capsys) -> None:
     import socket
 
-    reef = _ReleasesReef([_row("v1"), _row("v2", []), _row("v3", [{"name": "later", "kind": "env"}], pending=True)])
+    reef = _ReleasesReef([_row("v1"), _row("v2", []), _row("v3", [{"name": "later", "kind": "env"}], inactive=True)])
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
         assert setup("setup-scenario", "pi", compose, yes=True) == 0
@@ -2787,20 +2838,20 @@ def test_main_dispatches_setup_with_yes_and_marks_and_exits_with_its_status(tmp_
     assert called == [(("setup-scenario", "pi", str(tmp_path)), {"yes": True, "marks": ("a", "b")})]
 
 
-def _chain_row(release_id: str, parent: str | None, requires: list[dict] | None = None, *, pending: bool = False):
-    return {**_row(release_id, requires, pending=pending), "parent_release_id": parent}
+def _chain_row(release_id: str, parent: str | None, requires: list[dict] | None = None, *, inactive: bool = False):
+    return {**_row(release_id, requires, inactive=inactive), "parent_release_id": parent}
 
 
 @pytest.mark.unit
-def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, capsys) -> None:
+def test_setup_reads_the_chains_union_and_release_names_an_inactive_row(tmp_path, capsys) -> None:
     """What a release requires is every item over its chain, as the manifest lists it; ``--release`` names any
-    catalog row, a pending one included; an unknown id, a catalog with nothing served and a row without an id
+    catalog row, an inactive one included; an unknown id, a catalog with nothing served and a row without an id
     each say what they are, and an unknown ``--mark`` is exit 2 even when nothing is required."""
     rows = [
         _chain_row("v1", None),
         _chain_row("v2", "v1", [{"name": "TWILIO_SID", "kind": "env"}]),
         _chain_row("v3", "v2", []),
-        _chain_row("v4", "v3", [{"name": "later", "kind": "env", "check": "LATER"}], pending=True),
+        _chain_row("v4", "v3", [{"name": "later", "kind": "env", "check": "LATER"}], inactive=True),
     ]
     reef = _ReleasesReef(rows)
     compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
@@ -2813,7 +2864,7 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
         "    met",
         "reef-pi setup: every item is met; reef-pi update installs the release",
     ]
-    # The pending v4 by name: its chain's item, checked off already, and its own.
+    # The inactive v4 by name: its chain's item, checked off already, and its own.
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, yes=True, release="v4") == 0
     out = capsys.readouterr().out.splitlines()
@@ -2834,7 +2885,7 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
     )
     reef.close()
     # Nothing served yet: said so, and there is nothing to check off.
-    reef = _ReleasesReef([_chain_row("v9", None, [{"name": "x", "kind": "env"}], pending=True)])
+    reef = _ReleasesReef([_chain_row("v9", None, [{"name": "x", "kind": "env"}], inactive=True)])
     (tmp_path / "waiting").mkdir()
     compose, _ = _setup_tree(tmp_path / "waiting", reef.port, {"release_id": "v1"})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
@@ -2842,7 +2893,7 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
     assert capsys.readouterr().out == "reef-pi setup: no served release yet\n"
     reef.close()
     # A row without an id prints without one; an unknown mark is refused before the nothing required return.
-    reef = _ReleasesReef([{"pending": False, "operation": "creation", "current": True}])
+    reef = _ReleasesReef([{"operation": "creation", "checkpoint": True, "active": True}])
     (tmp_path / "bare").mkdir()
     compose, _ = _setup_tree(tmp_path / "bare", reef.port, {"release_id": "v1"})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
@@ -2976,7 +3027,7 @@ def test_setup_json_lists_the_items_with_met_from_the_environment_the_env_file_a
         "Check the service and scenario, then refresh the release list before retrying.\n"
     )
     reef.close()
-    reef = _ReleasesReef([_row("v9", [{"name": "x", "kind": "env"}], pending=True)])
+    reef = _ReleasesReef([_row("v9", [{"name": "x", "kind": "env"}], inactive=True)])
     (tmp_path / "waiting").mkdir()
     compose, _ = _setup_tree(tmp_path / "waiting", reef.port, {"release_id": "v1"})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
@@ -3797,13 +3848,17 @@ def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
 
 
 class _DoctorReef:
-    """A reef that serves only the harness routes, checks the bearer on them, and names one served head."""
+    """A reef that serves only the harness routes, checks the bearer on them, and names one active release."""
 
     def __init__(self, token: str, head: str, rows: list[dict] | None = None) -> None:
         import http.server
         import threading
 
-        catalog = rows if rows is not None else [{"release_id": head, "pending": False}]
+        catalog = (
+            rows
+            if rows is not None
+            else [{"release_id": head, "artifact_id": head, "checkpoint": True, "active": True, "activated": True}]
+        )
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -3834,11 +3889,15 @@ class _DoctorReef:
 
 @pytest.mark.unit
 def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypatch) -> None:
-    """A pending release is served to nobody until a person promotes it; doctor says so
-    with the step page, and stops saying so once a promote row names it."""
+    """An inactive release is served to nobody until a person activates it; doctor says so
+    with the step page, and stops saying so once it is active."""
     from reef.harness.client.wrapper import doctor
 
-    held = [{"release_id": "rel-3", "pending": False}, {"release_id": "rel-4", "pending": True}]
+    passed = {"metrics": {"selected": True}, "checkpoint": True}
+    held = [
+        {"release_id": "rel-3", "artifact_id": "rel-3", "checkpoint": True, "active": True, "activated": True},
+        {"release_id": "rel-4", "artifact_id": "rel-4", **passed, "active": False, "activated": False},
+    ]
     reef = _DoctorReef(token="dummy", head="rel-3", rows=held)
     compose, _ = _ask_tree(tmp_path, reef.port)
     binary = tmp_path / "fake-pi"
@@ -3848,18 +3907,15 @@ def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypa
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
-    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-3 installed, the active release" in line for line in out)
     (review,) = [line for line in out if line.startswith("ok  review")]
     assert f"rel-4 waits for your review: http://127.0.0.1:{reef.port}/reef/harness/releases/1/page" in review
     reef.close()
 
-    promoted = [
-        *held,
-        {"release_id": "rel-5", "pending": False, "operation": "promote", "rollback_target_release_id": "rel-4"},
-    ]
-    reef = _DoctorReef(token="dummy", head="rel-3", rows=promoted)
-    (tmp_path / "promoted").mkdir()
-    compose, _ = _ask_tree(tmp_path / "promoted", reef.port)
+    activated = [{**held[0], "active": False}, {**held[1], "active": True, "activated": True}]
+    reef = _DoctorReef(token="dummy", head="rel-3", rows=activated)
+    (tmp_path / "activated").mkdir()
+    compose, _ = _ask_tree(tmp_path / "activated", reef.port)
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     assert not [line for line in capsys.readouterr().out.splitlines() if line.startswith("ok  review")]
     reef.close()
@@ -3883,7 +3939,7 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
     assert any(line.startswith("ok  binary") and "0.84.2" in line for line in out)
     assert any(line.startswith("ok  tool") and "rg at /usr/bin/rg" in line for line in out)
     assert any(line.startswith("!!  tool") and "fd missing: install fd" in line for line in out)
-    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-3 installed, the active release" in line for line in out)
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     # A wrong token in the shell wins over the binding's, and the service says so.
@@ -3923,8 +3979,8 @@ def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, ca
     from a browser as the wait's."""
     from reef.harness.client.wrapper import doctor
 
-    pending = _step_row("rel-2222-pending", {"selected": True}, pending=True)
-    reef = _ReleasesReef([_row("rel-1"), pending])
+    inactive = _step_row("rel-2222-inactive", {"selected": True}, inactive=True)
+    reef = _ReleasesReef([_row("rel-1"), inactive])
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "rel-1"})
     binary = tmp_path / "fake-pi"
     binary.write_text("#!/bin/sh\necho 0.84.2\n")
@@ -3933,7 +3989,7 @@ def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, ca
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
-    assert any(line.startswith("ok  release") and "rel-1 installed, the served head" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-1 installed, the active release" in line for line in out)
     page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={PAGE_KEY}"
     assert out[-1].startswith("ok  review") and out[-1].endswith(f"rel-2222 waits for your review: {page}")
     reef.close()

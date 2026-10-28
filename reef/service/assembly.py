@@ -33,6 +33,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
+from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
@@ -280,8 +281,12 @@ def build_dispatcher(
     environ: Mapping[str, str] | None = None,
     hold_local_cycles: bool = False,
     evaluation_token: str | None = None,
+    new_artifacts: NewArtifacts | None = None,
 ) -> Dispatcher:
     """Build the dispatcher of a service.
+
+    ``new_artifacts`` observes the scenario storage's commits, so the service
+    evaluates each new artifact with its scenario's settings.
 
     A composite recipe's evaluation calls come back to this service, so a
     candidate of one component is evaluated against the release the others
@@ -340,6 +345,8 @@ def build_dispatcher(
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
             scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
+        if new_artifacts is not None:
+            scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
         artifact_backend = (
             {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
             if settings.artifact_backend == "git_lfs"
@@ -421,11 +428,13 @@ def build_app(
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token; a restart issues a new one with the recipe it rebuilds.
     evaluation_token = secrets.token_urlsafe(32) if settings.tokens else None
+    new_artifacts = NewArtifacts()
     dispatcher = build_dispatcher(
         settings,
         environ=environ,
         hold_local_cycles=True,
         evaluation_token=evaluation_token,
+        new_artifacts=new_artifacts,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
@@ -440,6 +449,7 @@ def build_app(
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
+            evaluations=ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts),
         )
     except BaseException:
         with suppress(Exception):

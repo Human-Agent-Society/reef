@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, kw_only=True)
 class ReefineRecipe(CordisRecipe):
-    """Refine a pi harness once per instruction, with extensions held for review.
+    """Refine a pi harness once per instruction; a change to an extension waits for a person to activate it.
 
     Configuration defaults enable harness requests and update notices, and
     answer a request with the agent proposer (:mod:`reef.recipe.reefine.agent`)

@@ -509,11 +509,12 @@ The session contract is:
        scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
    * - ``history()``
-     - Committed ``CommitRecord`` values in step order, including rollback and
-       pending releases. This is authoritative after an ambiguous commit error.
+     - Committed ``CommitRecord`` values in step order: training steps
+       (including inactive releases), activations, and new training starts.
+       This is authoritative after an ambiguous commit error.
    * - ``training_run_position()``
-     - The last rollback step and the count of training commits after it, for
-       experiment run numbering.
+     - The step of the last ``train_from`` commit and the count of training
+       commits after it, for experiment run numbering.
    * - ``commit_step(expected_step=..., commit=...)``
      - Persist the ``CommitRecord`` and its consumption progress, returning the
        canonical accepted record. Its step must equal ``expected_step + 1``.
@@ -524,9 +525,10 @@ The session contract is:
    * - ``close()``
      - Release the session's record and commit resources; repeated calls are safe.
 
-``CommitRecord`` carries the artifact ref, algorithm state, record watermark,
-consumed IDs, checkpoint/pending flags, operation and rollback
-target, metrics, and training job identity. The store must atomically validate
+``CommitRecord`` carries the operation (``training``, ``activate`` or
+``train_from``), the artifact ref, algorithm state, record watermark,
+consumed IDs, checkpoint/pending flags, metrics, and training job identity.
+An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
 returns the original record, even after later steps have committed; only
@@ -548,7 +550,8 @@ processor memory without repeating work. It does not modify stored bodies.
 
 Artifact bytes and backend head movement remain outside ``ScenarioStore``.
 ``ScenarioCommitter`` owns their order around store settlement, including
-pending releases, rollback, and checkpoint reconciliation. See `Commit ordering
+inactive releases, activation, new training starts, and checkpoint
+reconciliation. See `Commit ordering
 <../advanced_topics/state-model.rst#commit-ordering>`__. Step validation does not
 provide distributed leases or authorize multiple active training writers.
 
@@ -1508,9 +1511,9 @@ exact result it was given.
 |                                   | carry the evaluation it was given             |
 +-----------------------------------+-----------------------------------------------+
 
-A rejection leaves the previous artifact serving, and Reef publishes the
-candidate as a release held for review (``POST
-/reef/scenarios/{scenario}/promote`` serves it). An exception is fail-closed:
+A rejection leaves the active release serving, and Reef publishes the
+candidate as an inactive artifact (``POST
+/reef/scenarios/{scenario}/activate`` serves it). An exception is fail-closed:
 Reef does not publish the candidate. Make evaluations
 idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
 result was not durably committed. The deployment names the plugin class in
@@ -1520,7 +1523,8 @@ its ``evaluation`` section (`Configuration
 Without an ``evaluation`` section, a weight recipe uses
 ``AlwaysSelectCheckpointPlugin`` (``reef.evaluation.evaluators``): it selects
 every saved checkpoint and adds no metrics. ``ManualPromotionPlugin`` selects
-none, so a person promotes each release. The commit already records the
+none, so a person activates each artifact. It keeps this name until the
+activation rule moves out of training (RFC #965, step 3). The commit already records the
 checkpoint's ``training_metrics``, and it refuses an evaluation or decision
 metric whose key is a training metric or ``selected``, ``selection`` or
 ``training_job``. A training component only trains: it runs no evaluation of
@@ -1575,10 +1579,9 @@ set the capabilities on each ``ComponentSurface``.
 | Field         | Type                        | Contract                                     |
 +===============+=============================+==============================================+
 | ``validator`` | ``ArtifactValidator``       | admit the component before publication and   |
-|               |                             | rollback; the default accepts any artifact   |
+|               |                             | activation; the default accepts any artifact |
 +---------------+-----------------------------+----------------------------------------------+
-| ``loader``    | ``ArtifactLoader | None``   | recover the serving head, make published     |
-|               |                             | releases servable                            |
+| ``loader``    | ``ArtifactLoader | None``   | make published releases servable             |
 +---------------+-----------------------------+----------------------------------------------+
 | ``inference`` | ``InferenceHooks | None``   | prepare provider requests, verify responses  |
 +---------------+-----------------------------+----------------------------------------------+
@@ -1610,7 +1613,8 @@ Neither inherits from the other, and no trainer holds a serving engine.
   size in ``pipeline.sample2job.config.job_samples``.
 * An ``InferenceRuntime`` executes requests, manages admission, and loads
   published releases. It loads a release when a
-  scenario starts, when a release is committed, and when one is rolled back.
+  scenario starts, when a committed release is activated, and when a person
+  activates one.
   Its ``model_path`` property supplies the default model name for harness
   bindings; the base implementation returns an empty string for runtimes whose
   requests select the model. ``per_scenario_adapters`` is true for a runtime
@@ -1618,14 +1622,22 @@ Neither inherits from the other, and no trainer holds a serving engine.
   kind of the weights that the runtime serves from a release: ``model``, the
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
+  ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
+  for an artifact on request, without loading it, or None, the default, for a
+  runtime that serves only its loaded artifact. A runtime whose handler answers
+  each call from the artifact that the call names overrides it, as the Tinker
+  runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
+  of a model artifact needs it.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` orders both around each commit. It publishes a
   selected checkpoint, has the runtime serve it
   (``WeightRuntime.activate_checkpoint``), and then writes the commit record.
-  A failed publication therefore leaves serving unchanged. For a rollback it
-  first imports the release into the training component, then publishes and
-  serves the target the same way.
+  A failed publication therefore leaves serving unchanged. For an activation
+  it has the runtime serve the release that binds the artifact, then writes
+  an ``activate`` record; in a scenario of several components it first
+  publishes that release, with no new content. For a ``train-from`` it has
+  the trainer import the artifact, then writes a ``train_from`` record.
 
 ``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:
@@ -1638,8 +1650,8 @@ Neither inherits from the other, and no trainer holds a serving engine.
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
   weights. After it serves a release, it cannot return to the base model,
-  because the engines do not keep the base model's files. Roll back to a
-  saved release instead.
+  because the engines do not keep the base model's files. Activate a saved
+  release instead.
 
 Two training scenarios can share a deployment only if its training component
 allows it (``shares_scenarios``) and its runtime serves each scenario its own
@@ -1739,8 +1751,8 @@ loop:
    * - ``import_start(release)``
      - Copy a published release into the component's own storage and return
        it as a start (``None`` for a release without weights). Reef calls it
-       for a rollback. Raise ``ValueError`` when no job can start from those
-       weights.
+       for a ``train-from``. Raise ``ValueError`` when no job can start from
+       those weights.
    * - ``fresh_start(start)``
      - Return a start with the weights of ``start`` and no training state: a
        new optimizer state, the learning-rate schedule at step 0, and an
@@ -1802,10 +1814,10 @@ reports ``rollout_rewards``, the rewards of each task's rollouts, by task
 name. A component that cannot roll out tasks refuses such a job in
 ``check_job``; Slime does.
 
-For a rollback, Reef first imports the release with ``import_start``. It then
-writes the rollback commit and cancels the running job. The next job starts
-from the imported release. A component that cannot load a release raises
-``ValueError``, and Reef refuses the rollback with HTTP 409.
+For a ``train-from``, Reef first imports the release with ``import_start``
+and cancels the running job. It then writes the ``train_from`` commit. The
+next job starts from the imported release. A component that cannot load a
+release raises ``ValueError``, and Reef refuses the request with HTTP 400.
 
 Tinker integration
 ------------------
@@ -1830,8 +1842,8 @@ checkpoint's PEFT adapter into ``adapter/``, and Tinker's adapter as Tinker
 saved it into ``tinker-adapter/`` (``TinkerClient.download``); its ``release_format`` is
 ``ReleaseFormat("adapter", lora_rank, ("all",))``; without it, the release
 format is ``None``. Reef's engines can then serve the adapters
-(``inference.serving: engines``). Rollback works: the component imports the
-release's manifest as a start.
+(``inference.serving: engines``). Train-from works: the component imports
+the release's manifest as a start.
 
 ``TrainingDeployment`` (``reef.train.deployment``) is a training backend's
 deployment definition. ``default_serving`` (``engines`` unless the backend

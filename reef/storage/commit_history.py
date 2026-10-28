@@ -17,6 +17,7 @@ from threading import RLock
 
 from reef.core.errors import ReefError
 from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.storage.tasks import TaskStorage
@@ -51,8 +52,9 @@ class CommitHistory(ABC):
       ``CommitHistoryError``. Otherwise ``records()`` is ``(*H, r)`` afterwards.
     - ``locked()``: no other session or process appends while the block runs.
     - ``training_run_position()`` is ``(s, n)``: ``s`` is the step of the last
-      rollback in ``H``, or 0 when there is none, and ``n`` is the number of
-      training records in ``H`` with a step above ``s``.
+      ``"train_from"`` record in ``H``, or 0 when there is none, and ``n`` is
+      the number of training records in ``H`` with a step above ``s``. An
+      activation does not start a new training run.
     """
 
     @property
@@ -78,11 +80,11 @@ class CommitHistory(ABC):
         """Serialize a read-check-append sequence with other sessions and processes."""
 
     def training_run_position(self) -> tuple[int, int]:
-        """Return the latest rollback step and the training steps after it."""
+        """Return the step of the latest new training start and the number of training steps after it."""
         run_segment = 0
         run_step = 0
         for record in self.records():
-            if record.operation == "rollback":
+            if record.operation == "train_from":
                 run_segment = record.step
                 run_step = 0
             elif record.operation == "training" and record.step > run_segment:
@@ -91,11 +93,11 @@ class CommitHistory(ABC):
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """One open session of a scenario: its records, task stores, uploaded trajectories and commits.
+    """One open session of a scenario: its records, task stores, uploaded trajectories, evaluations and commits.
 
     Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
-    ``trajectories`` and ``commit_history`` hold that scenario's state; the
-    bundled storages keep all four in one database. Every record in the
+    ``trajectories``, ``evaluations`` and ``commit_history`` hold that
+    scenario's state; the bundled storages keep all five in one database. Every record in the
     history names ``scenario``; a read that finds another name raises
     ``ReefError``. ``initial_step`` is a non-negative step for an existing
     scenario constructed at a saved step. The current step is the last step in
@@ -115,6 +117,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         *,
         tasks: TaskStorage,
         trajectories: TrajectoryStore,
+        evaluations: EvaluationStore,
         initial_step: int = 0,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
@@ -125,6 +128,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._records = records
         self._tasks = tasks
         self._trajectories = trajectories
+        self._evaluations = evaluations
         self._commit_history = commit_history
         self._initial_step = initial_step
         self._cached_history: tuple[CommitRecord, ...] = ()
@@ -153,6 +157,12 @@ class CommitHistoryScenarioStore(ScenarioStore):
         with self._lock:
             self._ensure_open()
             return self._trajectories
+
+    @property
+    def evaluations(self) -> EvaluationStore:
+        with self._lock:
+            self._ensure_open()
+            return self._evaluations
 
     @property
     def commit_history(self) -> CommitHistory:

@@ -4,8 +4,8 @@ The trainer runs transformers' ``Qwen3_5VisionModel``. The rollout engine runs S
 ``Qwen3VLMoeVisionModel`` (``python/sglang/srt/models/qwen3_vl.py``). Both compute the same function, but
 five ops use different kernels or a different rounding order. In bf16 the tower amplifies these one-ULP
 differences into 5 to 10 percent relative L2 at its output (5.4% for Qwen3.5-0.8B, 10.4% for Qwen3.5-2B, 16
-images). So the image features (and the log-probs of image samples) differ between training and rollout. ``match_sglang_vision_numerics`` replaces these five ops
-with SGLang's versions:
+images). So the image features (and the log-probs of image samples) differ between training and rollout.
+``match_sglang_vision_numerics`` replaces these five ops with SGLang's versions:
 
 1. RoPE ``inv_freq`` in fp32. HF keeps it in a buffer that ``.to(bf16)`` casts to bf16. SGLang computes it in
    fp32 (``layers/rotary_embedding/base.py``, ``_compute_inv_freq``).
@@ -25,9 +25,9 @@ The match is exact only under three conditions:
 - The engine uses the SDPA vision attention backend. For an engine that Slime starts, pass
   ``--sglang-mm-attention-backend sdpa``. For an engine that Reef starts, set ``mm-attention-backend: sdpa``
   under ``inference.options``. On CUDA, SGLang uses another backend by default.
-- The engine encodes each image in its own tower call. On the regular engine path of the SGLang pin
-  ``f7ea06e1``, the engine encodes the cache-miss images of one request (in the current prefill chunk) in one
-  call, so this holds for at most one cache-miss image per request. The engine must encode images itself: with no
+- The engine encodes each image in its own tower call. The regular engine path of the SGLang pin ``f7ea06e1``
+  encodes the cache-miss images of one request (in the current prefill chunk) in one call. So this holds for at
+  most one cache-miss image per request. The engine must encode images itself: with no
   ``encoder`` worker (EPD) and with ``mm-enable-dp-encoder`` off. The EPD encoder at the pin merges the images of
   up to ``SGLANG_ENCODER_MAX_BATCH_SIZE`` (default 8) requests in one call, and the DP encoder shards images
   across ranks.
@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import types
+from collections.abc import Callable
 
 import torch
 from torch.nn import functional
@@ -54,7 +55,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb_eager(q, k, cos, sin, unsqueeze_dim=1):
+def apply_rotary_pos_emb_eager(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1
+) -> tuple[torch.Tensor, torch.Tensor]:
     # Same body as sglang.srt.layers.rotary_embedding.utils.apply_rotary_pos_emb_native at the pin f7ea06e1.
     orig_q_dtype = q.dtype
     orig_k_dtype = k.dtype
@@ -66,17 +69,22 @@ def apply_rotary_pos_emb_eager(q, k, cos, sin, unsqueeze_dim=1):
     return q_embed.to(orig_q_dtype), k_embed.to(orig_k_dtype)
 
 
-def get_local_rope_apply():
+def get_local_rope_apply() -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
     """A copy of SGLang's compiled RoPE apply, for environments without sglang."""
     return torch.compile(dynamic=True, backend="inductor")(apply_rotary_pos_emb_eager)
 
 
-def get_rope_apply():
+def get_rope_apply() -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    """Return SGLang's compiled ``apply_rotary_pos_emb_native``.
+
+    The Reef image build checks that this import works. Without SGLang (for example outside the image), return the
+    local compiled copy and log a warning.
+    """
     try:
         from sglang.srt.layers.rotary_embedding.utils import apply_rotary_pos_emb_native
 
         return apply_rotary_pos_emb_native
-    except ImportError as e:  # sglang is optional on the training side
+    except ImportError as e:
         logger.warning(f"Cannot import SGLang's apply_rotary_pos_emb_native ({e!r}); using a local compiled copy.")
         return get_local_rope_apply()
 
@@ -131,10 +139,13 @@ def transformers_api_supported(version: str | None = None) -> bool:
     return (5, 12) <= Version(version).release[:2] < (5, 14)
 
 
-def match_sglang_vision_numerics(vision_model, rope_apply=None) -> bool:
+def match_sglang_vision_numerics(
+    vision_model: torch.nn.Module, rope_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None
+) -> bool:
     """Patch a transformers ``Qwen3_5VisionModel`` in place. See the module docstring.
 
-    Returns False and leaves the model unchanged for an unsupported transformers version.
+    Returns False and leaves the model unchanged for an unsupported transformers version. ``rope_apply`` is only for
+    tests. Tests that do not need SGLang pass the local copy. Slime calls this function without it.
     """
     if not transformers_api_supported():
         import transformers
@@ -169,8 +180,8 @@ def match_sglang_vision_numerics(vision_model, rope_apply=None) -> bool:
         return x.permute(0, 4, 1, 2, 3).reshape(-1, self.embed_dim)
 
     def attention_forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):  # 3. and 5.
-        s = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(s, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        seq_length = hidden_states.shape[0]
+        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
         cos, sin = position_embeddings
         q, k = rope_apply(q.contiguous(), k.contiguous(), cos, sin)
         q, k, v = (x.transpose(0, 1).unsqueeze(0) for x in (q, k, v))
@@ -178,23 +189,26 @@ def match_sglang_vision_numerics(vision_model, rope_apply=None) -> bool:
         out = functional.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, dropout_p=0.0, scale=self.scaling, is_causal=False
         )
-        out = out.transpose(1, 2).contiguous().reshape(s, -1).contiguous()
+        out = out.transpose(1, 2).contiguous().reshape(seq_length, -1).contiguous()
         return self.proj(out)
 
     cls_forward = type(vision_model).forward
 
     def vision_forward(self, hidden_states, grid_thw, **kwargs):  # 2. and one call per image
+        total_patch_count = int(grid_thw.prod(dim=1).sum())
+        if total_patch_count != hidden_states.shape[0]:
+            raise ValueError(f"pixel rows {hidden_states.shape[0]} != sum of grid t*h*w {total_patch_count}")
         pooled, last, offset = [], [], 0
         for grid in grid_thw:
             grid = grid.view(1, 3)
-            n = int(grid.prod())
+            patch_count = int(grid.prod())
             indices, _ = get_vision_bilinear_indices_and_weights(
                 grid, num_grid_per_side=self.num_grid_per_side, spatial_merge_size=self.config.spatial_merge_size
             )
             weights = sglang_bilinear_weights(grid, self.num_grid_per_side, self.config.spatial_merge_size)
             output = cls_forward(
                 self,
-                hidden_states[offset : offset + n],
+                hidden_states[offset : offset + patch_count],
                 grid_thw=grid,
                 bilinear_indices=indices.to(grid.device),
                 bilinear_weights=weights,
@@ -202,9 +216,7 @@ def match_sglang_vision_numerics(vision_model, rope_apply=None) -> bool:
             )
             pooled.append(output.pooler_output)
             last.append(output.last_hidden_state)
-            offset += n
-        if offset != hidden_states.shape[0]:
-            raise ValueError(f"pixel rows {hidden_states.shape[0]} != sum of grid t*h*w {offset}")
+            offset += patch_count
         return BaseModelOutputWithPooling(last_hidden_state=torch.cat(last), pooler_output=torch.cat(pooled))
 
     vision_model.rotary_pos_emb.forward = types.MethodType(rotary_forward, vision_model.rotary_pos_emb)

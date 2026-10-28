@@ -154,7 +154,7 @@ raises, or calls the context past its budget of transitions, ends the turn
 with ``LOOP_ERROR`` and fails the checks, and the first end of a turn is final
 whatever the loop code catches. Loop code runs inside the loop's own
 process, so a win that creates, changes or removes a ``native_loop`` is always
-a pending release a person promotes, whether or not ``evolution.review_kinds``
+an inactive release that a person activates, whether or not ``evolution.review_kinds``
 names the kind, and ``harness_try`` refuses to mount one on a serving process:
 the model proposes a loop, a person serves it.
 
@@ -438,16 +438,19 @@ Two settings shape the evaluation result:
   proposer receives them as ``rejected`` and can stop re-proposing what the
   evaluation already refused.
 
-By default a successful evaluation is served at once.
-``evolution.publish: review`` holds every win as a pending release instead,
+By default Reef activates the release of a successful evaluation at once.
+``evolution.publish: review`` makes every win an inactive release instead,
 and ``evolution.review_kinds`` (a
-list of node kinds, empty by default) holds only the wins that touch those
-kinds, so ``[code_extension]`` lets rules and config auto publish while code
+list of node kinds, empty by default) does so only for the wins that touch those
+kinds, so ``[code_extension]`` lets rules and config serve at once while code
 waits for a person; a win that touches a ``native_loop`` waits whether or not
-the list names it. A pending release sits in the catalog with its evaluation
-metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
-names it; the loop keeps evolving from it in the meantime, so promoting the
-latest pending release serves everything accumulated since the head.
+the list names it. An inactive release sits in the catalog with its evaluation
+metrics and is never served until ``POST /reef/scenarios/{scenario}/activate``
+names it. The loop keeps evolving from it in the meantime, so activating the
+latest inactive release serves everything accumulated since the active one.
+`Activate an artifact <operate.rst#activate-an-artifact>`__ describes
+activation. `Train from an artifact <operate.rst#train-from-an-artifact>`__
+describes how to make the loop evolve from another artifact.
 
 Similarly, for more detail, refer to `Write a harness method
 <../developer-guide/write-a-harness-method.rst>`__.
@@ -488,11 +491,11 @@ closes that gap: every ``N`` steps, and at once when the served model or the
 adapter version has changed since the publish, the loop re-evaluates the last
 published tree against the tree it replaced on the current suite instead of
 proposing. If
-the older tree now wins, the loop publishes it, which rolls the deployment
-back; if the published tree still wins, nothing changes. Only the tree from
-the most recent publish is kept as a rollback target, and a rollback consumes
-it, so the recheck reverts one bad publish rather than walking the whole
-history back.
+the older tree now wins, the loop publishes it again as a new release, which
+returns the deployment to the older tree; if the published tree still wins,
+nothing changes. Only the tree from the most recent publish is kept for a
+recheck, and a revert uses it up, so the recheck reverts one bad publish
+rather than walking the whole history back.
 
 Cost
 ^^^^
@@ -703,14 +706,14 @@ reference run finished in 63 s on Qwen3-8B: one reported trace filled the
 step, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
 notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
-tied the current tree on every task and lost the gate. The run has succeeded when one
-step wins its gate and ``GET /reef/harness`` serves a release other than the seed.
+tied the current tree on every task and lost the evaluation. The run has succeeded when one
+step wins its evaluation and ``GET /reef/harness`` serves a release other than the seed.
 ``/reef/harness/releases`` then shows that step's training row with
 ``published: true`` in its metrics.
 
 If ``/reef/harness`` still serves the seed after a few minutes, the run has
 failed. A server without tool calling can start but fails every rollout:
-both sides tie, no candidate ever wins, and the head never moves. The step's
+both sides tie, no candidate ever wins, and the active release never changes. The step's
 row names the cause. Vendor install failures instead refuse deployment
 startup. Confirm that
 ``~/.local/share/reef-harness/pi/node_modules/.bin/pi --version`` runs and
@@ -725,7 +728,7 @@ A model that answers all three tasks correctly still trains one step per
 report. Evaluation runs the tasks again on the current and candidate trees,
 so passing the initial tasks does not determine whether a candidate will
 win, tie, or lose. A step publishes only when its candidate wins; rejected
-or skipped steps leave the served tree unchanged. ``run.py`` counts all
+or skipped steps leave the active release unchanged. ``run.py`` counts all
 submitted reports, waits for the steps they triggered up to its deadline,
 and prints how many reports it submitted for steps and how many of them failed.
 
@@ -776,20 +779,20 @@ environment in its project, and code there runs as you when ``reef-pi``
 starts, before its check.
 
 ``reef-pi doctor`` checks the interpreter and imports, service authentication,
-agent binary, tools on PATH, and installed release against the served head.
+agent binary, tools on PATH, and installed release against the active release.
 It exits 0 when all checks pass and lists releases awaiting review, using the
 same descriptions as ``reef-pi evolve --wait``.
 
 ``reef-pi --help`` (also ``-h`` or ``help``) lists wrapper subcommands before
 pi's help: ``report``, ``evolve``, ``wait``, ``page``, ``doctor``, ``setup``,
-and ``update``. Other arguments run pi. For pinning, rollback, and raw manifest
+and ``update``. Other arguments run pi. For pinning, activation, and raw manifest
 routes, see `HTTP API <../reference/http-api.rst#harness-artifacts>`__.
 
 Reef pins Claude Code's version, so ``reef-claude`` runs Claude Code with
 ``DISABLE_UPDATES=1`` unless your shell sets it. ``reef-claude upgrade`` and
 ``reef-claude install`` reach Claude Code's own update and install commands,
 which print that updates are disabled, and ``reef-claude update`` is Reef's
-own command, which installs the served release. Reef refuses a harness tree
+own command, which installs the active release. Reef refuses a harness tree
 whose ``settings.json`` sets ``DISABLE_UPDATES``, but a ``.claude/settings.json``
 of your own in the project folder can still turn those commands back on:
 Claude Code applies that file's ``env`` over the environment, and it reads
@@ -881,7 +884,7 @@ release catalog every 5 s for the step that consumed the request, says
 progress (``GET /reef/harness/requests/<id>/progress``) shows a step took it,
 and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``
-for; a pending one with ``This release changes an extension, so read it before
+for; an inactive one with ``This release changes an extension, so read it before
 it runs: /versions <version> opens the page, /versions <version> install
 serves it. Page: <link>``; a rejected step with the evaluation's reason and
 the first task it missed, with why the rollout failed or its score and the
@@ -892,14 +895,14 @@ only when the rollouts ran, left a transcript and scored low; a skipped step wit
 why (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
 points the change left out, and after a rejection the same points read as
-``review notes (they did not decide this result)``. The exit status is 0 for a selected or pending
+``review notes (they did not decide this result)``. The exit status is 0 for a selected or inactive
 release, 1 for a rejected or skipped step, 2 when the timeout passes first.
 On a terminal the wrapper then hands you the next step: a selected release
 asks ``Install now? [Y/n]`` and, on yes, runs ``reef-pi setup`` for it and
 then ``reef-pi update``, closing with ``Installed release <id>. Restart
-reef-pi to use it.``; a pending release names ``reef-pi page <version>`` to
-read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
-the new head the same way. Declined, or in a script without a terminal,
+reef-pi to use it.``; an inactive release names ``reef-pi page <version>`` to
+read it, asks ``Activate now? [y/N]`` and, on yes, activates it and installs
+that same release the same way. Declined, or in a script without a terminal,
 it prints the commands to run instead: ``reef-pi update``, with ``reef-pi
 setup`` first only while the release requires something this machine has
 not met. ``update`` keeps the binary where the first install put it.
@@ -939,9 +942,9 @@ keeps beside a notice. If the step settles while you are between turns, the
 session offers its install right there; while you are mid turn it stays a
 report, so your input is never taken away, and the next session start offers
 the same release. ``/versions <version> install`` starts the same install
-whenever you are ready, after a confirmation linking the step's page. A
-release still held back from the served head is served as part of installing
-it, so installing is the one decision. Installation runs ``reef-pi update`` for that release, collects
+whenever you are ready, after a confirmation linking the step's page. An
+inactive release is activated as part of installing it, so installing is the
+one decision. Installation runs ``reef-pi update`` for that release, collects
 its setup items and ends with ``Installed release <id8>. Type /reload to
 load it now.`` You can also use ``reef-pi update`` and ``reef-pi setup``
 from a separate terminal. A request filed before a restart, or settled
@@ -964,9 +967,9 @@ Reef's entries (``reef-version-check``, ``reef-requests``,
 evolved extension runs in pi's process with your privileges, so the
 tutorial's ``configs/deployment.yaml`` sets
 ``evolution.review_kinds: [code_extension]`` beside ``requests: true`` and
-``version_check: true``: a release that touches one waits for
-``POST /reef/scenarios/{scenario}/promote`` before any session installs it;
-promote it as shown below. ``configs/serve.yaml`` and
+``version_check: true``: a release that touches one stays inactive until
+``POST /reef/scenarios/{scenario}/activate`` names it, and no session installs
+it before then; activate it as shown below. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
 set none of the three. The built-in ``reef.recipe.reefine:ReefineRecipe`` is available through
 ``reef serve --recipe reefine``. ``tutorials/reefine/`` runs this path end to
@@ -996,8 +999,8 @@ asks ``run it? [y/N]`` before running a command (``--yes`` answers for
 scripts), records what passed in the ``.reef-harness-release`` release
 metadata file under ``setup`` with the check it stood for, and exits 0
 once every item is met; ``reef-pi setup --mark <name>`` checks an item off
-by hand, and ``reef-pi setup --release <id>`` reads a pending release's
-items, so you check them off before you promote it. An item whose check
+by hand, and ``reef-pi setup --release <id>`` reads an inactive release's
+items, so you check them off before you activate it. An item whose check
 changed since its check off is asked again.
 
 An ``env`` item is met when its variable (the check, else the name) is set
@@ -1021,12 +1024,12 @@ unknown or non-env name; the value is an argument, never shell source);
 ``reef-pi setup --run NAME`` runs that item's check without asking and
 checks it off when it passes (exit 0 when met, 1 otherwise, 2 for an
 unknown name). ``reef-pi update`` fetches the install script for the
-served head (``--release <id>`` for another release) with your token and
+active release (``--release <id>`` for another release) with your token and
 runs it for your install root, printing the installed release; while the
 release requires an item you have not met, it prints the items and exits
 3 without installing. On a fresh machine install the release the refusal
 names first (it requires nothing, so ``reef-pi`` exists), run ``reef-pi
-setup`` for the head's list, then ``reef-pi update``. Until every item is
+setup`` for the active release's list, then ``reef-pi update``. Until every item is
 met the update notice, in a session with the ``reef-pi`` wrapper on disk,
 asks ``Set up release <id8> now?`` with the list and collects what is
 missing the same way (each item once, a check only after your yes), then
@@ -1045,10 +1048,10 @@ through setup. No check or installation command runs at session start.
 See what a version is with ``/versions`` in a ``reef-pi`` session: an
 aligned table, oldest first, with the version (``v0``, ``v1``, ...: the
 row's step), the first eight characters of the release id, the result (``selected``, ``rejected``, ``skipped``,
-``pending``, ``promoted at vN`` once a later promote serves a pending
-release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
+``inactive`` for a release that was never activated, else the row's
+operation: ``creation`` or
 ``recovery``), and a separate status column marking ``installed`` on the
-version this tree runs and ``current`` on the served head. Each request
+version this tree runs and ``active`` on the active release. Each request
 summary appears below its row, with line breaks collapsed to spaces. The
 footer explains the status markers and lists the details and install commands.
 ``/versions <version>`` prints the link to that step's page,
@@ -1062,13 +1065,12 @@ diff against the release it ran on), Result (the evaluation's result and numbers
 and the step record directory when ``evolution.step_record_dir`` is set),
 Setup (what the release needs from you: the step's own items, then those
 carried from earlier steps) and Chain (the parent, this release, and its
-children: the steps evaluated on it and any promote or rollback made on it,
-each a link to its own page; for
-a rejected or skipped step, the head it ran on). The line under the title
-carries the release id, the commit time and ``Currently served`` on the head.
+children: the steps evaluated on it, each a link to its own page; for
+a rejected or skipped step, the release it ran on). The line under the title
+carries the release id and the commit time. On the active release it also
+carries the chip ``Active release``.
 ``/versions <version> install`` runs the install and setup flow for that
-step after you confirm it, serving a release still held back from the head
-first. The page holds the proposer's plan, its review and the numbers, so
+step after you confirm it, and activates an inactive release first. The page holds the proposer's plan, its review and the numbers, so
 ``/versions <version>`` offers to open it rather than reprinting it. The
 page itself can also be fetched with a curl that carries the
 scenario header and the token into a file, for a hosted deployment where
@@ -1095,33 +1097,40 @@ The wrapper points the loop at its capture proxy through a temp copy of
 the tree, keeps the loop's session log under ``native/sessions`` beside
 the installed tree, and ``report`` works as for any adapter.
 
-Promote a pending release
-~~~~~~~~~~~~~~~~~~~~~~~~~
+Activate an inactive release
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A win that touches a kind in ``evolution.review_kinds`` (``code_extension``
-in the tutorial's ``deployment.yaml``) or a ``native_loop`` sits in the
-catalog with ``pending: true`` and is served to no session on its own. In a
-``reef-pi`` session it is offered like any other release, because installing
-one is your decision: taking the offer names it to ``POST
-/reef/scenarios/{scenario}/promote`` and installs what that answers. The
-answer is the new head with a fresh release id, because a promote republishes
-the tree as a commit of its own. By hand, find its id in ``GET
-/reef/harness/releases`` (the newest row marked ``pending``), read the change
-(``?release_id=<id>`` on the install route installs that tree without moving
-the head), and name it to the promote route yourself. Both
-calls name the scenario your install used: the ``x-reef-scenario`` header
-you gave the install command or, without one, the generated name the script
-baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;
-``grep REEF_HARNESS_SCENARIO ~/.local/bin/reef-pi`` prints it. The
-deployment listens on port 8901.
+When a win touches a kind in ``evolution.review_kinds`` (``code_extension``
+in the tutorial's ``deployment.yaml``) or a ``native_loop``, Reef leaves its
+release inactive. The release sits in the catalog with ``active: false`` and
+``activated: false``, and no session gets it on its own. In a ``reef-pi``
+session it is offered like any other release, because installing it is your
+decision. When you take the offer, ``reef-pi`` sends it to ``POST
+/reef/scenarios/{scenario}/activate`` and then installs it. In a scenario of
+one component, which the tutorial's is, activation makes no new release, so
+the release you install keeps its id.
+
+To activate it by hand:
+
+1. In ``GET /reef/harness/releases``, find the newest row with
+   ``"checkpoint": true`` and ``"activated": false``.
+2. Optionally, read the change: ``?release_id=<id>`` on the install route
+   installs that tree without activating it.
+3. Send the row's ``artifact_id`` to the activate route.
+
+Both calls name the scenario that your install used. That is the
+``x-reef-scenario`` header that you gave the install command. Without one, it
+is the generated name that the script baked into ``reef-pi`` as
+``REEF_HARNESS_SCENARIO``; ``grep REEF_HARNESS_SCENARIO ~/.local/bin/reef-pi``
+prints it. The deployment listens on port 8901.
 
 .. code:: bash
 
    curl -sS -H "x-reef-scenario: <scenario>" \
-     http://127.0.0.1:8901/reef/harness/releases    # the row with "pending": true
+     http://127.0.0.1:8901/reef/harness/releases    # the newest row with "checkpoint": true and "activated": false
    curl -sS -X POST -H "Content-Type: application/json" \
-     -d '{"release_id": "<the pending release id>"}' \
-     http://127.0.0.1:8901/reef/scenarios/<scenario>/promote
+     -d '{"artifact_id": "<artifact_id of that row>"}' \
+     http://127.0.0.1:8901/reef/scenarios/<scenario>/activate
 
 Run a Codex session
 -------------------
@@ -1207,8 +1216,8 @@ seconds of wall clock (600), checked before each model call.
 With ``--follow head``, the default, the process polls
 ``GET /reef/harness/releases`` every ``--poll-interval`` seconds (60) and
 reads the ``x-reef-release-id`` header of every inference answer, so a
-process with traffic learns of a publish on its next model call. A new head
-is mounted between two steps of the open turn, or at once when the process
+process with traffic learns of a new active release on its next model call.
+A new active release is mounted between two steps of the open turn, or at once when the process
 is idle. The mount is one line in the open turn's session, else in
 ``native/sessions/serve.jsonl``:
 
@@ -1227,17 +1236,17 @@ serving. On success the release metadata file and ``native/tree.json`` name the 
 release, so a restart boots from it with ``source: boot``.
 
 With ``--follow pinned`` the process logs ``release/available`` with the
-new head and waits for a person. ``reef-native mount <release_id> --tree
+new active release and waits for a person. ``reef-native mount <release_id> --tree
 ./reef-harness`` applies one release by hand, an older one included, which
 rolls the process back locally; under ``head`` too, a release mounted by
-hand stands until the head moves again. A Reef that does not answer logs
+hand stands until the active release changes again. A Reef that does not answer logs
 ``release/poll-failed`` with the error and the next retry, doubling up to
 ten minutes, and the process keeps serving. A Reef that is busy is polled
 again at the interval: a catalog read waits behind a running evolve step,
-so a poll that times out during one retries at the interval and the head
-lands as soon as the step ends. A manifest read that times out the same way
+so a poll that times out during one retries at the interval and the new
+active release mounts as soon as the step ends. A manifest read that times out the same way
 logs ``harness/mount-failed`` and is retried by the next poll that names
-the head, so a release published between two steps mounts once the steps
+that release, so a release activated between two steps mounts once the steps
 are over.
 
 ``--self-tools`` gives the model three built-in tools. The tree cannot
@@ -1267,7 +1276,7 @@ The serve process runs on your machine with your privileges and runs tree
 code in process, as the rollout form does: every hook imports and listens
 there, and a tool call runs there unless ``REEF_NATIVE_ENFORCE=bwrap`` is
 set; the evaluation's sandbox does not apply to it. Under ``--follow head``,
-whoever can publish to the scenario
+whoever can publish or activate a release of the scenario
 runs code on the machine the process serves on. ``--follow pinned`` keeps a
 person in that loop.
 

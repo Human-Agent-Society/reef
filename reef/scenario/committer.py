@@ -13,22 +13,23 @@ from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
-from reef.core.errors import ReefError
+from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
+    CommitOperation,
     CommitRecord,
     RecordProgress,
+    active_artifact_ref,
     scenario_metadata_for,
     to_json_value,
 )
@@ -40,6 +41,31 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class ComponentArtifact:
+    """One component's artifact, as an activation or a new training start names it, and a release that binds it.
+
+    Values: ``component`` is a component the scenario names (``ScenarioCommitter.component_names``).
+    ``artifact_id`` is the artifact's identity: ``release_id`` of the release that made it in a scenario of one
+    component, ``<release_id>:<component>`` in a scenario of several. ``content_id`` is the artifact's content id:
+    the release's own with one component, the component entry's with several. ``release_id`` names a release that
+    binds the artifact as ``component``: the active release after an activation, and the release that minted the
+    artifact for a new training start. Every field is a non-empty string.
+
+    Purpose: ``ScenarioCommitter.activate`` and ``train_from`` make it, and the service routes answer with it.
+    """
+
+    component: str
+    artifact_id: str
+    content_id: str
+    release_id: str
+
+    def __post_init__(self) -> None:
+        values = (self.component, self.artifact_id, self.content_id, self.release_id)
+        if not all(isinstance(value, str) and value for value in values):
+            raise ValueError("component, artifact_id, content_id and release_id must be non-empty strings")
+
+
+@dataclass(frozen=True)
 class _ArtifactHeadSync:
     state: Literal["synchronized", "pending", "conflict"]
     release_id: str
@@ -47,7 +73,7 @@ class _ArtifactHeadSync:
 
 
 class ScenarioCommitter:
-    """Order one scenario's commit, rollback, and retry effects; delegate release queries."""
+    """Order one scenario's commits, activations, new training starts and retries; delegate release queries."""
 
     def __init__(
         self,
@@ -71,8 +97,6 @@ class ScenarioCommitter:
         self._binding = binding
         self._artifacts = artifacts
         self.trainers = trainers
-        # The first trainer answers commits made on the scenario's behalf, such as rollback.
-        self._trainer = trainers[0].trainer
         self._step = scenario_step
         self._store = store
         self.experiment_observer = experiment_observer
@@ -81,10 +105,10 @@ class ScenarioCommitter:
         # calls and evaluation rollouts, neither of which changes committed
         # releases. With several trainers a preparation runs outside it; the
         # dispatcher still runs one step of the scenario at a time.
-        # Readers share only the publication lock with commit and rollback.
+        # Readers share only the publication lock with commit and activation.
         # Writers must acquire the operation lock first; readers never take it.
         self._publication_lock = RLock()
-        #: Read-only release queries. They share the publication lock with commit and rollback.
+        #: Read-only release queries. They share the publication lock with commit and activation.
         self.release_queries = ScenarioReleases(
             name=name,
             artifacts=artifacts,
@@ -158,64 +182,19 @@ class ScenarioCommitter:
         return component if len(self.trainers) > 1 else None
 
     def own_record(self, record: CommitRecord, component: str | None) -> bool:
-        """Whether ``component``'s trainer made ``record``; a record naming no trainer belongs to the only one."""
-        if record.component == component:
-            return True
-        return record.component is None and record.operation == "training" and len(self.trainers) == 1
+        """Whether ``component``'s trainer made the training record ``record``; one naming no trainer is the lone trainer's.
+
+        ``component`` is the name on record (``component_on_record``). An
+        activation or a new training start is no trainer's own record: it
+        carries no trainer state.
+        """
+        return record.operation == "training" and record.component == component
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
-        """The newest durable commit made by ``component``'s trainer."""
+        """The newest durable training commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
-        name = self.component_trainer(component).component
+        name = self.component_on_record(self.component_trainer(component).component)
         return next((record for record in reversed(records) if self.own_record(record, name)), None)
-
-    def record_is_current(self, record: CommitRecord) -> bool:
-        """Whether ``record`` still describes what is served.
-
-        A lone trainer's newest record is current only at the scenario step:
-        a rollback after it moves the step on. With several trainers the step
-        also moves on every other trainer's commit, so the record stays current
-        until a rollback or promote lands after it.
-        """
-        if len(self.trainers) == 1:
-            return record.step == self._step
-        records = self._store.history() if self._store.durable else ()
-        return all(
-            later.operation == "training" or self.leaves_component(later, record)
-            for later in records
-            if later.step > record.step
-        )
-
-    def recorded_rollback_restored_weights(self, recorded: CommitRecord) -> bool:
-        """Whether the rollback that wrote ``recorded`` changed the runtime-loaded recipe component, so the weight trainer starts from it."""
-        loaded = self._binding.surface.loader_component
-        if loaded is None:
-            return False
-        # The release served before the rollback: the newest earlier record that was not held for review, and
-        # the creation before any. A rollback that left the weights alone gives the trainer no new start.
-        earlier = [
-            entry for entry in reversed(self._store.history()) if entry.step < recorded.step and not entry.pending
-        ]
-        if self._binding.surface.single:
-            served_id = next((entry.artifact_ref.content_id for entry in earlier), self._artifacts.base.content_id)
-            return recorded.artifact_ref.content_id != served_id
-        served_entry = next((entry.components[loaded] for entry in earlier if entry.components is not None), None)
-        if served_entry is None:
-            creation = self.release_queries.creation_components(self._step, retry=True)
-            served_entry = None if creation is None else creation.get(loaded)
-        recorded_entry = None if recorded.components is None else recorded.components.get(loaded)
-        if recorded_entry is None or served_entry is None:
-            # A composed release always names its weights: a side that cannot be read (the creation manifest
-            # while the repository is away) does not count as a change.
-            return False
-        return recorded_entry != served_entry
-
-    @staticmethod
-    def leaves_component(later: CommitRecord, record: CommitRecord) -> bool:
-        """Whether ``later`` (a rollback or promote) carried ``record``'s component forward unchanged."""
-        if record.component is None or later.components is None or record.components is None:
-            return False
-        return later.components.get(record.component) == record.components.get(record.component)
 
     def release_manifest(self, artifact: Artifact) -> ReleaseComponents:
         """The manifest a release carries: its own, or the one-component manifest a flat release implies."""
@@ -256,270 +235,167 @@ class ScenarioCommitter:
             return None
         return self.release_manifest(artifact).content_ids
 
-    def held_component(self, release_id: str) -> str | None:
-        """The component a release held for review changed; ``None`` when it is not such a release.
+    def component_names(self) -> tuple[str, ...]:
+        """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
+        return self._binding.surface.names or (self.trainers[0].component,)
 
-        The record names the trainer that made the release, and a trainer may
-        publish another component's content, so the component is read off the
-        recorded manifests: the one entry that differs from the release it was
-        carried from. A composed release whose manifests cannot be compared is
-        refused rather than guessed at, since promoting the wrong component
-        would serve a tree the person did not review.
+    def require_no_pending_commit(self, action: str) -> None:
+        """Raise ``CommitPending`` while any trainer's result waits for its commit; ``action`` names what waits."""
+        if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
+            raise CommitPending(f"cannot {action} while a training result waits for its commit")
+
+    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
+        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+
+        With one component, ``component`` may be ``None`` and
+        ``artifact_id`` is the ``release_id`` of the release that made the
+        artifact. With several, ``component`` is required and ``artifact_id``
+        is ``<release_id>:<component>`` for a release that minted that
+        component's content (``ScenarioReleases.artifacts``). Raise
+        ``ValueError`` for a missing or unknown component,
+        ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
+        list, and ``ReleaseNotRestorable`` for a release without durable
+        bytes or without every component the scenario serves.
         """
-        records = self._store.history() if self._store.durable else ()
-        record = next((row for row in reversed(records) if row.artifact_ref.release_id == release_id), None)
-        if record is None or not record.pending:
-            return None
-        if self._binding.surface.single:
-            return record.component
-        parent_id = record.artifact_ref.parent_release_id
-        if record.components is None or parent_id is None:
-            raise ReleaseNotRestorable(
-                f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
-                "its commit record carries no manifest"
+        names = self.component_names()
+        if component is None:
+            if len(names) > 1:
+                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
+            component = names[0]
+        if component not in names:
+            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+        listed = self.release_queries.artifacts(self._step, names)
+        row = next((row for row in listed if (row["artifact_id"], row["component"]) == (artifact_id, component)), None)
+        if row is None:
+            raise ArtifactNotFound(
+                f"scenario {self._name!r} has no artifact {artifact_id!r} of component {component!r}"
             )
-        # A person asked for this promote: a creation manifest read that failed before is tried again now.
-        changed = self.changed_components(record, records, retry=True)
-        if changed is None:
-            raise ReleaseNotRestorable(
-                f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
-                f"the manifest of its parent {parent_id!r} is not available"
-            )
-        if len(changed) != 1:
-            raise ReleaseNotRestorable(
-                f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
-                f"it differs from {parent_id!r} in {changed}"
-            )
-        return changed[0]
-
-    def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
-        """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
-        if not isinstance(release_id, str) or not release_id.strip():
-            raise ValueError("release_id must be a non-empty string")
-        release_id = release_id.strip()
-        with self._lock, self._publication_lock:
-            current_ref = self._artifacts.current
-            if current_ref.release_id == release_id:
-                return current_ref
-            target = self.release_queries.find_release(release_id)
-            if target is None:
-                raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
-            target_ref, target_checkpoint = target
-            if not target_checkpoint:
-                raise ReleaseNotRestorable(
-                    f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
-                )
-            if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
-                raise ReefError("cannot rollback while a training result is pending commit")
-
-            artifacts = self._artifacts
-            checkpoint = artifacts.checkpoint
-            next_step = self._step + 1
-            prepared = self._trainer.prepare_commit(None)
-            recorded = self.recorded_retry(
-                prepared, next_step, operation=operation, rollback_target_release_id=release_id
-            )
-            weight_trainer = self.weight_trainer()
-            if recorded is not None:
-                recorded = self.finish_recorded_retry(recorded, prepared, self._trainer)
-                if (
-                    weight_trainer is not None
-                    and operation == "rollback"
-                    and self.recorded_rollback_restored_weights(recorded)
-                ):
-                    weight_trainer.trainer.apply_rollback_start(
-                        self.imported_start(weight_trainer.trainer, artifacts.resolve(target_ref))
-                    )
-                return recorded.artifact_ref
-            if self._store.durable:
-                self._synchronize_checkpoint()
-            source = artifacts.resolve(target_ref)
-            durable = self._store.durable
-            surface = self._binding.surface
-            try:
-                self.require_components(source)
-            except ReefError as exc:
-                raise ReleaseNotRestorable(str(exc)) from exc
-            promoted = self.held_component(release_id) if operation == "promote" else None
-            staged: Artifact | None = None
-            if promoted is not None and not surface.single:
-                # A held release carries the other components as they were when it
-                # was minted; promoting it publishes its own component on the
-                # combination served now, not the combination of that day.
-                served_now = artifacts.resolve(current_ref)
-                components = {name: served_now.component(name) for name in surface.names}
-                components[promoted] = source.component(promoted)
-                source = artifacts.stage_composed(next_step, components, parent=checkpoint)
-                staged = source
-            try:
-                self.admit_restored(source, release_id, promoted)
-                # The runtime-loaded component changes only when the engine serves other content. The runtime
-                # serves the target once it is published, so a failed publication leaves serving as it was.
-                loaded_component = surface.loader_component
-                served = Artifact(current_ref, artifacts.repository)
-                restore_weights = loaded_component is not None and surface.component_changed(
-                    source, served, loaded_component
-                )
-                # A rollback also moves where training continues; a promote serves a release training passed already.
-                restoring = weight_trainer if restore_weights and operation == "rollback" else None
-                restored_start = None if restoring is None else self.imported_start(restoring.trainer, source)
-                if staged is None:
-                    staged = artifacts.stage(next_step, source, parent=checkpoint)
-                published_ref = artifacts.publish(
-                    staged,
-                    expected_parent=checkpoint,
-                    metadata=self.release_metadata(
-                        source, prepared, next_step, operation=operation, rollback_target_release_id=release_id
-                    ),
-                    advance_heads=not durable,
-                )
-                surface.activate(
-                    artifacts.resolve(published_ref), self._binding.runtime, source=source, previous=served
-                )
-                record = self._append_commit_record(
-                    step=next_step,
-                    artifact_ref=published_ref,
-                    checkpoint=True,
-                    prepared=prepared,
-                    operation=operation,
-                    rollback_target_release_id=release_id,
-                    components=self.recorded_components(source),
-                )
-            except Exception:
-                if staged is not None:
-                    artifacts.discard(staged)
-                raise
-            self.finish_committed_step(
-                prepared, record, self._trainer, expected=current_ref, expected_checkpoint=checkpoint
-            )
-            if restoring is not None:
-                restoring.trainer.apply_rollback_start(restored_start)
-            return published_ref
-
-    def resume_rollback_start(self) -> None:
-        """After a restart, start the weight trainer's next job from a rollback newer than the trainer's last commit.
-
-        A rollback moves where training continues, and the trainer's next
-        commit records that. A restart before that commit recovers the
-        trainer's state from its earlier commit, so the newer rollback's
-        release is imported again here.
-        """
-        weight_trainer = self.weight_trainer()
-        if weight_trainer is None or not self._store.durable:
-            return
-        recorded_component = self.component_on_record(weight_trainer.component)
-        records = self._store.history()
-        last_training = next(
-            (
-                record.step
-                for record in reversed(records)
-                if record.operation == "training" and self.own_record(record, recorded_component)
-            ),
-            0,
-        )
-        rollback = next(
-            (
-                record
-                for record in reversed(records)
-                if record.step > last_training
-                and record.operation == "rollback"
-                and self.recorded_rollback_restored_weights(record)
-            ),
-            None,
-        )
-        if rollback is not None:
-            weight_trainer.trainer.apply_rollback_start(
-                self.imported_start(weight_trainer.trainer, self._artifacts.resolve(rollback.artifact_ref))
-            )
-
-    def weight_trainer(self) -> ComponentTrainer | None:
-        """The scenario's weight trainer, which submits training jobs; ``None`` when the scenario trains no weights."""
-        return next(
-            (
-                component_trainer
-                for component_trainer in self.trainers
-                if component_trainer.trainer.job_loop is not None
-            ),
-            None,
-        )
-
-    def imported_start(self, trainer: Trainer, release: Artifact) -> str | None:
-        """Import ``release``'s runtime-loaded recipe component into ``trainer``'s training component as a start.
-
-        Raise ``ReleaseNotRestorable`` when the component cannot start from those weights.
-        """
+        found = self.release_queries.find_release(row["release_id"])
+        if found is None or not found[1]:
+            raise ReleaseNotRestorable(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
+        release = self._artifacts.resolve(found[0])
         try:
-            return trainer.import_rollback_release(self.loaded_release_path(release))
-        except ValueError as exc:
-            raise ReleaseNotRestorable(f"scenario {self._name!r}: {exc}") from exc
+            self.require_components(release)
+        except ReefError as exc:
+            raise ReleaseNotRestorable(str(exc)) from exc
+        content_id = self._binding.surface.component_artifact(release, component).ref.content_id
+        return ComponentArtifact(component, artifact_id, content_id, release.ref.release_id), release
 
-    def loaded_release_path(self, release: Artifact) -> Path:
-        """The local directory of ``release``'s runtime-loaded recipe component."""
-        surface = self._binding.surface
-        loaded = surface.loader_component
-        if loaded is None:
-            raise ReefError(f"scenario {self._name!r} serves no runtime-loaded component")
-        path = surface.component_artifact(release, loaded).materialize().local_path
-        if path is None:
-            raise ReefError(f"scenario {self._name!r}: the release has no local files to train from")
-        return path
+    def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Make ``artifact_id`` the active artifact of ``component``; return it with the release that is active after.
 
-    def admit_restored(self, source: Artifact, release_id: str, promoted: str | None) -> None:
-        """Run on a release a rollback or promote restores the checks its commit ran, and no more.
-
-        A flat release runs the surface's checks as its commit did. A composed
-        one runs the release's own check and the check of the component its
-        commit published (a promote's held component); a carried component
-        was admitted when it was published, or entered as the seed, which no
-        check judged, so judging it again here would refuse a release its
-        commit admitted.
+        With one component the release that made the artifact becomes the
+        active release: no artifact or release is written. With several, the
+        activation publishes a release: the active release with
+        ``component`` bound to the artifact. It reuses the components'
+        content, and the chain tip, the parent of the next training
+        publication, stays. No training start changes. The runtime activates
+        the release first, then the ``"activate"`` record lands at the next
+        step, then the active release moves; a crash before the record leaves
+        the active release that the log names. Activating the active artifact
+        changes nothing. Raise as :meth:`resolve_artifact` does, and
+        ``CommitPending`` while a training result waits for its commit.
         """
-        surface = self._binding.surface
-        if surface.single:
-            surface.validate(source)
-            return
-        surface.validator.validate(source)
-        component = promoted if promoted is not None else self.published_component(release_id)
-        if component is not None and component in surface.names:
-            surface.components[component].validator.validate(surface.component_artifact(source, component))
+        with self._lock, self._publication_lock:
+            selected, release = self.resolve_artifact(artifact_id, component)
+            surface = self._binding.surface
+            current_ref = self._artifacts.current
+            served = Artifact(current_ref, self._artifacts.repository)
+            if surface.component_artifact(served, selected.component).ref.content_id == selected.content_id:
+                return replace(selected, release_id=current_ref.release_id)
+            self.require_no_pending_commit("activate an artifact")
+            if surface.single:
+                # The release's own admission check, as at its publication.
+                surface.validate(release)
+                target, recorded_component, components = release, None, None
+            else:
+                staged = self.stage_combination(
+                    self._step + 1, served, selected.component, release.component(selected.component)
+                )
+                manifest = self.release_manifest(staged)
+                # Published beside the chain, as an inactive release is: the chain tip and the backend head stay.
+                published_ref = self._artifacts.publish(
+                    staged,
+                    expected_parent=self._artifacts.checkpoint,
+                    metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: manifest.to_dict()},
+                    advance_heads=False,
+                )
+                target, recorded_component, components = (
+                    self._artifacts.resolve(published_ref),
+                    selected.component,
+                    manifest.content_ids,
+                )
+            surface.activate(target, self._binding.runtime, previous=served)
+            record = self.append_operation_record(
+                "activate", target.ref, component=recorded_component, components=components
+            )
+            self._artifacts.activate(target.ref, expected=current_ref)
+            self.advance_to(record.step)
+            return replace(selected, release_id=target.ref.release_id)
 
-    def published_component(self, release_id: str) -> str | None:
-        """The component the training commit that minted ``release_id`` changed, read off the recorded manifests
-        as :meth:`held_component` reads it (a trainer may publish another component's content); ``None`` for the
-        seed, for a release another operation minted, and when the manifests do not say."""
+    def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Set ``component``'s training start to ``artifact_id``; return the artifact.
+
+        The trainer's running job is cancelled, and its next job or step
+        starts from the artifact. The active release does not change.
+        ``component`` may be left out when the scenario has one component.
+        The trainer takes the start first, then the ``"train_from"`` record
+        lands at the next step; a restart before the trainer's next training
+        commit takes the start again from that record. Raise as
+        :meth:`resolve_artifact` does, ``TrainingStartRefused`` when the
+        trainer cannot start from the artifact, and ``CommitPending`` while
+        a training result waits for its commit.
+        """
+        # The start can import weights for minutes: readers of the releases wait only for the record.
+        with self._lock:
+            selected, release = self.resolve_artifact(artifact_id, component)
+            component_trainer = self.component_trainer(selected.component)
+            self.require_no_pending_commit("set the training start")
+            self.start_trainer(component_trainer, release)
+            with self._publication_lock:
+                record = self.append_operation_record(
+                    "train_from", release.ref, component=self.component_on_record(component_trainer.component)
+                )
+                self.advance_to(record.step)
+            return selected
+
+    def resume_training_starts(self) -> None:
+        """After a restart, give each trainer its newest ``"train_from"`` start that its training records do not hold.
+
+        The trainer's next training commit records the start in its state;
+        a restart before that commit recovers the state of the earlier
+        commit, so the start is taken again here.
+        """
         records = self._store.history() if self._store.durable else ()
-        record = next((item for item in records if item.artifact_ref.release_id == release_id), None)
-        if record is None or record.operation != "training":
-            return None
-        changed = self.changed_components(record, records, retry=False)
-        return changed[0] if changed is not None and len(changed) == 1 else None
+        for component_trainer in self.trainers:
+            name = self.component_on_record(component_trainer.component)
+            last = self.last_record_for(component_trainer.component)
+            last_step = 0 if last is None else last.step
+            start = next(
+                (
+                    record
+                    for record in reversed(records)
+                    if record.step > last_step and record.operation == "train_from" and record.component == name
+                ),
+                None,
+            )
+            if start is not None:
+                self.start_trainer(component_trainer, self._artifacts.resolve(start.artifact_ref))
 
-    def changed_components(
-        self, record: CommitRecord, records: tuple[CommitRecord, ...], *, retry: bool
-    ) -> list[str] | None:
-        """The components ``record``'s release changed against the release it was carried from.
-
-        The parent's manifest comes from its commit record, or from the
-        creation artifact when the parent is the seed. ``None`` when either
-        manifest is unknown.
-        """
-        parent_id = record.artifact_ref.parent_release_id
-        if record.components is None or parent_id is None:
-            return None
-        carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
-        if carried is None and self.release_queries.creation_artifact.release_id == parent_id:
-            carried = self.release_queries.creation_components(self._step, retry=retry)
-        if carried is None:
-            return None
-        return [name for name, content_id in record.components.items() if carried.get(name) != content_id]
+    def start_trainer(self, component_trainer: ComponentTrainer, release: Artifact) -> None:
+        """Start ``component_trainer`` from its component of ``release``, with the entries its commit recorded."""
+        artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
+        component_trainer.trainer.start_from(
+            artifact, self.release_queries.entries_for_version(release.ref.release_id)
+        )
 
     def publish_shipped_content(self) -> ArtifactRef | None:
-        """Commit the backend's update of the content this Reef ships, when the served release is stale.
+        """Commit the backend's update of the content this Reef ships, when the active release is stale.
 
         The update is a training commit with no job data behind it: it consumes no
         records and runs no evaluation, since its content is Reef's own. It is
-        served at once rather than held for review for the same reason. Returns the
-        new head, or ``None`` when the served release already carries the content.
+        activated at once for the same reason. Returns the new active release, or
+        ``None`` when the active release already carries the content.
         """
         with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
@@ -612,7 +488,7 @@ class ScenarioCommitter:
             scenario=self._name,
             recipe=observer.recipe,
             step=step,
-            source_artifact_ref=self._artifacts.current,
+            source_artifact_ref=observer.start_artifact_ref,
             run_segment=observer.run_segment,
             run_step=observer.run_step,
             backend=backend_name,
@@ -663,9 +539,9 @@ class ScenarioCommitter:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # A pending release is recorded but never activated and moves no head.
+            # A pending release is recorded as an inactive artifact and moves no head.
             # The engine must confirm the new revision before anything moves
-            # the served head: the staged bytes load first, and the version
+            # the active release: the staged bytes load first, and the version
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
@@ -701,8 +577,6 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         scenario_step: int,
         *,
-        operation: str = "training",
-        rollback_target_release_id: str | None = None,
         component: str | None = None,
     ) -> dict[str, Any]:
         """The metadata a committed release carries.
@@ -723,8 +597,6 @@ class ScenarioCommitter:
             ),
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
-            operation=operation,
-            rollback_target_release_id=rollback_target_release_id,
             component=self.component_on_record(component),
         )
         return {
@@ -765,12 +637,13 @@ class ScenarioCommitter:
     def stage_publication(
         self, next_step: int, publication: SavedArtifactPublication, checkpoint: ArtifactRef
     ) -> Artifact:
-        """Admit the published component and stage the release it belongs to.
+        """Admit the published component and stage the release it belongs to, with ``checkpoint`` as its parent.
 
         A flat scenario stages the artifact as published. A multi-component
-        scenario replaces the named component and carries every other
-        component forward from the checkpoint, so one step changes one
-        component and the release still binds the whole combination.
+        scenario binds the named component to the publication and carries
+        every other component from the active release
+        (:meth:`stage_combination`), so a step changes one component and
+        never brings back what an activation replaced.
         """
         surface = self._binding.surface
         component = publication.component
@@ -782,14 +655,22 @@ class ScenarioCommitter:
             surface.validate(publication.artifact)
             return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         surface.components[component].validator.validate(publication.artifact)
-        carried = self._artifacts.resolve(checkpoint)
-        self.require_components(carried)
+        active = self._artifacts.resolve(self._artifacts.current)
+        self.require_components(active)
+        return self.stage_combination(next_step, active, component, publication.artifact)
+
+    def stage_combination(self, next_step: int, carried: Artifact, component: str, content: Artifact) -> Artifact:
+        """Stage the release ``carried`` with ``component`` bound to ``content``, on the chain tip as its parent.
+
+        The release's own check runs on the staged release; the carried
+        components were admitted when they were published. A refused release
+        is discarded.
+        """
+        surface = self._binding.surface
         components = {name: carried.component(name) for name in surface.names}
-        components[component] = publication.artifact
-        staged = self._artifacts.stage_composed(next_step, components, parent=checkpoint)
+        components[component] = content
+        staged = self._artifacts.stage_composed(next_step, components, parent=self._artifacts.checkpoint)
         try:
-            # The release's own check, which a rollback or promote to this release runs too; the carried
-            # components were admitted when they were published.
             surface.validator.validate(staged)
         except BaseException:
             self._artifacts.discard(staged)
@@ -798,7 +679,7 @@ class ScenarioCommitter:
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         # A component the engine already serves is not activated again, so a
-        # harness step never reloads weights; the served head is compared by
+        # harness step never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
         self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
@@ -815,18 +696,18 @@ class ScenarioCommitter:
         """Complete a recorded step before exposing trainer state; callers hold both commit locks.
 
         Install heads and settle the trainer before advancing the scenario step.
-        Failed completion retries the same record; pending releases move no head.
+        Failed completion retries the same record. A step that made no
+        artifact records the active one, and a pending artifact is not
+        activated: neither moves a head.
         """
-        if not record.pending:
+        if record.made_artifact and not record.pending:
             if self._artifacts.current == record.artifact_ref:
-                if record.checkpoint and self._store.durable:
+                if self._store.durable:
                     self._refresh_committed_checkpoint()
-            elif record.checkpoint:
+            else:
                 self._install_committed_checkpoint(
                     record.artifact_ref, expected=expected, expected_checkpoint=expected_checkpoint
                 )
-            else:
-                self._artifacts.advance(record.artifact_ref, expected=expected)
         trainer.commit_applied(prepared.algorithm_state)
         trainer.commit(prepared)
         if not self._store.durable:
@@ -838,11 +719,7 @@ class ScenarioCommitter:
     def finish_recorded_retry(self, record: CommitRecord, prepared: PreparedCommit, trainer: Trainer) -> CommitRecord:
         """Retry storage settlement, then complete the exact release already on record."""
         record = self._store.commit_step(expected_step=self._step, commit=record)
-        records = self._store.history()
-        previous = next(
-            (prior.artifact_ref for prior in reversed(records[:-1]) if not prior.pending),
-            self.release_queries.creation_artifact,
-        )
+        previous = active_artifact_ref(self._store.history()[:-1], self.release_queries.creation_artifact)
         self.finish_committed_step(
             prepared, record, trainer, expected=previous, expected_checkpoint=self._artifacts.checkpoint
         )
@@ -853,24 +730,20 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         next_step: int,
         *,
-        operation: str = "training",
-        rollback_target_release_id: str | None = None,
         pending: bool = False,
         component: str | None = None,
     ) -> CommitRecord | None:
-        """The record an earlier attempt of this commit left at ``next_step``, or ``None`` when there is none."""
+        """The training record an earlier attempt of this commit left at ``next_step``, or ``None`` when there is none."""
         records = self._store.history()
         if not records or records[-1].step != next_step:
             return None
         record = records[-1]
         if (
-            record.operation != operation
-            or record.rollback_target_release_id != rollback_target_release_id
-            or record.pending != pending
-            or not self.own_record(record, component)
+            record.pending != pending
+            or not self.own_record(record, self.component_on_record(component))
             or not self._record_matches_prepared(record, prepared)
         ):
-            raise ScenarioStoreConflict(f"commit step {next_step} conflicts with the pending {operation} commit")
+            raise ScenarioStoreConflict(f"commit step {next_step} conflicts with the pending training commit")
         return record
 
     @staticmethod
@@ -885,6 +758,33 @@ class ScenarioCommitter:
             and record.training_job_id == prepared.training_job_id
         )
 
+    def append_operation_record(
+        self,
+        operation: CommitOperation,
+        artifact_ref: ArtifactRef,
+        *,
+        component: str | None,
+        components: Mapping[str, str] | None = None,
+    ) -> CommitRecord:
+        """Append an ``"activate"`` or ``"train_from"`` record at the next step; it carries no trainer state.
+
+        ``components`` is the manifest of a release that an activation published, and ``component`` then names
+        the activated component.
+        """
+        record = CommitRecord(
+            scenario=self._name,
+            step=self._step + 1,
+            artifact_ref=artifact_ref,
+            checkpoint=False,
+            algorithm_state=None,
+            high_water_sequence=0,
+            high_water_offset=0,
+            operation=operation,
+            component=component,
+            components=components,
+        )
+        return self._store.commit_step(expected_step=self._step, commit=record)
+
     def _append_commit_record(
         self,
         *,
@@ -892,8 +792,6 @@ class ScenarioCommitter:
         artifact_ref: ArtifactRef,
         checkpoint: bool,
         prepared: PreparedCommit,
-        operation: str = "training",
-        rollback_target_release_id: str | None = None,
         pending: bool = False,
         component: str | None = None,
         components: Mapping[str, str] | None = None,
@@ -908,8 +806,6 @@ class ScenarioCommitter:
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,
             consumed_ids=prepared.consumed_ids,
-            operation=operation,
-            rollback_target_release_id=rollback_target_release_id,
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
             component=self.component_on_record(component),
@@ -918,4 +814,4 @@ class ScenarioCommitter:
         return self._store.commit_step(expected_step=self._step, commit=record)
 
 
-__all__ = ["ScenarioCommitter"]
+__all__ = ["ComponentArtifact", "ScenarioCommitter"]

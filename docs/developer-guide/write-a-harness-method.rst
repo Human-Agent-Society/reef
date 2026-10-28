@@ -92,7 +92,7 @@ scored traces, or unscored records with the inference stages that "Two
 trace sources" below describes.
 
 Reef evaluates request mutations and applies the same ``evolution.publish``
-policy as for other steps. Pending agent proposals and periodic rollback
+policy as for other steps. Pending agent proposals and periodic
 rechecks cannot take over the step assigned to a request.
 
 Score a rollout
@@ -121,7 +121,7 @@ than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
 candidate and selects it when every task reaches ``evolution.floor_score``
 (default ``1.0``). A rollout that gave no answer fails its task. A rollout
 that did not run fails no task, but a task with no rollout that ran does not
-pass (see `Selection policies <#selection-policies>`__). The current release
+pass (see `Selection policies <#selection-policies>`__). The training start
 does not run under ``floor``, so ``current_scores`` is empty.
 ``always`` selects every applied mutation.
 

@@ -83,14 +83,14 @@ How it works
    published as a release, ready but waiting for your review because it
    changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
-4. Read. A release that touches a ``code_extension`` is held back from the
-   served head, so it reaches no session on its own. ``/versions
+4. Read. A release that touches a ``code_extension`` is inactive: Reef does
+   not serve it, so it reaches no session on its own. ``/versions
    <step>`` opens its page (``reef-pi page <version>`` from the shell), which
    carries the design, how to use the change, the review and the numbers.
 5. Install and set up. A step that settles while you are between turns offers
    its install there; otherwise run ``/versions <version> install``
-   (``reef-pi update`` from the shell). A release held back from the head is
-   served as part of installing it, so installing is the one decision. After
+   (``reef-pi update`` from the shell). An inactive release is activated as
+   part of installing it, so installing is the one decision. After
    confirmation, the session collects what the change needs: for each unmet ``requires`` item it shows the item's
    ``prompt`` and asks for the value of an ``env`` item, kept in
    ``.reef-harness-env`` beside the install, or for a confirmation before a
@@ -113,11 +113,11 @@ Behavior and configuration
   that integration and the path from invocation to a visible result, including
   state and an off command for modes. Headless trials cannot verify the dropdown;
   the agent records any unverified interactive checks in its design.
-* ``evolution.review_kinds: [code_extension]`` holds code changes pending
-  human promotion. Client requirements must pass setup before installation.
+* ``evolution.review_kinds: [code_extension]`` leaves each release with a code
+  change inactive until a person activates it. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
-  ``evolution.floor_score`` (``1.0``). The current release is not run. A
+  ``evolution.floor_score`` (``1.0``). The training start is not run. A
   rollout that gave no answer misses the floor; one that the environment
   could not run does not.
 * What only you can provide (a phone number, a credential, a permission, an
@@ -417,7 +417,7 @@ nothing about whether the change does what was asked; the step's design and
 review notes and the person judge that. Set both ``evolution.tasks`` and
 ``evolution.evaluate`` for a workload of your own, and
 ``evolution.selection: score_comparison`` to require the candidate to beat
-the current release on them instead.
+the training start on them instead.
 
 An adapter whose prompt is a Harbor task directory, ``terminus``, cannot
 take this prompt. There the recipe runs the same check as the task

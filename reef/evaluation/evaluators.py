@@ -270,11 +270,12 @@ class AlwaysSelectCheckpointPlugin(AlwaysSelectMixin):
 
 
 class ManualPromotionPlugin(ConfiguredEvaluationPlugin):
-    """Hold every checkpoint for review: a person promotes each release (``POST /reef/scenarios/{s}/promote``).
+    """Activate no checkpoint: a person activates each artifact (``POST /reef/scenarios/{s}/activate``).
 
-    ``evaluate`` measures nothing, as ``AlwaysSelectCheckpointPlugin`` does, and ``decide`` selects no candidate,
-    so each checkpoint is a pending release. A deployment names it in its ``evaluation`` section, which takes no
-    config. It takes a ``CheckpointCandidate`` and raises ``TypeError`` for another candidate.
+    ``evaluate`` measures nothing, as ``AlwaysSelectCheckpointPlugin`` does, and ``decide`` selects no
+    candidate, so each checkpoint is an inactive artifact until a person activates it. A deployment names it
+    in its ``evaluation`` section, which takes no config. It takes a ``CheckpointCandidate`` and raises
+    ``TypeError`` for another candidate. The name stays until RFC #965 step 3 makes this the activation rule.
     """
 
     @classmethod
@@ -292,7 +293,7 @@ class ManualPromotionPlugin(ConfiguredEvaluationPlugin):
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
         return SelectionDecision(
-            selected=False, policy="manual", reason="a person promotes each release", evaluation=evaluation
+            selected=False, policy="manual", reason="a person activates each release", evaluation=evaluation
         )
 
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
@@ -19,8 +18,6 @@ from reef.surface.base import (
     Surface,
     WeightRuntime,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class RuntimeLoadMismatch(ReefError):
@@ -52,28 +49,11 @@ class WeightLoader(ArtifactLoader):
             return runtime.activate_checkpoint(artifact, scenario=self._scenario)
         return artifact.ref.release_id
 
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef:
-        if current is not None and current.release_id != checkpoint.release_id:
-            # A staged-but-never-published artifact (``local:``) has no
-            # durable bytes address; keep the committed step/state
-            # continuity and fall serving back to the last checkpoint.
-            logger.info(
-                "committed artifact %r is not durable; serving falls back to checkpoint %r",
-                current.release_id,
-                checkpoint.release_id,
-            )
-        return checkpoint
-
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
         """Return the runtime load ID that serves the committed ``artifact``, or None when it is unknown.
 
-        The runtime names it: every activation of a release, at a commit, a
-        rollback or a restart, loads it under a version of its own.
+        The runtime names it: every activation of a release, at a commit, an
+        activation or a restart, loads it under a version of its own.
         """
         if self._scenario is not None:
             return scenario_adapter_version(self._scenario, runtime)
