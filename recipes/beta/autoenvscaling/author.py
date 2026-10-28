@@ -24,18 +24,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from reef_client.client import ReefClient, ReefClientError
 from reef_client.serve import RECEIPT_HEADER
 
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
 from recipes.beta.reefine.agent import launch_pi, rendered_files
-from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay
 from reef.core.prompts import untrusted_text
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.gateway import AgentGateway, AgentTool, refuse, relay
 from reef.harness.tree import HarnessTree
 from reef.inference.provider_protocol import ANTHROPIC_CLIENT_HEADERS, response_events
 from reef.record2sample.generator.designer import (
@@ -303,18 +303,18 @@ def call_receipt(headers: Mapping[str, str], body: bytes) -> str | None:
 
 
 class RecordingGateway(AgentGateway):
-    """Reefine's agent gateway, with each model call recorded on Reef and its receipt kept.
+    """The agent gateway, with each model call recorded on Reef and its receipt kept.
 
-    Reefine's gateway relays a model call with the credential alone. Reef records a call only when it names a
+    The agent gateway relays a model call with the credential alone. Reef records a call only when it names a
     scenario, so this relay adds ``x-reef-scenario`` and the run's ``x-reef-tag-*`` labels, sends the call to
-    ``upstream`` (a Reef service, which the gateway keeps as ``served``) with its token, and records the
-    receipt of every call in ``calls``. The request's ``model`` is always the binding's.
+    ``upstream`` (a Reef service, the gateway's ``binding``) with its token, and records the receipt of every
+    call in ``calls``. The request's ``model`` is always the binding's.
     """
 
     def __init__(
-        self, upstream: ModelBinding, calls: ModelCalls, tools: WorkspaceTools, *, headers: Mapping[str, str]
+        self, upstream: ModelBinding, calls: ModelCalls, tools: AgentTool, *, headers: Mapping[str, str]
     ) -> None:
-        super().__init__(upstream, calls, tools, None)
+        super().__init__(upstream, calls, (tools,))
         self.reef_headers = dict(headers)
 
     def relay_model_call(self, client: BaseHTTPRequestHandler, route: str, payload: dict[str, Any]) -> None:
@@ -324,31 +324,39 @@ class RecordingGateway(AgentGateway):
             refuse(client, 429, str(exc))
             return
         headers = {"Content-Type": "application/json", "Accept-Encoding": "identity", **self.reef_headers}
-        if self.served.api_key:
-            headers["Authorization"] = f"Bearer {self.served.api_key}"
+        if self.binding.api_key:
+            headers["Authorization"] = f"Bearer {self.binding.api_key}"
         for name in ANTHROPIC_CLIENT_HEADERS:
             value = client.headers.get(name)
             if value:
                 headers[name] = value
         status, body, upstream_headers = relay(
             client,
-            f"{self.served.base_url.rstrip('/')}{route}",
+            f"{self.binding.base_url.rstrip('/')}{route}",
             headers,
-            {**payload, "model": self.served.model},
-            timeout_s=self.served.timeout_s,
+            {**payload, "model": self.binding.model},
+            timeout_s=self.binding.timeout_s,
         )
         self.calls.record({"status": status, "receipt": call_receipt(upstream_headers, body)})
 
 
-class AgentTools(WorkspaceTools):
+class AgentTools(AgentTool):
     """The gateway's ``/check`` for one agent run, answered at once, and the polls that follow it.
 
-    ``/check`` starts a check on a thread of its own (the workspace pulled from the sandbox, then the candidate
-    checks) and answers ``state: running`` with its ``check_id``; while one runs, ``/check`` answers that one and
-    starts nothing. This agent runs no trials, so ``/trial`` carries the polls: the task ``check <check_id>``
-    answers ``running`` until the check ends, then its result with ``state: done``. No HTTP exchange outlasts a
-    check, and every caller waiting on one gets its result.
+    ``/check`` with no arguments starts a check on a thread of its own (the workspace pulled from the sandbox,
+    then the candidate checks) and answers ``state: running`` with its ``check_id``; while one runs, it answers
+    that one and starts nothing. ``/check`` with a ``check_id`` polls that check: it answers ``running`` until the
+    check ends, then its result with ``state: done``. No HTTP exchange outlasts a check, and every caller waiting
+    on one gets its result.
     """
+
+    name = "check"
+    description = "Start a check of the task in ./task, or poll the check that check_id names."
+    input_schema: ClassVar[Mapping[str, Any]] = {
+        "type": "object",
+        "properties": {"check_id": {"type": "integer"}},
+        "additionalProperties": False,
+    }
 
     def __init__(self, root: Path, checks: CandidateChecks) -> None:
         self.root = root
@@ -360,7 +368,15 @@ class AgentTools(WorkspaceTools):
         self.results: dict[int, dict[str, object] | None] = {}
         self.running_id: int | None = None
 
-    def check(self) -> dict[str, Any]:
+    def call(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        check_id = arguments.get("check_id")
+        if check_id is None:
+            return self.start()
+        if isinstance(check_id, bool) or not isinstance(check_id, int) or check_id not in self.results:
+            raise ValueError("check_id must name a check this run started")
+        return self.poll(check_id)
+
+    def start(self) -> dict[str, Any]:
         with self.lock:
             if self.running_id is None:
                 self.running_id = len(self.results) + 1
@@ -370,8 +386,7 @@ class AgentTools(WorkspaceTools):
                 ).start()
             return {"state": "running", "check_id": self.running_id}
 
-    def trial(self, task: str, script: dict[str, object] | None = None) -> dict[str, Any]:
-        check_id = int(task.removeprefix("check "))
+    def poll(self, check_id: int) -> dict[str, Any]:
         with self.lock:
             result = self.results[check_id]
         if result is None:

@@ -507,16 +507,17 @@ class SandboxExecutor(EpisodeExecutor):
             for dns_path in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
                 if Path(dns_path).exists():
                     cmd += ["--ro-bind", dns_path, dns_path]
-        # Mount the root read-only, then open only declared runtime-state
-        # directories. Rendered inputs inside those directories are rebound
-        # read-only so a run cannot mutate the admitted composition.
+        # Mount the root read-only, then open only the workspace and the
+        # declared runtime-state directories. Rendered inputs inside those
+        # directories are rebound read-only so a run cannot mutate the
+        # admitted composition, as a remote sandbox's command does.
         cmd += ["--ro-bind", str(root), str(root)]
-        for path in writable_paths:
+        opened = (workspace, *writable_paths)
+        for path in opened:
             cmd += ["--bind", str(path), str(path)]
         for path in readonly_paths:
-            if any(path == writable or writable in path.parents for writable in writable_paths):
+            if any(path == writable or writable in path.parents for writable in opened):
                 cmd += ["--ro-bind", str(path), str(path)]
-        cmd += ["--bind", str(workspace), str(workspace)]
         cmd += ["--chdir", str(workspace)]
         for key, value in {
             **inherited_environment(),

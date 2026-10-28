@@ -29,8 +29,9 @@ The ``StepContext`` holds two things:
   the step's material are files there, and the method reads them through the
   workspace's readers. This page calls it ``workspace``.
 - ``context.tools``: the services that Reef runs for the method: model calls,
-  the tree check, and the evaluation of a tree on tasks. These are actions,
-  not files. This page calls them ``tools``.
+  the tree check, the evaluation of a tree on tasks, and a run of the
+  deployment's coding agent. These are actions, not files. This page calls
+  them ``tools``.
 
 ``step`` edits ``workspace.harness``. The tree in that directory when ``step``
 returns is the step's candidate. The ``StepResult`` says what the step did.
@@ -77,6 +78,53 @@ traces that scored below 1, asks for new rules, and writes them to
 
 `Configure a deployment`_ shows the deployment file that runs it, and `Score
 an episode`_ shows the scorer it names.
+
+A method made of prompts
+------------------------
+
+A method can also be a folder of prompts that a coding agent runs:
+``reef.train.harness_backend:AgentMethod``. Each step runs the deployment's
+coding agent (``evolution.agent``) once in the step's workspace, and the tree
+it leaves in ``harness/`` is the candidate. The folder holds these files:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - File
+     - Holds
+   * - ``START.md``
+     - the prompt of a step; required
+   * - ``RESUME.md``
+     - the prompt of a step whose ``state/`` holds files from an earlier
+       step; optional, ``START.md`` takes its place
+   * - ``rules.md``, ``skills/<name>/SKILL.md``, and the other tree paths
+     - the agent's own harness tree, which Reef renders for the agent's
+       adapter after its protocol rules
+   * - ``README.md``
+     - text for people; the agent does not get it
+
+In a prompt, ``{step}`` becomes the step's number and ``{history}`` the
+history's path from the workspace. Reef's protocol rules
+(``reef/train/harness_backend/agent/protocol.md``) tell the agent the rest:
+what each directory of the workspace holds, the files it writes, and the tools
+it calls (see `Run a coding agent`_). After the agent exits, the method reads
+three files of ``output/``: ``summary.md`` is the step's summary,
+``notes.json`` (a JSON object) adds to its notes, and ``requires.json`` (a
+JSON array) is its requires. A run that does not exit 0 leaves the head
+tree, so the step skips, and the summary says how the run ended.
+
+.. code:: yaml
+
+   evolution:
+     method:
+       module: reef.train.harness_backend:AgentMethod
+       config:
+         prompts: methods/rules-editor   # the folder
+         model: proposer                  # served, or an evolution.models entry
+     agent:
+       adapter: claude
+       sandbox: bwrap
 
 The step
 --------
@@ -263,6 +311,10 @@ The tools
        call that does not go through ``tools.models``, and
        ``note(kind, text, *, failed=False)`` for one line of the step's
        activity
+   * - ``tools.run_agent(prompt, *, tree, model)``
+     - one run of the deployment's coding agent in the workspace, as an
+       ``AgentOutcome``; only a method whose class sets ``runs_agent`` gets
+       an agent
 
 Call a model
 ~~~~~~~~~~~~
@@ -305,6 +357,44 @@ scorer. It also raises ``RuntimeError`` when a call needs more episodes than
 the step has left, and then no episode of the call runs. It raises
 ``ValueError`` when the tree fails ``check``, and ``TypeError`` when
 ``tasks`` is one string. A refused call adds nothing to the history.
+
+Run a coding agent
+~~~~~~~~~~~~~~~~~~
+
+``tools.run_agent`` runs the deployment's coding agent once, and returns when
+the agent exits or runs past ``evolution.agent.timeout_s``. ``evolution.agent``
+names the agent's adapter (any adapter whose prompt is text, ``pi`` by
+default), its binary, and the sandbox it runs in; see the `configuration
+reference <../reference/configuration.rst#harness-evolution-keys>`__. A
+method whose class sets ``runs_agent = True`` gets the agent, and Reef refuses
+to start such a method when the deployment configures none.
+
+The agent's working directory is the workspace. It can write ``harness/``,
+``state/``, ``scratch/`` and ``output/``, and it reads ``material/`` and the
+history. Its own harness is ``tree``, rendered for the agent's adapter after
+Reef's protocol rules. The agent holds no credential: its model calls go to
+the binding that ``model`` names (``served`` or an ``evolution.models`` entry)
+through a loopback gateway at ``$REEF_AGENT_URL``. The gateway spends each
+call from the step's budget and records it in ``calls.json``. The same
+address serves two tools on the workspace's trees, so a method that is only
+prompts can check and score its work:
+
+- ``GET $REEF_AGENT_URL/tools`` lists the tools and their arguments.
+- ``POST $REEF_AGENT_URL/check`` with ``{"tree": "harness"}`` answers
+  ``passed`` and ``problems``.
+- ``POST $REEF_AGENT_URL/evaluate`` with ``{"tree": "harness", "tasks":
+  [...], "repeats": 1}`` answers one record per episode, through the score
+  cache and the step's episode budget.
+
+A ``tree`` argument is a directory of the workspace, such as ``harness`` or
+``scratch/try-2``. A refused call answers 400 with the reason.
+
+``AgentOutcome`` says how the run ended: ``exit_code``, ``timed_out``, or the
+``error`` that kept it from starting, and its ``seconds``. The agent's session
+log stays in ``output/agent-session.jsonl``. ``run_agent`` raises
+``RuntimeError`` when no agent runs for the method, ``KeyError`` when
+``model`` names no binding, and ``ValueError`` when ``tree`` does not render
+for the agent's adapter.
 
 The result
 ----------

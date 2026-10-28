@@ -14,9 +14,8 @@ Callers do not need to know which sandbox runs their commands. Only
 - ``remote_executor(kind, section, environ)`` returns the cloud sandbox of
   provider ``kind`` (a key of ``REMOTE_EXECUTORS``: ``e2b`` or ``modal``) from
   that provider's options in ``section``. A caller with its own settings, such
-  as the beta Reefine recipe's ``evolution.agent``, passes its
-  section; the factory reads only the provider's options, ``forward_ports``
-  and ``env_from``.
+  as ``evolution.agent``, passes its section; the factory reads only the
+  provider's options, ``forward_ports`` and ``env_from``.
 - ``reef.sandbox.remote.REMOTE_TASK_ENVIRONMENTS`` lists the Harbor environment
   types that run a task's containers on a provider, each with the variables
   its credentials come from.

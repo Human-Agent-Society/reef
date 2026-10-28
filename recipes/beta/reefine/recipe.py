@@ -10,35 +10,33 @@ On the health task the floor checks that the tree still works, not that the
 requested change does; the step's design and review and the person judge
 that.
 
-Two keys of the section are Reefine's own. ``agent`` says where the
-coding agent that answers a request on pi runs (``agent_settings``), and
-``multimodal`` names the gateway for images, embeddings, speech and
-decisions (``recipes.beta.reefine.multimodal``).
+``evolution.agent`` says where the coding agent that answers a request on
+pi runs (``reef.train.harness_backend.agent.settings``); Reefine adds
+``trial_timeout_s`` to it, the limit of each trial, and runs its agent on the
+harness's own binary unless the section names another. ``multimodal`` is
+Reefine's own key: the gateway for images, embeddings, speech and decisions
+(``recipes.beta.reefine.multimodal``).
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from recipes.beta.reefine.agent import AgentExecution
+from recipes.beta.reefine.agent import ReefineAgent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER
 from recipes.beta.reefine.method import ReefineMethod
 from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree import TreeKind
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.interfaces import MultimodalRelay
-from reef.sandbox.config import REMOTE_EXECUTORS, remote_executor
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -58,96 +56,8 @@ EVALUATION_DEFAULTS: Mapping[str, Any] = {
 }
 
 
-@dataclass(frozen=True)
-class AgentSettings:
-    """``evolution.agent``, read: where Reefine's agent runs and for how long.
-
-    Values: ``executor`` is the agent's isolation, not yet bound to pi's
-    program; ``timeout_s`` > 0 bounds the whole agent run and
-    ``trial_timeout_s`` > 0 each trial.
-    Purpose: ``agent_settings`` reads it from the deployment, and
-    ``ReefineRecipe.build_backend`` binds it for each scenario.
-    """
-
-    executor: EpisodeExecutor
-    timeout_s: float
-    trial_timeout_s: float
-
-    def __post_init__(self) -> None:
-        if self.timeout_s <= 0 or self.trial_timeout_s <= 0:
-            raise ValueError("the agent's timeouts must be positive")
-
-    def bind(self, binary: str | None, provider: MultimodalProvider | None) -> AgentExecution:
-        """The agent's execution: the executor bound to pi's program (``binary`` names the binary in place of the
-        pinned one) and preflighted, the time limits, and ``provider`` for the trials."""
-        executor, bound_binary = self.executor.for_program(
-            AdapterProgram(get_adapter(EXTENSION_ADAPTER)), binary=binary
-        )
-        executor.preflight()
-        return AgentExecution(executor, bound_binary, self.timeout_s, self.trial_timeout_s, provider)
-
-
-def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path) -> AgentSettings | None:
-    """``evolution.agent`` as the agent's isolation and its two time limits; ``None`` runs no agent.
-
-    ``sandbox: bwrap`` jails the agent and gives it the internet but no host
-    port but the gateway's, and refuses to start where bwrap or pasta is
-    missing. A cloud sandbox (``sandbox: e2b`` or ``sandbox: modal``, with
-    that provider's options in the section; its image is the harness's
-    pinned binary, built on first use, unless an option names one) runs it
-    where it reaches the gateway through a tunnel and nothing else of the
-    host, and carries the deployment that ``state_dir`` names, so a later
-    start stops the sandboxes a stopped run left. ``sandbox: none`` runs it
-    unisolated with the service's privileges, and must be chosen. Left empty
-    (and ``REEF_AGENT_SANDBOX`` unset), the agent is jailed where the host
-    can, and off where it cannot: then the served model answers requests in
-    text. No section runs no agent. The variable's old name,
-    ``REEF_PROPOSER_SANDBOX``, is refused, so a deployment that still sets
-    it does not start without the isolation it names.
-    """
-    if section is None:
-        return None
-    if not isinstance(section, Mapping):
-        raise RecipeConfigError("evolution.agent must be a mapping")
-    if "REEF_PROPOSER_SANDBOX" in environ:
-        raise RecipeConfigError("REEF_PROPOSER_SANDBOX is no longer read: set REEF_AGENT_SANDBOX instead")
-    timeouts = []
-    for key, default in (("timeout_s", 1800.0), ("trial_timeout_s", 300.0)):
-        value = section.get(key, default)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise RecipeConfigError(f"evolution.agent.{key} must be a positive number")
-        timeouts.append(float(value))
-    timeout_s, trial_timeout_s = timeouts
-    sandbox = str(section.get("sandbox") or environ.get("REEF_AGENT_SANDBOX") or "").strip()
-    if sandbox == "none":
-        logging.getLogger(__name__).warning(
-            "evolution.agent.sandbox is none: the agent runs with the service's own privileges and full "
-            "network access, fed text from clients; use it only where you trust every client"
-        )
-        return AgentSettings(LocalExecutor(), timeout_s, trial_timeout_s)
-    if sandbox in REMOTE_EXECUTORS:
-        try:
-            remote = remote_executor(sandbox, section, environ, timeout_s=timeout_s, owner_anchor=state_dir)
-            remote.preflight()
-        except SandboxUnavailable as exc:
-            raise RecipeConfigError(f"evolution.agent.sandbox is {sandbox}, but {exc}") from exc
-        return AgentSettings(remote, timeout_s, trial_timeout_s)
-    if sandbox not in ("", "bwrap"):
-        choices = ", ".join(f"'{name}'" for name in ("bwrap", *sorted(REMOTE_EXECUTORS), "none"))
-        raise RecipeConfigError(f"evolution.agent.sandbox must be one of {choices}")
-    executor = SandboxExecutor(network="isolated")
-    try:
-        executor.preflight()
-    except SandboxUnavailable as exc:
-        if sandbox == "bwrap":
-            raise RecipeConfigError(f"evolution.agent.sandbox is bwrap, but {exc}") from exc
-        logging.getLogger(__name__).warning(
-            "the agent is off: %s. The served model answers requests in text; set "
-            "evolution.agent.sandbox: none to run the agent without isolation",
-            exc,
-        )
-        return None
-    return AgentSettings(executor, timeout_s, trial_timeout_s)
+#: How long one trial of the agent may take when ``evolution.agent.trial_timeout_s`` says nothing.
+DEFAULT_TRIAL_TIMEOUT_S = 300.0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -158,9 +68,9 @@ class ReefineRecipe(HarnessEvolutionRecipe):
     defaults merged in. ``multimodal`` is ``evolution.multimodal`` read,
     ``None`` for no gateway: Reef relays the harness's image, embedding,
     speech and decision calls to it with its key, unrecorded, and the
-    agent's trials reach the same one. ``agent`` is
-    ``evolution.agent`` read, ``None`` when no agent answers
-    requests (off pi, or where the host cannot jail it).
+    agent's trials reach the same one. ``agent`` is ``evolution.agent``
+    read, ``None`` when no agent answers requests (off pi, or where the host
+    cannot jail it), and ``trial_timeout_s`` > 0 bounds each of its trials.
     Purpose: a deployment names it as its recipe; it builds each scenario's
     backend with ``ReefineMethod``. Override ``evolution.evaluation.policy``
     to compare scores against the current release, and ``training-mode`` to
@@ -170,7 +80,7 @@ class ReefineRecipe(HarnessEvolutionRecipe):
     name: str = field(default="reefine", kw_only=True)
     training_mode: str = config_field("manual")
     multimodal: MultimodalSettings | None = None
-    agent: AgentSettings | None = None
+    trial_timeout_s: float = DEFAULT_TRIAL_TIMEOUT_S
 
     @property
     def multimodal_provider(self) -> MultimodalProvider | None:
@@ -209,22 +119,32 @@ class ReefineRecipe(HarnessEvolutionRecipe):
                 HEALTH_TASK_DIRECTORY if str(task).startswith("[health]") else task for task in tasks
             ]
         own = {key: value for key, value in section.items() if key not in ("agent", "multimodal")}
+        # The agent answers requests on pi alone; on another adapter the served model does, so no agent is
+        # built, jailed or warned about. On pi it runs unless the section is null, on the harness's own binary.
+        agent = section.get("agent", {}) if adapter == EXTENSION_ADAPTER else None
+        trial_timeout_s: Any = DEFAULT_TRIAL_TIMEOUT_S
+        if agent is not None:
+            if not isinstance(agent, Mapping):
+                raise RecipeConfigError("evolution.agent must be a mapping")
+            if agent.get("adapter", EXTENSION_ADAPTER) != EXTENSION_ADAPTER:
+                raise RecipeConfigError(f"Reefine's agent is {EXTENSION_ADAPTER}: evolution.agent.adapter must be it")
+            trial_timeout_s = agent.get("trial_timeout_s", DEFAULT_TRIAL_TIMEOUT_S)
+            if (
+                isinstance(trial_timeout_s, bool)
+                or not isinstance(trial_timeout_s, (int, float))
+                or trial_timeout_s <= 0
+            ):
+                raise RecipeConfigError("evolution.agent.trial_timeout_s must be a positive number")
+            binary = section.get("binary")
+            agent = {**({"binary": binary} if binary else {}), **agent}
         kwargs = super()._recipe_kwargs(
-            {**settings, "evolution": {**EVOLUTION_DEFAULTS, **own, "evaluation": evaluation}}, values
+            {**settings, "evolution": {**EVOLUTION_DEFAULTS, **own, "agent": agent, "evaluation": evaluation}}, values
         )
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(section.get("multimodal"), values)
         except ValueError as exc:
             raise RecipeConfigError(f"evolution.{exc}") from exc
-        # The agent answers requests on pi alone; on another adapter the served model does, so no agent is
-        # built, jailed or warned about.
-        kwargs["agent"] = (
-            agent_settings(
-                section.get("agent", {}), values, state_dir=Path(kwargs["evolution"].state_dir).expanduser()
-            )
-            if adapter == EXTENSION_ADAPTER
-            else None
-        )
+        kwargs["trial_timeout_s"] = float(trial_timeout_s)
         return kwargs
 
     def build_backend(
@@ -235,8 +155,8 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         host, or named in a cloud sandbox's image."""
         if self.agent is None or not isinstance(self.method, ReefineMethod):
             return super().build_backend(scenario, releases, task_storage)
-        method = ReefineMethod(self.agent.bind(self.evolution.binary, self.multimodal_provider))
+        method = ReefineMethod(ReefineAgent(self.agent.bind(), self.trial_timeout_s, self.multimodal_provider))
         return HarnessEvolutionRecipe.build_backend(replace(self, method=method), scenario, releases, task_storage)
 
 
-__all__ = ["SEED_DIRECTORY", "AgentSettings", "ReefineRecipe", "agent_settings"]
+__all__ = ["DEFAULT_TRIAL_TIMEOUT_S", "SEED_DIRECTORY", "ReefineRecipe"]

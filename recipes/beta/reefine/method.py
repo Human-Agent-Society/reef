@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from recipes.beta.reefine.agent import AgentExecution, answer_with_agent
+from recipes.beta.reefine.agent import ReefineAgent, answer_with_agent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, answer_request, learn_from_failures
 from reef.train.harness_backend import Method, StepContext, StepResult
 
@@ -29,7 +29,7 @@ class ReefineMethod(Method):
     agent it binds there; the backend calls ``step`` once per step.
     """
 
-    def __init__(self, agent: AgentExecution | None = None) -> None:
+    def __init__(self, agent: ReefineAgent | None = None) -> None:
         self.agent = agent
 
     def step(self, context: StepContext) -> StepResult:

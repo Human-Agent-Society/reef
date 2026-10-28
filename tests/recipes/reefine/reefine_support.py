@@ -28,7 +28,7 @@ from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
-from reef.train.harness_backend import Method, Tools, Trace, Workspace
+from reef.train.harness_backend import AgentOutcome, Method, Tools, Trace, Workspace
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.types import JobData, TrainStepResult
 
@@ -103,6 +103,9 @@ class ModelTools(Tools):
 
     def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple:
         raise RuntimeError("a text answer scores no tree")
+
+    def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
+        raise RuntimeError("a text answer runs no agent")
 
 
 class Served(ModelBinding):

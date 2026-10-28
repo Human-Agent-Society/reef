@@ -36,9 +36,9 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, ClassVar
 
-from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools
+from recipes.beta.reefine.agent_gateway import ReefineGateway
 from recipes.beta.reefine.answer import (
     EXTENSION_ADAPTER,
     PI_EXTENSION_API,
@@ -53,24 +53,26 @@ from recipes.beta.reefine.answer import (
 )
 from recipes.beta.reefine.multimodal import MultimodalProvider
 from recipes.beta.reefine.prompts import prompt
+from recipes.beta.reefine.trial import trial_script
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.trajectory import final_assistant_text, reader_for
+from reef.harness.episodes.run import headless_argv
+from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.gateway import AgentTool
 from reef.harness.tree import HarnessTree, TreePatch, locate, render_tree
-from reef.sandbox.environment import download_directory, execute
+from reef.sandbox.environment import download_directory
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
 from reef.train.harness_backend import Tools, Workspace
+from reef.train.harness_backend.agent.run import AgentExecution, agent_env, launch_agent, read_session
 
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
 AGENT_TOOLS = Path(__file__).with_name("agent_tools.ts")
 TRIAL_DRIVER = Path(__file__).with_name("trial_driver.mjs")
 #: The agent's own harness: its rules and its tools, as a tree rendered for pi.
 AGENT_TOOLS_PATH = "extensions/reef-agent-tools.ts"
-#: The session state pi writes beside its rendered config, writable in a sandbox.
-AGENT_STATE_PATHS = ("sessions", "pi-agent")
 #: How much of a trial the agent reads back: enough to see what happened, never a whole transcript.
 MAX_TRIAL_TEXT = 4000
 MAX_TRIAL_CALLS = 30
@@ -91,27 +93,26 @@ AGENT_PROMPT = prompt("agent_request")
 
 
 @dataclass(frozen=True)
-class AgentExecution:
+class ReefineAgent:
     """Where Reefine's agent runs, for how long, and the multimodal gateway its trials reach.
 
-    Values: ``executor`` is the isolation the agent and its trials run under,
-    bound to pi's program, and ``binary`` is pi's binary there.
-    ``timeout_s`` > 0 bounds the whole agent run and ``trial_timeout_s`` > 0
-    each trial. ``provider`` is the deployment's multimodal gateway, ``None``
-    for none.
+    Values: ``execution`` is ``evolution.agent`` bound to pi: the isolation
+    the agent and its trials run under, pi's binary there, and the time limit
+    of the whole agent run. ``trial_timeout_s`` > 0 bounds each trial.
+    ``provider`` is the deployment's multimodal gateway, ``None`` for none.
     Purpose: ``ReefineRecipe.build_backend`` makes one per scenario;
     ``ReefineMethod`` runs the agent on a request step with it.
     """
 
-    executor: EpisodeExecutor
-    binary: str
-    timeout_s: float
+    execution: AgentExecution
     trial_timeout_s: float
     provider: MultimodalProvider | None = None
 
     def __post_init__(self) -> None:
-        if self.timeout_s <= 0 or self.trial_timeout_s <= 0:
-            raise ValueError("AgentExecution timeouts must be positive")
+        if self.execution.descriptor.name != EXTENSION_ADAPTER:
+            raise ValueError(f"Reefine's agent is {EXTENSION_ADAPTER}, not {self.execution.descriptor.name}")
+        if self.trial_timeout_s <= 0:
+            raise ValueError("ReefineAgent.trial_timeout_s must be positive")
 
 
 def agent_rules(provider: MultimodalProvider | None) -> str:
@@ -173,42 +174,33 @@ def launch_pi(
     given, is pi's own directory: ``files`` are written there, read-only, and
     pi keeps its sessions there. ``workspace``, ``root/workspace`` unless
     given, is the session's working directory, and ``writable`` names other
-    directories under ``root`` it may write.
+    directories under ``root`` it may write. ``script`` runs the scripted
+    trial driver in place of pi.
     """
     home = root if home is None else home
-    workspace = root / "workspace" if workspace is None else workspace
-    for relative, text in files.items():
-        target = home / PurePosixPath(relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    workspace.mkdir(exist_ok=True)
-    state = tuple(home / relative for relative in AGENT_STATE_PATHS)
-    for path in state:
-        path.mkdir(parents=True, exist_ok=True)
-    session_env = {
-        key: value.replace("{root}", str(home)) for key, value in descriptor.env.items() if key != "PI_OFFLINE"
-    }
-    session_env["HOME"] = str(home)
-    # The harness's own binary first, so a nested `pi -p` finds the pinned one.
-    session_env["PATH"] = os.pathsep.join([str(Path(binary).absolute().parent), os.environ.get("PATH", "")])
-    argv = [binary, *(token.replace("{prompt}", prompt_text) for token in descriptor.argv)]
+    session_env = agent_env(descriptor, binary, home)
+    # An agent and its trials run online: pi's offline switch is for benchmark episodes.
+    session_env.pop("PI_OFFLINE", None)
+    argv = headless_argv(descriptor, binary, prompt_text)
     if script is not None:
+        home.mkdir(parents=True, exist_ok=True)
         (home / "trial-script.json").write_text(json.dumps(script), encoding="utf-8")
         driver = home / "trial-driver.mjs"
         shutil.copyfile(TRIAL_DRIVER, driver)
         argv = ["node", str(driver)]
-    outcome = execute(
+    outcome = launch_agent(
+        descriptor,
         executor,
         argv,
+        files,
+        {**session_env, **env},
         root=root,
-        workspace=workspace,
-        env={**session_env, **env},
+        home=home,
+        cwd=root / "workspace" if workspace is None else workspace,
         timeout=timeout,
-        writable_paths=(*state, *writable),
-        readonly_paths=tuple(home / PurePosixPath(relative) for relative in files),
+        writable=writable,
     )
-    trajectory = reader_for(descriptor.trajectory_format)(home / descriptor.trajectory_path)
-    return outcome, list(trajectory)
+    return outcome, read_session(descriptor, home)
 
 
 def tool_calls(trajectory: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -258,8 +250,8 @@ def unread_lines(left_out: Mapping[str, str], paths: Iterable[str]) -> list[str]
     return list(lines)
 
 
-class AgentRun(WorkspaceTools):
-    """One agent run in a step's workspace, and the two tools the gateway serves over the agent's tree.
+class AgentRun:
+    """One agent run in a step's workspace, and what its two tools, ``check`` and ``trial``, do with its tree.
 
     Values: ``workspace`` is the step's workspace, whose ``harness/`` the
     agent edits; ``tools`` checks trees and meters the step; ``head`` is the
@@ -270,26 +262,27 @@ class AgentRun(WorkspaceTools):
     ``time.monotonic``) ends the run, and no trial runs into its last
     ``finish_seconds``. ``checks`` holds every check and trial result in
     order.
-    Purpose: ``answer_with_agent`` makes one per request step; the gateway
-    calls ``check`` and ``trial`` while the agent works, and the step reads
-    the candidate with ``read`` when the agent stops.
+    Purpose: ``answer_with_agent`` makes one per request step; the gateway's
+    ``CheckTool`` and ``TrialTool`` call ``check`` and ``trial`` while the
+    agent works, and the step reads the candidate with ``read`` when the
+    agent stops.
     """
 
-    def __init__(self, workspace: Workspace, tools: Tools, head: HarnessTree, agent: AgentExecution) -> None:
+    def __init__(self, workspace: Workspace, tools: Tools, head: HarnessTree, agent: ReefineAgent) -> None:
         self.workspace = workspace
         self.tools = tools
         self.head = head
         self.agent = agent
         self.descriptor = get_adapter(EXTENSION_ADAPTER)
         self.served = tools.models.served
-        self.gateway: AgentGateway | None = None
+        self.gateway: ReefineGateway | None = None
         self.session: EpisodeExecutor | None = None
         #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
         #: pull replaces the tree's directory, so one call at a time reads it.
         self.workspace_lock = threading.Lock()
         self.trials = 0
-        self.deadline = time.monotonic() + agent.timeout_s
-        self.finish_seconds = min(60.0, agent.timeout_s * 0.1)
+        self.deadline = time.monotonic() + agent.execution.timeout_s
+        self.finish_seconds = min(60.0, agent.execution.timeout_s * 0.1)
         self.checks: list[dict[str, Any]] = []
 
     def remaining_seconds(self) -> float:
@@ -311,7 +304,7 @@ class AgentRun(WorkspaceTools):
 
     def executor(self) -> EpisodeExecutor:
         """The run's session, which reaches the gateway; the agent's executor before the run starts."""
-        return self.agent.executor if self.session is None else self.session
+        return self.agent.execution.executor if self.session is None else self.session
 
     def snapshot(self) -> tuple[HarnessTree, list[str]]:
         """Pull the agent's tree from its session and read it (see ``read``)."""
@@ -425,7 +418,7 @@ class AgentRun(WorkspaceTools):
         try:
             outcome, trajectory = launch_pi(
                 self.descriptor,
-                self.agent.binary,
+                self.agent.execution.binary,
                 self.executor(),
                 files,
                 task,
@@ -498,8 +491,47 @@ class AgentRun(WorkspaceTools):
         )
 
 
+class CheckTool(AgentTool):
+    """``check``: the agent's tree through the step's validation, with what a request may not change named."""
+
+    name = "check"
+    description = "Validate the tree in harness/ as the step validates a request's change."
+    input_schema: ClassVar[Mapping[str, Any]] = {"type": "object", "properties": {}, "additionalProperties": False}
+
+    def __init__(self, run: AgentRun) -> None:
+        self.run = run
+
+    def call(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.run.check()
+
+
+class TrialTool(AgentTool):
+    """``trial``: one online task, or one scripted session, of the candidate harness."""
+
+    name = "trial"
+    description = "Run the candidate harness on one online task, or on one scripted session of checks."
+    input_schema: ClassVar[Mapping[str, Any]] = {
+        "type": "object",
+        "properties": {"task": {"type": "string"}, "script": {"type": "object"}},
+        "additionalProperties": False,
+    }
+
+    def __init__(self, run: AgentRun) -> None:
+        self.run = run
+
+    def call(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        task, script = arguments.get("task"), arguments.get("script")
+        if script is not None:
+            if task is not None:
+                raise ValueError("choose task or script, not both")
+            return self.run.trial("", trial_script(script))
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("a trial needs a task or script")
+        return self.run.trial(task.strip())
+
+
 def answer_with_agent(
-    workspace: Workspace, tools: Tools, head: HarnessTree, request: TrainingRequest, agent: AgentExecution
+    workspace: Workspace, tools: Tools, head: HarnessTree, request: TrainingRequest, agent: ReefineAgent
 ) -> Answer:
     """Run the agent on one request in the step's tree and read its work back: the change with the notes the step
     records, or the empty change with the reason under ``failure``. When the answer's tree is not the one the agent
@@ -510,7 +542,7 @@ def answer_with_agent(
     shutil.copyfile(PI_EXTENSION_API, reference)
     home = workspace.scratch / AGENT_HOME
     run = AgentRun(workspace, tools, head, agent)
-    gateway = AgentGateway(run.served, tools.calls, run, agent.provider)
+    gateway = ReefineGateway(run.served, tools.calls, (CheckTool(run), TrialTool(run)), agent.provider)
     gateway.start()
     run.gateway = gateway
     record: dict[str, Any] = {}
@@ -527,20 +559,21 @@ def answer_with_agent(
             failures=failures_section(workspace.traces()),
         )
         env = {"REEF_AGENT_URL": gateway.base_url, **trial_env(gateway.base_url)}
-        run.session = agent.executor.open_session(forward_ports=(gateway.port,), timeout_s=agent.timeout_s)
-        run.deadline = time.monotonic() + agent.timeout_s
-        env["REEF_AGENT_DEADLINE_MS"] = str(int((time.time() + agent.timeout_s) * 1000))
+        limit = agent.execution.timeout_s
+        run.session = agent.execution.executor.open_session(forward_ports=(gateway.port,), timeout_s=limit)
+        run.deadline = time.monotonic() + limit
+        env["REEF_AGENT_DEADLINE_MS"] = str(int((time.time() + limit) * 1000))
         env["REEF_AGENT_FINISH_SECONDS"] = str(run.finish_seconds)
-        tools.calls.note("agent", f"the coding agent started on the request (at most {agent.timeout_s:g} s)")
+        tools.calls.note("agent", f"the coding agent started on the request (at most {limit:g} s)")
         outcome, trajectory = launch_pi(
             run.descriptor,
-            agent.binary,
+            agent.execution.binary,
             run.executor(),
             rendered_files(agent_tree, binding, run.descriptor),
             agent_prompt,
             env,
             root=workspace.root,
-            timeout=agent.timeout_s,
+            timeout=limit,
             home=home,
             workspace=workspace.harness,
             writable=(workspace.output,),
@@ -665,8 +698,10 @@ def keep_left_tree(workspace: Workspace, candidate: HarnessTree) -> None:
 __all__ = [
     "AGENT_TOOLS",
     "AGENT_TOOLS_PATH",
-    "AgentExecution",
     "AgentRun",
+    "CheckTool",
+    "ReefineAgent",
+    "TrialTool",
     "answer_with_agent",
     "launch_pi",
     "rendered_files",

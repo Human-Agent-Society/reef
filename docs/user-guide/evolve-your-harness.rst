@@ -514,10 +514,11 @@ are not implemented by this provider. Pi and Codex have opt-in real E2B tests
 in ``tests/smoke/test_e2b_episode.py``; other adapters need their template and
 runtime-state paths validated with their own agent binaries.
 
-The beta Reefine recipe runs a coding agent and configures where it runs with
-its own ``evolution.agent.sandbox``. That setting is independent of
-``evolution.executor``: set ``evolution.executor: e2b`` to run the evaluation
-episodes in cloud sandboxes as well.
+A method that runs a coding agent, such as ``AgentMethod`` or the beta
+Reefine recipe, chooses where the agent runs with ``evolution.agent.sandbox``.
+That setting is independent of ``evolution.executor``: set
+``evolution.executor: e2b`` to run the evaluation episodes in cloud sandboxes
+as well.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your

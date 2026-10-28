@@ -2,8 +2,8 @@
 
 Meta-Harness is full-history search over a fixed model's harness. This method
 represents every candidate as a complete Reef harness tree, so the same search
-works with any Reef adapter and any episode scorer. It has no Harbor,
-Terminal-Bench, Terminus, or coding-agent dependency.
+works with any Reef adapter and any episode scorer. `MetaHarness` has no
+Harbor, Terminal-Bench, Terminus, or coding-agent dependency.
 
 The method is a Reef harness evolution method (`Method`) in the standard
 layout:
@@ -13,10 +13,15 @@ meta_harness/
   method.py            MetaHarness: one complete tree per step from the whole search history
   system_prompt.md     the proposer model's system prompt
   proposal_prompt.md   the instructions in front of the search state
+  agent/               the same search with a coding agent as the proposer, as prompts (AgentMethod)
   examples/terminal_bench/
                        the runnable Terminal-Bench search
   results/             the selected harness of the reported comparison
 ```
+
+`MetaHarness` makes one model call per step. Upstream's proposer is a coding
+agent that reads the whole search as files; [`agent/`](agent/README.md) runs
+that proposer as a method made of prompts, on the deployment's coding agent.
 
 Reef owns tree validation, adapter rendering, model binding, episode
 execution, timeouts, residue policy, finite-score checks, the score cache,

@@ -32,6 +32,7 @@ from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import CommittedReleases, ComponentReleases, ReleaseFiles
 from reef.train.harness_backend import Method, StepContext, StepResult, Workspace
+from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.harness_backend.tools import StepTools
@@ -118,12 +119,15 @@ def harness_recipe(
     tasks: tuple[str, ...] = ("task one",),
     evaluation: Mapping[str, Any] | None = None,
     worker_executor: ExecutorSettings | None = None,
+    agent: AgentSettings | None = None,
+    models: Mapping[str, ModelBinding] | None = None,
     **evolution: Any,
 ) -> HarnessEvolutionRecipe:
     """A pi recipe over the fake binary, its state under ``tmp_path``.
 
     ``evaluation`` sets ``EvaluationSettings`` fields beside ``tasks``, and ``evolution`` sets
-    ``EvolutionSettings`` fields. ``worker_executor`` places the episode workers (``execution.evolution``).
+    ``EvolutionSettings`` fields. ``worker_executor`` places the episode workers (``execution.evolution``),
+    ``agent`` is the method's coding agent and ``models`` the method's named models.
     """
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
@@ -135,6 +139,8 @@ def harness_recipe(
         seed=seed,
         runtime=runtime(),
         worker_executor=ExecutorSettings() if worker_executor is None else worker_executor,
+        agent=agent,
+        models=dict(models or {}),
     )
 
 
@@ -227,11 +233,11 @@ def step_tools(workspace: Workspace, models: ModelBindings, record: list[dict[st
     """The backend's tools of ``workspace``'s step, made before the method runs: ``models`` with no budget, every
     call in ``record``, and no scorer. The head is the tree in ``harness/``."""
     return StepTools(
+        workspace=workspace,
         descriptor=get_adapter(str(workspace.host()["adapter"])),
         evaluator=None,
         history=History.open(workspace.history_dir),
         head=workspace.tree().checksum(),
-        step=workspace.step,
         models=models,
         step_calls=StepCalls(0, [] if record is None else record),
     )

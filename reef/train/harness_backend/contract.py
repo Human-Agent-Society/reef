@@ -3,9 +3,10 @@
 A method is a :class:`Method`. Each step gives it one :class:`StepContext`:
 the step's :class:`~reef.train.harness_backend.workspace.Workspace`, where the
 harness's components and the step's material are files, and the
-:class:`Tools`, the services that Reef runs for the method. The method edits
-``context.workspace.harness``; the tree it leaves there is the step's
-candidate, and an unchanged tree skips the step. It returns a
+:class:`Tools`, the services that Reef runs for the method: model calls, the
+tree check, the evaluation, and a run of the deployment's coding agent. The
+method edits ``context.workspace.harness``; the tree it leaves there is the
+step's candidate, and an unchanged tree skips the step. It returns a
 :class:`StepResult` that describes what it did. A method never subclasses
 the backend.
 """
@@ -13,40 +14,62 @@ the backend.
 from __future__ import annotations
 
 import json
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, ClassVar
 
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.requirements import parse_requires
 from reef.evaluation.harness import EpisodeRecord
 from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.gateway import ModelCalls
 from reef.harness.tree import HarnessTree, ValidationResult
 from reef.train.harness_backend.workspace import Workspace
 
 
-class ModelCalls(ABC):
-    """The step's model-call budget, its call record, and its live activity.
+@dataclass(frozen=True)
+class AgentOutcome:
+    """How one run of the deployment's coding agent ended.
 
-    Purpose: every binding in ``Tools.models`` spends and records through it.
-    A method that sends model traffic another way, such as the gateway of an
-    agent process, spends and records through ``Tools.calls`` itself.
+    Values: ``exit_code`` is the agent's exit status, ``None`` when it did
+    not exit by itself. ``timed_out`` is True when it ran past
+    ``evolution.agent.timeout_s``. ``error`` is why it could not start,
+    ``None`` when it started. Exactly one holds: an exit code, a time out or
+    an error. ``seconds`` ≥ 0 is how long the run took.
+    Purpose: ``Tools.run_agent`` returns it; the method decides what the run
+    is worth, and ``to_json`` goes into its notes.
     """
 
-    @abstractmethod
-    def spend(self) -> None:
-        """Count one call; raise ``RuntimeError`` when the step's budget is exhausted."""
+    exit_code: int | None
+    timed_out: bool
+    error: str | None
+    seconds: float
 
-    @abstractmethod
-    def record(self, entry: Mapping[str, Any]) -> None:
-        """Append one call to the step's call record, which redacts and clips its texts."""
+    def __post_init__(self) -> None:
+        ends = (self.exit_code is not None, self.timed_out, self.error is not None)
+        if sum(ends) != 1:
+            raise ValueError("an agent run ends in exactly one way: an exit code, a time out or an error")
+        if not math.isfinite(self.seconds) or self.seconds < 0:
+            raise ValueError("AgentOutcome.seconds must be a finite number of at least 0")
 
-    @abstractmethod
-    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
-        """Add one line to the step's live activity: ``kind`` names what acted (such as ``model``, ``agent`` or
-        ``evaluate``), ``text`` what it did, and ``failed`` marks a line that went wrong."""
+    @property
+    def succeeded(self) -> bool:
+        """The agent exited by itself with status 0."""
+        return self.exit_code == 0
+
+    def describe(self) -> str:
+        """How the run ended, in a few words, for a summary."""
+        if self.timed_out:
+            return f"ran past its limit after {self.seconds:g} s"
+        if self.error is not None:
+            return f"could not start: {self.error}"
+        return f"exited {self.exit_code} after {self.seconds:g} s"
+
+    def to_json(self) -> dict[str, Any]:
+        return {"exit_code": self.exit_code, "timed_out": self.timed_out, "error": self.error, "seconds": self.seconds}
 
 
 class Tools(ABC):
@@ -85,6 +108,24 @@ class Tools(ABC):
         call is refused. Raise ``ValueError`` when ``tree`` fails ``check``, and
         ``TypeError`` when ``tasks`` is one string. A refused call adds nothing
         to the history.
+        """
+
+    @abstractmethod
+    def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
+        """Run the deployment's coding agent (``evolution.agent``) once in the step's workspace, and wait for it.
+
+        The agent works in the workspace's root: it may write ``harness/``,
+        ``state/``, ``scratch/`` and ``output/``, and it reads ``material/``
+        and the history. ``tree`` is the agent's own harness, such as its
+        rules and skills, rendered for the agent's adapter after Reef's
+        protocol rules, which describe the workspace and the tools. The
+        agent's model calls go to the binding ``model`` names, through a
+        loopback gateway that spends from the step's budget and records each
+        call; the gateway also serves ``check`` and ``evaluate`` on the
+        workspace's trees. Raise ``RuntimeError`` when no agent runs for the
+        method (it needs ``runs_agent`` and ``evolution.agent``), ``KeyError``
+        when ``model`` names no binding, and ``ValueError`` when ``tree`` does
+        not render for the agent's adapter.
         """
 
 
@@ -144,15 +185,20 @@ class StepContext:
 class Method(ConfiguredPlugin, ABC):
     """Base class of a harness evolution method.
 
+    Values: ``runs_agent`` is True for a method that runs the deployment's
+    coding agent (``Tools.run_agent``); only such a method gets the agent,
+    and the recipe refuses a deployment that configures none for it.
     Purpose: a deployment names the class in ``evolution.method``, the recipe
     builds it with ``from_config``, and the backend calls ``step`` once per
     step. A method keeps what it learns across steps in the workspace's
     ``state/``; the backend commits that directory with the step.
     """
 
+    runs_agent: ClassVar[bool] = False
+
     @abstractmethod
     def step(self, context: StepContext) -> StepResult:
         """Edit ``context.workspace.harness`` into this step's candidate, or leave it unchanged to skip the step."""
 
 
-__all__ = ["Method", "ModelCalls", "StepContext", "StepResult", "Tools"]
+__all__ = ["AgentOutcome", "Method", "StepContext", "StepResult", "Tools"]

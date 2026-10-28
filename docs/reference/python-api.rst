@@ -1424,7 +1424,9 @@ is the reference.
 
    from reef.evaluation.harness import EpisodeScorer, History, Promoter
    from reef.harness.tree import HarnessTree, TreePatch
-   from reef.train.harness_backend import Method, ModelCalls, StepContext, StepResult, Tools, Trace, Workspace
+   from reef.train.harness_backend import (
+       AgentMethod, AgentOutcome, Method, ModelCalls, StepContext, StepResult, Tools, Trace, Workspace,
+   )
 
    class MyMethod(Method):
        def step(self, context: StepContext) -> StepResult: ...
@@ -1449,6 +1451,16 @@ dataclass, which refuses an unknown key.
    * - ``Method.step(context)``
      - edit ``context.workspace.harness`` into the step's candidate and
        return a ``StepResult``; leave the tree unchanged to skip the step
+   * - ``Method.runs_agent``
+     - a class attribute, ``False`` by default; ``True`` for a method that
+       calls ``Tools.run_agent``, which then gets ``evolution.agent`` and is
+       refused at startup without it
+   * - ``AgentMethod``
+     - a method that is a folder of prompts (``config``: ``prompts``, the
+       folder, and ``model``, ``served`` by default): ``START.md``, an
+       optional ``RESUME.md``, and the agent's own tree; each step runs the
+       agent once and reads ``output/summary.md``, ``notes.json`` and
+       ``requires.json``
    * - ``StepContext``
      - ``workspace``, the step's ``Workspace``, and ``tools``, the step's
        ``Tools``; the backend makes one per step
@@ -1489,6 +1501,17 @@ dataclass, which refuses an unknown key.
        when the call needs more episodes than
        ``evolution.max_episodes_per_step`` leaves, and then no episode runs;
        ``ValueError`` for a tree that fails ``check``
+   * - ``Tools.run_agent(prompt, *, tree, model)``
+     - one run of the deployment's coding agent in the workspace, its own
+       harness ``tree`` rendered after Reef's protocol rules and its model
+       calls on the binding ``model`` names, through a gateway that serves
+       ``check`` and ``evaluate`` too; an ``AgentOutcome``. ``RuntimeError``
+       when no agent runs for the method, ``KeyError`` for an unknown
+       ``model``, ``ValueError`` for a tree that does not render
+   * - ``AgentOutcome``
+     - ``exit_code`` (``None`` when the agent did not exit by itself),
+       ``timed_out``, ``error`` (why it could not start) and ``seconds``;
+       ``succeeded`` is an exit with status 0
    * - ``StepResult``
      - ``summary`` (plain text, the commit's ``method_summary``), ``notes``
        (a JSON object, refused otherwise; the commit's ``method_notes``) and
