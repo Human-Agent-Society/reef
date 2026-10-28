@@ -723,7 +723,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 content_id=source.content_id,
                 parent_release_id=None,
                 source={"kind": "import", "inputs": dict(source.inputs)},
-                metadata=source.metadata,
+                metadata={},
             )
             commit = self._workspace.commit("import base artifact")
             try:

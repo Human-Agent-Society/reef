@@ -328,8 +328,7 @@ class CompositeRecipe(Recipe):
     def base_artifact_source(self) -> BaseArtifactSource:
         """Each component's base under that component's directory.
 
-        The files, the model directory and the metadata of a component go
-        under its name; each input is named ``<component>.<input>``. Raise
+        The files and the model directory of a component go under its name; each input is named ``<component>.<input>``. Raise
         ``RecipeConfigError`` when two components hold a model directory.
         """
         sources = {component: recipe.base_artifact_source() for component, recipe in self.components.items()}
@@ -344,7 +343,6 @@ class CompositeRecipe(Recipe):
             },
             model_directory=sources[models[0]].model_directory if models else None,
             model_component=models[0] if models else None,
-            metadata={component: dict(source.metadata) for component, source in sources.items() if source.metadata},
             inputs={
                 f"{component}.{name}": value
                 for component, source in sources.items()

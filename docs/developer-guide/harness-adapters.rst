@@ -1039,8 +1039,9 @@ Native tree file
 
 The native descriptor declares ``files.tree: native/tree.json``. Reef
 renders the release's entries into that file as a JSON array of
-``{id, name, config}`` objects. It is the same list stored in the commit
-log under ``algorithm_state["entries"]``.
+``{id, name, config}`` objects. Every harness artifact, of every adapter,
+also holds the same list in ``reef-entries.json`` at the tree root. Reef
+reads a release's entries from that file. A client's pull leaves it out.
 
 The file accompanies evaluation rollouts, published artifacts, manifests,
 install scripts, and pulled trees. Before the first evolution step, the

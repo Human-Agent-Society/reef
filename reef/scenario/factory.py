@@ -203,24 +203,20 @@ class ScenarioFactory:
 
         Every entry names the artifact of ``selected`` explicitly: the
         scenario's creation makes no artifact. A flat release is its one
-        component, with the release's metadata. A composed release keeps its
-        own manifest, which must bind every component the surface serves. A
-        release without one keeps one directory per component, and each
-        component's metadata under its name; a component it seeds nothing for
-        starts empty. Files outside every component directory, a model
+        component. A composed release keeps its own manifest, which must bind
+        every component the surface serves. A release without one keeps one
+        directory per component; a component it seeds nothing for starts
+        empty. Files outside every component directory, a model
         snapshot laid out at the root say, belong to no component and would
         be carried forward by none: such a release is refused.
         """
         base = backend.materialize(selected)
         manifest = base.components
         if surface.single and manifest is None:
-            metadata = {key: value for key, value in base.metadata.items() if key != COMPONENTS_METADATA_KEY}
             return ReleaseComponents(
                 {
                     name: ComponentEntry(
-                        selected.content_id,
-                        metadata=metadata,
-                        artifact_id=made_artifact_id(selected.release_id, name, single=True),
+                        selected.content_id, artifact_id=made_artifact_id(selected.release_id, name, single=True)
                     )
                     for name in surface.names
                 }
@@ -249,16 +245,15 @@ class ScenarioFactory:
                 f"base release {selected.release_id!r} keeps {stray} outside its components {list(surface.names)}: "
                 "a release serving several components keeps one directory per component"
             )
-        entries: dict[str, ComponentEntry] = {}
-        for name in surface.names:
-            # An imported base keeps each component's metadata under the component's name.
-            carried = base.metadata.get(name)
-            entries[name] = ComponentEntry(
-                f"{selected.content_id}:{name}",
-                metadata=carried if isinstance(carried, Mapping) else {},
-                artifact_id=made_artifact_id(selected.release_id, name, single=False),
-            )
-        return ReleaseComponents(entries)
+        return ReleaseComponents(
+            {
+                name: ComponentEntry(
+                    f"{selected.content_id}:{name}",
+                    artifact_id=made_artifact_id(selected.release_id, name, single=False),
+                )
+                for name in surface.names
+            }
+        )
 
     def validate_existing(
         self,

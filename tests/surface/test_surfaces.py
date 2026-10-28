@@ -385,3 +385,24 @@ def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> N
 def test_weight_hooks_need_the_scenario_and_its_runtime_together() -> None:
     with pytest.raises(ValueError, match="both the scenario and the runtime"):
         WeightInferenceHooks(scenario="math")
+
+
+def test_a_harness_artifact_holds_its_entries_and_a_client_pull_leaves_them_out(tmp_path) -> None:
+    from reef.artifact import Artifact
+    from reef.surface.files import ENTRIES_FILE, TextFileTree, entries_file, read_entries
+
+    entries = ({"id": "rules", "name": "rules", "config": {"text": "be brief"}},)
+    tree = tmp_path / "harness"
+    tree.mkdir()
+    (tree / "AGENTS.md").write_text("be brief\n", encoding="utf-8")
+    for relative, text in entries_file(entries).items():
+        (tree / relative).write_text(text, encoding="utf-8")
+
+    assert read_entries(tree) == entries
+    assert TextFileTree().read_files(Artifact.local(tree)) == {"AGENTS.md": "be brief\n"}
+    (tree / ENTRIES_FILE).write_text('{"not": "a list"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="not a list of objects"):
+        read_entries(tree)
+    (tree / ENTRIES_FILE).unlink()
+    with pytest.raises(ValueError, match="no readable"):
+        read_entries(tree)

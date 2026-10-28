@@ -435,11 +435,9 @@ class ScenarioCommitter:
                 self.start_trainer(component_trainer, self._artifacts.resolve(start.artifact_ref))
 
     def start_trainer(self, component_trainer: ComponentTrainer, release: Artifact) -> None:
-        """Start ``component_trainer`` from its component of ``release``, with the entries its commit recorded."""
+        """Start ``component_trainer`` from its component of ``release``."""
         artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
-        component_trainer.trainer.start_from(
-            artifact, self.release_queries.entries_for_version(release.ref.release_id, self._step)
-        )
+        component_trainer.trainer.start_from(artifact)
 
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Commit the backend's update of the content this Reef ships, when the active release is stale.

@@ -31,6 +31,7 @@ from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.cordis import CordisRecipe
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
+from reef.surface.files import ENTRIES_FILE
 from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.trainer import Trainer
 
@@ -1262,19 +1263,14 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     assert "upstream" not in files["native/models.json"]  # the seed carries no provider
     info = built.build_surface("demo").harness
     assert info is not None
-    base_entries = built.base_artifact_source().metadata["entries"]
+    base_entries = json.loads(files[ENTRIES_FILE])
     assert [entry["id"] for entry in base_entries][:3] == ["read_file", "write_file", "run_bash"]
     assert info.served_model == "qwen3-8b"
-    assert (
-        CordisRecipe.from_environment(
-            {},
-            config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},
-            runtime=_upstream_runtime(service),
-        )
-        .base_artifact_source()
-        .files
-        == {}
-    )
+    assert CordisRecipe.from_environment(
+        {},
+        config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},
+        runtime=_upstream_runtime(service),
+    ).base_artifact_source().files == {ENTRIES_FILE: "[]\n"}
 
 
 # -- the replay page --------------------------------------------------------

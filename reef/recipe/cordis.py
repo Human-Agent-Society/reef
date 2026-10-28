@@ -51,6 +51,7 @@ from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
+from reef.surface.files import entries_file
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
 from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
@@ -677,8 +678,9 @@ class CordisRecipe(Recipe):
         """The seed as the base harness, which a new scenario serves before any step publishes.
 
         The files are the seed rendered for the adapter, with the entries list
-        where the adapter keeps one. The metadata holds the entries for every
-        adapter. Without a seed, the base harness is empty. The input is the
+        where the adapter keeps one, and the entries in ``ENTRIES_FILE``, as
+        every harness artifact holds them. Without a seed, the base harness
+        holds only the empty entries list. The input is the
         checksum of the seed without Reef's own entries
         (``RESERVED_ENTRY_IDS``). Each Reef version ships its own copy of
         those entries, and a step publishes the new copy
@@ -688,9 +690,9 @@ class CordisRecipe(Recipe):
         configured = [dict(entry) for entry in self.seed if entry.get("id") not in RESERVED_ENTRY_IDS]
         descriptor = get_adapter(self.adapter)
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
+        rendered = {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)} if self.seed else {}
         return BaseArtifactSource(
-            files={**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)} if self.seed else {},
-            metadata={"entries": [dict(entry) for entry in self.seed]},
+            files={**rendered, **entries_file(self.seed)},
             inputs={"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()},
         )
 
