@@ -14,7 +14,7 @@ reef:
   token: ${REEF_TOKEN}
   # The OpenAI-compatible provider (no /v1 suffix) and the model under test.
   # Reef proxies recorded traffic here, the proposer's calls go here, and
-  # evaluation episodes are pointed here - nothing else ever sees it.
+  # evaluation rollouts are pointed here - nothing else ever sees it.
   run-dir: work/stack
 
 recipe:
@@ -58,7 +58,7 @@ recipe:
           Reply with the median as a plain integer alone on the last line.
       # The first-boot composition. It carries no provider: Reef renders its
       # own model binding (reef.upstream_url / reef.upstream_model below) into each
-      # evaluation episode, and the published tree never names an endpoint.
+      # evaluation rollout, and the published tree never names an endpoint.
       # The starter skill gives the proposer a node to improve.
       seed:
         - id: answer-style

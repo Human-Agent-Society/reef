@@ -1,8 +1,7 @@
-"""The Tinker component's own rollouts: a task job's episodes sampled on Tinker, then trained."""
+"""The Tinker component's own rollouts: a task job's rollouts sampled on Tinker, then trained."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 import urllib.request
@@ -13,7 +12,7 @@ import pytest
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
-from reef.harness.client.tasks import EpisodeRow, TaskLab
+from reef.harness.client.tasks import RolloutRow, TaskLab
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
 from reef.tinker.checkpoint import TinkerCheckpoint
@@ -22,10 +21,10 @@ from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.rollout import RolloutSettings, SamplerEndpoint, TaskRollouts, roll_out
+from reef.train.tinker_backend.rollout import RolloutSettings, SamplerEndpoint, TaskJobRollouts, roll_out
 
 MODEL = "Qwen/Qwen3-8B"
-ROLLOUT = {"episodes_per_task": 2, "concurrency": 2}
+ROLLOUT = {"rollouts_per_task": 2, "concurrency": 2}
 
 
 class Sampler(TinkerSampler):
@@ -49,15 +48,15 @@ class Sampler(TinkerSampler):
 
 
 class AgentLab(TaskLab):
-    """Calls the model once through the agent's api_base, then scores the episode with the task's reward."""
+    """Calls the model once through the agent's api_base, then scores the rollout with the task's reward."""
 
     def __init__(self, rewards: dict[str, float], failing: frozenset[str] = frozenset()) -> None:
         self.rewards = rewards
         self.failing = failing
 
-    async def run(self, task_path, agent, *, key, tags, overrides) -> EpisodeRow:
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         if task_path.name in self.failing:
-            return EpisodeRow(rewards={}, error="the sandbox did not start")
+            return RolloutRow(rewards={}, error="the sandbox did not start")
         body = json.dumps({"model": "m", "messages": [{"role": "user", "content": f"solve {task_path.name}"}]})
         request = urllib.request.Request(
             f"{agent['kwargs']['api_base']}/chat/completions",
@@ -68,7 +67,7 @@ class AgentLab(TaskLab):
         # A blocking agent: the sampler endpoint runs on its own threads.
         with urllib.request.urlopen(request, timeout=10) as response:
             response.read()
-        return EpisodeRow(rewards={"reward": self.rewards[task_path.name]})
+        return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
 
 
 def harbor_task(root: Path, name: str) -> TaskSample:
@@ -83,21 +82,19 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     tasks = (harbor_task(tmp_path, "add"), harbor_task(tmp_path, "sort"), harbor_task(tmp_path, "broken"))
     sampler = Sampler()
 
-    rollouts = asyncio.run(
-        roll_out(
-            tasks,
-            RolloutSettings.from_parameters({"rollout": ROLLOUT}),
-            sampler,
-            "tinker://start/sampler",
-            model=MODEL,
-            runtime_load_id="tinker:start",
-            work_dir=tmp_path / "work",
-            lab=AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"})),
-        )
+    rollouts = roll_out(
+        tasks,
+        RolloutSettings.from_parameters({"rollout": ROLLOUT}),
+        sampler,
+        "tinker://start/sampler",
+        model=MODEL,
+        runtime_load_id="tinker:start",
+        work_dir=tmp_path / "work",
+        lab=AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"})),
     )
 
     assert sampler.paths == ["tinker://start/sampler"] * 4
-    # Each task's two episodes form its group; the task whose sandbox failed has none.
+    # Each task's two rollouts form its group; the task whose sandbox failed has none.
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add", "sort", "sort"]
     assert rollouts.rewards() == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": ()}
     # The sandbox of "broken" did not start: its rollouts failed, which is not the policy's failure.
@@ -148,9 +145,9 @@ def test_the_sampler_endpoint_answers_a_bad_request_and_a_sampler_failure_with_t
     ("rollout", "message"),
     [
         (None, "needs the rollout parameter"),
-        ({"episodes_per_task": 1}, "episodes_per_task must be an int of at least 2"),
-        ({"episodes_per_task": 2, "concurrency": 0}, "concurrency must be an int of at least 1"),
-        ({"episodes_per_task": 2, "sandbox": "docker"}, r"takes no \['sandbox'\]"),
+        ({"rollouts_per_task": 1}, "rollouts_per_task must be an int of at least 2"),
+        ({"rollouts_per_task": 2, "concurrency": 0}, "concurrency must be an int of at least 1"),
+        ({"rollouts_per_task": 2, "sandbox": "docker"}, r"takes no \['sandbox'\]"),
         ({}, "incomplete"),
     ],
 )
@@ -185,7 +182,7 @@ def finished(component, job_id):
     return status
 
 
-def grouped(tmp_path: Path) -> TaskRollouts:
+def grouped(tmp_path: Path) -> TaskJobRollouts:
     def sample(name: str, reward: float) -> TrajectorySample:
         training = {"tokens": [1, 2, 3, 7, 8], "loss_mask": [1, 1], "rollout_log_probs": [-0.1, -0.2]}
         trajectory = {
@@ -197,7 +194,7 @@ def grouped(tmp_path: Path) -> TaskRollouts:
         return TrajectorySample(trajectory, group_id=name)
 
     scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
-    return TaskRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
+    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
 
 
 @pytest.mark.unit
@@ -222,7 +219,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
 
     calls = []
 
-    async def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
+    def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
         calls.append((tuple(task.task_path.name for task in tasks), sampler_path))
         return grouped(tmp_path)
 
@@ -239,7 +236,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         assert status.state == "finished" and len(status.checkpoints) == 1
         assert calls == [(("add",), "tinker://base/sampler")] and client.trained == [2]
         assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
-        # The rollouts are kept: running the job again trains them without new episodes.
+        # The rollouts are kept: running the job again trains them without new rollouts.
         kept = json.loads((component.job_directory("job-0") / ROLLOUTS_FILE).read_text())
         assert kept["scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
         settings = component.job_parameters(parameters).rollout
@@ -285,7 +282,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
 def test_an_evaluation_job_scores_its_start_and_trains_nothing(tmp_path, monkeypatch):
     import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
 
-    async def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
+    def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
         return grouped(tmp_path)
 
     monkeypatch.setattr(component_module, "roll_out", fake_roll_out)

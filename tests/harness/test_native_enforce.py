@@ -127,7 +127,7 @@ def test_the_profile_follows_the_declaration(tmp_path: Path) -> None:
     for capabilities in ((), ("read",), ("write",), ("exec",), ("network",), ("exec", "write", "network")):
         argv = profile(*capabilities)
         assert argv[0] == "bwrap" and "--die-with-parent" in argv and "--clearenv" in argv
-        # A jail inside the episode's cannot mount a fresh /proc, so it binds the episode's read only.
+        # A jail inside the rollout's cannot mount a fresh /proc, so it binds the rollout's read only.
         assert "--unshare-pid" in argv and "--proc" not in argv
         assert argv[argv.index("/proc") - 1 : argv.index("/proc") + 2] == ["--ro-bind", "/proc", "/proc"]
         assert ("--unshare-net" in argv) is ("network" not in capabilities)

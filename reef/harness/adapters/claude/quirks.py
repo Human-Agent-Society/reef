@@ -3,7 +3,7 @@
 Claude Code's boot writes local state beside the rendered config under
 CLAUDE_CONFIG_DIR: a top-level ``.claude.json`` state file, a ``statsig/``
 feature-gate cache, per-session ``todos/`` lists, and ``shell-snapshots/``.
-The descriptor whitelists those so the episode inverse tolerates them and
+The descriptor whitelists those so the rollout inverse tolerates them and
 reports anything else as residue.
 
 Every model call stays on Reef's model binding, and a ``model`` in the

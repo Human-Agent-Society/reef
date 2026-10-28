@@ -111,14 +111,14 @@ fails before training.
 
 A job's data can also be Harbor tasks (a task job), as the `generated-task
 recipe <../reference/configuration.rst#generated-tasks>`__ makes. Before it
-trains, the component runs ``rollout.episodes_per_task`` episodes of each task
-on Tinker's sampler at the job's start weights, so the episodes sample the
+trains, the component runs ``rollout.rollouts_per_task`` rollouts of each task
+on Tinker's sampler at the job's start weights, so the rollouts sample the
 weights that the job trains. The agent's model calls go to a sampler endpoint
 on this host, which answers Tinker's text chat with the training capture; the
-task's verifier scores each episode. The component trains on each task's
+task's verifier scores each rollout. The component trains on each task's
 group of samples, keeps the rollouts in its job directory so a resumed job
 trains the same samples, and reports each task's rewards in the job's metrics.
-The ``rollout`` job parameter sets the episodes, the agent and the sandbox.
+The ``rollout`` job parameter sets the rollouts, the agent and the sandbox.
 Reef's serving takes no part, so another runtime, such as an inference
 component, can serve the releases.
 

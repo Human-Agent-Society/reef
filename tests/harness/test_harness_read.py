@@ -127,11 +127,11 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
 
 def test_harness_recipes_name_their_adapter(tmp_path, monkeypatch) -> None:
     (tmp_path / "demo_adapter_surface.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))

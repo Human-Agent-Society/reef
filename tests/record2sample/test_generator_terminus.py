@@ -1,4 +1,4 @@
-"""The generator's Terminus 2: an episode that fills its context or fails a send-keys still reaches the verifier."""
+"""The generator's Terminus 2: a rollout that fills its context or fails a send-keys still reaches the verifier."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def terminal_lost() -> RuntimeError:
 
 def run_raising(monkeypatch: pytest.MonkeyPatch, error: BaseException | None) -> agent_context.AgentContext:
     async def parent_run(self, instruction, environment, context) -> None:
-        context.metadata = {"n_episodes": 3}
+        context.metadata = {"n_rollouts": 3}
         if error is not None:
             raise error
 
@@ -49,10 +49,10 @@ def test_a_full_context_or_a_lost_terminal_ends_the_run_for_verification(
     monkeypatch: pytest.MonkeyPatch, error: BaseException, reason: str
 ) -> None:
     context = run_raising(monkeypatch, error)
-    assert context.metadata == {"n_episodes": 3, generator_terminus.EPISODE_END_KEY: reason}
+    assert context.metadata == {"n_rollouts": 3, generator_terminus.ROLLOUT_END_KEY: reason}
 
 
 def test_a_finished_run_is_unmarked_and_other_errors_still_fail_the_trial(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert run_raising(monkeypatch, None).metadata == {"n_episodes": 3}
+    assert run_raising(monkeypatch, None).metadata == {"n_rollouts": 3}
     with pytest.raises(RuntimeError, match="model endpoint"):
         run_raising(monkeypatch, RuntimeError("model endpoint unreachable"))

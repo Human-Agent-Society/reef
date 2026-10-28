@@ -4,7 +4,7 @@ dsh composes its plugin tree from bundle layers plus one user patch layer
 per profile, ``profiles/<profile>/cordis.patch.yml``: a YAML list of entries
 addressed by plugin id. Config nodes write each layer as a JSON object keyed
 by id, so two nodes touching one plugin deep merge, and ``finalize_render``
-emits the list for the headless profile an episode runs and the web profile
+emits the list for the headless profile a rollout runs and the web profile
 ``reef-dsh web`` boots: one entry per id (a string starting with ``!!js ``
 becomes a js expression, the form dsh's own bundles use), then one
 ``insert`` entry per rendered code extension so the loader boots it from its
@@ -73,7 +73,7 @@ YAML_1_2_RESOLVERS = (
 # entry list, node_modules symlinks into the installation, and the module
 # fallback links, plus a package manifest and the pnpm workspace file for a
 # profile without a manifest (the headless one; the web one is rendered).
-# Episode state, not residue.
+# Rollout state, not residue.
 cleanup_whitelist = (
     "dsh/profiles/headless/package.json",
     "dsh/profiles/headless/cordis.yml",

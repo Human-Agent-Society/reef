@@ -78,7 +78,7 @@ class ScenarioCommitter:
         self.experiment_observer = experiment_observer
         self._lock = RLock()
         # A lone trainer's preparation holds the operation lock across proposer
-        # calls and evaluation episodes, neither of which changes committed
+        # calls and evaluation rollouts, neither of which changes committed
         # releases. With several trainers a preparation runs outside it; the
         # dispatcher still runs one step of the scenario at a time.
         # Readers share only the publication lock with commit and rollback.

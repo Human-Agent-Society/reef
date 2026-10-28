@@ -1,4 +1,4 @@
-"""The reward: each finished week of a CEO-Bench episode, credited and posted to Reef.
+"""The reward: each finished week of a CEO-Bench rollout, credited and posted to Reef.
 
 The harness (``harness.harbor_agent``) plays the benchmark's agent turn by
 turn and knows the engine's day at every model call, so :class:`WeekRecords`
@@ -13,7 +13,7 @@ turns reported so far.
 
 A week's opening state is valued as its cash plus its subscription run-rate
 (the engine's own monthly recurring revenue, or the dashboard's estimate
-when the books cannot be read), counted over the weeks left in the episode
+when the books cannot be read), counted over the weeks left in the rollout
 and at most ``horizon_weeks`` of them (:func:`valuation`). Cash alone made
 every purchase a loss and inaction the safest week; the run-rate term is what
 pays for growth inside the horizon.
@@ -21,7 +21,7 @@ pays for growth inside the horizon.
 A week's credit is the discounted sum of the value changes of the next
 ``credit_weeks`` weeks (:func:`week_credit`): the week that spends on
 acquisition is credited with the subscribers that arrive over the weeks
-after it. The last weeks of an episode end with the final cash the engine
+after it. The last weeks of a rollout end with the final cash the engine
 reports, valued as cash alone, and their sums are cut short there.
 
 Credits are posted through :class:`ScoreScale`, which clips one week's
@@ -80,7 +80,7 @@ def week_credit(deltas: Sequence[float], discount: float, initial_cash: float = 
     """The discounted sum of the value changes in ``deltas``, in units of the starting balance.
 
     ``deltas[0]`` is the week's own change, ``deltas[1]`` the next week's, and
-    so on; a shorter sequence is an episode that ended inside the window.
+    so on; a shorter sequence is a rollout that ended inside the window.
     """
     return sum(delta * discount**position for position, delta in enumerate(deltas)) / initial_cash
 
@@ -89,7 +89,7 @@ class ScoreScale:
     """Scale each week's credit by the running median magnitude of the credits so far.
 
     The credit is clipped to ``clip`` first, so one six-figure purchase does
-    not set the scale for the rest of the episode; the scale never drops
+    not set the scale for the rest of the rollout; the scale never drops
     below ``floor``, so a run of near-zero weeks does not blow small noise up
     to the cap. Scaling keeps the sign: a week that grew the company scores
     positive whatever the weeks around it did.
@@ -304,7 +304,7 @@ def turn_decision(turn: dict, scripts: dict[str, str]) -> str | None:
     ``scripts`` holds the files the agent has written so far (path to
     content), updated here as ``write_file``/``edit_file`` calls pass, so a
     bash command that runs one of them is judged by what it contains; a
-    script this episode did not write is taken to act.
+    script this rollout did not write is taken to act.
     """
     for name, arguments in tool_calls(turn):
         if name in ("write_file", "edit_file"):
@@ -338,7 +338,7 @@ def turn_tokens(turn: dict) -> int:
 
 
 class WeekRecords:
-    """The episode's weeks: each one's opening state and its turns, in call order."""
+    """The rollout's weeks: each one's opening state and its turns, in call order."""
 
     def __init__(
         self,
@@ -391,7 +391,7 @@ class WeekRecords:
         The week closes with the opening state of the next week seen and is
         credited with the value changes of the ``credit_weeks`` weeks from it
         on, so it stays open until that many later weeks have opened. With
-        ``final_cash`` the episode is over: the last week seen ends there,
+        ``final_cash`` the rollout is over: the last week seen ends there,
         valued as cash alone, and a window that reaches the end is cut short.
         """
         deltas: list[float] = []
@@ -409,7 +409,7 @@ class WeekRecords:
             deltas.append(value_end - value)
             closing = closing or (cash_end, value_end)
             if index + 1 >= len(ordered):
-                break  # the episode ended inside the window
+                break  # the rollout ended inside the window
         if closing is None:
             return None
         return (*closing, week_credit(deltas, self.discount))
@@ -484,7 +484,7 @@ class TrainingPacer:
 
     The reported turns fill batches of ``batch_size``; each full batch must
     have produced one training release. ``wait`` blocks until the scenario
-    has that many releases beyond the count at episode start, or the timeout
+    has that many releases beyond the count at rollout start, or the timeout
     passes, in which case the shortfall is forgiven so later weeks do not
     wait for a batch the recipe declined.
     """

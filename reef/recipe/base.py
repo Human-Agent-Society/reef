@@ -66,7 +66,7 @@ class ServedEndpoint:
     ``url`` is the service's base URL and ``token`` a bearer token it accepts.
     ``component`` names the release component the recipe evolves when it is
     one of several: its evaluation calls then leave that component's served
-    hooks out, since the episode runs a candidate of it.
+    hooks out, since the rollout runs a candidate of it.
     """
 
     url: str

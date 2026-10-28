@@ -1,11 +1,11 @@
 # OpenAI Codex CLI, driven through its non-interactive exec mode.
 #
 # CODEX_HOME relocates user configuration, rules, hooks, skills, and session
-# rollouts into the episode root. Codex lists the skills below
+# rollouts into the rollout root. Codex lists the skills below
 # $CODEX_HOME/skills in exec and in its TUI, so a reef-codex session, which
-# keeps the person's own HOME, finds the same skills an episode does. The CLI
+# keeps the person's own HOME, finds the same skills a rollout does. The CLI
 # keeps model-generated commands in a workspace-write sandbox and never waits
-# for an approval during a benchmark episode.
+# for an approval during a benchmark rollout.
 name: codex
 binary: codex
 install:
@@ -13,7 +13,7 @@ install:
   package: "@openai/codex"
   version: "0.153.4"
   binary_path: "node_modules/.bin/codex"
-# An episode never waits for an approval and never searches the web: these
+# A rollout never waits for an approval and never searches the web: these
 # overrides win over config.toml. The tree may not set approval_policy, so a
 # person's reef-codex session keeps Codex's own on-request default: the model
 # asks the person before it runs a command outside the sandbox, such as a
@@ -64,16 +64,16 @@ files:
           trace_exporter: none
         sandbox_workspace_write:
           network_access: false
-      # web_search may take any value Codex reads, because the episode argv
+      # web_search may take any value Codex reads, because the rollout argv
       # pins it disabled and only a person's reef-codex session reads the
       # tree's value.
       checks:
-        # The episode argv pins never, and a reef-codex session keeps Codex's
+        # The rollout argv pins never, and a reef-codex session keeps Codex's
         # on-request default, so the person approves each command that leaves
         # the sandbox.
         - key: approval_policy
           match: IsAbsent()
-          reason: episodes pin never, and a reef-codex session keeps on-request
+          reason: rollouts pin never, and a reef-codex session keeps on-request
         # The config.toml keys a tree may set, and the keys Reef's model
         # binding writes, which the render refuses from a tree without it.
         # The entire file is treated as a dict.
@@ -86,7 +86,7 @@ files:
               "tool_output_token_limit", "web_search",
               "model", "model_provider", "model_providers"
             ])))
-          reason: the other codex config keys are not admitted for benchmark episodes
+          reason: the other codex config keys are not admitted for benchmark rollouts
         - key: web_search
           match: IsIn(["disabled", "cached", "indexed", "live"])
         - key: [

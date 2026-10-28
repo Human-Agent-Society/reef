@@ -375,7 +375,7 @@ function renderProcess() {
     const what = e.type === 'turn' ? `turn in session ${short(d.session)} on release ${short(d.release_id)}` : describe(e);
     tr.innerHTML = `<td class="t">${sec(t)}</td><td>${esc(e.type)}</td><td>${esc(what)}</td>`; tb.appendChild(tr);
   });
-  if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the episode form writes none.</td></tr>';
+  if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the rollout form writes none.</td></tr>';
 }
 function sync() { document.getElementById('scrub').value = state.pos; renderGraph(); renderDetail(); }
 document.getElementById('relsel').onchange = e => { state.release = +e.target.value; renderChain(); renderGraph(); };

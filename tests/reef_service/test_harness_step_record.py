@@ -1,5 +1,5 @@
 """Guarantees of the evolve step record, hermetic: the proposer's model calls,
-the parsed proposal with its options, and every gate episode's trajectory
+the parsed proposal with its options, and every gate rollout's trajectory
 land where a reader can rebuild the decision, and nothing lands when the
 record is off. A fake native binary writes a session tree shaped like the
 native loop's, so the stage path metric is checked against a kept file."""
@@ -22,12 +22,12 @@ from tests.reef_service.test_harness_recipe import (
     runtime,
     seeded_state,
 )
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
-from reef.evaluation.harness import EpisodeEvaluationWorker
+from reef.evaluation.harness import RolloutEvaluationWorker
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
+from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.rollouts.run import RolloutError, TrajectoryKeepError, run_rollout
 from reef.harness.tree.nodes import RECORD_TEXT_CAP
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
@@ -94,7 +94,7 @@ def native_backend(tmp_path: Path, propose=lambda n, s, m: MARKER_RULES, **optio
     return CordisBackend(
         descriptor=get_adapter("native"),
         propose=resolve_proposer(propose),
-        score_episode=resolve_episode_scorer(native_score),
+        score_rollout=resolve_rollout_scorer(native_score),
         tasks=("task one",),
         models=MODEL,
         binary=options.pop("binary", str(make_native_binary(tmp_path))),
@@ -106,7 +106,7 @@ def pi_backend(tmp_path: Path, propose, **options) -> CordisBackend:
     return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
-        score_episode=resolve_episode_scorer(evaluate),
+        score_rollout=resolve_rollout_scorer(evaluate),
         tasks=("task one",),
         models=options.pop("models", MODEL),
         binary=str(make_binary(tmp_path)),
@@ -121,20 +121,20 @@ def read_json(path: Path):
 def test_remote_worker_returns_records_without_touching_driver_path(tmp_path):
     blocker = tmp_path / "driver-only"
     blocker.write_text("this path cannot be a directory on the worker")
-    worker = EpisodeEvaluationWorker(
+    worker = RolloutEvaluationWorker(
         get_adapter("native"),
-        resolve_episode_scorer(native_score),
+        resolve_rollout_scorer(native_score),
         str(make_native_binary(tmp_path)),
         10,
         LocalExecutor(),
         False,
         transfer_records=True,
     )
-    scored = worker.run({}, "one", blocker / "episode")
+    scored = worker.run({}, "one", blocker / "rollout")
     assert scored.record_archive is not None
     assert blocker.read_text() == "this path cannot be a directory on the worker"
     with tarfile.open(fileobj=BytesIO(scored.record_archive), mode="r:gz") as archive:
-        assert {"./session.jsonl", "./agents/002-checker.jsonl", "./episode.json"} <= set(archive.getnames())
+        assert {"./session.jsonl", "./agents/002-checker.jsonl", "./rollout.json"} <= set(archive.getnames())
 
 
 # -- the proposer's calls ---------------------------------------------------
@@ -250,7 +250,7 @@ def test_a_rejected_remove_records_its_absent_options(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_step_record_writes_the_proposal_and_every_episode_and_the_path_matches_the_kept_trajectory(
+def test_step_record_writes_the_proposal_and_every_rollout_and_the_path_matches_the_kept_trajectory(
     tmp_path: Path,
     workers: int,
 ) -> None:
@@ -259,7 +259,7 @@ def test_step_record_writes_the_proposal_and_every_episode_and_the_path_matches_
     b = native_backend(
         tmp_path,
         step_record_dir=tmp_path / "record",
-        episode_repeats=2,
+        rollout_repeats=2,
         worker_executor=ExecutorSettings(workers=workers),
     )
     result = run_backend_step(b, batch(), b.initial_state())
@@ -269,15 +269,15 @@ def test_step_record_writes_the_proposal_and_every_episode_and_the_path_matches_
     step = tmp_path / "record" / "1"
     assert read_json(step / "proposer.json") == []
     assert read_json(step / "mutations.json") == [MARKER_RECORD]
-    episodes = step / "episodes"
+    rollouts = step / "rollouts"
     names = ["candidate-0", "candidate-0-1", "current-0", "current-0-1"]
-    assert sorted(path.name for path in episodes.iterdir()) == names
+    assert sorted(path.name for path in rollouts.iterdir()) == names
     for name in names:
-        assert (episodes / name / "session.jsonl").is_file()
-        assert (episodes / name / "agents" / "002-checker.jsonl").is_file()
+        assert (rollouts / name / "session.jsonl").is_file()
+        assert (rollouts / name / "agents" / "002-checker.jsonl").is_file()
 
     # The path metric is what the kept file says: the root's stage/exit names and how its turn ended.
-    kept = [json.loads(line) for line in (episodes / "candidate-0" / "session.jsonl").read_text().splitlines()]
+    kept = [json.loads(line) for line in (rollouts / "candidate-0" / "session.jsonl").read_text().splitlines()]
     stages = [event["data"]["stage"] for event in kept if event["type"] == "stage/exit"]
     reasons = [event["data"]["reason"]["kind"] for event in kept if event["type"] == "turn/end"]
     assert stages == ["think", "act", "think"] and reasons == ["completed"]
@@ -287,7 +287,7 @@ def test_step_record_writes_the_proposal_and_every_episode_and_the_path_matches_
     # The checker's own verify stage and gave_up reason stay out of the root's path.
     checker = [
         json.loads(line)
-        for line in (episodes / "candidate-0" / "agents" / "002-checker.jsonl").read_text().splitlines()
+        for line in (rollouts / "candidate-0" / "agents" / "002-checker.jsonl").read_text().splitlines()
     ]
     assert [event["data"]["stage"] for event in checker if event["type"] == "stage/exit"] == ["verify"]
 
@@ -312,7 +312,7 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     assert read_json(first / "proposer.json") == []
 
 
-def test_a_recheck_step_writes_episodes_only_and_counts_no_proposer_calls(tmp_path: Path) -> None:
+def test_a_recheck_step_writes_rollouts_only_and_counts_no_proposer_calls(tmp_path: Path) -> None:
     b = native_backend(tmp_path, step_record_dir=tmp_path / "record", recheck_every=1)
     first = run_backend_step(b, batch(), b.initial_state())
     assert first.metrics["selected"] is True
@@ -322,8 +322,8 @@ def test_a_recheck_step_writes_episodes_only_and_counts_no_proposer_calls(tmp_pa
     assert second.metrics["proposer_input_tokens"] == 0 and second.metrics["proposer_output_tokens"] == 0
     step = tmp_path / "record" / "2"
     assert second.metrics["step_record"] == str(step)
-    assert sorted(path.name for path in step.iterdir()) == ["episodes"]
-    assert sorted(path.name for path in (step / "episodes").iterdir()) == ["candidate-0", "current-0"]
+    assert sorted(path.name for path in step.iterdir()) == ["rollouts"]
+    assert sorted(path.name for path in (step / "rollouts").iterdir()) == ["candidate-0", "current-0"]
 
 
 def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
@@ -331,19 +331,19 @@ def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     candidate = prepared.candidate
     assert candidate is not None and candidate.record_dir == tmp_path / "record" / "1"
-    # A file where the episodes directory goes stands in for a full or unwritable record volume.
-    (candidate.record_dir / "episodes").write_text("in the way")
-    with pytest.raises(TrajectoryKeepError, match="cannot keep episode trajectory"):
+    # A file where the rollouts directory goes stands in for a full or unwritable record volume.
+    (candidate.record_dir / "rollouts").write_text("in the way")
+    with pytest.raises(TrajectoryKeepError, match="cannot keep rollout trajectory"):
         b.evaluate(candidate)
     b.abort_step(prepared)
     assert b.initial_state()["entries"] == []
 
-    # The failure is not an episode failure: run_episode raises it past the launch mapping, and the episode
+    # The failure is not a rollout failure: run_rollout raises it past the launch mapping, and the rollout
     # root is still removed on the way out.
-    from reef.harness.episodes import run as episode_module
+    from reef.harness.rollouts import run as rollout_module
 
     removed: list[Path] = []
-    remove = episode_module._remove_episode_root
+    remove = rollout_module._remove_rollout_root
 
     def observed(root: Path) -> None:
         removed.append(root)
@@ -354,10 +354,10 @@ def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(episode_module, "_remove_episode_root", observed)
+        patch.setattr(rollout_module, "_remove_rollout_root", observed)
         with pytest.raises(TrajectoryKeepError) as caught:
-            run_episode(descriptor, files, "task", binary=str(make_binary(tmp_path)), keep_dir=blocker / "kept")
-    assert not isinstance(caught.value, EpisodeError)
+            run_rollout(descriptor, files, "task", binary=str(make_binary(tmp_path)), keep_dir=blocker / "kept")
+    assert not isinstance(caught.value, RolloutError)
     assert len(removed) == 1 and not removed[0].exists()
 
 
@@ -372,10 +372,10 @@ def test_nothing_is_written_when_the_step_record_is_off(tmp_path: Path) -> None:
     assert result.metrics["candidate_paths"] == ({"stages": ["think", "act", "think"], "reason": "completed"},)
 
 
-def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stages(tmp_path: Path) -> None:
+def test_a_rollout_that_could_not_run_has_no_path_and_a_pi_session_has_no_stages(tmp_path: Path) -> None:
     missing = native_backend(tmp_path, binary=str(tmp_path / "no-such-binary"))
     result = run_backend_step(missing, batch(), missing.initial_state())
-    assert result.metrics["episode_failures"] == 2
+    assert result.metrics["rollout_failures"] == 2
     assert result.metrics["candidate_paths"] == (None,) and result.metrics["current_paths"] == (None,)
 
     pi = pi_backend(tmp_path, lambda n, s, m: MARKER_RULES)
@@ -383,14 +383,14 @@ def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stage
     assert result.metrics["candidate_paths"] == ({"stages": [], "reason": None},)
 
 
-# -- the episode seam -------------------------------------------------------
+# -- the rollout seam -------------------------------------------------------
 
 
-def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: Path) -> None:
+def test_run_rollout_keeps_the_trajectory_before_the_root_is_removed(tmp_path: Path) -> None:
     descriptor = get_adapter("pi")
     files = render_composition([("rules", {"text": "keep me"}), *MODEL.compose_nodes(descriptor)], descriptor)
     keep = tmp_path / "kept"
-    result = run_episode(descriptor, files, "task", binary=str(make_binary(tmp_path)), keep_dir=keep)
+    result = run_rollout(descriptor, files, "task", binary=str(make_binary(tmp_path)), keep_dir=keep)
     kept = [json.loads(line) for line in (keep / "session.jsonl").read_text().splitlines()]
     assert kept == list(result.trajectory) and kept[-1]["rules"] == "keep me\n"
 
@@ -398,7 +398,7 @@ def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: P
     silent = tmp_path / "silent"
     silent.write_text("#!/bin/sh\nexit 0\n")
     silent.chmod(0o755)
-    empty = run_episode(descriptor, files, "task", binary=str(silent), keep_dir=tmp_path / "none")
+    empty = run_rollout(descriptor, files, "task", binary=str(silent), keep_dir=tmp_path / "none")
     assert empty.trajectory == () and not (tmp_path / "none").exists()
 
     # A link an evolved tool left in the session directory is kept as a link: the outside file never enters.
@@ -409,15 +409,15 @@ def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: P
         f'#!/bin/sh\nmkdir -p "$PI_CODING_AGENT_SESSION_DIR"\nln -s {outside} "$PI_CODING_AGENT_SESSION_DIR/pulled"\n'
     )
     linker.chmod(0o755)
-    run_episode(descriptor, files, "task", binary=str(linker), keep_dir=tmp_path / "linked")
+    run_rollout(descriptor, files, "task", binary=str(linker), keep_dir=tmp_path / "linked")
     assert (tmp_path / "linked" / "pulled").is_symlink()
 
-    # A kept record is never merged over: an existing episode directory refuses the copy.
+    # A kept record is never merged over: an existing rollout directory refuses the copy.
     taken = tmp_path / "taken"
     taken.mkdir()
     (taken / "session.jsonl").write_text("earlier record\n")
-    with pytest.raises(TrajectoryKeepError, match="cannot keep episode trajectory"):
-        run_episode(descriptor, files, "task", binary=str(make_binary(tmp_path)), keep_dir=taken)
+    with pytest.raises(TrajectoryKeepError, match="cannot keep rollout trajectory"):
+        run_rollout(descriptor, files, "task", binary=str(make_binary(tmp_path)), keep_dir=taken)
     assert (taken / "session.jsonl").read_text() == "earlier record\n"
 
 
@@ -429,7 +429,7 @@ def test_recipe_parses_step_record_dir_and_the_backend_refuses_an_unwritable_one
         return {
             "evolution": {
                 "propose": resolve_proposer(lambda n, s, m: None),
-                "evaluate": resolve_episode_scorer(evaluate),
+                "evaluate": resolve_rollout_scorer(evaluate),
                 "tasks": ["one"],
                 **evolution,
             }
@@ -470,7 +470,7 @@ def test_a_relative_record_dir_is_made_absolute_at_build(tmp_path: Path, monkeyp
     config = {
         "evolution": {
             "propose": resolve_proposer(lambda n, s, m: None),
-            "evaluate": resolve_episode_scorer(evaluate),
+            "evaluate": resolve_rollout_scorer(evaluate),
             "tasks": ["one"],
             "step_record_dir": "rel",
             "binary": str(make_native_binary(tmp_path)),
@@ -482,7 +482,7 @@ def test_a_relative_record_dir_is_made_absolute_at_build(tmp_path: Path, monkeyp
     assert backend._step_record_dir == (tmp_path / "rel" / "demo").resolve() and backend._step_record_dir.is_absolute()
 
 
-# -- what the boundary never saw, the raw request seam, and the episode record ---------------------
+# -- what the boundary never saw, the raw request seam, and the rollout record ---------------------
 
 
 def test_record_redacts_credential_shaped_text_from_the_proposer_and_the_refused_proposal(tmp_path: Path) -> None:
@@ -552,19 +552,19 @@ def test_a_long_reply_is_clipped_with_the_marker(tmp_path: Path) -> None:
     assert reply.startswith("y" * RECORD_TEXT_CAP) and reply.endswith("... [clipped 3 chars]")
 
 
-def test_every_episode_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path: Path) -> None:
+def test_every_rollout_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path: Path) -> None:
     b = native_backend(tmp_path, step_record_dir=tmp_path / "record")
     result = run_backend_step(b, batch(), b.initial_state())
-    record = read_json(tmp_path / "record" / "1" / "episodes" / "candidate-0" / "episode.json")
+    record = read_json(tmp_path / "record" / "1" / "rollouts" / "candidate-0" / "rollout.json")
     assert record["task"] == "task one" and record["exit_code"] == 0 and record["failure"] is None
     assert record["score"] == 1.0 and result.metrics["selected"] is True
     assert record["path"] == result.metrics["candidate_paths"][0]
     assert record["residue"] == [] and isinstance(record["stdout"], str) and isinstance(record["stderr"], str)
 
-    # An episode that could not run still leaves its record: the failure, and no output to show.
+    # A rollout that could not run still leaves its record: the failure, and no output to show.
     broken = native_backend(tmp_path, binary=str(tmp_path / "missing"), step_record_dir=tmp_path / "broken")
     run_backend_step(broken, batch(), broken.initial_state())
-    record = read_json(tmp_path / "broken" / "1" / "episodes" / "candidate-0" / "episode.json")
+    record = read_json(tmp_path / "broken" / "1" / "rollouts" / "candidate-0" / "rollout.json")
     assert record["score"] == "failed" and record["failure"]["stage"] == "launch"
     assert record["exit_code"] is None and record["stdout"] is None and record["residue"] is None
 
@@ -573,7 +573,7 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
     """Per agent, the usage on the assistant messages and compactions of a
     native trajectory adds up beside the turn and tool counters, and the
     side's sum keeps every counter."""
-    from reef.harness.episodes.trajectory import agent_work, sum_agents
+    from reef.harness.rollouts.trajectory import agent_work, sum_agents
 
     trajectory = [
         {"type": "session", "data": {"agent": "root"}},

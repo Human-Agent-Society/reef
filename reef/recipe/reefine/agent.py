@@ -35,9 +35,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from reef.core.prompts import untrusted_text
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.requests import REQUESTS_SKILL_ID, request_entries
-from reef.harness.episodes.trajectory import reader_for
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.requests import REQUESTS_SKILL_ID, request_entries
+from reef.harness.rollouts.trajectory import reader_for
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition
@@ -45,7 +45,7 @@ from reef.recipe.reefine import evolution
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.recipe.reefine.multimodal import MultimodalProvider
 from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
+from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
 from reef.train.types import TrajectorySample
@@ -234,7 +234,7 @@ def rendered_files(nodes: Sequence[tuple[str, Any]], binding: ModelBinding, host
 
 def launch_pi(
     host: AgentHost,
-    executor: EpisodeExecutor,
+    executor: ProgramExecutor,
     files: Mapping[str, str],
     prompt: str,
     env: Mapping[str, str],
@@ -316,7 +316,7 @@ class AgentRun(WorkspaceTools):
         self.served = served
         self.gateway: AgentGateway | None = None
         #: The session the agent and its trials run in, once the agent starts.
-        self.session: EpisodeExecutor | None = None
+        self.session: ProgramExecutor | None = None
         #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
         #: pull replaces the workspace directory, so one call at a time reads it.
         self.workspace_lock = threading.Lock()
@@ -355,7 +355,7 @@ class AgentRun(WorkspaceTools):
             else:
                 (target / name).unlink(missing_ok=True)
 
-    def executor(self) -> EpisodeExecutor:
+    def executor(self) -> ProgramExecutor:
         """The run's session, which reaches the gateway; the host's executor before the agent starts."""
         return self.host.executor if self.session is None else self.session
 
@@ -442,7 +442,7 @@ class AgentRun(WorkspaceTools):
                 return self.record_check(
                     "trial", {**result, "candidate": candidate, "seconds": round(time.monotonic() - started, 1)}
                 )
-        except EpisodeTimeout:
+        except RolloutTimeout:
             limit = f"the trial ran past its {timeout:g} s limit"
             self.host.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
             return self.record_check(
@@ -454,7 +454,7 @@ class AgentRun(WorkspaceTools):
                     "provider_calls": self.gateway.provider_calls_since(before),
                 },
             )
-        except EpisodeLaunchError as error:
+        except RolloutLaunchError as error:
             self.host.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
             return self.record_check("trial", {"ran": False, "candidate": candidate, "error": str(error)})
         finally:
@@ -598,9 +598,9 @@ def answer_with_agent(
                         "maxTokens (Reef renders the model binding's max_output_tokens into it)"
                     )
                 break
-        except EpisodeTimeout:
+        except RolloutTimeout:
             agent["timed_out"] = True
-        except EpisodeLaunchError as error:
+        except RolloutLaunchError as error:
             host.calls.note("proposer", f"the coding agent run failed: {error}", failed=True)
             return StepProposal((), {"failure": f"the agent run failed: {error}"})
         finally:

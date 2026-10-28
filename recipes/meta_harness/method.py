@@ -30,7 +30,7 @@ from reef.core.evaluation import (
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.evaluation.evaluators import BackendEvaluateMixin
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
@@ -129,19 +129,19 @@ class MetaHarnessProposer(Proposer):
         store: PopulationStore,
         descriptor: AdapterDescriptor,
         tasks: Sequence[str],
-        episode_repeats: int,
+        rollout_repeats: int,
         mode: str = "full_history",
         model: str = "proposer",
         kinds: Sequence[str] = (),
         max_candidates: int = 0,
-        max_target_episodes: int = 0,
+        max_target_rollouts: int = 0,
         max_nodes: int = 32,
     ) -> None:
         if mode not in SEARCH_MODES:
             raise ValueError(f"Meta-Harness mode must be one of {SEARCH_MODES}")
         if not model:
             raise ValueError("Meta-Harness proposer model name must not be empty")
-        for label, value in (("max_candidates", max_candidates), ("max_target_episodes", max_target_episodes)):
+        for label, value in (("max_candidates", max_candidates), ("max_target_rollouts", max_target_rollouts)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"Meta-Harness {label} must be a non-negative integer")
         if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
@@ -159,15 +159,15 @@ class MetaHarnessProposer(Proposer):
         self._store = store
         self._descriptor = descriptor
         self._tasks = tuple(str(task) for task in tasks)
-        self._episode_repeats = episode_repeats
+        self._rollout_repeats = rollout_repeats
         self._mode = mode
         self._model = model
         self._available_kinds = available
         self._kinds = selected
         self._max_candidates = max_candidates
-        self._max_target_episodes = max_target_episodes
+        self._max_target_rollouts = max_target_rollouts
         self._max_nodes = max_nodes
-        self._evaluation_cost = 2 * len(self._tasks) * episode_repeats
+        self._evaluation_cost = 2 * len(self._tasks) * rollout_repeats
 
     def propose(
         self,
@@ -188,8 +188,8 @@ class MetaHarnessProposer(Proposer):
         if self._max_candidates and population.generated_candidates >= self._max_candidates:
             population.record_attempt(step=step, status="budget_exhausted", budget="max_candidates")
             return None
-        if self._max_target_episodes and population.episode_calls + self._evaluation_cost > self._max_target_episodes:
-            population.record_attempt(step=step, status="budget_exhausted", budget="max_target_episodes")
+        if self._max_target_rollouts and population.rollout_calls + self._evaluation_cost > self._max_target_rollouts:
+            population.record_attempt(step=step, status="budget_exhausted", budget="max_target_rollouts")
             return None
 
         prompt = self._prompt(population, samples)
@@ -314,7 +314,7 @@ class MetaHarnessProposer(Proposer):
             },
             "served_candidate_id": population.served_id,
             "evaluation_tasks": list(self._tasks),
-            "episode_repeats": self._episode_repeats,
+            "rollout_repeats": self._rollout_repeats,
             "adapter_node_kinds": list(self._available_kinds),
             "evolvable_node_kinds": list(self._kinds),
             "max_nodes": self._max_nodes,
@@ -370,7 +370,7 @@ class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
             policy="meta_harness",
             reason=(
                 f"candidate scored {candidate_mean:.4f} against committed incumbent {incumbent_mean:.4f} "
-                f"over {len(candidate_scores)} episode results"
+                f"over {len(candidate_scores)} rollout results"
             ),
             evaluation=evaluation,
             metrics={
@@ -380,7 +380,7 @@ class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
                 "population_parent_id": proposed.parent_id,
                 "population_size": len(population.candidates),
                 "proposer_calls": population.proposer_calls,
-                "target_episode_calls": population.episode_calls,
+                "target_rollout_calls": population.rollout_calls,
             },
         )
 

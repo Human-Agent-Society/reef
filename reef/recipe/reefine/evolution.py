@@ -26,14 +26,14 @@ from typing import Any
 from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
-from reef.evaluation.harness import EpisodeScorer, verifier_reward
+from reef.evaluation.harness import RolloutScorer, verifier_reward
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import final_assistant_text
-from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.requests import REQUESTS_ENTRY_ID, ships_requests
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.trajectory import final_assistant_text
+from reef.harness.rollouts.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal
@@ -1323,8 +1323,8 @@ def _entry_view(kind: str, config: Any, entry_id: Any = None) -> dict[str, Any]:
     return {"id": entry_id, "kind": kind, "body": body[:_PREVIEW_CHARS]}
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    """Grade the last line of the episode's final assistant text, 1.0 exact; the health task directory scores
+def evaluate(task: str, result: RolloutResult) -> float:
+    """Grade the last line of the rollout's final assistant text, 1.0 exact; the health task directory scores
     its verifier's reward."""
     if task == HEALTH_TASK_DIRECTORY:
         return verifier_reward(task, result)
@@ -1358,10 +1358,10 @@ class TextProposer(Proposer):
         return propose(nodes, samples, models, requests=requests, entries=entries, adapter=self.adapter)
 
 
-class AnswerScorer(EpisodeScorer):
+class AnswerScorer(RolloutScorer):
     """:func:`evaluate` as an ``evolution.evaluate`` plugin."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return evaluate(task, result)
 
 

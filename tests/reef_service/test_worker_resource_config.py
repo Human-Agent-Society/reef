@@ -1,7 +1,7 @@
 """Worker sizing is generic; only component capability checks know the role."""
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.evaluation.harness import evaluation_executor_config, evaluation_selection
 from reef.inference.http import InferenceProxyRuntime
@@ -21,7 +21,7 @@ def recipe_config(execution, **evolution):
         "execution": {"evolution": execution},
         "evolution": {
             "propose": resolve_proposer(lambda *args: None),
-            "evaluate": resolve_episode_scorer(scorer),
+            "evaluate": resolve_rollout_scorer(scorer),
             "tasks": ["one"],
             **evolution,
         },
@@ -34,7 +34,7 @@ def test_generic_sizing_drives_real_recipe(workers, backend):
     recipe = CordisRecipe.from_environment(
         {}, config=config, runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy")
     )
-    selected, needs = evaluation_selection(recipe.score_episode, recipe.worker_executor)
+    selected, needs = evaluation_selection(recipe.score_rollout, recipe.worker_executor)
     assert selected.settings.backend == backend
     assert needs.workers == int(workers)
     assert needs.cpus_per_worker == 2
@@ -64,7 +64,7 @@ def test_gpu_resources_and_cpu_reservations_reach_ray_without_initializing_it():
     settings = executor_settings(
         {}, {"backend": "ray", "workers": 3, "resources": {"cpus_per_worker": 2, "gpus_per_worker": 0.5}}
     )
-    selection, needs = evaluation_selection(resolve_episode_scorer(scorer), settings)
+    selection, needs = evaluation_selection(resolve_rollout_scorer(scorer), settings)
     config = evaluation_executor_config(selection, needs, WorkerSpec(dict))
     assert selection.settings.backend == "ray"
     assert len(config.workers) == 3
@@ -89,7 +89,7 @@ def test_omitted_gpu_request_preserves_component_requirement(monkeypatch):
 def test_conflicting_raw_actor_options_are_rejected(resource, option):
     settings = executor_settings({}, {"resources": {resource: 1}, "options": {option: 2}})
     with pytest.raises(ValueError, match="resources"):
-        evaluation_selection(resolve_episode_scorer(scorer), settings)
+        evaluation_selection(resolve_rollout_scorer(scorer), settings)
 
 
 class VisibleDeviceWorker:
@@ -111,7 +111,7 @@ def test_mp_assigns_disjoint_gpu_masks_before_worker_construction(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-first,GPU-second")
     monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("GPU-first", "GPU-second"))
     settings = executor_settings({}, {"workers": 2, "resources": {"gpus_per_worker": 1}})
-    selection, needs = evaluation_selection(resolve_episode_scorer(scorer), settings)
+    selection, needs = evaluation_selection(resolve_rollout_scorer(scorer), settings)
     config = evaluation_executor_config(selection, needs, WorkerSpec(VisibleDeviceWorker))
     executor = Executor.create(config)
     try:

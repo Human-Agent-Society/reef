@@ -1,19 +1,19 @@
-# opencode, driven headless per episode.
+# opencode, driven headless per rollout.
 #
 # OPENCODE_CONFIG_DIR points config discovery at the rendered directory and
 # suppresses global config seeding; the XDG overrides relocate data, cache,
-# and state so sessions land inside the episode root, and npm_config_cache
+# and state so sessions land inside the rollout root, and npm_config_cache
 # moves the npm cache of opencode's boot install from the root's .npm into
 # the relocated cache. Permissions auto-reject in `opencode run` without
 # --auto, so --auto is part of the canonical invocation. The config defaults
 # pin the benchmarking traps: autoupdate off, sharing off, permissions
-# allowed (episodes are isolated roots), and only provider reef, the model
+# allowed (rollouts are isolated roots), and only provider reef, the model
 # binding's, so a model choice the render check misses cannot reach
 # opencode's own zen provider.
 name: opencode
 binary: opencode
 # The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# GET /reef/harness/install script, never by rollout runs.
 install:
   kind: npm
   package: "opencode-ai"
@@ -30,7 +30,7 @@ env:
 # An interactive run through reef-opencode. opencode registers its websearch
 # tool (Exa, no key needed) only for its own provider or with this switch, and
 # no config key turns it on, so a session on provider reef has no websearch
-# without it. Episodes stay without it: a benchmark episode does not search
+# without it. Rollouts stay without it: a benchmark rollout does not search
 # the web (codex keeps web_search disabled for the same reason), since results
 # change between runs and a task's answer could be looked up.
 client_env:
@@ -46,7 +46,7 @@ files:
         permission:
           "*": "allow"
       checks:
-        # Keep a benchmark episode hermetic and on the binding's provider only.
+        # Keep a benchmark rollout hermetic and on the binding's provider only.
         - key: [autoupdate, share, enabled_providers]
           match: IsDefault()
         # Each of these chooses a model beyond the binding.
@@ -69,7 +69,7 @@ cleanup_whitelist:
 quirks: reef.harness.adapters.opencode.quirks
 # How to point opencode at a model endpoint, per API dialect (its
 # custom-provider config shape). Reef renders the set matching its model
-# binding's api into evaluation episodes; the served tree never carries a
+# binding's api into evaluation rollouts; the served tree never carries a
 # provider.
 model_binding:
   openai:

@@ -71,7 +71,7 @@ How it works
    remain. The evaluation runs the candidate on the health task: it
    publishes when the tree still works, and both pages say the health task
    is no test of the requested behavior, which only the review reads; when
-   every candidate episode fails before it is scored (the runner was not
+   every candidate rollout fails before it is scored (the runner was not
    found, say), both pages say the evaluation could not run and quote the
    cause. The step's page carries the design and the review either way. A
    review call that answers with no text is asked once more with room for
@@ -327,7 +327,7 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
   agent's files are copied in, refreshed for each check and trial, and copied
   back when it stops. It needs ``pip install 'reef-infra[e2b]'`` and an E2B
   key (``e2b_api_key``, else ``E2B_API_KEY``); ``e2b_template`` names the
-  sandbox image, else Reef builds ``reef-pi-<version>-episodes-v1`` (the pinned
+  sandbox image, else Reef builds ``reef-pi-<version>-rollouts-v1`` (the pinned
   pi and bubblewrap on Node 22) on first use. A custom template must include
   bubblewrap. The agent runs with rendered inputs read-only and only its
   workspace and declared state writable; it cannot use sudo to remove that
@@ -432,7 +432,7 @@ Terminus
 Terminal-Bench's Terminus 2. Prepare a model endpoint with its API key, and
 Docker or a remote Harbor environment (E2B or Modal) for the task container. With Docker, the default, prepare a
 working Docker installation on the service host. On macOS, Docker must share
-``~/.reef/episodes`` with the host. Other platforms use the temp directory;
+``~/.reef/rollouts`` with the host. Other platforms use the temp directory;
 set ``TMPDIR`` for the service if Docker's VM does not share it. To run the
 task containers remotely instead, see `Docker or a remote environment
 <../../developer-guide/harness-adapters.rst#docker-or-a-remote-environment>`__.
@@ -484,12 +484,12 @@ on the page before using the new tree.
 Docker context and published files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-With local Docker, the episode uses the Docker your shell uses: it keeps the
+With local Docker, the rollout uses the Docker your shell uses: it keeps the
 service's ``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
 ``~/.docker``, where colima and Docker Desktop set the current context). On
-macOS its files live under ``~/.reef/episodes``, because colima does not
+macOS its files live under ``~/.reef/rollouts``, because colima does not
 share ``$TMPDIR`` with its VM; on Linux, WSL and Windows they stay in the
-temp directory. An episode on E2B gets none of these.
+temp directory. A rollout on E2B gets none of these.
 ``GET /reef/harness`` serves the published tree; `Harness adapters
 <../../developer-guide/harness-adapters.rst>`__ shows the config that runs
 it through Reef yourself, including the ``x-reef-scenario`` header.

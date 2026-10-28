@@ -1,4 +1,4 @@
-"""Episode continuation: a later call's prompt is the previous call's exact tokens plus the rendered new messages."""
+"""Rollout continuation: a later call's prompt is the previous call's exact tokens plus the rendered new messages."""
 
 from __future__ import annotations
 
@@ -58,10 +58,10 @@ class ChatMLTokenizer:
 TOKENIZER = ChatMLTokenizer()
 
 
-def first_request(episode: str = "episode-1") -> dict:
+def first_request(rollout: str = "rollout-1") -> dict:
     return {
         "model": "qwen",
-        "user": episode,
+        "user": rollout,
         "messages": [{"role": "system", "content": "Use tools."}, {"role": "user", "content": "Find my order."}],
     }
 
@@ -117,7 +117,7 @@ class ScriptedEngine:
             str(self.server.make_url("")).rstrip("/"),
             model_path="qwen",
             tokenizer=TOKENIZER,
-            episode_continuation=True,
+            rollout_continuation=True,
             **config,
         )
 
@@ -130,7 +130,7 @@ def artifact(tmp_path) -> Artifact:
 
 def assemble(responses: list[dict]):
     records = [
-        AgentRecord.create(scenario="episode", request_type=RequestType.INFERENCE, payload={"response": response})
+        AgentRecord.create(scenario="rollout", request_type=RequestType.INFERENCE, payload={"response": response})
         for response in responses
     ]
     return make_multi_turn_policy_trajectory(records, 1.0, source_agent_record_id="report", realign_threshold=0)
@@ -203,7 +203,7 @@ def test_a_length_limited_turn_keeps_the_end_of_turn_as_masked_context(tmp_path)
         (lambda request: request.update(model="other"), "cannot change model"),
     ],
 )
-def test_a_request_that_does_not_extend_its_episode_is_refused_before_generation(tmp_path, mutate, message) -> None:
+def test_a_request_that_does_not_extend_its_rollout_is_refused_before_generation(tmp_path, mutate, message) -> None:
     async def scenario():
         async with ScriptedEngine([([ord("a"), IM_END], "stop")]) as engine:
             handler = engine.handler()
@@ -219,12 +219,12 @@ def test_a_request_that_does_not_extend_its_episode_is_refused_before_generation
 
 
 @pytest.mark.unit
-def test_a_new_episode_and_a_request_without_user_render_from_the_template(tmp_path) -> None:
+def test_a_new_rollout_and_a_request_without_user_render_from_the_template(tmp_path) -> None:
     async def scenario():
         async with ScriptedEngine([([ord("a"), IM_END], "stop")] * 3) as engine:
             handler = engine.handler()
-            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request("episode-1"))
-            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request("episode-2"))
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request("rollout-1"))
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request("rollout-2"))
             anonymous = continued(first_request(), {"role": "user", "content": "next"})
             anonymous.pop("user")
             await handler.inference(artifact(tmp_path), "/v1/chat/completions", anonymous)
@@ -260,15 +260,15 @@ def test_without_the_option_every_request_renders_from_the_template(tmp_path) ->
 
 
 @pytest.mark.unit
-def test_the_oldest_episode_is_forgotten_past_the_limit(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(chat_module, "EPISODE_PREFIX_LIMIT", 2)
+def test_the_oldest_rollout_is_forgotten_past_the_limit(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(chat_module, "ROLLOUT_PREFIX_LIMIT", 2)
 
     async def scenario():
         async with ScriptedEngine([([ord("a"), IM_END], "stop")] * 4) as engine:
             handler = engine.handler()
-            for episode in ("one", "two", "three"):
-                await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request(episode))
-            # Episode "one" was forgotten, so its continuation is a fresh render, not a prefix extension.
+            for rollout in ("one", "two", "three"):
+                await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request(rollout))
+            # Rollout "one" was forgotten, so its continuation is a fresh render, not a prefix extension.
             later = continued(first_request("one"), {"role": "user", "content": "next"})
             await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
         return engine, later
@@ -355,7 +355,7 @@ def test_a_real_qwen3_template_keeps_every_sampled_token(tmp_path, truncated) ->
         await server.start_server()
         try:
             handler = SGLangInferenceHandler(
-                str(server.make_url("")).rstrip("/"), model_path=path, tokenizer=tokenizer, episode_continuation=True
+                str(server.make_url("")).rstrip("/"), model_path=path, tokenizer=tokenizer, rollout_continuation=True
             )
             first = await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
             later = copy.deepcopy(first_request())

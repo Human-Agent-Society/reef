@@ -1,4 +1,4 @@
-"""Test-only adapters that wrap a plain function as a Proposer or an EpisodeScorer.
+"""Test-only adapters that wrap a plain function as a Proposer or a RolloutScorer.
 
 Reef takes harness evolution plugins as classes only. Tests keep their short
 lambdas through these adapters. As before, a keyword reaches the function only
@@ -8,7 +8,7 @@ when its signature names it (or takes ``**kwargs``), and the function declares
 
 import inspect
 
-from reef.evaluation.harness import EpisodeScorer
+from reef.evaluation.harness import RolloutScorer
 from reef.train.cordis_backend.strategies import Proposer
 
 
@@ -46,7 +46,7 @@ class FunctionProposer(Proposer):
         return self.fn(nodes, samples, models, **forwarded)
 
 
-class FunctionScorer(EpisodeScorer):
+class FunctionScorer(RolloutScorer):
     def __init__(self, fn):
         self.fn = fn
 
@@ -63,5 +63,5 @@ def resolve_proposer(value):
     return value if isinstance(value, Proposer) else FunctionProposer(value)
 
 
-def resolve_episode_scorer(value):
-    return value if isinstance(value, EpisodeScorer) else FunctionScorer(value)
+def resolve_rollout_scorer(value):
+    return value if isinstance(value, RolloutScorer) else FunctionScorer(value)

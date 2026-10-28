@@ -37,13 +37,13 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     says (the Tinker component's ``RolloutSettings``), which the recipe
     requires.
 
-    Enabled rounds save each task and its train/eval split in the scenario's task store before their episodes run.
-    Eval tasks stay in the store without episodes or training feedback.
+    Enabled rounds save each task and its train/eval split in the scenario's task store before their rollouts run.
+    Eval tasks stay in the store without rollouts or training feedback.
 
     With ``recipe.config.checkpoint_eval_rollouts_per_task`` set to k, every artifact that the trainer publishes
     is evaluated on the eval tasks of the scenario's ``imported-tasks`` store (``ImportedTaskEvaluation``): an
     evaluation job from the artifact's checkpoint rolls each task out k times, with ``job_parameters`` and k in
-    place of the rollout's ``episodes_per_task``, and trains nothing. Task uploads to that store's eval split are
+    place of the rollout's ``rollouts_per_task``, and trains nothing. Task uploads to that store's eval split are
     then admitted. The evaluation decides nothing: the ``evaluation`` section decides which artifact serves.
 
     Values: ``checkpoint_eval_rollouts_per_task`` is None (no evaluation) or a positive int that the training
@@ -73,7 +73,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
         except ValueError as exc:
             raise RecipeConfigError(
                 "the generated-task recipe trains task jobs, whose recipe.config.job_parameters.rollout names the "
-                f"episodes of each task and the agent that runs them: {exc}"
+                f"rollouts of each task and the agent that runs them: {exc}"
             ) from exc
         rollouts = self.checkpoint_eval_rollouts_per_task
         if rollouts is None:

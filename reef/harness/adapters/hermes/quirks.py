@@ -3,7 +3,7 @@
 Config nodes write ``config.yaml`` as a JSON object and the render
 emits it as YAML by its suffix, and the ``env`` target as ``.env`` lines, where hermes
 reads a custom provider's key. It also writes the ``.no-bundled-skills`` marker, so an
-episode carries only the tree's skills instead of hermes's bundled catalog; adds the commands
+rollout carries only the tree's skills instead of hermes's bundled catalog; adds the commands
 root to ``skills.external_dirs`` after the tree's own entries, so a tree
 that sets the list still has its commands; and, for every rendered plugin,
 writes the ``plugin.yaml`` manifest and grants the plugin in
@@ -33,7 +33,7 @@ _CONFIG = "hermes/config.yaml"
 ENV_PATH = "hermes/.env"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
-# The commands root beside the home: HERMES_HOME/.. in an episode, and REEF_HARNESS_DEST, the install root, in a
+# The commands root beside the home: HERMES_HOME/.. in a rollout, and REEF_HARNESS_DEST, the install root, in a
 # reef-hermes session, whose home is a temp copy. hermes skips an entry that names no directory, such as the second
 # one where REEF_HARNESS_DEST is unset. A config node's list replaces the one below it, so both follow the tree's own
 # skills.external_dirs, which hermes reads as one entry when it is a string.
@@ -57,7 +57,7 @@ DEFAULT_IDENTITY = (
 
 # hermes's boot scaffolds the home on every start: state directories, the
 # runtime and cache files, lock files beside the state store, and the seed
-# skill it always writes. Episode state, not residue.
+# skill it always writes. Rollout state, not residue.
 cleanup_whitelist = (
     "hermes/cron/**",
     "hermes/sessions/**",

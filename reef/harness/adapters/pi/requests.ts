@@ -26,7 +26,7 @@
 // a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
 // node can parse it in CI and pi's TS loader accepts it unchanged; pi-tui, which draws the entry, is imported
 // lazily from pi's own loader, so plain node loads the file without it. Evaluation
-// episodes set PI_OFFLINE and this extension then registers nothing, so the
+// rollouts set PI_OFFLINE and this extension then registers nothing, so the
 // evaluation never sees the commands or the tools.
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -378,7 +378,7 @@ function argumentsProblem(name, args) {
 }
 
 export default function requests(pi) {
-  if (process.env.PI_OFFLINE) return; // hermetic episodes never see the commands or the tools
+  if (process.env.PI_OFFLINE) return; // hermetic rollouts never see the commands or the tools
   const agentDir = process.env.PI_CODING_AGENT_DIR;
   const serviceUrl = process.env.REEF_SERVICE_URL;
   const scenario = process.env.REEF_SCENARIO;
@@ -764,7 +764,7 @@ export default function requests(pi) {
       if (!line || typeof line.text !== "string") continue;
       lines.push(`  ${line.failed ? "x" : "-"} ${String(line.kind || "")}: ${clip(line.text, 100)}`);
     }
-    if (watch.episodes !== null) lines.push(`  evaluation episodes: ${watch.episodes}`);
+    if (watch.rollouts !== null) lines.push(`  evaluation rollouts: ${watch.rollouts}`);
     if (watch.stepRecord) lines.push(`  step record: ${watch.stepRecord}`);
     lines.push(`  full detail: ${requestPageLink(watch.recordId)}`);
     lines.push("  the step runs in the background; your input stays yours");
@@ -800,7 +800,7 @@ export default function requests(pi) {
       state: "queued",
       recordId,
       ask,
-      episodes: null,
+      rollouts: null,
       stepRecord: null,
       activity: [],
       frame: 0,
@@ -842,7 +842,7 @@ export default function requests(pi) {
         ctx.ui.notify(`reef: no result yet for '${ask}'; /versions shows it when it settles`, "warning");
         return;
       }
-      // The step's own phase, which the record alone cannot tell: proposing, evaluating, and the episode count.
+      // The step's own phase, which the record alone cannot tell: proposing, evaluating, and the rollout count.
       let progress;
       try {
         progress = await requestProgress(recordId);
@@ -852,7 +852,7 @@ export default function requests(pi) {
       if (watch !== mine) return;
       if (progress) {
         mine.state = String(progress.state || mine.state);
-        mine.episodes = typeof progress.episodes_total === "number" ? progress.episodes_total : null;
+        mine.rollouts = typeof progress.rollouts_total === "number" ? progress.rollouts_total : null;
         mine.stepRecord = typeof progress.step_record === "string" ? progress.step_record : null;
         // What the proposer has done so far, oldest first; an older service sends none.
         mine.activity = Array.isArray(progress.activity) ? progress.activity : [];

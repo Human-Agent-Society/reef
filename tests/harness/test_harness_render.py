@@ -18,7 +18,7 @@ from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer, ClientState, DescriptorError, load_descriptor
 from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.quirks import read_frontmatter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.render import RenderError, render_composition
 
@@ -105,7 +105,7 @@ def test_codex_rejects_code_extensions_until_hooks_have_separate_isolation() -> 
 def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
     descriptor = get_adapter("codex")
     for approval_policy in ("on-request", "never"):
-        with pytest.raises(RenderError, match=r"on approval_policy in codex/config\.toml: episodes pin never"):
+        with pytest.raises(RenderError, match=r"on approval_policy in codex/config\.toml: rollouts pin never"):
             render_composition([("config", {"data": {"approval_policy": approval_policy}})], descriptor)
     with pytest.raises(RenderError, match=r"on web_search in codex/config\.toml: it must match IsIn\("):
         render_composition([("config", {"data": {"web_search": "always"}})], descriptor)
@@ -120,24 +120,24 @@ def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
             r"on sandbox_workspace_write\.writable_roots in",
         ),
         ({"otel": {"exporter": "otlp-http"}}, "on otel in"),
-        ({"mcp_servers": {"untrusted": {"command": "tool"}}}, "config keys are not admitted for benchmark episodes"),
-        ({"hooks": {"SessionStart": []}}, "config keys are not admitted for benchmark episodes"),
-        ({"notify": ["untrusted-command"]}, "config keys are not admitted for benchmark episodes"),
-        ({"model_instructions_file": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
-        ({"experimental_compact_prompt_file": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
-        ({"model_catalog_json": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
+        ({"mcp_servers": {"untrusted": {"command": "tool"}}}, "config keys are not admitted for benchmark rollouts"),
+        ({"hooks": {"SessionStart": []}}, "config keys are not admitted for benchmark rollouts"),
+        ({"notify": ["untrusted-command"]}, "config keys are not admitted for benchmark rollouts"),
+        ({"model_instructions_file": "/etc/passwd"}, "config keys are not admitted for benchmark rollouts"),
+        ({"experimental_compact_prompt_file": "/etc/passwd"}, "config keys are not admitted for benchmark rollouts"),
+        ({"model_catalog_json": "/etc/passwd"}, "config keys are not admitted for benchmark rollouts"),
         (
             {"agents": {"reviewer": {"config_file": "/etc/passwd"}}},
-            "config keys are not admitted for benchmark episodes",
+            "config keys are not admitted for benchmark rollouts",
         ),
     ):
         with pytest.raises(RenderError, match=message):
             render_composition([("config", {"data": data})], descriptor)
 
 
-def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_session_config() -> None:
+def test_codex_rollout_argv_pins_approvals_and_web_search_off_over_the_session_config() -> None:
     """A reef-codex session reads config.toml: no approval_policy, so Codex asks the person on request, and the
-    tree's web_search. The episode argv overrides both before the prompt."""
+    tree's web_search. The rollout argv overrides both before the prompt."""
     descriptor = get_adapter("codex")
     files = render_composition([("config", {"data": {"web_search": "live"}})], descriptor)
     config = tomllib.loads(files["codex/config.toml"])
@@ -262,7 +262,7 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
     patch = yaml.safe_load(files[DSH_PATCH].replace("!!js ", ""))
     by_id = {row["id"]: row for row in patch if "id" in row}
-    # Every entry in id order, the defaults that keep an episode readable and quiet, the binding, then the inserts.
+    # Every entry in id order, the defaults that keep a rollout readable and quiet, the binding, then the inserts.
     assert [row.get("id", "insert") for row in patch] == [
         "agent-default-model",
         "agent-loop",
@@ -413,7 +413,7 @@ def test_dsh_binds_both_profiles_in_every_dialect(api, route_api, base_url) -> N
     assert files["dsh/.env"] == "REEF_API_KEY=k-1\n"
 
 
-def test_dsh_locks_refuse_a_patch_that_breaks_the_episode() -> None:
+def test_dsh_locks_refuse_a_patch_that_breaks_the_rollout() -> None:
     descriptor = get_adapter("dsh")
     with pytest.raises(
         RenderError,
@@ -483,8 +483,8 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     # An OpenRouter host is hermes's own provider, whose key it reads from the environment or its home's .env.
     assert files["hermes/.env"] == "OPENAI_API_KEY=k-1\n"
     assert config["agent"] == {"max_turns": 40}
-    # The defaults that keep an episode hermetic and single request, and the second skill root, found beside
-    # the episode home and, in a reef-hermes session whose home is a temp copy, at the install root.
+    # The defaults that keep a rollout hermetic and single request, and the second skill root, found beside
+    # the rollout home and, in a reef-hermes session whose home is a temp copy, at the install root.
     assert config["security"] == {"tirith_enabled": False} and "approval" not in config
     assert config["auxiliary"] == {"title_generation": {"enabled": False}}
     assert config["memory"] == {"nudge_interval": 0} and config["sessions"] == {"write_json_snapshots": True}
@@ -520,7 +520,7 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     assert kept.count(DEFAULT_IDENTITY) == 1
 
 
-def test_hermes_locks_refuse_a_config_that_breaks_the_episode() -> None:
+def test_hermes_locks_refuse_a_config_that_breaks_the_rollout() -> None:
     descriptor = get_adapter("hermes")
     with pytest.raises(RenderError, match=r"on security\.tirith_enabled in"):
         render_composition([("config", {"data": {"security": {"tirith_enabled": True}}})], descriptor)
@@ -1026,7 +1026,7 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
 
 
 def test_opencode_descriptor_turns_on_websearch_for_interactive_runs_only() -> None:
-    """opencode registers websearch for provider reef only with OPENCODE_ENABLE_EXA; episodes do not search the web."""
+    """opencode registers websearch for provider reef only with OPENCODE_ENABLE_EXA; rollouts do not search the web."""
     descriptor = get_adapter("opencode")
     assert descriptor.client_env == {"OPENCODE_ENABLE_EXA": "1"}
     assert "OPENCODE_ENABLE_EXA" not in descriptor.env
@@ -1043,10 +1043,10 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
 @pytest.mark.parametrize("value", ["x", "maybe", "2", "1"])
 def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
     """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
-    yes or on, so a tree must not set them at all: the episode env and reef-claude's client_env own them. Windows
+    yes or on, so a tree must not set them at all: the rollout env and reef-claude's client_env own them. Windows
     matches env names in any case."""
     with pytest.raises(
-        RenderError, match=f"on env key {key!r} in claude/settings.json: the episode env and reef-claude set it"
+        RenderError, match=f"on env key {key!r} in claude/settings.json: the rollout env and reef-claude set it"
     ):
         render_composition([("config", {"data": {"env": {key: value}}})], get_adapter("claude"))
 
@@ -1267,7 +1267,7 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
 
 
 def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
-    """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
+    """Every other bundled adapter's rollout stays hermetic: no service variable beyond PATH and TMPDIR."""
     terminus = get_adapter("terminus")
     assert terminus.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
     assert terminus.is_root_bind_mounted

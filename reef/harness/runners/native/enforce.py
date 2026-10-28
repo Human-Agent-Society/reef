@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.sandbox.process import TOOL_ISOLATION as ISOLATION
-from reef.sandbox.process import EpisodeLaunchError, run_process
+from reef.sandbox.process import RolloutLaunchError, run_process
 
 ENFORCE_ENV = "REEF_NATIVE_ENFORCE"
 #: What a profile can withhold; ``read`` is not here because every tool sees the workspace, read only at least.
@@ -37,7 +37,7 @@ LIBRARY_PATHS: tuple[str, ...] = (
     "/etc/passwd",
     "/etc/group",
 )
-#: What ``exec`` adds: the base directories the sandbox executor binds for a whole episode.
+#: What ``exec`` adds: the base directories the sandbox executor binds for a whole rollout.
 EXEC_PATHS: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
 #: The child side of a sandboxed call; it imports nothing from reef, so only this file needs binding.
 CHILD = Path(__file__).with_name("sandboxed.py")
@@ -162,7 +162,7 @@ class BwrapEnforcer(Enforcer):
                 stdin_text=request,
                 new_session=False,
             )
-        except (OSError, EpisodeLaunchError) as exc:
+        except (OSError, RolloutLaunchError) as exc:
             raise SandboxFailed(f"bwrap could not start: {exc}") from exc
         reply: Any = None
         if done.exit_code == 0:

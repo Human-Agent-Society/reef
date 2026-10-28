@@ -1,20 +1,20 @@
-# Hermes Agent, driven headless per episode.
+# Hermes Agent, driven headless per rollout.
 #
 # HERMES_HOME relocates the whole home (config.yaml, the session snapshots,
 # SOUL.md, skills, plugins, the state store, logs and caches) under the
-# episode root. `chat -Q --oneshot -q` answers one task on a non TTY and
+# rollout root. `chat -Q --oneshot -q` answers one task on a non TTY and
 # exits; hermes's own approval policy runs file and terminal tools inside
 # the working directory with no prompt and refuses a command it flags as
 # dangerous with a tool error, so no bypass flag is used (the top level -z
 # one shot would bypass those approvals). The config defaults keep an
-# episode hermetic and single request: no scanner download, no session
+# rollout hermetic and single request: no scanner download, no session
 # title call, no background review, and a plain file session snapshot the
 # reader can parse.
 name: hermes
 binary: hermes
 # The vendor's channel is a git checkout installed editable into a venv:
 # PyPI is stale and upstream refuses wheel builds. Consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# GET /reef/harness/install script, never by rollout runs.
 install:
   kind: git
   package: hermes-agent
@@ -43,7 +43,7 @@ files:
         # security.tirith_enabled downloads a scanner binary from GitHub at
         # boot, and the scanner blocks a command it cannot resolve, such as
         # "$REEF_HARNESS_WRAPPER" evolve; title_generation is one extra model
-        # call per episode; the memory and skill nudges spawn a background
+        # call per rollout; the memory and skill nudges spawn a background
         # review agent, which makes model calls and writes skills into the
         # tree; the curator writes its state into the tree's skills at the
         # first start and later archives and backs up skills there; the
@@ -62,7 +62,7 @@ files:
         skills:
           creation_nudge_interval: 0
       checks:
-        # Keep an episode hermetic and single request, with its snapshot readable.
+        # Keep a rollout hermetic and single request, with its snapshot readable.
         - key: [
             security.tirith_enabled, auxiliary.title_generation.enabled, memory.nudge_interval,
             skills.creation_nudge_interval, curator.enabled, sessions.write_json_snapshots,
@@ -146,7 +146,7 @@ files:
   # Every skill is also a /name slash command in the interactive CLI, and
   # hermes has no other command surface, so a command is a skill under a
   # second root. The quirks module adds it to skills.external_dirs twice,
-  # beside the home for an episode and at the install root for a
+  # beside the home for a rollout and at the install root for a
   # reef-hermes session, after any entries the tree lists.
   agent_command: "hermes-commands/{name}/SKILL.md"
   skill: "hermes/skills/{name}/SKILL.md"
@@ -192,7 +192,7 @@ quirks: reef.harness.adapters.hermes.quirks
 # hermes reads the key under model for a loopback or an unknown host, and
 # takes an OpenRouter host for its OpenRouter provider, where only the
 # environment or .env supplies the key; both are written so either kind of
-# endpoint answers. Reef renders this set into evaluation episodes; the
+# endpoint answers. Reef renders this set into evaluation rollouts; the
 # served tree never carries a provider or a key. Only the openai dialect is
 # bound; hermes's anthropic_messages api mode was not measured.
 model_binding:

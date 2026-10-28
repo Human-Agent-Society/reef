@@ -143,13 +143,13 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
 
 
 def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_size() -> None:
-    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", episodes_total=2)
+    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", rollouts_total=2)
     page = build_request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
     progress = _section(page, "Progress")
     assert REFRESH in page and '<span class="evaluating">Checking the harness</span>' in progress
-    assert "the evaluation is running the candidate through its episodes" in progress
+    assert "the evaluation is running the candidate through its rollouts" in progress
     assert "<dt>Step time</dt><dd>3 min 20 s into the step</dd>" in progress
-    assert "<dt>Evaluation episodes</dt><dd>2 in the evaluation</dd>" in progress
+    assert "<dt>Evaluation rollouts</dt><dd>2 in the evaluation</dd>" in progress
     assert '<dt>Step record</dt><dd class="id">/work/steps/1</dd>' in progress
     assert "<dt>Waiting</dt>" not in progress
 
@@ -161,13 +161,13 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_
         and "the proposer is writing the change" in progress
     )
     assert "<dt>Step time</dt><dd>42 s into the step</dd>" in progress
-    assert "Evaluation episodes" not in progress and "Step record" not in progress
+    assert "Evaluation rollouts" not in progress and "Step record" not in progress
 
     # Another request's step says nothing about this one, which still waits.
     other = replace(evaluating, request_id="another")
     page = build_request_page(_record(), [CREATION], progress=other, now=1_100.0)
     assert '<span class="queued">Queued</span>' in page and "<dd>100 s</dd>" in page
-    assert "Evaluation episodes" not in page
+    assert "Evaluation rollouts" not in page
     page = build_request_page(_record(), [CREATION], consumed=True, now=1_100.0)
     assert '<span class="running">In progress</span>' in page and "its row follows" in page and REFRESH in page
     page = build_request_page(
@@ -238,13 +238,13 @@ def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_r
     assert "What changed" in _sections(page)
 
 
-def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
+def test_a_rejected_request_names_the_missed_rollout_on_both_pages() -> None:
     selection = {"reason": "candidate missed the floor on 1 of 1 tasks", "metrics": {"floor_score": 1.0}}
-    episode = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
+    rollout = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
     notes = {"review": {"result": "partial", "covered": [], "uncovered": ["no off switch"]}}
     row = _row(
         _answered(
-            selected=False, selection=selection, candidate_episodes=[episode], mutation=MUTATION, proposal_notes=notes
+            selected=False, selection=selection, candidate_rollouts=[rollout], mutation=MUTATION, proposal_notes=notes
         )
     )
     page = build_request_page(_record(), [CREATION, row], now=1_100.0)
@@ -260,7 +260,7 @@ def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
 
 
 def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_score() -> None:
-    """Every candidate episode failed before a score (the runner was not found): the checks judged nothing, so both
+    """Every candidate rollout failed before a score (the runner was not found): the checks judged nothing, so both
     pages say the evaluation could not run and quote the cause, and the version page shows no candidate score. Both
     pages say the floor tasks were set before the request and do not test what it asks for."""
     selection = {
@@ -269,9 +269,9 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
         "metrics": {"floor_score": 1},
     }
     cause = "harness binary reef-terminus not found"
-    episode = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
+    rollout = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
     metrics = _answered(
-        selected=False, selection=selection, candidate_episodes=[episode], candidate_score=0.0, mutation=MUTATION
+        selected=False, selection=selection, candidate_rollouts=[rollout], candidate_score=0.0, mutation=MUTATION
     )
     row = _row(metrics)
     result = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Result")
@@ -282,7 +282,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     assert "The evaluation could not run" in version and f"<dt>Could not run</dt><dd>{cause}</dd>" in version
     assert "Candidate score" not in version and "Missed" not in version and note in version
     # A scored miss keeps the checks' own words and its candidate score.
-    scored = _row({**metrics, "candidate_episodes": [{**episode, "score": 0.0, "failure": None, "reply": "no"}]})
+    scored = _row({**metrics, "candidate_rollouts": [{**rollout, "score": 0.0, "failure": None, "reply": "no"}]})
     version = build_release_page(1, [CREATION, scored])
     assert "The evaluation could not run" not in version and "Candidate score" in version
 

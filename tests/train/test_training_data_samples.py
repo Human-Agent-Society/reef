@@ -47,7 +47,7 @@ def atif_item():
     return TrajectorySample(
         {
             "schema_version": "ATIF-v1.7",
-            "session_id": "episode-1",
+            "session_id": "rollout-1",
             "agent": {"name": "test", "version": "1.0"},
             "steps": [
                 {"step_id": 1, "source": "user", "message": "Solve the task."},
@@ -89,7 +89,7 @@ def test_harness_projection_reads_external_atif_without_reef_records():
     assert payload["messages"] == [{"role": "user", "content": "Solve the task."}]
     assert payload["response"]["choices"][0]["message"] == {"role": "assistant", "content": "The answer is 42."}
     assert item.metadata["feedback"] == "correct"
-    assert source_record_id(item) == "episode-1"
+    assert source_record_id(item) == "rollout-1"
 
 
 def test_original_provider_payloads_and_feedback_survive_json_roundtrip():

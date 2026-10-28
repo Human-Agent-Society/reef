@@ -1,13 +1,13 @@
 """Harness evolution recipe: boots the composition mutation loop from config.
 
 ``CordisRecipe`` boots the loop from a config yaml. ``propose``, ``evaluate``
-and ``promote`` name :class:`Proposer`, :class:`EpisodeScorer` and
+and ``promote`` name :class:`Proposer`, :class:`RolloutScorer` and
 :class:`Promoter` classes (``module:ClassName``, or a mapping with ``module``
 and ``config``); code may pass built instances instead. ``propose``
 returns one ``Mutation``, a sequence of them (one composite proposal under
 one selection decision), a ``StepProposal`` (the mutations plus notes the
 step records), or ``None``. ``CordisBackend`` owns the
-mutation/render/episode/scoring phases; the recipe composes that evaluator
+mutation/render/rollout/scoring phases; the recipe composes that evaluator
 and its selection policy into the candidate evaluator executed by ``Trainer``.
 """
 
@@ -28,12 +28,12 @@ from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
-from reef.evaluation.harness import EpisodeScorer, FloorPlugin, ScoreComparisonPlugin, evaluation_selection
+from reef.evaluation.harness import FloorPlugin, RolloutScorer, ScoreComparisonPlugin, evaluation_selection
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
-from reef.harness.episodes.requests import request_entries
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.rollouts.requests import request_entries
+from reef.harness.rollouts.version_check import version_check_entry
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -43,7 +43,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
@@ -64,7 +64,7 @@ _SELECTION_PLUGINS: dict[str, type[SelectionPlugin]] = {
 
 def proposer_agent_settings(
     section: Any, environ: Mapping[str, str], *, proposals_dir: Path = Path(".reef/proposals")
-) -> tuple[EpisodeExecutor | None, float, float]:
+) -> tuple[ProgramExecutor | None, float, float]:
     """``evolution.proposer_agent`` as the agent's executor and its two timeouts; no section runs no agent.
 
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
@@ -132,7 +132,7 @@ class _ScenarioModels(ModelBindingsResolver):
         runtime = self.config.runtime
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
-        # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
+        # The scenario's own model is served by this Reef too, so a rollout reaches it through the same route.
         binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
@@ -187,12 +187,12 @@ class CordisRecipe(Recipe):
 
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and
-    ``evaluate`` (:class:`Proposer` and :class:`EpisodeScorer` class references), ``tasks`` (the episode
+    ``evaluate`` (:class:`Proposer` and :class:`RolloutScorer` class references), ``tasks`` (the rollout
     prompts scored per step; or ``eval_task_store``, a task store such as ``imported-tasks`` whose eval split
     each step reads), optional ``binary`` (a path to the harness
     binary; left unset, backend construction installs the adapter descriptor's
     pinned version through the vendor's own channel, into the same prefix a
-    client's install script uses - see :mod:`reef.harness.episodes.vendor_install`),
+    client's install script uses - see :mod:`reef.harness.rollouts.vendor_install`),
     optional ``seed`` (a list of entry options - id, name, config -
     loaded into the composition tree on first boot, where an item may also
     be a dotted ``module:attribute`` naming a sequence of them; a recovered
@@ -203,7 +203,7 @@ class CordisRecipe(Recipe):
     or a reference to a :class:`~reef.evaluation.SelectionPlugin` class),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each evaluation
-    episode's trajectory files, so the decision is reconstructible; off by
+    rollout's trajectory files, so the decision is reconstructible; off by
     default),
     optional ``client_models`` (further model names the installed client
     may switch to; the install script renders them into its config beside
@@ -230,7 +230,7 @@ class CordisRecipe(Recipe):
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
     ``reef.upstream_api`` for a Responses or Anthropic-style provider). It
     reaches ``propose`` as ``models.served`` and is rendered into each
-    evaluation episode through the adapter's ``model_binding`` template, so
+    evaluation rollout through the adapter's ``model_binding`` template, so
     the seed carries no provider nodes and neither does the published tree; a
     client points its own harness at Reef. A method's auxiliary models - a
     stronger proposer, a judge - are declared under ``evolution.models`` and
@@ -258,21 +258,21 @@ class CordisRecipe(Recipe):
     """
 
     propose: Proposer
-    score_episode: EpisodeScorer
+    score_rollout: RolloutScorer
     tasks: tuple[str, ...]
     #: A task store whose eval split each step evaluates on, in place of ``tasks``.
     eval_task_store: str | None = None
     adapter: str = "pi"
     binary: str | None = None
-    episode_timeout_s: float = 600.0
-    episode_repeats: int = 1
+    rollout_timeout_s: float = 600.0
+    rollout_repeats: int = 1
     #: The default ``job_samples``: the fewest traces of one evolution step. The stage config can override it.
     batch_size: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
-    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
+    executor: ProgramExecutor = field(default_factory=lambda: build_executor(None))
     promote_failures: bool = False
     max_promoted_tasks: int = 50
     max_promoted_per_client: int = 5
@@ -289,7 +289,7 @@ class CordisRecipe(Recipe):
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation rollouts sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
     #: Default proposal inbox root, with one directory per scenario.
@@ -298,7 +298,7 @@ class CordisRecipe(Recipe):
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     #: The isolation an agent proposer runs under (``evolution.proposer_agent``); ``None`` runs no agent.
-    agent_executor: EpisodeExecutor | None = None
+    agent_executor: ProgramExecutor | None = None
     agent_timeout_s: float = 1800.0
     agent_trial_timeout_s: float = 300.0
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
@@ -326,15 +326,15 @@ class CordisRecipe(Recipe):
         super().__post_init__()
         if not isinstance(self.propose, Proposer):
             raise ValueError("harness evolution requires a Proposer")
-        if not isinstance(self.score_episode, EpisodeScorer):
-            raise ValueError("harness evolution requires an EpisodeScorer")
+        if not isinstance(self.score_rollout, RolloutScorer):
+            raise ValueError("harness evolution requires a RolloutScorer")
         if not self.tasks and self.eval_task_store is None:
             raise ValueError("harness evolution requires tasks or an eval task store")
-        evaluation_selection(self.score_episode, self.worker_executor)
-        if self.episode_timeout_s <= 0:
-            raise ValueError("episode_timeout_s must be positive")
-        if self.episode_repeats < 1:
-            raise ValueError("episode_repeats must be at least 1")
+        evaluation_selection(self.score_rollout, self.worker_executor)
+        if self.rollout_timeout_s <= 0:
+            raise ValueError("rollout_timeout_s must be positive")
+        if self.rollout_repeats < 1:
+            raise ValueError("rollout_repeats must be at least 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         for label, value in (
@@ -415,12 +415,12 @@ class CordisRecipe(Recipe):
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
             raise RecipeConfigError("evolution.binary must be a non-empty string when set")
-        timeout = evolution.get("episode_timeout_s", 600.0)
+        timeout = evolution.get("rollout_timeout_s", 600.0)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
-        repeats = evolution.get("episode_repeats", 1)
+            raise RecipeConfigError("evolution.rollout_timeout_s must be a positive number")
+        repeats = evolution.get("rollout_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
-            raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+            raise RecipeConfigError("evolution.rollout_repeats must be an integer of at least 1")
         batch_size = evolution.get("batch_size", 1)
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise RecipeConfigError("evolution.batch_size must be an integer of at least 1")
@@ -554,7 +554,7 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         try:
             worker_executor = role_executor_settings(settings, "evolution")
-            scorer = EpisodeScorer.from_setting(evolution.get("evaluate"), setting="evolution.evaluate")
+            scorer = RolloutScorer.from_setting(evolution.get("evaluate"), setting="evolution.evaluate")
             propose = Proposer.from_setting(evolution.get("propose"), setting="evolution.propose")
             promote = (
                 Promoter.from_setting(evolution["promote"], setting="evolution.promote")
@@ -575,14 +575,14 @@ class CordisRecipe(Recipe):
             "max_pending_proposals": max_pending,
             "propose": propose,
             "promote": promote,
-            "score_episode": scorer,
+            "score_rollout": scorer,
             "worker_executor": worker_executor,
             "tasks": tuple(str(task) for task in tasks),
             "eval_task_store": eval_task_store,
             "adapter": adapter,
             "binary": binary,
-            "episode_timeout_s": float(timeout),
-            "episode_repeats": repeats,
+            "rollout_timeout_s": float(timeout),
+            "rollout_repeats": repeats,
             "batch_size": batch_size,
             "forbid_residue": forbid_residue,
             **budgets,
@@ -609,7 +609,7 @@ class CordisRecipe(Recipe):
         """The served model's endpoint.
 
         With the service known and a scenario named, this Reef's own
-        evaluation route for that scenario: an episode then samples the
+        evaluation route for that scenario: a rollout then samples the
         release the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
@@ -738,12 +738,12 @@ class CordisRecipe(Recipe):
         return {
             "descriptor": get_adapter(self.adapter),
             "propose": self.propose,
-            "score_episode": self.score_episode,
+            "score_rollout": self.score_rollout,
             "tasks": self.tasks,
             "models": self.model_bindings(scenario),
             "binary": self.binary,
-            "episode_timeout_s": self.episode_timeout_s,
-            "episode_repeats": self.episode_repeats,
+            "rollout_timeout_s": self.rollout_timeout_s,
+            "rollout_repeats": self.rollout_repeats,
             "forbid_residue": self.forbid_residue,
             "executor": self.executor,
             "max_steps": self.max_steps,

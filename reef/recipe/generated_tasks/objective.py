@@ -1,4 +1,4 @@
-"""The generated-task objective: group relative advantages over the episodes of one task, on the importance sampling loss."""
+"""The generated-task objective: group relative advantages over the rollouts of one task, on the importance sampling loss."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from reef.train.types import JobData, trajectory_groups
 
 @register_objective
 class TaskGroupObjective(TrainingObjective):
-    """Each episode's advantage is its reward centered and scaled within its task group; a constant group gets 0."""
+    """Each rollout's advantage is its reward centered and scaled within its task group; a constant group gets 0."""
 
     name = "task_group"
     # Tinker's built in loss: the advantage on every response token, the rollout log probs as the reference.

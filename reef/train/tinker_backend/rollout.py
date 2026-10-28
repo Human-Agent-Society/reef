@@ -1,16 +1,15 @@
-"""Tinker's own rollouts: a task job's Harbor episodes, sampled on Tinker at the job's start weights.
+"""Tinker's own rollouts: a task job's Harbor rollouts, sampled on Tinker at the job's start weights.
 
-A task job holds ``TaskSample`` values. Before it trains, the component runs ``episodes_per_task`` episodes of
-each task with ``TaskEpisodeRunner``: the agent works in the task's sandbox, the task's verifier scores the
-episode, and each model call goes through the runner's capture proxy to a ``SamplerEndpoint`` on this host. The
+A task job holds ``TaskSample`` values. Before it trains, the component runs ``rollouts_per_task`` rollouts of
+each task with ``TaskRolloutRunner``: the agent works in the task's sandbox, the task's verifier scores the
+rollout, and each model call goes through the runner's capture proxy to a ``SamplerEndpoint`` on this host. The
 endpoint samples Tinker's sampler of the job's start, so the rollouts sample the weights that the job trains.
-Each episode that ran assembles into one sample; the samples of one task form its group, which trains only with
+Each rollout that ran assembles into one sample; the samples of one task form its group, which trains only with
 at least two samples. Reef's serving takes no part.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import threading
@@ -21,9 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import RolloutScore, RolloutScores
+from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
-from reef.harness.client.tasks import TaskEpisode, TaskEpisodeRunner, TaskLab
+from reef.harness.client.tasks import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.runtime.interfaces import UpstreamStatusError, inference_aborted
 from reef.tinker.sampling import TinkerSampler, sample_chat
@@ -38,20 +37,20 @@ REALIGN_THRESHOLD = 32768
 
 @dataclass(frozen=True)
 class RolloutSettings:
-    """A task job's ``rollout`` parameter: how the component samples the episodes of the job's tasks.
+    """A task job's ``rollout`` parameter: how the component samples the rollouts of the job's tasks.
 
-    Values: ``episodes_per_task`` is an int of at least 2, the group of one task. ``agent`` is a Harbor
+    Values: ``rollouts_per_task`` is an int of at least 2, the group of one task. ``agent`` is a Harbor
     agent config with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None for
-    ``TaskEpisodeRunner``'s default agent. ``environment`` is a non-empty Harbor environment type, such as
+    ``TaskRolloutRunner``'s default agent. ``environment`` is a non-empty Harbor environment type, such as
     ``docker``, ``e2b`` or ``modal``. ``agent_host`` is the host at which an agent in the sandbox reaches this host, or
-    None for an agent on this host. ``concurrency`` is a positive int, the episodes in flight.
-    ``verifier_timeout_reward`` is the reward of an episode whose verifier timed out, or None to leave it
+    None for an agent on this host. ``concurrency`` is a positive int, the rollouts in flight.
+    ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it
     unscored. ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign
     before a response (for a thinking template's scaffold). Purpose: ``from_parameters`` reads it from a
     job's parameters; ``roll_out`` runs it.
     """
 
-    episodes_per_task: int
+    rollouts_per_task: int
     agent: Mapping[str, Any] | None = None
     environment: str = "docker"
     agent_host: str | None = None
@@ -61,7 +60,7 @@ class RolloutSettings:
 
     def __post_init__(self) -> None:
         for name, value, least in (
-            ("episodes_per_task", self.episodes_per_task, 2),
+            ("rollouts_per_task", self.rollouts_per_task, 2),
             ("concurrency", self.concurrency, 1),
             ("scaffold_tolerance", self.scaffold_tolerance, 0),
         ):
@@ -94,7 +93,7 @@ class RolloutSettings:
 
 
 @dataclass(frozen=True)
-class TaskRollouts:
+class TaskJobRollouts:
     """The rollouts of one task job.
 
     Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with
@@ -110,7 +109,7 @@ class TaskRollouts:
         if any(not isinstance(sample, TrajectorySample) for sample in self.samples):
             raise TypeError("task rollouts train trajectories")
         if not isinstance(self.scores, RolloutScores):
-            raise TypeError("TaskRollouts.scores must be RolloutScores")
+            raise TypeError("TaskJobRollouts.scores must be RolloutScores")
         names = {task for task, _ in self.scores.tasks}
         groups = [sample.group_id for sample in self.samples]
         seen: list[str | None] = []
@@ -131,7 +130,7 @@ class TaskRollouts:
 
 
 class SamplerEndpoint:
-    """An OpenAI text chat endpoint on loopback that samples one Tinker sampler, for the episodes of one job.
+    """An OpenAI text chat endpoint on loopback that samples one Tinker sampler, for the rollouts of one job.
 
     ``sampler_path`` is the job's start sampler, or None for the base model. Each answer carries the training
     capture with ``runtime_load_id``. A request that is not JSON gets 400, a sampler refusal its own status, and a
@@ -205,12 +204,12 @@ def task_name(task: TaskSample) -> str:
     return task.task_path.name
 
 
-def episode_sample(episode: TaskEpisode, group: str, assembly: SampleAssembly) -> TrajectorySample | None:
-    """The sample of one episode in ``group``, or None when it has no calls, an aborted call, or does not assemble.
+def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly) -> TrajectorySample | None:
+    """The sample of one rollout in ``group``, or None when it has no calls, an aborted call, or does not assemble.
 
-    An episode that ran without a reward scores 0.
+    A rollout that ran without a reward scores 0.
     """
-    if not episode.turns or any(inference_aborted(turn.response) for turn in episode.turns):
+    if not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
         return None
     inferences = tuple(
         AgentRecord.create(
@@ -218,17 +217,17 @@ def episode_sample(episode: TaskEpisode, group: str, assembly: SampleAssembly) -
             request_type=RequestType.INFERENCE,
             payload={**turn.request, "response": dict(turn.response)},
         )
-        for turn in episode.turns
+        for turn in rollout.turns
     )
     try:
-        sample = assembly.assemble(inferences, episode.reward or 0.0, source_id=episode.episode_id)
+        sample = assembly.assemble(inferences, rollout.reward or 0.0, source_id=rollout.rollout_id)
     except ValueError:
-        logger.warning("episode %s of task %s does not assemble into a sample", episode.episode_id, group)
+        logger.warning("rollout %s of task %s does not assemble into a sample", rollout.rollout_id, group)
         return None
     return replace(sample, group_id=group, source_agent_record_ids=())
 
 
-async def roll_out(
+def roll_out(
     tasks: Sequence[TaskSample],
     settings: RolloutSettings,
     sampler: TinkerSampler,
@@ -238,10 +237,10 @@ async def roll_out(
     runtime_load_id: str,
     work_dir: Path,
     lab: TaskLab | None = None,
-) -> TaskRollouts:
-    """Run ``settings.episodes_per_task`` episodes of each task on ``sampler_path``, and group their samples.
+) -> TaskJobRollouts:
+    """Run ``settings.rollouts_per_task`` rollouts of each task on ``sampler_path``, and group their samples.
 
-    ``lab`` runs each episode; None is reef-eval's Harbor lab under ``work_dir``.
+    ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``.
     """
     assembly = SampleAssembly(
         SampleAssemblySettings(
@@ -251,7 +250,7 @@ async def roll_out(
         )
     )
     with SamplerEndpoint(sampler, sampler_path, model=model, runtime_load_id=runtime_load_id) as endpoint:
-        runner = TaskEpisodeRunner(
+        runner = TaskRolloutRunner(
             reef_url=endpoint.url,
             scenario=ROLLOUT_SCENARIO,
             model=model,
@@ -260,39 +259,32 @@ async def roll_out(
             agent_host=settings.agent_host,
             environment=settings.environment,
             is_reporting=False,
-            is_rollout=True,
+            is_unrecorded=True,
             verifier_timeout_reward=settings.verifier_timeout_reward,
             lab=lab,
+            concurrency=settings.concurrency,
+            model_adapter=sampler_path,
         )
-        limit = asyncio.Semaphore(settings.concurrency)
-
-        async def run(task: TaskSample) -> TaskEpisode:
-            async with limit:
-                return await runner.run_async(task.task_path)
-
-        runs = [task for task in tasks for _ in range(settings.episodes_per_task)]
-        episodes = await asyncio.gather(*(run(task) for task in runs))
+        rollouts = runner.run_rollouts(
+            [
+                RolloutRequest(runner.harness, runner.served_model, str(task.task_path))
+                for task in tasks
+                for _ in range(settings.rollouts_per_task)
+            ]
+        )
     samples: list[TrajectorySample] = []
     for index, task in enumerate(tasks):
         name = task_name(task)
         ran = [
-            episode
-            for episode in episodes[index * settings.episodes_per_task : (index + 1) * settings.episodes_per_task]
-            if not episode.is_infrastructure_failure
+            rollout
+            for rollout in rollouts[index * settings.rollouts_per_task : (index + 1) * settings.rollouts_per_task]
+            if not rollout.is_infrastructure_failure
         ]
-        group = [sample for sample in (episode_sample(episode, name, assembly) for episode in ran) if sample]
+        group = [sample for sample in (rollout_sample(rollout, name, assembly) for rollout in ran) if sample]
         # A group of fewer than two samples has no relative reward, so it does not train.
         if len(group) >= 2:
             samples.extend(group)
     scores = RolloutScores.by_task(
-        [task_name(task) for task in tasks], [rollout_score(episode) for episode in episodes]
+        [task_name(task) for task in tasks], [runner.rollout_score(rollout) for rollout in rollouts]
     )
-    return TaskRollouts(tuple(samples), scores)
-
-
-def rollout_score(episode: TaskEpisode) -> RolloutScore:
-    """The score of one rollout: failed when the environment could not run it, else its reward, 0 when it ran
-    without one."""
-    if episode.is_infrastructure_failure:
-        return RolloutScore.failed()
-    return RolloutScore.scored(0.0 if episode.reward is None else episode.reward)
+    return TaskJobRollouts(tuple(samples), scores)

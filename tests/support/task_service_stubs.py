@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
-from reef.harness.client.tasks import EpisodeTurn, TaskEpisode
+from reef.harness.client.tasks import RolloutTurn, TaskRollout
 from reef.record2sample.generator import (
     DesignerRequest,
     DuplicateTask,
@@ -70,24 +70,24 @@ def staged_digest(path: Path) -> str | None:
         return None
 
 
-def episode_reward(rewards: float | Sequence[float], index: int) -> float:
-    """The reward of a task's episode ``index``: one reward for every episode, or the rewards in turn."""
+def rollout_reward(rewards: float | Sequence[float], index: int) -> float:
+    """The reward of a task's rollout ``index``: one reward for every rollout, or the rewards in turn."""
     if isinstance(rewards, (int, float)):
         return float(rewards)
     return float(rewards[index % len(rewards)])
 
 
-def rollout_turn(model: str | None, episode: int, runtime_load_id: str | None = None) -> EpisodeTurn:
-    """One answered model call of a rollout episode, with the training block the service returns."""
+def rollout_turn(model: str | None, rollout: int, runtime_load_id: str | None = None) -> RolloutTurn:
+    """One answered model call of a rollout, with the training block the service returns."""
     training: dict[str, object] = {
-        "tokens": [1, 2, 3, episode],
+        "tokens": [1, 2, 3, rollout],
         "loss_mask": [1, 1],
         "rollout_log_probs": [-0.1, -0.2],
     }
     if runtime_load_id is not None:
         training["runtime_load_id"] = runtime_load_id
-    return EpisodeTurn(
-        request={"model": model or "served", "messages": [{"role": "user", "content": f"solve {episode}"}]},
+    return RolloutTurn(
+        request={"model": model or "served", "messages": [{"role": "user", "content": f"solve {rollout}"}]},
         response={"choices": [{"message": {"role": "assistant", "content": "done"}}], "training": training},
     )
 
@@ -103,7 +103,7 @@ class StandInGenerator(Generator):
         same_port: bool = False,
         is_solvable: bool = True,
         rewards: Mapping[str, float | Sequence[float]] | None = None,
-        episode_error: str = "",
+        rollout_error: str = "",
         fail_after: int | None = None,
         taken: Sequence[str] = (),
         check_fail_after: int | None = None,
@@ -115,7 +115,7 @@ class StandInGenerator(Generator):
         self.taken = set(taken)
         self.is_solvable = is_solvable
         self.rewards = dict(rewards or {"plain": 0.25, "hint": 0.75})
-        self.episode_error = episode_error
+        self.rollout_error = rollout_error
         #: The version that answers each rollout call; None names none.
         self.runtime_load_id: str | None = None
         self.fail_after = fail_after
@@ -123,11 +123,11 @@ class StandInGenerator(Generator):
         self.proposals: list[dict[str, object]] = []
         self.writes: list[str] = []
         self.checks: list[Path] = []
-        self.episode_requests: list[dict[str, object]] = []
+        self.rollout_requests: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
         self.deleted: list[str] = []
-        self.episodes = 0
-        self.task_episodes: dict[str, int] = {}
+        self.rollouts = 0
+        self.task_rollouts: dict[str, int] = {}
 
     async def propose(
         self, request: DesignerRequest, *, scenario, generation, index, tags, model=None
@@ -191,8 +191,8 @@ class StandInGenerator(Generator):
             return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
         return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
 
-    async def run_episodes(self, task_path, *, scenario, arm, count, extra_instruction_files, tags, model=None):
-        self.episode_requests.append(
+    async def run_rollouts(self, task_path, *, scenario, arm, count, extra_instruction_files, tags, model=None):
+        self.rollout_requests.append(
             {
                 "task": task_path.name,
                 "arm": arm,
@@ -204,23 +204,23 @@ class StandInGenerator(Generator):
         )
         rows = []
         for _ in range(count):
-            self.episodes += 1
-            index = self.task_episodes.get(task_path.name, 0)
-            self.task_episodes[task_path.name] = index + 1
-            reward = None if self.episode_error else episode_reward(self.rewards[arm], index)
+            self.rollouts += 1
+            index = self.task_rollouts.get(task_path.name, 0)
+            self.task_rollouts[task_path.name] = index + 1
+            reward = None if self.rollout_error else rollout_reward(self.rewards[arm], index)
             rows.append(
-                TaskEpisode(
+                TaskRollout(
                     task_path=task_path,
                     name=task_path.name,
-                    episode_id=f"episode-{self.episodes}",
+                    rollout_id=f"rollout-{self.rollouts}",
                     reward=reward,
                     rewards={} if reward is None else {"reward": reward},
-                    error=self.episode_error,
+                    error=self.rollout_error,
                     receipts=(),
                     failed_calls=0,
                     report_agent_record_ids=(),
                     trial_uri=None,
-                    turns=() if self.episode_error else (rollout_turn(model, self.episodes, self.runtime_load_id),),
+                    turns=() if self.rollout_error else (rollout_turn(model, self.rollouts, self.runtime_load_id),),
                 )
             )
         return tuple(rows)

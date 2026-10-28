@@ -44,7 +44,7 @@ transcripts, together with a sentence about what went wrong in each one, are
 handed to the reflection model. That model rewrites one component of the
 composition and hands back a new version. The child is run on exactly the same
 problems as its parent, and only a child that scores strictly better survives.
-A child that fails costs only those few episodes, which is what makes the
+A child that fails costs only those few rollouts, which is what makes the
 search affordable; a child that wins is then measured properly, on the full
 validation set.
 
@@ -129,7 +129,7 @@ Run the example
 
 `recipes/gepa/examples/aime <../../../recipes/gepa/examples/aime/README.md>`__
 has the prerequisites and the full walkthrough. The driver embeds a Reef
-service and runs every minibatch problem as a real episode against the served
+service and runs every minibatch problem as a real rollout against the served
 tree, which means the method reflects on traffic the composition genuinely
 produced rather than on a simulation of it. At the end it seals two passes over
 a held-out split, one on the composition it started with and one on the

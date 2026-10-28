@@ -40,7 +40,7 @@ from reef.harness.client.wrapper import (
     update,
     wait_request,
 )
-from reef.harness.step_result import missed_episodes
+from reef.harness.step_result import missed_rollouts
 
 
 @pytest.fixture(autouse=True)
@@ -592,13 +592,13 @@ def test_after_a_hermes_session_the_wrapper_names_the_resume_command_that_works(
 
 
 @pytest.mark.unit
-def test_hermes_finds_the_agent_commands_in_a_session_and_in_an_episode(tmp_path) -> None:
+def test_hermes_finds_the_agent_commands_in_a_session_and_in_a_rollout(tmp_path) -> None:
     """A reef-hermes session's home is a temp copy, so HERMES_HOME/.. is not the install root; the commands
-    root is still found there, through REEF_HARNESS_DEST, and an episode home still finds it beside itself."""
+    root is still found there, through REEF_HARNESS_DEST, and a rollout home still finds it beside itself."""
     import subprocess
 
     from reef.harness.adapters import get_adapter
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter("hermes")
@@ -635,7 +635,7 @@ def test_hermes_finds_the_agent_commands_in_a_session_and_in_an_episode(tmp_path
         run_agent(sys.executable, str(home), "test-scenario", "hermes", "HERMES_HOME", [str(script)])
     subprocess.run([sys.executable, str(script)], env={**env, "HERMES_HOME": str(home)}, check=True)
 
-    # The session ran in the temp copy and the episode in the home itself; both found the command.
+    # The session ran in the temp copy and the rollout in the home itself; both found the command.
     assert seen.read_text().splitlines() == ["False ['summarize']", "True ['summarize']"]
 
 
@@ -726,7 +726,7 @@ def test_codex_folder_trust_outlives_the_run_outside_the_tree_and_only_for_the_s
     session's copy; trust a command wrote for another folder is dropped, and the installed config.toml never
     changes."""
     from reef.harness.adapters import get_adapter
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter("codex")
@@ -1067,7 +1067,7 @@ def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(t
 
     from reef.harness.adapters import get_adapter
     from reef.harness.client.wrapper import _create_temp_composition, _extract_reef_url
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter(adapter)
@@ -1235,7 +1235,7 @@ def test_wrapper_reads_the_token_back_from_every_adapters_binding(tmp_path, adap
     rendered into it, byte for byte, characters a text search would cut at included."""
     from reef.harness.adapters import get_adapter
     from reef.harness.client.wrapper import _reef_token
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter(adapter)
@@ -1882,12 +1882,12 @@ def test_a_pending_release_off_pi_names_the_wait_command_with_its_request() -> N
 
 
 @pytest.mark.unit
-def test_an_episode_that_passed_without_a_transcript_is_not_missed() -> None:
-    """A missing session log is no failure: an episode a grader passed on its files is not named as the cause."""
+def test_a_rollout_that_passed_without_a_transcript_is_not_missed() -> None:
+    """A missing session log is no failure: a rollout a grader passed on its files is not named as the cause."""
     passed = {"task": "t", "score": 1.0, "failure": None, "reply": None, "transcript_read": False}
-    metrics = {"selection": {"metrics": {"floor_score": 1.0}}, "candidate_episodes": [passed]}
-    assert missed_episodes(metrics) == []
-    assert missed_episodes({**metrics, "candidate_episodes": [{**passed, "score": 0.0}]}) != []
+    metrics = {"selection": {"metrics": {"floor_score": 1.0}}, "candidate_rollouts": [passed]}
+    assert missed_rollouts(metrics) == []
+    assert missed_rollouts({**metrics, "candidate_rollouts": [{**passed, "score": 0.0}]}) != []
 
 
 @pytest.mark.unit
@@ -1993,7 +1993,7 @@ def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, r
 
 
 @pytest.mark.unit
-def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_the_episode_failed(
+def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_the_rollout_failed(
     tmp_path, capsys
 ) -> None:
     """The result line names what the checks saw: the task and why it failed, or its score and the reply that was
@@ -2007,12 +2007,12 @@ def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_th
     cases = [
         (
             {"task": "[health] echo", "score": 0.0, "failure": "exit 1: boom", "reply": None},
-            "the task '[health] echo' failed: exit 1: boom. Nothing changed; the episode failed, so the change itself "
+            "the task '[health] echo' failed: exit 1: boom. Nothing changed; the rollout failed, so the change itself "
             "was not judged.",
         ),
         (
             {"task": "[health] echo", "score": 0.0, "failure": None, "reply": None, "transcript_read": False},
-            "the task '[health] echo' scored 0.0; no transcript was read from the episode's session log, so no reply "
+            "the task '[health] echo' scored 0.0; no transcript was read from the rollout's session log, so no reply "
             "was graded. Nothing changed; no transcript was read, so the change itself was not judged.",
         ),
         (
@@ -2021,8 +2021,8 @@ def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_th
             "the request.",
         ),
     ]
-    for index, (episode, tail) in enumerate(cases):
-        row = _step_row("rel-0", {**floor, **review, "candidate_episodes": [episode]})
+    for index, (rollout, tail) in enumerate(cases):
+        row = _step_row("rel-0", {**floor, **review, "candidate_rollouts": [rollout]})
         reef = _FakeReef(answer, rows=[CREATION_ROW, row])
         (tmp_path / str(index)).mkdir()
         compose, captures = _ask_tree(tmp_path / str(index), reef.port)
@@ -2249,7 +2249,7 @@ def test_a_wait_on_a_running_step_names_its_phase_and_its_time_so_far(tmp_path, 
 
 @pytest.mark.unit
 def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_path, capsys) -> None:
-    """A step whose every candidate episode failed before a score says the evaluation could not run, with the cause,
+    """A step whose every candidate rollout failed before a score says the evaluation could not run, with the cause,
     not that the change missed the checks; what the harness puts out of reach gets its own line."""
     failed = {"task": "[health] x", "score": None, "failure": "harness binary reef-terminus not found", "reply": None}
     selection = {
@@ -2260,7 +2260,7 @@ def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_pat
     limits = ["no tool lockout.", "a typed skill still loads."]
     notes = {"review": {"result": "partial", "covered": [], "uncovered": [], "limits": limits}}
     rejected = _step_row(
-        "rel-0", {"selected": False, "selection": selection, "candidate_episodes": [failed], "proposal_notes": notes}
+        "rel-0", {"selected": False, "selection": selection, "candidate_rollouts": [failed], "proposal_notes": notes}
     )
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     reef = _FakeReef(answer, rows=[CREATION_ROW, rejected])
@@ -3546,7 +3546,7 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
 def dsh_install(tmp_path: Path) -> Path:
     """An installed dsh tree with one agent_command, bound to a Reef that is never called."""
     from reef.harness.adapters import get_adapter
-    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.rollouts.model_binding import ModelBinding
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter("dsh")

@@ -33,7 +33,7 @@ skillclaw/
                       the catalog_names inverse
     skillclaw.py      the method: propose runs the sealed night flow and
                       maps its decisions to one composite mutation
-                      sequence; evaluate grades the probe episodes
+                      sequence; evaluate grades the probe rollouts
     plugins.py        NightProposer and ProbeScorer, the classes
                       skillclaw.yaml names; they call skillclaw.py
     night.py          the sealed night step: one decision per skill group
@@ -66,7 +66,7 @@ The day is the sealed day: each task runs in its WildClawBench container, the ag
 
 The night trigger is the job's data: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day goes into one job's data - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
 
-The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe episodes (three exact-answer coding tasks) still run and their scores land in the version metrics, so every published pool version carries a measured before/after record without deciding on those scores.
+The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe rollouts (three exact-answer coding tasks) still run and their scores land in the version metrics, so every published pool version carries a measured before/after record without deciding on those scores.
 
 ## The two runs and the claim
 
@@ -94,7 +94,7 @@ What a run actually needs, beyond `pip install reef-client` and reef itself:
 - **the WildClawBench dataset**: `run.sh` clones the repo at the pin, but the multi gigabyte task workspaces come from the `internlm/WildClawBench` HuggingFace dataset and must be downloaded into `work/wildclawbench` first; `run.sh` fails fast with that instruction if they are missing.
 - **a provider key** (`REEF_UPSTREAM_API_KEY`, required): the agent sessions, the benchmark judge, and the night's evolve calls all bill against it. A full campaign is two runs (control first) of 7 days x 60 multi-turn agent sessions each, plus judge and night calls - the dominant cost is the agent sessions on the executor model (the paper setting is qwen3-max through OpenRouter; a locally served model through the `serving/` proxy replaces the bill with GPU time). Budget accordingly before starting; there is no dry mode in this script.
 - **a Brave search key** (`BRAVE_API_KEY`, optional): the benchmark's search tasks call the Brave API from inside their containers; without a key those tasks degrade and the rest of the day still runs.
-- **the pi binary** (`REEF_PI_BINARY`): the mechanism's probe episodes run it headless; their scores are recorded, never gating.
+- **the pi binary** (`REEF_PI_BINARY`): the mechanism's probe rollouts run it headless; their scores are recorded, never gating.
 
 ```bash
 pip install reef-client
@@ -110,7 +110,7 @@ Each run resumes after its last sealed round, so a crashed or interrupted campai
 
 ## The Harbor smoke task
 
-`harbor/` is one task in the Harbor format every sibling example uses, and `PYTHONPATH=../.. python3 run.py solve` is the standard one-episode smoke over it (`pip install -e .` first; docker required, the campaign env vars apply). The repository root on `PYTHONPATH` exposes the cookbook's canonical `recipes.skillclaw.recipe` entry point. The task is the benchmark's own `03_Social_Interaction/task_1_meeting_negotiation`, vendored in full at the campaign pin: the prompt is `instruction.md`, its Warmup block is the container startup (mock Gmail and Calendar services on localhost, ground-truth fixtures deleted before the agent starts), and its Automated Checks block is `tests/grade.py`, writing `overall_score` to the verifier reward. This task was chosen because it grades fully programmatically (fixture-driven audit endpoints, no LLM judge, no external hosts), so unlike the campaign day it needs neither the multi gigabyte dataset download nor the benchmark's release image: the environment builds standalone and `lab.run` works anywhere docker does. WildClawBench is MIT licensed; the vendored content carries its notice (`harbor/LICENSE`, `task.toml`'s `license_note`).
+`harbor/` is one task in the Harbor format every sibling example uses, and `PYTHONPATH=../.. python3 run.py solve` is the standard one-rollout smoke over it (`pip install -e .` first; docker required, the campaign env vars apply). The repository root on `PYTHONPATH` exposes the cookbook's canonical `recipes.skillclaw.recipe` entry point. The task is the benchmark's own `03_Social_Interaction/task_1_meeting_negotiation`, vendored in full at the campaign pin: the prompt is `instruction.md`, its Warmup block is the container startup (mock Gmail and Calendar services on localhost, ground-truth fixtures deleted before the agent starts), and its Automated Checks block is `tests/grade.py`, writing `overall_score` to the verifier reward. This task was chosen because it grades fully programmatically (fixture-driven audit endpoints, no LLM judge, no external hosts), so unlike the campaign day it needs neither the multi gigabyte dataset download nor the benchmark's release image: the environment builds standalone and `lab.run` works anywhere docker does. WildClawBench is MIT licensed; the vendored content carries its notice (`harbor/LICENSE`, `task.toml`'s `license_note`).
 
 The solve agent (`harness/harbor_agent.py`) is deliberately minimal, one recorded model call through the same embedded service the campaign runs - the smoke proves the task contract end to end, not agent quality. Expect a low reward: a one-shot completion cannot work the mock APIs.
 
