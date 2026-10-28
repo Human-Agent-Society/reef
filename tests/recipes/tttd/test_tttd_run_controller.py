@@ -58,7 +58,7 @@ class _StatusReader(TrainingStatusReader):
         if self.statuses:
             self.last = self.statuses.popleft()
         if self.events is not None:
-            self.events.append(("status", None if self.last is None else self.last.scenario_step))
+            self.events.append(("status", None if self.last is None else self.last.finished_jobs))
         return self.last
 
 
@@ -81,8 +81,10 @@ def _identity():
     )
 
 
-def _status(step, version):
-    return ScenarioTrainingStatus(step, version, batch_ready=False)
+def _status(finished_jobs, version, *, running_job_id=None, failed_job_error=None):
+    return ScenarioTrainingStatus(
+        finished_jobs, running_job_id, version, job_data_ready=False, failed_job_error=failed_job_error
+    )
 
 
 @pytest.mark.unit
@@ -93,11 +95,11 @@ def test_two_by_two_smoke_waits_for_each_training_commit(tmp_path) -> None:
         [
             _status(0, "v0"),  # initial restore check
             _status(0, "v0"),  # step 0 precondition
-            _status(0, "v0"),
-            _status(1, "v1"),  # step 0 commit
+            _status(0, "v0", running_job_id="job-0"),  # step 0's job runs and commits its checkpoint
+            _status(1, "v1"),  # step 0's job ended
             _status(1, "v1"),  # step 1 precondition
-            _status(1, "v1"),
-            _status(2, "v2"),  # step 1 commit
+            _status(1, "v1", running_job_id="job-1"),
+            _status(2, "v2"),  # step 1's job ended
         ],
         events,
     )
@@ -168,7 +170,7 @@ def test_commit_waits_for_serving_version_reconciliation(tmp_path) -> None:
         [
             _status(0, "v0"),  # initial restore check
             _status(0, "v0"),  # step 0 precondition
-            _status(1, "v0"),  # durable head committed; runtime status is stale
+            _status(1, "v0"),  # the job ended; runtime status is stale
             _status(1, "v1"),  # runtime acknowledges the new serving weights
         ],
         events,
@@ -233,6 +235,22 @@ def test_resume_fails_closed_when_reef_and_archive_steps_disagree(tmp_path) -> N
 
 
 @pytest.mark.unit
+def test_controller_fails_when_the_steps_training_job_failed(tmp_path) -> None:
+    store = TTTDRunStateStore(tmp_path / "state.json", _identity())
+    store.save_pending(next_step=1, previous_runtime_load_id="v0", archive={"steps": [0]})
+    controller = TTTDRunController(
+        _Harness([]),
+        _StatusReader([_status(1, "v0", failed_job_error="RuntimeError: out of memory")]),
+        store,
+        poll_interval_s=0.01,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(TTTDRunStateError, match="step 0 failed: RuntimeError: out of memory"):
+        controller.run(1)
+
+
+@pytest.mark.unit
 def test_status_client_reads_authenticated_public_training_status() -> None:
     observed = {}
 
@@ -250,9 +268,15 @@ def test_status_client_reads_authenticated_public_training_status() -> None:
                     "preload_errors": {},
                     "scenarios": {
                         "smoke": {
-                            "scenario_step": 1,
+                            "scenario_step": 3,
+                            "training_job": None,
+                            "finished_jobs": 1,
+                            "last_committed_step": {
+                                "step": 3,
+                                "metrics": {"training_job": {"job_id": "job-0", "event": "finished"}},
+                            },
                             "current_runtime_load_id": "v1",
-                            "batch_ready": False,
+                            "job_data_ready": False,
                             "processor": {"failed_steps": []},
                         }
                     },
@@ -289,7 +313,7 @@ def test_controller_fails_fast_when_reef_discards_a_mixed_artifact_step(tmp_path
     store.save_pending(next_step=1, previous_runtime_load_id="v0", archive={"steps": [0]})
     controller = TTTDRunController(
         _Harness([]),
-        _StatusReader([ScenarioTrainingStatus(0, "v0", False, (failure,))]),
+        _StatusReader([ScenarioTrainingStatus(0, None, "v0", False, (failure,))]),
         store,
         poll_interval_s=0.01,
         sleep=lambda _seconds: None,

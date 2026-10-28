@@ -201,9 +201,9 @@ def test_null_is_rejected_where_the_field_is_not_optional(tmp_path, section, fie
 def test_null_is_kept_for_optional_fields(tmp_path):
     raw = {
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001", "upstream-api-key": None},
-        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"max-staleness": None}},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"training-mode": None}},
     }
-    with pytest.raises(DeployConfigError, match=r"recipe\.config\.max-staleness does not accept null"):
+    with pytest.raises(DeployConfigError, match=r"recipe\.config\.training-mode does not accept null"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     raw["recipe"]["config"] = {}
     raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
@@ -274,18 +274,18 @@ def test_declared_recipe_sections_support_leaf_overrides():
         "reef": {
             "recipe": "reef.recipe.cordis:CordisRecipe",
             "data": {"training_mode": "auto"},
-            "evolution": {"adapter": "pi", "tasks": ["one"], "episode_repeats": 2},
+            "evolution": {"adapter": "pi", "tasks": ["one"], "rollout_repeats": 2},
         }
     }
     arguments = component_config_arguments(config)
     result = _apply_overrides(
         config,
-        {"recipe.config.evolution.episode_repeats": "4", "recipe.config.training-mode": "manual"},
+        {"recipe.config.evolution.rollout_repeats": "4", "recipe.config.training-mode": "manual"},
         arguments=arguments,
     )
-    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_repeats": 4}
+    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "rollout_repeats": 4}
     assert result["reef"]["data"]["training_mode"] == "manual"
-    assert config["reef"]["evolution"]["episode_repeats"] == 2
+    assert config["reef"]["evolution"]["rollout_repeats"] == 2
 
 
 @pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])

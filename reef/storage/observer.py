@@ -18,6 +18,7 @@ from typing import Any, Self
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
@@ -38,7 +39,7 @@ class RecordObserver:
         """One record the store inserted for the first time (retries are not reported)."""
 
     def record_committed(self, commit: CommitRecord) -> None:
-        """One committed step, training or rollback, with the record ids its batch consumed."""
+        """One committed step (training, activation or new training start), with the record ids its job data consumed."""
 
     def close(self) -> None:
         pass
@@ -97,16 +98,6 @@ class ObservedRecordStore(RecordStore):
     ) -> tuple[StoredRecord, ...]:
         return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
 
-    def record_consumption(
-        self,
-        scenario: str,
-        agent_record_ids: frozenset[str],
-        *,
-        receipt_id: str,
-        metadata: Mapping[str, object],
-    ) -> None:
-        self._inner.record_consumption(scenario, agent_record_ids, receipt_id=receipt_id, metadata=metadata)
-
     def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
         return self._inner.consumption_receipts(scenario)
 
@@ -140,6 +131,10 @@ class ObservedScenarioStore(ScenarioStore):
     @property
     def trajectories(self) -> TrajectoryStore:
         return self._inner.trajectories
+
+    @property
+    def evaluations(self) -> EvaluationStore:
+        return self._inner.evaluations
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()

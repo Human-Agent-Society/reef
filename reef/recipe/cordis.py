@@ -1,19 +1,21 @@
 """Harness evolution recipe: boots the composition mutation loop from config.
 
 ``CordisRecipe`` boots the loop from a config yaml. ``propose``, ``evaluate``
-and ``promote`` name :class:`Proposer`, :class:`EpisodeScorer` and
+and ``promote`` name :class:`Proposer`, :class:`RolloutScorer` and
 :class:`Promoter` classes (``module:ClassName``, or a mapping with ``module``
 and ``config``); code may pass built instances instead. ``propose``
 returns one ``Mutation``, a sequence of them (one composite proposal under
 one selection decision), a ``StepProposal`` (the mutations plus notes the
 step records), or ``None``. ``CordisBackend`` owns the
-mutation/render/episode/scoring phases; the recipe composes that evaluator
+mutation/render/rollout/scoring phases; the recipe composes that evaluator
 and its selection policy into the candidate evaluator executed by ``Trainer``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.model_metadata import ModelMetadata
@@ -28,12 +31,14 @@ from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
-from reef.evaluation.harness import EpisodeScorer, FloorPlugin, ScoreComparisonPlugin, evaluation_selection
+from reef.evaluation.harness import FloorPlugin, RolloutScorer, ScoreComparisonPlugin, evaluation_selection
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
-from reef.harness.episodes.requests import request_entries
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.rollouts.requests import request_entries
+from reef.harness.rollouts.version_check import version_check_entry
+from reef.harness.tree.mutations import entries_refusal, nodes_from_entries
+from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -42,15 +47,15 @@ from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.sandbox.config import build_executor
-from reef.sandbox.e2b import E2BExecutor, deployment_owner
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
+from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import Surface
+from reef.surface.base import ArtifactLayout, Surface
+from reef.surface.files import ENTRIES_FILE, entries_file, read_entries
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
-from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
+from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.cordis_backend.strategies import Promoter, Proposer
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
@@ -65,16 +70,16 @@ _SELECTION_PLUGINS: dict[str, type[SelectionPlugin]] = {
 
 def proposer_agent_settings(
     section: Any, environ: Mapping[str, str], *, proposals_dir: Path = Path(".reef/proposals")
-) -> tuple[EpisodeExecutor | None, float, float]:
+) -> tuple[ProgramExecutor | None, float, float]:
     """``evolution.proposer_agent`` as the agent's executor and its two timeouts; no section runs no agent.
 
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
     but the gateway's, and refuses to start where bwrap or pasta is missing;
-    ``sandbox: e2b`` runs it in an E2B cloud sandbox (``e2b_api_key``, else
-    ``E2B_API_KEY``; ``e2b_template``, else the harness's pinned binary, built on
-    first use) that reaches the gateway through a tunnel and nothing else of the
-    host, and carries the deployment that ``proposals_dir`` names, so a later
-    start stops the sandboxes a stopped run left; ``sandbox: none`` runs it
+    a cloud sandbox (``sandbox: e2b`` or ``sandbox: modal``, with that provider's
+    options in the section; its image is the harness's pinned binary, built on
+    first use, unless an option names one) runs it where it reaches the gateway
+    through a tunnel and nothing else of the host, and carries the deployment that
+    ``proposals_dir`` names, so a later start stops the sandboxes a stopped run left; ``sandbox: none`` runs it
     unisolated with the service's privileges, and must be chosen. Left empty
     (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is jailed where the host
     can, and off (the text proposer answers requests) where it cannot.
@@ -96,19 +101,16 @@ def proposer_agent_settings(
             "full network access, fed text from clients; use it only where you trust every client"
         )
         return LocalExecutor(), timeouts[0], timeouts[1]
-    if sandbox == "e2b":
+    if sandbox in REMOTE_EXECUTORS:
         try:
-            remote = E2BExecutor.from_config(
-                {key: section[key] for key in ("e2b_api_key", "e2b_api_key_env", "e2b_template") if key in section},
-                environ,
-            )
-            remote = replace(remote, timeout_s=timeouts[0], owner=deployment_owner(proposals_dir))
+            remote = remote_executor(sandbox, section, environ, timeout_s=timeouts[0], owner_anchor=proposals_dir)
             remote.preflight()
         except SandboxUnavailable as exc:
-            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is {sandbox}, but {exc}") from exc
         return remote, timeouts[0], timeouts[1]
     if sandbox not in ("", "bwrap"):
-        raise RecipeConfigError("evolution.proposer_agent.sandbox must be 'bwrap', 'e2b' or 'none'")
+        choices = ", ".join(f"'{name}'" for name in ("bwrap", *sorted(REMOTE_EXECUTORS), "none"))
+        raise RecipeConfigError(f"evolution.proposer_agent.sandbox must be one of {choices}")
     executor = SandboxExecutor(network="isolated")
     try:
         executor.preflight()
@@ -124,6 +126,51 @@ def proposer_agent_settings(
     return executor, timeouts[0], timeouts[1]
 
 
+def harness_files(descriptor: AdapterDescriptor, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The files of a harness artifact whose entries are ``entries``, by relative path.
+
+    The files are ``ENTRIES_FILE`` and, for non-empty ``entries``, their
+    render for ``descriptor`` with the entries list where the adapter keeps
+    one. Raise ``RenderError`` for entries that do not render.
+    """
+    if not entries:
+        return entries_file(entries)
+    return {
+        **render_composition(nodes_from_entries(entries), descriptor),
+        **tree_files(descriptor, entries),
+        **entries_file(entries),
+    }
+
+
+@dataclass(frozen=True)
+class HarnessLayout(ArtifactLayout):
+    """The layout of a harness artifact for the adapter ``descriptor``, which an import must meet (RFC #980).
+
+    A directory meets it when its ``ENTRIES_FILE`` holds entries that the
+    seed's admission takes (``entries_refusal``) and its other files are
+    exactly the other files of ``harness_files`` for those entries, byte for
+    byte. ``ENTRIES_FILE`` itself may have any JSON formatting.
+    """
+
+    descriptor: AdapterDescriptor
+
+    def check(self, directory: Path) -> None:
+        entries = read_entries(directory)
+        refusal = entries_refusal(entries, self.descriptor)
+        if refusal is not None:
+            raise ValueError(f"the harness entries are refused: {refusal}")
+        expected = harness_files(self.descriptor, entries)
+        actual = {path.relative_to(directory).as_posix(): path for path in directory.rglob("*") if path.is_file()}
+        missing, extra = sorted(set(expected) - set(actual)), sorted(set(actual) - set(expected))
+        if missing or extra:
+            raise ValueError(
+                f"a harness artifact holds exactly the render of its entries: missing {missing}, extra {extra}"
+            )
+        for relative, path in actual.items():
+            if relative != ENTRIES_FILE and path.read_bytes() != expected[relative].encode("utf-8"):
+                raise ValueError(f"{relative} differs from the render of the harness entries")
+
+
 @dataclass(frozen=True)
 class _ScenarioModels(ModelBindingsResolver):
     config: ModelConfig
@@ -136,7 +183,7 @@ class _ScenarioModels(ModelBindingsResolver):
         runtime = self.config.runtime
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
-        # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
+        # The scenario's own model is served by this Reef too, so a rollout reaches it through the same route.
         binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
@@ -191,12 +238,12 @@ class CordisRecipe(Recipe):
 
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and
-    ``evaluate`` (:class:`Proposer` and :class:`EpisodeScorer` class references), ``tasks`` (the episode
+    ``evaluate`` (:class:`Proposer` and :class:`RolloutScorer` class references), ``tasks`` (the rollout
     prompts scored per step; or ``eval_task_store``, a task store such as ``imported-tasks`` whose eval split
     each step reads), optional ``binary`` (a path to the harness
     binary; left unset, backend construction installs the adapter descriptor's
     pinned version through the vendor's own channel, into the same prefix a
-    client's install script uses - see :mod:`reef.harness.episodes.vendor_install`),
+    client's install script uses - see :mod:`reef.harness.rollouts.vendor_install`),
     optional ``seed`` (a list of entry options - id, name, config -
     loaded into the composition tree on first boot, where an item may also
     be a dotted ``module:attribute`` naming a sequence of them; a recovered
@@ -207,7 +254,7 @@ class CordisRecipe(Recipe):
     or a reference to a :class:`~reef.evaluation.SelectionPlugin` class),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each evaluation
-    episode's trajectory files, so the decision is reconstructible; off by
+    rollout's trajectory files, so the decision is reconstructible; off by
     default),
     optional ``client_models`` (further model names the installed client
     may switch to; the install script renders them into its config beside
@@ -234,7 +281,7 @@ class CordisRecipe(Recipe):
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
     ``reef.upstream_api`` for a Responses or Anthropic-style provider). It
     reaches ``propose`` as ``models.served`` and is rendered into each
-    evaluation episode through the adapter's ``model_binding`` template, so
+    evaluation rollout through the adapter's ``model_binding`` template, so
     the seed carries no provider nodes and neither does the published tree; a
     client points its own harness at Reef. A method's auxiliary models - a
     stronger proposer, a judge - are declared under ``evolution.models`` and
@@ -262,21 +309,21 @@ class CordisRecipe(Recipe):
     """
 
     propose: Proposer
-    score_episode: EpisodeScorer
+    score_rollout: RolloutScorer
     tasks: tuple[str, ...]
     #: A task store whose eval split each step evaluates on, in place of ``tasks``.
     eval_task_store: str | None = None
     adapter: str = "pi"
     binary: str | None = None
-    episode_timeout_s: float = 600.0
-    episode_repeats: int = 1
-    #: The traces in one evolution step; the trainer makes a batch when the pipeline holds this many.
+    rollout_timeout_s: float = 600.0
+    rollout_repeats: int = 1
+    #: The default ``job_samples``: the fewest traces of one evolution step. The stage config can override it.
     batch_size: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
-    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
+    executor: ProgramExecutor = field(default_factory=lambda: build_executor(None))
     promote_failures: bool = False
     max_promoted_tasks: int = 50
     max_promoted_per_client: int = 5
@@ -285,15 +332,13 @@ class CordisRecipe(Recipe):
     max_rejected_history: int = 25
     min_win_margin: int = 0
     floor_score: float = 1.0
-    publish: str = "auto"
-    review_kinds: tuple[str, ...] = ()
     #: Models an installed client may switch to besides the served one, rendered into its config.
     client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation rollouts sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
     #: Default proposal inbox root, with one directory per scenario.
@@ -302,7 +347,7 @@ class CordisRecipe(Recipe):
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     #: The isolation an agent proposer runs under (``evolution.proposer_agent``); ``None`` runs no agent.
-    agent_executor: EpisodeExecutor | None = None
+    agent_executor: ProgramExecutor | None = None
     agent_timeout_s: float = 1800.0
     agent_trial_timeout_s: float = 300.0
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
@@ -320,7 +365,7 @@ class CordisRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
+        return PipelineSpec(record2record=ReportRecord2Record, record2sample=TraceSamples, sample2job=TraceJobData)
 
     @property
     def harness_adapter(self) -> str | None:
@@ -330,15 +375,15 @@ class CordisRecipe(Recipe):
         super().__post_init__()
         if not isinstance(self.propose, Proposer):
             raise ValueError("harness evolution requires a Proposer")
-        if not isinstance(self.score_episode, EpisodeScorer):
-            raise ValueError("harness evolution requires an EpisodeScorer")
+        if not isinstance(self.score_rollout, RolloutScorer):
+            raise ValueError("harness evolution requires a RolloutScorer")
         if not self.tasks and self.eval_task_store is None:
             raise ValueError("harness evolution requires tasks or an eval task store")
-        evaluation_selection(self.score_episode, self.worker_executor)
-        if self.episode_timeout_s <= 0:
-            raise ValueError("episode_timeout_s must be positive")
-        if self.episode_repeats < 1:
-            raise ValueError("episode_repeats must be at least 1")
+        evaluation_selection(self.score_rollout, self.worker_executor)
+        if self.rollout_timeout_s <= 0:
+            raise ValueError("rollout_timeout_s must be positive")
+        if self.rollout_repeats < 1:
+            raise ValueError("rollout_repeats must be at least 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         for label, value in (
@@ -353,8 +398,6 @@ class CordisRecipe(Recipe):
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
         if self.floor_score <= 0:
             raise ValueError("floor_score must be positive")
-        if self.publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
         if not isinstance(self.selection, PluginReference) or not issubclass(
             self.selection.plugin_class, SelectionPlugin
         ):
@@ -419,12 +462,12 @@ class CordisRecipe(Recipe):
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
             raise RecipeConfigError("evolution.binary must be a non-empty string when set")
-        timeout = evolution.get("episode_timeout_s", 600.0)
+        timeout = evolution.get("rollout_timeout_s", 600.0)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
-        repeats = evolution.get("episode_repeats", 1)
+            raise RecipeConfigError("evolution.rollout_timeout_s must be a positive number")
+        repeats = evolution.get("rollout_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
-            raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+            raise RecipeConfigError("evolution.rollout_repeats must be an integer of at least 1")
         batch_size = evolution.get("batch_size", 1)
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise RecipeConfigError("evolution.batch_size must be an integer of at least 1")
@@ -489,14 +532,12 @@ class CordisRecipe(Recipe):
         # A recheck compares two trees; the floor evaluates one.
         if selection_setting == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
-        publish = evolution.get("publish", "auto")
-        if publish not in ("auto", "review"):
-            raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
-        review_kinds = evolution.get("review_kinds", ())
-        if isinstance(review_kinds, str) or not isinstance(review_kinds, Sequence):
-            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
-        if not all(isinstance(kind, str) and kind for kind in review_kinds):
-            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
+        for moved in ("publish", "review_kinds"):
+            if moved in evolution:
+                raise RecipeConfigError(
+                    f"evolution.{moved} is gone: the activation section decides whether a kept tree serves "
+                    "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
+                )
         client_models = evolution.get("client_models", ())
         if isinstance(client_models, str) or not isinstance(client_models, Sequence):
             raise RecipeConfigError("evolution.client_models must be a list of model names")
@@ -558,7 +599,7 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         try:
             worker_executor = role_executor_settings(settings, "evolution")
-            scorer = EpisodeScorer.from_setting(evolution.get("evaluate"), setting="evolution.evaluate")
+            scorer = RolloutScorer.from_setting(evolution.get("evaluate"), setting="evolution.evaluate")
             propose = Proposer.from_setting(evolution.get("propose"), setting="evolution.propose")
             promote = (
                 Promoter.from_setting(evolution["promote"], setting="evolution.promote")
@@ -579,14 +620,14 @@ class CordisRecipe(Recipe):
             "max_pending_proposals": max_pending,
             "propose": propose,
             "promote": promote,
-            "score_episode": scorer,
+            "score_rollout": scorer,
             "worker_executor": worker_executor,
             "tasks": tuple(str(task) for task in tasks),
             "eval_task_store": eval_task_store,
             "adapter": adapter,
             "binary": binary,
-            "episode_timeout_s": float(timeout),
-            "episode_repeats": repeats,
+            "rollout_timeout_s": float(timeout),
+            "rollout_repeats": repeats,
             "batch_size": batch_size,
             "forbid_residue": forbid_residue,
             **budgets,
@@ -595,8 +636,6 @@ class CordisRecipe(Recipe):
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
             "max_promoted_per_client": per_client,
-            "publish": publish,
-            "review_kinds": tuple(review_kinds),
             "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
@@ -613,7 +652,7 @@ class CordisRecipe(Recipe):
         """The served model's endpoint.
 
         With the service known and a scenario named, this Reef's own
-        evaluation route for that scenario: an episode then samples the
+        evaluation route for that scenario: a rollout then samples the
         release the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
@@ -674,7 +713,7 @@ class CordisRecipe(Recipe):
         else:
             served_metadata = None
         return create_harness_surface(
-            seed_entries=tuple(dict(entry) for entry in self.seed),
+            layout=HarnessLayout(get_adapter(self.adapter)),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             model_metadata=self.model_metadata,
@@ -682,13 +721,24 @@ class CordisRecipe(Recipe):
             client_models=client_models,
         )
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The seed rendered for the adapter, with its entries list where the adapter carries one: a fresh scenario serves it before any step publishes."""
-        if not self.seed:
-            return None
-        descriptor = get_adapter(self.adapter)
-        nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
-        return {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)}
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The seed as the base harness, which a new scenario serves before any step publishes.
+
+        The files are the seed rendered for the adapter, with the entries list
+        where the adapter keeps one, and the entries in ``ENTRIES_FILE``, as
+        every harness artifact holds them. Without a seed, the base harness
+        holds only the empty entries list. The input is the
+        checksum of the seed without Reef's own entries
+        (``RESERVED_ENTRY_IDS``). Each Reef version ships its own copy of
+        those entries, and a step publishes the new copy
+        (``CordisBackend.shipped_content_update``). Thus a Reef upgrade keeps
+        the base.
+        """
+        configured = [dict(entry) for entry in self.seed if entry.get("id") not in RESERVED_ENTRY_IDS]
+        return BaseArtifactSource(
+            files=harness_files(get_adapter(self.adapter), self.seed),
+            inputs={"seed": hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest()},
+        )
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's proposal inbox and its step records: what a delete archives beside the record store."""
@@ -742,12 +792,12 @@ class CordisRecipe(Recipe):
         return {
             "descriptor": get_adapter(self.adapter),
             "propose": self.propose,
-            "score_episode": self.score_episode,
+            "score_rollout": self.score_rollout,
             "tasks": self.tasks,
             "models": self.model_bindings(scenario),
             "binary": self.binary,
-            "episode_timeout_s": self.episode_timeout_s,
-            "episode_repeats": self.episode_repeats,
+            "rollout_timeout_s": self.rollout_timeout_s,
+            "rollout_repeats": self.rollout_repeats,
             "forbid_residue": self.forbid_residue,
             "executor": self.executor,
             "max_steps": self.max_steps,
@@ -759,8 +809,6 @@ class CordisRecipe(Recipe):
             "promote": self.promote,
             "recheck_every": self.recheck_every,
             "max_rejected_history": self.max_rejected_history,
-            "publish": self.publish,
-            "review_kinds": self.review_kinds,
             "seed": self.seed,
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,
@@ -804,5 +852,5 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
-            batch_size=self.batch_size,
+            default_job_samples=self.batch_size,
         )

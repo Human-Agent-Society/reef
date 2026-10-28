@@ -12,10 +12,10 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2task import ReportTasks
-from reef.task2batch import Task2Batch
+from reef.record2sample import ReportSamples
+from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem, TrainDataItem, TrainingBatch
+from reef.train.types import JobData, Sample, TaskSample
 
 
 def inference(record_id: str) -> AgentRecord:
@@ -45,7 +45,7 @@ def exclusive_stage(
     )
 
 
-class SampleTasks(ReportTasks):
+class NamedReportSamples(ReportSamples):
     """Each report becomes a task named after it. ``fail_assembly`` breaks the training contract."""
 
     def __init__(self) -> None:
@@ -53,20 +53,20 @@ class SampleTasks(ReportTasks):
         self.assembled: list[str] = []
         self.fail_assembly = False
 
-    def make_sample(self, context: ReportContext) -> TrainDataItem:
+    def make_sample(self, context: ReportContext) -> Sample:
         if self.fail_assembly:
             raise ValueError("broken training data")
         self.assembled.append(context.report.agent_record_id)
-        return TaskItem(Path(context.report.agent_record_id))
+        return TaskSample(Path(context.report.agent_record_id))
 
 
-class SampleBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+class SampleJobData(Sample2Job):
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class SamplePipeline(TrainingPipeline):
-    """A reported-feedback pipeline over an exclusive report stage, with ``SampleTasks`` and ``batches``."""
+    """A reported-feedback pipeline over an exclusive report stage, with ``NamedReportSamples`` and ``batches``."""
 
     def __init__(
         self,
@@ -74,16 +74,16 @@ class SamplePipeline(TrainingPipeline):
         grouping: ReportGrouping | None = None,
         ordered_groups: bool = False,
         report_type: type[ReportBase] | None = None,
-        tasks: SampleTasks | None = None,
-        batches: type[SampleBatches] = SampleBatches,
+        tasks: NamedReportSamples | None = None,
+        batches: type[SampleJobData] = SampleJobData,
     ) -> None:
         context = PipelineContext("math", report_type)
-        self.sample_tasks = SampleTasks() if tasks is None else tasks
+        self.sample_tasks = NamedReportSamples() if tasks is None else tasks
         super().__init__(
             context,
             record2record=exclusive_stage(context, grouping, ordered_groups=ordered_groups),
-            record2task=self.sample_tasks,
-            task2batch=batches(context, None),
+            record2sample=self.sample_tasks,
+            sample2job=batches(context, None, None),
         )
 
     @property
@@ -116,7 +116,7 @@ class PairGrouping(ReportGrouping):
 
 
 class GroupPipeline(SamplePipeline):
-    def __init__(self, *, batches: type[SampleBatches] = SampleBatches) -> None:
+    def __init__(self, *, batches: type[SampleJobData] = SampleJobData) -> None:
         super().__init__(grouping=PairGrouping(), batches=batches)
 
     @property
@@ -178,8 +178,8 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
 
 def test_processor_requires_sample_assembly_instead_of_judge() -> None:
     with pytest.raises(TypeError, match="abstract"):
-        ReportTasks()
-    assert not hasattr(ReportTasks, "judge")
+        ReportSamples()
+    assert not hasattr(ReportSamples, "judge")
 
 
 def test_operational_backlog_excludes_reserved_reports() -> None:
@@ -188,12 +188,12 @@ def test_operational_backlog_excludes_reserved_reports() -> None:
         processor.push(inference(f"i{index}"))
         processor.push(report(f"r{index}", f"i{index}"))
     assert processor.operational_metrics()["unreserved_reports"] == 2
-    batch = processor.build_batch(1)
+    batch = processor.build_job_data(1)
     sample = processor.operational_metrics()
     assert sample["unreserved_reports"] == 1
     assert sample["reserved_reports"] == 1
     assert sample["oldest_report_wait_seconds"] >= 0
-    processor.acknowledge(batch.batch_id)
+    processor.acknowledge(batch.data_id)
     assert processor.operational_metrics()["unreserved_reports"] == 1
     assert processor.operational_metrics()["reserved_reports"] == 0
 
@@ -206,7 +206,7 @@ def test_inferences_wait_for_reports_and_batch_counts_completed_samples() -> Non
     processor.push(report("r1", "i1"))
     assert not processor.ready(2)
     processor.push(report("r2", "i2"))
-    assert tuple(str(item.task_path) for item in processor.build_batch(2).items) == ("r1", "r2")
+    assert tuple(str(item.task_path) for item in processor.build_job_data(2).samples) == ("r1", "r2")
     assert "i3" not in processor.releasable_record_ids()
 
 
@@ -218,7 +218,7 @@ def test_report_before_inference_fails_without_queuing_it() -> None:
     assert not processor.ready(1)
     assert processor.assembled == []
     processor.push(report("r1", "i1"))
-    assert tuple(str(item.task_path) for item in processor.build_batch(1).items) == ("r1",)
+    assert tuple(str(item.task_path) for item in processor.build_job_data(1).samples) == ("r1",)
 
 
 @pytest.mark.parametrize("references", [(), ("i1", "i1"), ("i1", "missing")])
@@ -255,7 +255,7 @@ def test_valid_feedback_is_assembled_without_score_filtering(score: float) -> No
     processor = SamplePipeline()
     processor.push(inference("i1"))
     processor.push(report("r1", "i1", score=score))
-    assert tuple(str(item.task_path) for item in processor.build_batch(1).items) == ("r1",)
+    assert tuple(str(item.task_path) for item in processor.build_job_data(1).samples) == ("r1",)
 
 
 def test_assembly_failure_protects_inputs_and_does_not_acknowledge_a_retry() -> None:
@@ -269,7 +269,7 @@ def test_assembly_failure_protects_inputs_and_does_not_acknowledge_a_retry() -> 
     assert not processor.ready(1)
     processor.fail_assembly = False
     processor.push(report("r1", "i1"))
-    assert tuple(str(item.task_path) for item in processor.build_batch(1).items) == ("r1",)
+    assert tuple(str(item.task_path) for item in processor.build_job_data(1).samples) == ("r1",)
 
 
 def test_duplicate_reports_and_batch_polls_do_not_assemble_twice() -> None:
@@ -277,13 +277,13 @@ def test_duplicate_reports_and_batch_polls_do_not_assemble_twice() -> None:
     processor.push(inference("i1"))
     processor.push(report("r1", "i1"))
     processor.push(report("r1", "i1"))
-    batch = processor.build_batch(1)
-    assert processor.build_batch(1) is batch
+    batch = processor.build_job_data(1)
+    assert processor.build_job_data(1) is batch
     assert processor.assembled == ["r1"]
-    processor.release_batch(batch.batch_id)
+    processor.release_job_data(batch.data_id)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
-    batch = processor.build_batch(1)
-    assert processor.acknowledge(batch.batch_id) == {"i1", "r1"}
+    batch = processor.build_job_data(1)
+    assert processor.acknowledge(batch.data_id) == {"i1", "r1"}
     processor.push(report("late", "i1"))
     assert not processor.ready(1)
     assert processor.assembled == ["r1"]
@@ -296,7 +296,7 @@ def test_a_second_report_on_the_inference_of_a_live_report_ends_without_training
     processor.push(report("r2", "i1"))
     # r2 ends at once. The live r1 keeps i1.
     assert processor.releasable_record_ids() == {"r2"}
-    processor.acknowledge(processor.build_batch(1).batch_id)
+    processor.acknowledge(processor.build_job_data(1).data_id)
     assert processor.assembled == ["r1"]
     assert not processor.ready(1)
     assert processor.releasable_record_ids() == {"i1", "r1", "r2"}
@@ -310,7 +310,7 @@ def test_group_waits_for_complete_samples() -> None:
         processor.push(inference(f"i{index}"))
         processor.push(report(f"r{index}", f"i{index}"))
         assert processor.ready(1) == (index == 2)
-    assert tuple(str(item.task_path) for item in processor.build_batch(1).items) == ("r1", "r2")
+    assert tuple(str(item.task_path) for item in processor.build_job_data(1).samples) == ("r1", "r2")
 
 
 def test_group_discard_releases_all_members_and_refuses_later_members() -> None:
@@ -329,7 +329,7 @@ def test_slot_retry_preserves_first_report() -> None:
         processor.push(inference(record_id))
         record = report(f"r-{record_id}", record_id)
         processor.push(replace(record, payload={**record.payload, "metadata": {"slot": slot}}))
-    assert tuple(str(item.task_path) for item in processor.build_batch(1).items) == ("r-first", "r-second")
+    assert tuple(str(item.task_path) for item in processor.build_job_data(1).samples) == ("r-first", "r-second")
     assert {"r-retry", "retry"} <= processor.releasable_record_ids()
 
 
@@ -346,7 +346,7 @@ def test_ordered_groups_can_coexist_with_singleton_samples() -> None:
     for record_id in ("g-z", "g-a", "single"):
         processor.push(inference(f"source-{record_id}"))
         processor.push(report(record_id, f"source-{record_id}"))
-    assert tuple(str(item.task_path) for item in processor.build_batch(3).items) == ("single", "g-a", "g-z")
+    assert tuple(str(item.task_path) for item in processor.build_job_data(3).samples) == ("single", "g-a", "g-z")
 
 
 def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
@@ -354,47 +354,47 @@ def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
     for index in (1, 2):
         processor.push(inference(f"i{index}"))
         processor.push(report(f"r{index}", f"i{index}"))
-    first = processor.build_batch(1)
+    first = processor.build_job_data(1)
     processor.push(inference("i3"))
     processor.push(report("r3", "i3"))
-    assert processor.build_batch(1) is first
-    assert processor.acknowledge(first.batch_id) == {"i1", "i2", "r1", "r2"}
+    assert processor.build_job_data(1) is first
+    assert processor.acknowledge(first.data_id) == {"i1", "i2", "r1", "r2"}
     assert processor.releasable_record_ids().isdisjoint({"i3", "r3"})
     assert not processor.ready(1)
     processor.push(inference("i4"))
     processor.push(report("r4", "i4"))
-    second = processor.build_batch(1)
-    assert [str(item.task_path) for item in second.items] == ["r3", "r4"]
-    assert processor.acknowledge(second.batch_id) == {"i3", "i4", "r3", "r4"}
+    second = processor.build_job_data(1)
+    assert [str(item.task_path) for item in second.samples] == ["r3", "r4"]
+    assert processor.acknowledge(second.data_id) == {"i3", "i4", "r3", "r4"}
 
 
 def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> None:
-    class SelectedBatches(SampleBatches):
-        def make_batch(self, tasks, batch_id):
-            assert [task.source_agent_record_ids for task in tasks] == [("i1", "r1"), ("i2", "r2")]
-            return super().make_batch(tasks[:1], batch_id)
+    class SelectedJobData(SampleJobData):
+        def make_job_data(self, samples, data_id):
+            assert [task.source_agent_record_ids for task in samples] == [("i1", "r1"), ("i2", "r2")]
+            return super().make_job_data(samples[:1], data_id)
 
-    processor = GroupPipeline(batches=SelectedBatches)
+    processor = GroupPipeline(batches=SelectedJobData)
     for index in (1, 2):
         processor.push(inference(f"i{index}"))
         processor.push(report(f"r{index}", f"i{index}"))
-    batch = processor.build_batch(1)
-    assert [str(item.task_path) for item in batch.items] == ["r1"]
-    assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
+    batch = processor.build_job_data(1)
+    assert [str(item.task_path) for item in batch.samples] == ["r1"]
+    assert processor.acknowledge(batch.data_id) == {"i1", "i2", "r1", "r2"}
     assert not processor.ready(1)
 
 
 def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
-    class BrokenTasks(SampleTasks):
+    class BrokenTasks(NamedReportSamples):
         def make_sample(self, context):
             return object() if self.fail_assembly else super().make_sample(context)
 
     processor = SamplePipeline(tasks=BrokenTasks())
     processor.push(inference("i1"))
     processor.fail_assembly = True
-    with pytest.raises(TypeError, match="TrainDataItem"):
+    with pytest.raises(TypeError, match="Sample"):
         processor.push(report("r1", "i1"))
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
     processor.fail_assembly = False
     processor.push(report("r1", "i1"))
-    assert processor.acknowledge(processor.build_batch(1).batch_id) == {"i1", "r1"}
+    assert processor.acknowledge(processor.build_job_data(1).data_id) == {"i1", "r1"}

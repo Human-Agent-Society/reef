@@ -3,21 +3,25 @@ Loss families
 
 A method's ``TrainingObjective`` owns signal preparation and declares its
 ``loss_family``. A loss family implements the model-dependent computation for
-one backend. Preparation runs on the full batch; tensor loss hooks run after
+one backend. Preparation runs on the job's full data; tensor loss hooks run after
 the backend's forward passes.
 
 - ``recipes/<name>/objective.py`` holds the backend-neutral objective.
   ``reef/train/algos/`` defines its shared contract and registry.
 - ``reef/train/slime_backend/`` holds Slime integration machinery; each
   method's Slime implementation lives in ``recipes/<name>/slime/``. Its spec
-  is torch-free driver code and its ``objective.py`` contains worker hooks.
+  is torch-free code that runs in the Slime component's process, and its
+  ``objective.py`` contains worker hooks.
 - Methods can also supply a Tinker loss implementation. TTTD shares one
   preparation method between its Slime and Tinker implementations.
 
-A recipe binds ``WeightTrainingSpec(objective=..., scheduling=...)``.
-``WeightTrainingSpec.loss_family`` derives the family from that objective;
-``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
-``StepScheduling``, with the backend's batch size, says how the runtime cuts the batch into optimizer steps.
+A recipe binds ``WeightTrainingSpec(objective=...)``.
+``WeightTrainingSpec.loss_family`` derives the family from that objective, and
+``TrainingSignal`` carries advantages, metrics and proposed state. The training
+component cuts each job's data into optimizer steps of its batch size. The
+objective's ``rollout_unit`` keeps each sample, or each comparison set, in one
+step; the job's optional ``scheduling`` parameter sets the passes, the order
+and the last step (`Python API <../reference/python-api.rst>`__).
 The workers start with that objective's family. A job that selects another
 objective trains that objective's family on the same workers (see
 `Per-job families`_).
@@ -36,17 +40,18 @@ A package ``__init__`` registers its family by reference
 (``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
 ``loss_families.py`` imports the reference on first resolve so
 ``@register_loss_family`` runs at boot. An external family decorates its class
-the same way. The recipe names it in ``training_spec().loss_family``; the
-driver reads that binding after importing the configured recipe class. Resolving the
-reference imports the module, which registers the family; the driver also keeps
-the reference on ``args.loss_family_ref`` so each Megatron worker, whose
-registry starts empty, can import it too.
+the same way. The recipe names it in ``training_spec().loss_family``; Reef
+reads that binding after it imports the configured recipe class. Resolving the
+reference imports the module, which registers the family. The Slime component
+also keeps the reference on ``args.loss_family_ref``, so each Megatron worker,
+whose registry starts empty, can import it too.
 
-Family to driver flags
-----------------------
+Family to Slime flags
+---------------------
 
-The recipe's ``loss_family`` and the driver's flags must describe the same
-objective; the driver checks it at start and refuses a mismatch.
+The recipe's ``loss_family`` and the Slime flags in ``training.options`` must
+describe the same objective. The Slime component checks them at start and
+refuses a mismatch.
 
 +---------------------+-----------------------------+----------------------------+
 | Loss family         | ``--loss-type``             | Rollout log-probs          |
@@ -84,15 +89,16 @@ The spec
 ``loss_family``, ``loss_type``, and ``validate_specific_args`` are required. The
 rest has defaults. The overrides, in the order the pipeline reaches them:
 
-- ``parse_specific_options`` and ``apply_driver_options``: family flags on
-  the driver's argv (``--<name>-*``), stripped before Slime's parser sees them
-  and stamped onto ``args``.
+- ``parse_specific_options`` and ``apply_driver_options``: family flags
+  (``--<name>-*``) in the Slime arguments, stripped before Slime's parser sees
+  them and stamped onto ``args``.
 - ``configure_backend_args``: derive backend settings once ``loss_family`` is
   stamped. SAO turns Slime's advantage pass on here.
 - ``shape_sample_row`` and ``build_rollout_data``: a custom wire row. The
   default row is ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``;
   a family appends its own columns and reads them back.
-- ``prepare_rollout``: driver-side work before a step.
+- ``prepare_rollout``: work in the component's process before the workers
+  train a job.
 - ``bind``: a per-run instance carrying state such as a critic schedule.
 - ``train``: critic and actor orchestration; the default is one actor step.
 - ``rollout_metrics``: rollout version and timing metrics after the step.
@@ -162,15 +168,16 @@ Per-job families
 A job can select an objective of another family (`Switch methods within a run
 <write-a-recipe.rst#switch-methods-within-a-run>`__). The workers keep their
 startup flags. The family brings its ``--loss-type``, objective hooks,
-advantage routing, wire keys, and default driver options. Before the family's
-first job starts, the bridge validates the family against the startup flags.
+advantage routing, wire keys, and the defaults of its family flags. Before the
+family's first job trains, the Slime component validates the family against
+the startup flags.
 Only the actor workers switch; the critic keeps the startup family. A ``self``
 distillation teacher copies the actor's weights at the family's first job, and
 Reef does not checkpoint that copy.
 
-The bridge refuses a family that:
+The Slime component fails the job for a family that:
 
-- needs driver options;
+- needs its own family flags, which only the startup family parses;
 - configures the critic, as SAO does;
 - is a second distillation family;
 - declares a wire key with a dtype that another family of the run declares
@@ -181,10 +188,11 @@ A learning-rate schedule sets the rate of each actor optimizer step through
 Slime's before-train-step hook. Reef runs any
 ``--custom-megatron-before-train-step-hook-path`` first. Megatron's scheduler
 keeps its configured curve, so a checkpoint still loads under the startup
-flags. The bridge records each scenario's schedule progress in
-``reef_learning_rate_schedules.json`` beside the job marker, with each
-checkpoint. It refuses to start when that file records progress after the
-loaded checkpoint. It refuses a schedule when the run uses ``--decoupled-lr``.
+flags. The component records the schedule's progress with each saved
+checkpoint (in the start's ``start.json``), so the next job continues it. A
+job that selects a schedule fails when the run uses ``--decoupled-lr``. A job
+that restarts training (``JobRequest(restart=True)``) starts both Megatron's
+scheduler and the selected schedule at step 0.
 
 The distillation base
 ---------------------
@@ -195,7 +203,8 @@ who the teacher is and which divergence is minimized. Both are settings of
 one implementation in the backend, ``reef/train/slime_backend/distill/``,
 and each such recipe's family is a thin subclass of it:
 
-- ``DistillAlgorithm`` is the driver-side base: the seven-column wire row
+- ``DistillAlgorithm`` is the base that runs in the component's process: the
+  seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
   by the student's response ids verbatim, and ``sample_weight``, the factor
   on that sample's mean divergence, 1 unless the recipe's stages set
@@ -214,7 +223,7 @@ and each such recipe's family is a thin subclass of it:
   a frozen snapshot at 0) or ``separate`` (another checkpoint that fits the
   actor's model, loaded beside the actor's weights). The pre-train hook
   switches the teacher's weights in through the actor's backups, runs one
-  forward-only pass over the batch's teacher sequences, and switches the
+  forward-only pass over the teacher sequences of the job's data, and switches the
   actor back.
 - The divergence is the forward KL, the reverse KL or the generalized JSD,
   over the teacher's whole distribution (``top-k`` 0: one row of this rank's
@@ -249,19 +258,22 @@ deadline of one scoring request, and ``options`` native SGLang options. The
 checkpoint teacher stays the default; the wire row, the loss and the report
 schema do not change.
 
-The bridge sends each sample's recorded teacher-prefix and response ids to the
+The Slime component sends each sample's recorded teacher-prefix and response ids to the
 engine's ``/generate`` with ``max_new_tokens=0``, sixteen requests at a time, and the log-probs requested
 from the last prompt token, checks the returned ids and row counts against the
 recorded response, and fills ``distill_teacher_sampled_log_probs``,
 ``distill_teacher_topk_ids`` and ``distill_teacher_topk_log_probs`` before the
-batch is partitioned and tensorized. Scoring completes before the training job
-is marked running, so a failure leaves no partially scored batch.
+batch is partitioned and tensorized. Scoring completes before the batch
+reaches the workers, so a scoring failure fails the job and leaves no
+partially scored batch.
 ``perf/distill_teacher_time`` is the scoring wall time in seconds, endpoint
 validation included.
 
-A managed deployment passes ``--<family>-teacher-url``,
+With a ``teacher`` section, ``reef serve`` starts the teacher as its own
+SGLang Ray service, ``distill-teacher``, and adds ``--<family>-teacher-url``,
 ``--<family>-teacher-model-path`` and ``--<family>-teacher-timeout`` to the
-driver; an explicit process stack may set them itself. The endpoint must serve
+Slime arguments. Without the section, ``training.options`` can set them for an
+engine that you run yourself. The endpoint must serve
 the model at ``teacher-model-path``, whose tokenizer is checked against the
 student's vocabulary and decoder at startup. Chat templates may differ because
 nothing is rendered or retokenized. Keep ``teacher=separate`` and drop
@@ -394,12 +406,12 @@ Inputs and requirements:
   top-k, top-p and min-p filters (see the configuration reference). With
   those filters on, the correction centers against the unfiltered
   distribution.
-- When the flag is on, the bridge adds each wire row's recorded top-K to the
+- When the flag is on, the Slime component adds each wire row's recorded top-K to the
   payload as ``sampler_topk_indices`` and ``sampler_topk_log_probs``; the
   family's wire row is unchanged. Multi-turn assembly keeps the recorded rows
   aligned with the joined response, gives inserted context an empty row, and
   drops top-K for the whole sample when a turn has none.
-- Before each step, the bridge keeps the first ``top-k`` entries of every
+- Before each job trains, the component keeps the first ``top-k`` entries of every
   trained position. It refuses a sample with missing or short rows,
   duplicate or negative ids, non-finite log-probs, or a head mass above one,
   and, when the sample carries ``rollout_log_probs``, a head whose entry for
@@ -407,7 +419,7 @@ Inputs and requirements:
   response). The worker also refuses ids outside the vocabulary. The check
   runs in torch (``score_centering/heads.py``); 64 samples of 1,024 tokens at
   ``top-k`` 128 take under a second on a CPU.
-- The driver refuses a family that declares no weight and
+- The Slime component refuses a family that declares no weight and
   ``--context-parallel-size`` above 1. For a family on Slime's policy loss it
   also refuses ``--use-tis``, ``--get-mismatch-metrics``, ``--use-opsm`` and
   ``--custom-pg-loss-reducer-function-path``: Slime reweights, masks or

@@ -21,7 +21,7 @@ uses the deployment's model:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2batch: {config: {buffer_size: 32}}}
+             pipeline: {sample2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:
@@ -36,15 +36,19 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
 
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.components import validate_component_name
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
+from reef.evaluation.activation import activation_reference
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
@@ -162,7 +166,7 @@ class CompositeRecipe(Recipe):
         *,
         environ: Mapping[str, str],
         runtime: InferenceRuntime | None = None,
-        training_runtime: TrainingRuntime | None = None,
+        training_component: TrainingComponent | None = None,
     ) -> CompositeRecipe:
         raw = config.get("components")
         if not isinstance(raw, Mapping) or not raw:
@@ -189,7 +193,7 @@ class CompositeRecipe(Recipe):
                 environ,
                 config=settings,
                 runtime=runtime,
-                training_runtime=training_runtime,
+                training_component=training_component,
             )
         modes = {recipe.training_mode for recipe in components.values()}
         if len(modes) != 1:
@@ -197,8 +201,14 @@ class CompositeRecipe(Recipe):
         values = dict(field_values)
         if configured_mode is None:
             values["training_mode"] = next(iter(modes))
+        if config.get("activation") is not None:
+            # One rule activates the artifacts of every component.
+            try:
+                values["activation"] = activation_reference(config["activation"])
+            except PluginConfigError as exc:
+                raise RecipeConfigError(str(exc)) from exc
         try:
-            return cls(components=components, runtime=runtime, training_runtime=training_runtime, **values)
+            return cls(components=components, runtime=runtime, training_component=training_component, **values)
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
 
@@ -206,7 +216,7 @@ class CompositeRecipe(Recipe):
     def select_weight_training(
         cls, config: Mapping[str, Any]
     ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
-        """The one component that trains weights, so the deployment connects its training runtime.
+        """The one component that trains weights, so the deployment connects its training component.
 
         A release loads one component into a runtime, so two weight training
         components are refused here, before any runtime is connected. The
@@ -315,19 +325,29 @@ class CompositeRecipe(Recipe):
             trainers.append(ComponentTrainer(component, trainer))
         return tuple(trainers)
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """Each component's seed under that component's directory; ``None`` when no component seeds one."""
-        files: dict[str, str] = {}
-        for component, recipe in self.components.items():
-            seed = recipe.base_artifact_files()
-            if seed:
-                files.update({f"{component}/{path}": text for path, text in seed.items()})
-        return files or None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """Each component's base under that component's directory.
 
-    def bootstrap_artifact_component(self) -> str | None:
-        """The weight-training component: a bootstrap model snapshot is that component's base content."""
-        return next(
-            (name for name, recipe in self.components.items() if isinstance(recipe, WeightTrainingRecipe)), None
+        The files and the model directory of a component go under its name; each input is named ``<component>.<input>``. Raise
+        ``RecipeConfigError`` when two components hold a model directory.
+        """
+        sources = {component: recipe.base_artifact_source() for component, recipe in self.components.items()}
+        models = [component for component, source in sources.items() if source.model_directory is not None]
+        if len(models) > 1:
+            raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
+        return BaseArtifactSource(
+            files={
+                f"{component}/{path}": text
+                for component, source in sources.items()
+                for path, text in source.files.items()
+            },
+            model_directory=sources[models[0]].model_directory if models else None,
+            model_component=models[0] if models else None,
+            inputs={
+                f"{component}.{name}": value
+                for component, source in sources.items()
+                for name, value in source.inputs.items()
+            },
         )
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:

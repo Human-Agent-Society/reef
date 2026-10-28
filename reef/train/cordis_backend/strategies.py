@@ -3,8 +3,8 @@
 Each is a :class:`~reef.core.plugins.ConfiguredPlugin`. A deployment names
 the class (``evolution.propose``, ``evolution.promote``), and the recipe
 builds it with ``from_config``; Python callers may pass a built instance. The
-episode scorer that ``evolution.evaluate`` names is
-:class:`reef.evaluation.harness.EpisodeScorer`.
+rollout scorer that ``evolution.evaluate`` names is
+:class:`reef.evaluation.harness.RolloutScorer`.
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from typing import Any
 
 from reef.core.plugins import ConfiguredPlugin
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree.mutations import Mutation
-from reef.sandbox.process import EpisodeExecutor
+from reef.sandbox.process import ProgramExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 
 @dataclass(frozen=True)
@@ -71,8 +71,8 @@ class AgentHost:
     """What a proposer that runs a coding agent needs from the step, handed over as the ``agent_host`` keyword.
 
     ``descriptor`` and ``binary`` are the harness adapter and its installed
-    binary, the same the episodes run; ``executor`` is the one the deployment
-    built for the agent (its isolation, not the episodes'); ``step_dir`` is the
+    binary, the same the rollouts run; ``executor`` is the one the deployment
+    built for the agent (its isolation, not the rollouts'); ``step_dir`` is the
     step's record directory, ``None`` with the record off; ``calls`` is the
     step's budget and record; the timeouts bound the whole agent run and each
     trial run of a candidate tree.
@@ -80,7 +80,7 @@ class AgentHost:
 
     descriptor: AdapterDescriptor
     binary: str
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     step_dir: Path | None
     calls: ProposerCalls
     timeout_s: float
@@ -92,10 +92,10 @@ class Proposer(ConfiguredPlugin, ABC):
 
     Implement:
         ``propose`` — given the current composition (as ``(kind, config)``
-        pairs in tree order), a batch of trace samples (a sample's ``score``
-        is ``None`` when the deployment batches recorded traffic without
+        pairs in tree order), the job data's trace samples (a sample's ``score``
+        is ``None`` when the deployment trains on recorded traffic without
         reports, so a method must handle unscored samples), and the
-        :class:`~reef.harness.episodes.model_binding.ModelBindings` the method may
+        :class:`~reef.harness.rollouts.model_binding.ModelBindings` the method may
         call, return one :class:`~reef.train.cordis_backend.Mutation`, a
         sequence of them (one composite proposal, applied under one snapshot
         and settled by one selection decision), a :class:`StepProposal`
@@ -125,8 +125,8 @@ class Proposer(ConfiguredPlugin, ABC):
     ``requests`` contains exactly one mapping with ``id``, ``text``,
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
-    in ``hybrid`` it is what an automatic batch would take next, up to
-    ``evolution.batch_size`` and possibly none (scored traces, or unscored records
+    in ``hybrid`` it is what automatic job data would take next, up to
+    ``job_samples`` (by default ``evolution.batch_size``) and possibly none (scored traces, or unscored records
     when the ``pipeline`` section names the inference stages). A proposer that takes
     instructions sets ``reads_requests``. It generates mutations against the current tree, then the
     same evaluation and publication policy used by automatic evolution apply.
@@ -158,7 +158,7 @@ class Proposer(ConfiguredPlugin, ABC):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -168,7 +168,7 @@ class Proposer(ConfiguredPlugin, ABC):
         entries: Sequence[Mapping[str, Any]] = (),
         agent_host: AgentHost | None = None,
     ) -> Mutation | Sequence[Mutation] | StepProposal | None:
-        """Propose mutations for the current composition and trace batch."""
+        """Propose mutations for the current composition and the job data's traces."""
 
 
 class Promoter(ConfiguredPlugin, ABC):
@@ -182,7 +182,7 @@ class Promoter(ConfiguredPlugin, ABC):
     @abstractmethod
     def promote(
         self,
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:

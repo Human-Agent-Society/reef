@@ -12,16 +12,18 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._threshold_processor import ThresholdBatches, threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 
-from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
+from reef.artifact import Artifact, BaseArtifactSource, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError, UnknownScenario
+from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
@@ -53,7 +55,7 @@ class _FileBackend(CandidateBackend):
         path.mkdir(parents=True)
         (path / f"{self.label}.txt").write_text(f"{self.label} step {step}", encoding="utf-8")
         self.result = TrainStepResult({"steps": step}, artifact=Artifact.local(path))
-        return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
+        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
 
     def evaluate(self, candidate):
         return EvaluationResult("test", "1", {})
@@ -77,8 +79,8 @@ class _TreeRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_harness_surface(served_model="served-model")
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        return self.seed
+    def base_artifact_source(self) -> BaseArtifactSource:
+        return BaseArtifactSource(files=self.seed or {})
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
@@ -90,10 +92,11 @@ class _TreeRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            default_job_samples=1,
         )
 
 
-class HybridThresholdBatches(ThresholdBatches):
+class HybridThresholdJobData(ThresholdJobData):
     """The same batches, taking instructions too."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
@@ -101,7 +104,7 @@ class HybridThresholdBatches(ThresholdBatches):
 
 def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
     """The threshold pipeline, one report per batch, taking instructions too."""
-    return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
+    return threshold_pipeline(context, sample2job=HybridThresholdJobData(context, 1, None))
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,7 @@ class _HybridTreeRecipe(_TreeRecipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            default_job_samples=1,
         )
 
 
@@ -137,8 +141,8 @@ class _ConfigRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_config_surface()
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        return {CONFIG_FILE: json.dumps({"request_defaults": {"temperature": 0.2}})}
+    def base_artifact_source(self) -> BaseArtifactSource:
+        return BaseArtifactSource(files={CONFIG_FILE: json.dumps({"request_defaults": {"temperature": 0.2}})})
 
 
 def _composite(tmp_path: Path) -> CompositeRecipe:
@@ -158,13 +162,14 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     assert surface.files_component == "harness"
     assert surface.harness is not None and surface.harness.served_model == "served-model"
     assert isinstance(surface.components["config"].validator, ConfigValidator)
-    assert recipe.base_artifact_files() == {
+    base = recipe.base_artifact_source()
+    assert base.files == {
         "harness/AGENTS.md": "seed",
         f"config/{CONFIG_FILE}": json.dumps({"request_defaults": {"temperature": 0.2}}),
     }
+    # No weight-training component: the base holds no model.
+    assert base.model_directory is None and base.model_component is None
     assert recipe.report_type is None
-    # No weight-training component: a bootstrap model snapshot would sit at the release root.
-    assert recipe.bootstrap_artifact_component() is None
     trainers = recipe.build_trainers(
         "agent", SQLiteScenarioStorage().open("agent").records, surface=surface, algorithm_states={}
     )
@@ -264,11 +269,11 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
 
 
 @pytest.mark.unit
-def test_service_connects_the_training_runtime_of_a_composite_weight_component() -> None:
+def test_service_connects_the_training_component_of_a_composite_weight_component() -> None:
     from tests.support._training_deployment import LocalRuntime
 
     from reef.service.assembly import _serving_recipe
-    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 
     settings = service_config_from_mapping(
         {
@@ -280,11 +285,11 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
             }
         }
     )
-    recipe = _serving_recipe("reef.recipe.composite:CompositeRecipe", settings, {}, None)
+    recipe = _serving_recipe("reef.recipe.composite:CompositeRecipe", settings, {})
     assert isinstance(recipe, CompositeRecipe)
-    assert isinstance(recipe.training_runtime, LocalRuntime)
-    assert recipe.training_runtime.received_model_path == "demo-model"
-    assert all(component.training_runtime is recipe.training_runtime for component in recipe.components.values())
+    assert isinstance(recipe.training_component, LocalRuntime)
+    assert recipe.training_component.received_model_path == "demo-model"
+    assert all(component.training_component is recipe.training_component for component in recipe.components.values())
     assert all(component.runtime is recipe.runtime for component in recipe.components.values())
 
     # A flat weight recipe setting has no place at the top of a composite.
@@ -294,35 +299,41 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
                 "recipe": "reef.recipe.composite:CompositeRecipe",
                 "model_path": "demo-model",
                 "training_backend": _LOCAL_TRAINING,
-                "max_staleness": 2,
+                "training_mode": "hybrid",
                 "components": _WEIGHTS_AND_HARNESS,
             }
         }
     )
-    with pytest.raises(ValueError, match=r"reef\.max_staleness is not a setting of CompositeRecipe"):
-        _serving_recipe("reef.recipe.composite:CompositeRecipe", stray, {}, None)
+    with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
+        _serving_recipe("reef.recipe.composite:CompositeRecipe", stray, {})
 
-    # A top level evaluation section reaches the component that trains: it is that component which parses it.
-    evaluated = service_config_from_mapping(
-        {
-            "reef": {
-                "recipe": "reef.recipe.composite:CompositeRecipe",
-                "model_path": "demo-model",
-                "training_backend": _LOCAL_TRAINING,
-                "components": _WEIGHTS_AND_HARNESS,
-            },
-            "evaluation": {"module": "no.such.module:Factory"},
-        }
-    )
-    with pytest.raises(RecipeConfigError, match=r"cannot import evaluation 'no\.such\.module:Factory'"):
-        _serving_recipe("reef.recipe.composite:CompositeRecipe", evaluated, {}, None)
+    # A top level activation section is the composite's own: one rule activates the artifacts of every component.
+    def with_activation(activation: Mapping[str, Any]) -> ServiceConfig:
+        return service_config_from_mapping(
+            {
+                "reef": {
+                    "recipe": "reef.recipe.composite:CompositeRecipe",
+                    "model_path": "demo-model",
+                    "training_backend": _LOCAL_TRAINING,
+                    "components": _WEIGHTS_AND_HARNESS,
+                },
+                "activation": activation,
+            }
+        )
+
+    never = _serving_recipe("reef.recipe.composite:CompositeRecipe", with_activation({"module": "never"}), {})
+    assert isinstance(never.activation_rule(), NeverActivate)
+    with pytest.raises(RecipeConfigError, match=r"cannot import activation 'no\.such\.module:Rule'"):
+        _serving_recipe(
+            "reef.recipe.composite:CompositeRecipe", with_activation({"module": "no.such.module:Rule"}), {}
+        )
 
 
 @pytest.mark.unit
 def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy.deployment_config import selected_weight_training
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.orchestrator import resolve_deployment_config
-    from reef.service.training_driver import _resolve_training_recipe
 
     raw = {
         "recipe": {
@@ -335,11 +346,11 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert config["reef"]["training_backend"] == _LOCAL_TRAINING
     assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
-    loss_family, name = _resolve_training_recipe(config)
-    assert name == "reef.recipe.composite:CompositeRecipe"
+    assert config["reef"]["recipe"] == "reef.recipe.composite:CompositeRecipe"
     from recipes.sao.recipe import SAORecipe
 
-    assert loss_family == SAORecipe.training_spec().loss_family
+    # The service builds the training component for the weight component's class and loss family.
+    assert selected_weight_training(CompositeRecipe, config) is SAORecipe
 
     # A component named through the environment is classified once the environment is applied.
     monkeypatch.setenv("PROBE_WEIGHTS", "recipes.sao.recipe:SAORecipe")
@@ -353,15 +364,17 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
     config, _ = resolve_deployment_config(interpolated, None, tmp_path / "serve.yaml")
     assert config["reef"]["training_backend"] == _LOCAL_TRAINING
 
-    # The driver reports an unimportable component the way it reports an unimportable recipe.
+    assert selected_weight_training(CompositeRecipe, config) is SAORecipe
+
+    # An unimportable component is refused the way an unimportable recipe is.
     broken = {
         "reef": {
             "recipe": "reef.recipe.composite:CompositeRecipe",
             "components": {"weights": {"implementation": "no.such.module:Recipe"}},
         }
     }
-    with pytest.raises(RuntimeError, match=r"cannot load reef\.recipe"):
-        _resolve_training_recipe(broken)
+    with pytest.raises(RecipeConfigError, match=r"cannot import recipe reference 'no\.such\.module:Recipe'"):
+        selected_weight_training(CompositeRecipe, broken)
 
 
 @pytest.mark.unit
@@ -430,7 +443,7 @@ def test_composite_recipe_shares_one_runtime_resolved_from_the_environment() -> 
 def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_path: Path) -> None:
     recipe = _composite(tmp_path)
     initial = tmp_path / "initial"
-    for relative, text in (recipe.base_artifact_files() or {}).items():
+    for relative, text in recipe.base_artifact_source().files.items():
         (initial / relative).parent.mkdir(parents=True, exist_ok=True)
         (initial / relative).write_text(text, encoding="utf-8")
     dispatcher = Dispatcher(
@@ -488,7 +501,7 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
 
 def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
     initial = tmp_path / "initial"
-    for relative, text in (recipe.base_artifact_files() or {}).items():
+    for relative, text in recipe.base_artifact_source().files.items():
         (initial / relative).parent.mkdir(parents=True, exist_ok=True)
         (initial / relative).write_text(text, encoding="utf-8")
     return Dispatcher(
@@ -650,7 +663,7 @@ def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None
     try:
         service = RequestService(dispatcher)
         headers = {"x-reef-scenario": "agent"}
-        # An episode runs for a loaded scenario's step, so its calls find the scenario loaded.
+        # A rollout runs for a loaded scenario's step, so its calls find the scenario loaded.
         assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
@@ -720,7 +733,7 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
                 assert (await response.json())["choices"][0]["message"]["content"] == "ok"
                 missing = await client.post("/reef/scenarios/agent/evaluation/v1/nothing", json={})
                 assert missing.status == 404
-                # An evaluation call never creates a scenario: only a loaded one has episodes.
+                # An evaluation call never creates a scenario: only a loaded one has rollouts.
                 unknown = await client.post(
                     "/reef/scenarios/other/evaluation/v1/chat/completions", json={"messages": []}
                 )
@@ -737,45 +750,46 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
 
 
 class _ClosingBackend(_FileBackend):
-    """A backend whose close waits for the episode call in flight, as a worker pool's close waits for its batch."""
+    """A backend whose close waits for the rollout call in flight, as a worker pool's close waits for its batch."""
 
     def __init__(
-        self, label: str, artifact_dir: Path, closing: threading.Event, episode_done: threading.Event
+        self, label: str, artifact_dir: Path, closing: threading.Event, rollout_done: threading.Event
     ) -> None:
         super().__init__(label, artifact_dir)
         self.closing = closing
-        self.episode_done = episode_done
+        self.rollout_done = rollout_done
 
     def close(self) -> None:
         self.closing.set()
-        self.episode_done.wait(10)
+        self.rollout_done.wait(10)
 
 
 @dataclass(frozen=True)
-class _EpisodeTreeRecipe(_TreeRecipe):
-    """The tree recipe whose backend closes only once its evaluation episode has made its last call."""
+class _RolloutTreeRecipe(_TreeRecipe):
+    """The tree recipe whose backend closes only once its evaluation rollout has made its last call."""
 
     closing: threading.Event = field(default_factory=threading.Event)
-    episode_done: threading.Event = field(default_factory=threading.Event)
+    rollout_done: threading.Event = field(default_factory=threading.Event)
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=threshold_pipeline,
-            candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.episode_done),
+            candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.rollout_done),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            default_job_samples=1,
         )
 
 
 @pytest.mark.unit
 def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_scenario_back(tmp_path: Path) -> None:
-    """A delete closes the scenario's backend, which waits for the evaluation episode in flight; the episode's call
+    """A delete closes the scenario's backend, which waits for the evaluation rollout in flight; the rollout's call
     must not wait for the scenario the delete holds, and must not create the scenario again once the delete ends."""
-    harness = _EpisodeTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
+    harness = _RolloutTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
     dispatcher = _serve(CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe()}), tmp_path)
     service = RequestService(dispatcher)
     try:
@@ -786,7 +800,7 @@ def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_s
         assert harness.closing.wait(10)
         answers: list[str] = []
 
-        def episode_call() -> None:
+        def rollout_call() -> None:
             try:
                 asyncio.run(
                     service.infer_with_data(
@@ -802,18 +816,18 @@ def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_s
             except UnknownScenario:
                 answers.append("unknown")
             finally:
-                harness.episode_done.set()
+                harness.rollout_done.set()
 
-        calling = threading.Thread(target=episode_call)
+        calling = threading.Thread(target=rollout_call)
         calling.start()
         calling.join(5)
-        assert not calling.is_alive(), "the episode call waited for the scenario the delete holds"
+        assert not calling.is_alive(), "the rollout call waited for the scenario the delete holds"
         deleting.join(10)
         assert not deleting.is_alive() and deleted["scenario"] == "agent"
         assert answers == ["unknown"]
         assert dispatcher.get_or_create_scenario("agent", allow_implicit_creation=False) is None
     finally:
-        harness.episode_done.set()
+        harness.rollout_done.set()
         dispatcher.close()
 
 
@@ -830,7 +844,7 @@ class _CaptureHandler(_EchoHandler):
 
 @pytest.mark.unit
 def test_an_evaluation_call_runs_every_hook_but_the_evaluated_components(tmp_path: Path) -> None:
-    """An episode runs its own candidate of one component, so that component's served hooks stay out of its calls:
+    """A rollout runs its own candidate of one component, so that component's served hooks stay out of its calls:
     evaluating the harness keeps the served request defaults, evaluating the config drops them."""
     dispatcher = _serve(_composite(tmp_path), tmp_path)
     handler = _CaptureHandler()
@@ -897,11 +911,11 @@ def test_only_a_composite_evaluates_through_the_service(
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     settings = ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
-    assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="episode")
+    assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="rollout")
     if composite:
         assert built["hold"] is True
         assert built["recipe"].components["harness"].endpoint == ServedEndpoint(
-            "http://127.0.0.1:8900", token="episode", component="harness"
+            "http://127.0.0.1:8900", token="rollout", component="harness"
         )
     else:
         assert built["hold"] is False and built["recipe"].endpoint is None
@@ -1033,7 +1047,7 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
     tmp_path: Path,
 ) -> None:
     """Flat, such a recipe's release is the whole artifact; inside a composite its release is its component, so its
-    check admits that component's steps as it admitted its whole release flat, and a rollback runs it again."""
+    check admits that component's steps as it admitted its whole release flat."""
     composite = CompositeRecipe(
         components={
             "notes": _LegacyTreeRecipe(label="notes", artifact_dir=tmp_path / "steps"),
@@ -1065,9 +1079,9 @@ class _ReleaseCheckedComposite(CompositeRecipe):
 
 
 @pytest.mark.unit
-def test_a_commit_runs_the_release_check_a_rollback_to_that_release_runs(tmp_path: Path) -> None:
-    """The release's own check runs on the composed release a step publishes, as a rollback or promote to it runs
-    it: a release the commit admits can be rolled back to, and one the rollback would refuse is never published."""
+def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_path: Path) -> None:
+    """The release's own check runs on the composed release a step publishes, as an activation of it runs it: a
+    release the commit admits can be activated again, and one the activation would refuse is never published."""
     composite = _ReleaseCheckedComposite(
         components={
             "harness": _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
@@ -1085,9 +1099,15 @@ def test_a_commit_runs_the_release_check_a_rollback_to_that_release_runs(tmp_pat
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
         published = scenario.current_artifact_ref()
         assert published != seed
-        scenario.rollback(seed.release_id)
-        scenario.rollback(published.release_id)
-        assert scenario.current_artifact_ref().content_id == published.content_id
+        # The creation made no artifact: it carries the base's, under the base release's ID.
+        seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.release_id)["harness"]
+        assert seed_harness == f"{scenario.repository.backend.resolve_release('base').release_id}:harness"
+        scenario.activate(seed_harness, "harness")
+        scenario.activate(f"{published.release_id}:harness", "harness")
+        served = scenario.repository.materialize(scenario.current_artifact_ref()).components
+        made = scenario.repository.materialize(published).components
+        assert served is not None and made is not None
+        assert served.content_ids == made.content_ids
     finally:
         dispatcher.close()
 
@@ -1118,18 +1138,15 @@ class _CountedTreeRecipe(_LegacyTreeRecipe):
 class _UnseededConfigRecipe(_ConfigRecipe):
     """A configuration recipe that seeds nothing: its component starts empty, which its own check would refuse."""
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        return BaseArtifactSource()
 
 
 @pytest.mark.unit
-def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a_carried_component_again(
-    tmp_path: Path,
-) -> None:
-    """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. A
-    rollback to one of those steps and a promote of a held one run what that step's commit ran, the release check and
-    the check of the component it published, so both go through; judging the carried component would refuse releases
-    their commits admitted."""
+def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
+    """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. An
+    activation of one of those steps, or of a held one, runs only the release's own check: each component was
+    admitted when its step published it, and judging the carried one would refuse releases their commits admitted."""
     checks = _CountedChecks()
     composite = CompositeRecipe(
         components={
@@ -1137,7 +1154,9 @@ def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a
                 label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}, checks=checks
             ),
             "config": _UnseededConfigRecipe(),
-        }
+        },
+        # A step that changes the "held" kind waits for a person to activate it.
+        activation=PluginReference(AlwaysActivate, {"review_kinds": ["held"]}),
     )
     dispatcher = _serve(composite, tmp_path / "svc")
     try:
@@ -1147,18 +1166,21 @@ def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a
         first = scenario.current_artifact_ref()
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
         checks.count = 0
-        dispatcher.rollback("agent", first.release_id)
-        assert scenario.current_artifact_ref().content_id == first.content_id
-        assert checks.count == 1
+        dispatcher.activate("agent", f"{first.release_id}:harness", "harness")
+        served = scenario.repository.materialize(scenario.current_artifact_ref()).components
+        assert served is not None
+        current = scenario.current_artifact_ref()
+        assert served.artifact_ids(current.release_id) == scenario.store.history()[0].components
+        assert checks.count == 0
         head = scenario.current_artifact_ref()
         scenario.commit(
-            TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), pending=True), component="harness"
+            TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), changed_kinds=frozenset({"held"})),
+            component="harness",
         )
         assert scenario.current_artifact_ref() == head
-        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
-        checks.count = 0
-        promoted = dispatcher.promote("agent", held)
-        assert promoted.release_id != head.release_id and checks.count == 1
+        held = scenario.store.history()[-1].artifact_ref.release_id
+        assert dispatcher.activate("agent", f"{held}:harness", "harness").artifact_id == f"{held}:harness"
+        assert checks.count == 1
     finally:
         dispatcher.close()
 
@@ -1272,7 +1294,7 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "hybrid"
-        assert contract["processor"] == type(harness.pipeline.task2batch).__name__
+        assert contract["processor"] == type(harness.pipeline.sample2job).__name__
     finally:
         dispatcher.close()
 

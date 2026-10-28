@@ -5,7 +5,7 @@ the request carries what the agent did on the last generation's environments, so
 regret of Sec. 4.2 into the frontier (the hint turns losses into wins), the mastered (won without it) and
 the out of reach (lost even with it), so the next environment lands where the agent fails without a hint
 and passes with one. ``experience_text`` is that section of the prompt; the generic task designer in
-``reef.record2task.generator`` carries it as data. The rest of this module is the bookkeeping of one generation,
+``reef.record2sample.generator`` carries it as data. The rest of this module is the bookkeeping of one generation,
 which ``SpadeTaskGenerator`` writes under its state directory and reads back after a restart.
 """
 
@@ -20,7 +20,7 @@ from typing import Literal
 
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.record2task.generator.designer import SKILL_PATTERN
+from reef.record2sample.generator.designer import SKILL_PATTERN
 
 MAX_EXPERIENCE_RECORDS = 12
 INSTRUCTION_EXCERPT_CHARS = 1200
@@ -97,7 +97,7 @@ def experience_text(experience: Sequence[PlayRecord]) -> str:
     out_of_reach = [r for r in experience if r.outcome == "out_of_reach"]
     lines = [
         (
-            "WHAT THE AGENT DID LAST TIME (mean episode returns in [0, 1] over its attempts; a hint is a few "
+            "WHAT THE AGENT DID LAST TIME (mean rollout returns in [0, 1] over its attempts; a hint is a few "
             "sentences of strategy the agent was given on a second set of attempts):"
         )
     ]
@@ -191,7 +191,7 @@ def skill_tag(skill: str | None) -> dict[str, str]:
 
 
 def mean_reward(rewards: Sequence[float]) -> float:
-    """The mean reward of an arm's episodes that ran; an arm without any counts as 0, like a loss."""
+    """The mean reward of an arm's rollouts that ran; an arm without any counts as 0, like a loss."""
     return statistics.fmean(rewards) if rewards else 0.0
 
 

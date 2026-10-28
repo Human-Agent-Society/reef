@@ -4,14 +4,19 @@ import asyncio
 import contextlib
 import logging
 import os
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
 
+from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
+from reef.service.artifact_evaluations import ArtifactEvaluations
+from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import create_authentication_middleware, normalize_tokens
 from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
@@ -131,6 +136,8 @@ def create_app(
     routing: RoutingAdapter | None = None,
     lifecycle: LifecycleSettings | None = None,
     preview: PreviewSettings | None = None,
+    evaluations: ArtifactEvaluations | None = None,
+    artifact_imports: ArtifactImports | None = None,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -147,13 +154,19 @@ def create_app(
     per Scenario. A managed child (``lifecycle``) instead starts closed, with
     no verified router runtime; its owner publishes one and opens admission
     through the control application stored under ``CONTROL_APPLICATION``.
+
+    ``evaluations`` runs the artifact evaluations of the evaluation routes, and
+    the automatic ones while the app runs; None runs the routes' evaluations
+    with reef-eval's Harbor lab and evaluates no new artifact.
+    ``artifact_imports`` reads and holds artifact imports; None reads the
+    built-in sources into the system's temporary directory.
     """
     # Read ``tokens`` once: an iterator is empty after one pass, and no tokens would turn authentication off.
     accepted_tokens = normalize_tokens(tokens)
     if routing is not None:
         if not accepted_tokens:
             raise ValueError("routing requires a service token")
-        if type(dispatcher.recipe) is not Recipe or dispatcher.recipe.training_runtime is not None:
+        if type(dispatcher.recipe) is not Recipe or dispatcher.recipe.training_component is not None:
             raise ValueError("routing requires the base record-only Recipe")
         if preview is None:
             raise ValueError("routing requires the Semantic Router preview settings")
@@ -202,10 +215,17 @@ def create_app(
 
         app.on_shutdown.append(finalize_requests)
     configure_browser_access(app, console_origins)
+    artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
     register_routes(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
+        evaluations=artifact_evaluations,
+        imports=(
+            ArtifactImports(ArtifactSources.from_setting(()), Path(tempfile.gettempdir()) / "reef-artifact-imports")
+            if artifact_imports is None
+            else artifact_imports
+        ),
     )
     if routing is not None and preview_client is not None:
 
@@ -222,6 +242,15 @@ def create_app(
                 await preview_client.close()
 
         app.cleanup_ctx.append(run_selection)
+
+    async def evaluate_new_artifacts(app: web.Application):
+        artifact_evaluations.open()
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(artifact_evaluations.close)
+
+    app.cleanup_ctx.append(evaluate_new_artifacts)
     if record_retention is not None:
 
         async def maintain_records(app: web.Application):

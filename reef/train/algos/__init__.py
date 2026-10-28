@@ -1,16 +1,16 @@
-"""Core backend-neutral output types for training objectives.
+"""Backend-neutral training objectives and their output.
 
-Optional implementation helpers live in :mod:`reef.train.algos.helpers`;
-the schedule materializer backends share lives in :mod:`reef.train.algos.schedule`.
-Registered-objective APIs live in :mod:`reef.train.algos.registry`.
+A recipe names a ``TrainingObjective``; its ``prepare`` returns a
+``TrainingSignal`` for one job's data. Optional implementation helpers live
+in :mod:`reef.train.algos.helpers`, the registered-objective APIs in
+:mod:`reef.train.algos.registry`, and the step schedule that training
+components share in :mod:`reef.train.algos.schedule`.
 """
 
-from reef.core.batches import StepScheduling
 from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.signals import StepSignal
+from reef.train.algos.signals import TrainingSignal
 
 __all__ = [
-    "StepScheduling",
-    "StepSignal",
     "TrainingObjective",
+    "TrainingSignal",
 ]

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -601,46 +600,6 @@ class SQLRecordStore(RecordStore):
     def _audit_record(cls, row: RowMapping) -> StoredRecord:
         return StoredRecord(sequence=int(row["sequence"]), item=cls._decode(row))
 
-    def record_consumption(
-        self,
-        scenario: str,
-        agent_record_ids: frozenset[str],
-        *,
-        receipt_id: str,
-        metadata: Mapping[str, object],
-    ) -> None:
-        """Persist a skipped batch's consumption without modifying its records."""
-        if not receipt_id:
-            raise ValueError("consumption receipt_id must be non-empty")
-        consumed_ids_json = self._json(sorted(agent_record_ids))
-        metadata_json = self._json(dict(metadata))
-        table = self._tables.consumption
-        with self._transaction(write=True) as connection:
-            self._insert(
-                connection,
-                table,
-                {
-                    "scenario": scenario,
-                    "receipt_id": receipt_id,
-                    "consumed_ids_json": consumed_ids_json,
-                    "metadata_json": metadata_json,
-                    "recorded_at": time.time(),
-                    "consumed_ids_sha256": hashlib.sha256(consumed_ids_json.encode()).hexdigest(),
-                },
-            )
-            existing = connection.execute(
-                select(table.c.metadata_json).where(
-                    self._tables.condition(table),
-                    table.c.scenario == scenario,
-                    table.c.receipt_id == receipt_id,
-                    table.c.consumed_ids_json == consumed_ids_json,
-                )
-            ).scalar_one_or_none()
-            if existing != metadata_json:
-                raise RecordConflict(
-                    f"consumption receipt {receipt_id!r} for scenario {scenario!r} has different content"
-                )
-
     def loss(self, scenario: str) -> RecordLoss:
         table = self._tables.eviction
         with self._transaction(write=False) as connection:
@@ -661,7 +620,12 @@ class SQLRecordStore(RecordStore):
         with self._transaction(write=False) as connection:
             rows = connection.execute(select(table.c.name, table.c.value_json).where(self._tables.condition(table)))
             values = {name: json.loads(value_json) for name, value_json in rows}
-        return ScenarioSettings(model_config=values.get("model_config"), training_mode=values.get("training_mode"))
+        return ScenarioSettings(
+            model_config=values.get("model_config"),
+            training_mode=values.get("training_mode"),
+            artifact_evaluation=values.get("artifact_evaluation"),
+            activation=values.get("activation"),
+        )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
         """Replace the stored settings in one transaction; a ``None`` setting is not stored."""
@@ -669,6 +633,10 @@ class SQLRecordStore(RecordStore):
         values = {
             "model_config": None if settings.model_config is None else dict(settings.model_config),
             "training_mode": settings.training_mode,
+            "artifact_evaluation": (
+                None if settings.artifact_evaluation is None else dict(settings.artifact_evaluation)
+            ),
+            "activation": None if settings.activation is None else dict(settings.activation),
         }
         rows = [
             {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}

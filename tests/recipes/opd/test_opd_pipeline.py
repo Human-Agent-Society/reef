@@ -4,9 +4,9 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import runtime_bindings
 
-from recipes.opd import OpdObjective, OPDRecipe, OPDSettings, OPDTasks
+from recipes.opd import OpdObjective, OPDRecipe, OPDSamples, OPDSettings
 from recipes.opd.slime import OpdSettings
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -15,14 +15,14 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.registry import build_recipe
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.runtime.interfaces import TrainingMethod
-from reef.task2batch import DistillBatches
-from reef.train.algos import StepScheduling
+from reef.sample2job import DistillJobData
+from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import settings_from_args
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import TrainingBatch
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.types import JobData
 
 TOKENS = [5, 6, 7, 1, 2, 3]
 
@@ -32,8 +32,8 @@ def opd_pipeline(max_teacher_tokens: int = 0) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=OPDTasks(OPDSettings(max_teacher_tokens=max_teacher_tokens)),
-        task2batch=DistillBatches(context, 1),
+        record2sample=OPDSamples(OPDSettings(max_teacher_tokens=max_teacher_tokens)),
+        sample2job=DistillJobData(context, 1, None),
     )
 
 
@@ -75,15 +75,15 @@ def report(context: str = "", score: float = 0.0) -> AgentRecord:
 def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: TrainingPipeline, score: float) -> None:
     processor.push(inference())
     processor.push(report(score=score))
-    batch = processor.build_batch(1)
-    assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "math:batch:1"
-    prepared = prepare_slime_step(batch, TrainingMethod("opd"), {}, StepScheduling(unit="sample"), step_size=1)
+    batch = processor.build_job_data(1)
+    assert isinstance(batch, JobData)
+    assert batch.data_id == "math:data:1"
+    prepared = prepare_slime_job(batch, TrainingMethod("opd"), {}, StepScheduling(), step_size=1)
     payload = prepared.payload
     assert payload is not None
     assert "advantages" not in payload
     assert payload["samples"] == [["i1", TOKENS, [1, 1, 1], [-0.1, -0.2, -0.3], 0.0, TOKENS, 1.0]]
-    data = to_slime_rollout_data({key: value for key, value in payload.items() if key != "source_rows"})
+    data = to_slime_rollout_data(payload)
     assert data["teacher_tokens"] == data["tokens"] == [TOKENS]
     assert data["response_lengths"] == [3]
     assert data["distill_sample_weights"] == [1.0]
@@ -102,20 +102,19 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
         "recipes.opd.recipe:OPDRecipe",
         {},
         {},
-        **runtime_bindings(StubTrainingRuntime()),
+        **runtime_bindings(),
     )
     assert isinstance(recipe, OPDRecipe)
     assert recipe.report_type is TeacherContextReport
-    assert recipe.max_staleness == 0
     spec = recipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("opd", "opd")
     pipeline = recipe.build_pipeline(PipelineContext("math", TeacherContextReport))
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
-    assert isinstance(pipeline.record2task, OPDTasks)
-    assert isinstance(pipeline.task2batch, DistillBatches)
-    assert spec.scheduling == StepScheduling(unit="sample")
+    assert isinstance(pipeline.record2sample, OPDSamples)
+    assert isinstance(pipeline.sample2job, DistillJobData)
+    assert OpdObjective.rollout_unit == "sample"
     with pytest.raises(ValueError, match="epochs"):
-        OpdObjective().validate_scheduling(StepScheduling(unit="sample", epochs=2))
+        OpdObjective().validate_scheduling(StepScheduling(epochs=2))
 
 
 @pytest.mark.unit

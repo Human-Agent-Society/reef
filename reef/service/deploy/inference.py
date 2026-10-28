@@ -174,8 +174,11 @@ def local_inference_component(config: dict[str, Any], settings: ServiceConfig) -
     The component (``python -m reef.inference.remote``) listens on a free
     loopback port and may start only ``inference.backend`` engines. Its two
     tokens are generated into this process's environment, unless set, so the
-    component and the HTTP service inherit them. It joins the Ray cluster at
-    ``training.ray-address`` when one is set; otherwise it starts its own.
+    component and the HTTP service inherit them. It joins the Ray cluster of
+    the deployment (``RAY_ADDRESS``, which ``reef serve`` sets when the
+    training backend runs on Ray, or ``training.ray-address``), so its
+    engines and the training workers reserve separate GPUs; otherwise it
+    starts its own.
     """
     python = os.environ.get("REEF_PYTHON", sys.executable)
     port = free_loopback_port(settings.port)
@@ -236,13 +239,12 @@ _CONFIGURED_FIELDS = {
     "inference_handler_config",
     "ray_address",
     "ray_namespace",
-    "ray_actor_name",
     "train_timeout_s",
     "training_backend",
     "training_ready_timeout",
     "training_settings",
     "training_backend_options",
-    "evaluation_settings",
+    "activation_settings",
     "pipeline_settings",
 }
 
@@ -259,8 +261,8 @@ def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
 def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
-    # The pipeline section belongs to any recipe; the recipe reads it.
-    if unsupported or "training" in config or "evaluation" in config:
+    # The pipeline and activation sections belong to any recipe; the recipe reads them.
+    if unsupported or "training" in config:
         raise DeployConfigError(
             "select a weight-training recipe for training; Reef does not start custom process stacks"
         )
@@ -383,12 +385,9 @@ def resolve_hf_snapshot(repo_id: str) -> str:
             f"  set reef.model_path to a local path or an HF repo ID like 'Qwen/Qwen2.5-1.5B-Instruct'"
         )
     try:
-        from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapshot, parse_artifact_source
+        from reef.artifact.sources import download_huggingface_snapshot, parse_huggingface_source
 
-        source = parse_artifact_source(value)
-        if not isinstance(source, HuggingFaceSource):
-            raise DeployConfigError(f"model path is not a valid HF repo ID: {repo_id}")
-        snapshot = download_huggingface_snapshot(source)
+        snapshot = download_huggingface_snapshot(parse_huggingface_source(value))
         return str(snapshot.local_path)
     except Exception as exc:
         if isinstance(exc, DeployConfigError):

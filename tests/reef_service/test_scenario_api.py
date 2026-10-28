@@ -71,7 +71,7 @@ def test_scenario_contract_returns_processor_and_request_types(tmp_path) -> None
     contract = dispatcher.scenario_contract("math")
     assert contract["scenario"] == "math"
     assert "recipe" not in contract
-    assert contract["processor"] == "NoBatches"
+    assert contract["processor"] == "NoJobData"
     assert contract["required_request_types"] == ["inference", "report"]
 
 
@@ -146,7 +146,7 @@ def test_delete_scenario_over_http() -> None:
             assert (await deleted.json())["scenario"] == "delivery"
             assert await (await client.get("/reef/scenarios")).json() == {"scenarios": []}
             assert (await client.delete("/reef/scenarios/delivery")).status == 404
-            assert (await client.get("/reef/scenarios/delivery/releases")).status == 404
+            assert (await client.get("/reef/scenarios/delivery/artifacts")).status == 404
         finally:
             await client.close()
 

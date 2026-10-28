@@ -28,7 +28,7 @@ log-prob gap and the same sample weights and effective loss masks.
 - this module, torch-free: the term's settings, the driver-side checks and
   the rollout keys, and the payload columns (the sampler's top-K per sample,
   in the order the schedule trains the rows);
-- :mod:`.heads`, torch, on the bridge: the check of the recorded heads;
+- :mod:`.heads`, torch, in the training component: the check of the recorded heads;
 - :mod:`.term`, torch, on the workers: the term and the wrapper that adds it
   to the family's loss.
 
@@ -47,7 +47,7 @@ from numbers import Integral
 from typing import Any
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, is_finite_number
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 #: Payload and rollout-data keys of the sampler's top-K: one ``[R, top_k]`` block per sample.
 TOPK_INDICES_KEY = "sampler_topk_indices"
@@ -124,7 +124,7 @@ def configure_score_centering(args: Namespace, spec: SlimeAlgorithm) -> None:
     args.reef_rollout_log_skip_keys = tuple(dict.fromkeys((*args.reef_rollout_log_skip_keys, *ROLLOUT_KEYS)))
 
 
-def sampler_topk_columns(samples: Sequence[TrajectoryItem], row_indices: Sequence[int]) -> dict[str, list[Any]]:
+def sampler_topk_columns(samples: Sequence[TrajectorySample], row_indices: Sequence[int]) -> dict[str, list[Any]]:
     """The payload's top-K columns: each wire row's recorded ``topk_indices`` and ``topk_log_probs``."""
     return {
         TOPK_INDICES_KEY: [list(samples[row].training.get("topk_indices", [])) for row in row_indices],

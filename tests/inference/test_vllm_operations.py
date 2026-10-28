@@ -34,9 +34,6 @@ class Receiver:
     def continue_generation_after_update(self):
         self.paused = False
 
-    def prepare_training_connection(self):
-        self.paused = True
-
     def shutdown(self):
         self.closed = True
 
@@ -60,17 +57,6 @@ def test_service_adapts_only_compatible_connections_without_owning_workers():
         service().backend(InferenceConnection("slime-sglang-control-v2", executor))
 
 
-def test_preparing_weight_transfer_fences_only_a_compatible_receiver():
-    receiver = Receiver()
-    executor = UniProcExecutor.from_workers([receiver])
-    with pytest.raises(ValueError, match="incompatible vLLM"):
-        service().prepare_weight_transfer(InferenceConnection("other-protocol", executor))
-    assert not receiver.paused
-    service().prepare_weight_transfer(InferenceConnection(INFERENCE_PROTOCOL, executor))
-    assert receiver.paused
-    assert not receiver.closed
-
-
 @pytest.mark.parametrize("versions", ["weights:1", [None], [""], {"engine": "weights:1"}])
 def test_receiver_rejects_malformed_versions_before_publication(versions):
     operations = VLLMInferenceBackend(UniProcExecutor.from_workers([Receiver(versions)]))
@@ -91,7 +77,7 @@ def test_initial_version_stamping_keeps_receiver_paused_on_partial_failure(monke
             versions[1] = args[0]
 
     receiver = Receiver(versions)
-    receiver.get_updatable_engines_and_lock = lambda: ([object(), object()], None, 0, [], [], [])
+    receiver.updatable_engines = lambda: [object(), object()]
     monkeypatch.setattr(RayExecutor, "from_workers", lambda workers: EngineGroup())
     operations = VLLMInferenceBackend(UniProcExecutor.from_workers([receiver]))
     operations.pause()
@@ -118,7 +104,7 @@ def test_adapter_eviction_requires_every_engine_acknowledgement(monkeypatch, las
             return self.result
 
     engines = [Engine({"success": True, "message": "ok"}), Engine(last_result)]
-    receiver = SimpleNamespace(get_updatable_engines_and_lock=lambda: (engines, None, 0, [], [], []))
+    receiver = SimpleNamespace(updatable_engines=lambda: engines)
 
     class EngineGroup:
         def collective_rpc(self, method, *, kwargs, timeout):
@@ -226,19 +212,23 @@ def test_worker_pauses_in_the_configured_mode_and_recovers_only_dead_engines(mon
     monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
     worker = worker_module.VLLMWorker.__new__(worker_module.VLLMWorker)
     worker.config = VLLMConfig("model", 2, 1, 2, router_url="http://router", pause_mode="retract")
-    group = SimpleNamespace(all_engines=[engine("a"), None], recovered=0)
+    group = SimpleNamespace(all_engines=[engine("a"), None])
     group.engines = [engine for engine in group.all_engines if engine is not None]
-    group.recover = lambda: events.append("recover")
+
+    def restart_dead_engines():
+        events.append("recover")
+        group.all_engines = [engine("a"), engine("b")]
+
+    group.recover = restart_dead_engines
     worker.group = group
     engines = worker_module._VLLMEngineGroup(worker)
     engines.pause()
     engines.resume()
     assert events == [("a", "pause", "retract"), ("a", "resume")]
-    engines.recover()
+    assert engines.recover() == 1
     assert events[-1] == "recover"
-    group.all_engines = [engine("a"), engine("b")]
-    engines.recover()
-    assert events[-1] == "recover"  # nothing dead: no second recovery
+    assert engines.recover() == 0
+    assert events.count("recover") == 1  # nothing dead: no second recovery
     assert engines.owned is True
 
 

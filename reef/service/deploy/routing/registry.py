@@ -10,7 +10,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from reef.runtime.recovery import write_json
+from reef.runtime.durable_files import write_json
 
 
 class RoutingOwnershipError(RuntimeError):

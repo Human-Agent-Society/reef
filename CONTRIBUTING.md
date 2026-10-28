@@ -169,8 +169,11 @@ The usual local checks are:
 
 ```bash
 pre-commit run --all-files
-pytest tests/
+pytest tests/ -n 8 --dist loadfile
 ```
+
+Run the suite in parallel, as CI does; `pytest-xdist` ships in the `dev`
+extra. Use `-n 0` for a serial run when you diagnose a failure.
 
 ### Keep the root READMEs synchronized
 
@@ -266,7 +269,7 @@ does with it.
 - State the one purpose of the type: which operation makes its values, which
   operation reads them, and what a value means to that reader.
 - Define each operation on the type by its inputs, its outputs, and the
-  relation between them. For example: for each item `i` that `make_tasks(X)`
+  relation between them. For example: for each item `i` that `make_samples(X)`
   returns, `sources(i) ⊆ records(X)`.
 - Make the definition complete. Each enum member, each status, and each case
   of an operation has a defined meaning and a defined result. No value can
@@ -286,13 +289,13 @@ Put the definition in the docstring of the type. For example:
 ```python
 @dataclass(frozen=True)
 class ReportGroup:
-    """Reports that must train in the same batch.
+    """Reports that must train in the same job.
 
     Values: a tuple ``reports`` belongs to the type if and only if it is
     non-empty, all its reports are of one scenario and have the same group key,
     it is in arrival order, and no report ID occurs twice.
     Purpose: the record stage makes it when the group is complete. The pipeline
-    reserves all of ``reports`` for one batch, or none of them.
+    reserves all of ``reports`` for one job's data, or none of them.
     """
 ```
 
@@ -388,7 +391,7 @@ Before requesting review for Python changes, run:
 ```bash
 pre-commit run --all-files
 python -m mypy
-pytest tests/
+pytest tests/ -n 8 --dist loadfile
 ```
 
 ## Make a pull request

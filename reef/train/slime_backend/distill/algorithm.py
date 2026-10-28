@@ -38,7 +38,7 @@ from reef.train.slime_backend.distill.teacher_engine import (
     TeacherEngine,
     validate_teacher_tokenizer,
 )
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 #: ``self``: the student's own weights read a privileged prefix (the current
 #: weights at update rate 1, an EMA of them below 1, a frozen snapshot at 0).
@@ -178,7 +178,7 @@ def _is_finite(value: object) -> bool:
 ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, teacher_tokens, sample_weight]"
 
 
-def distill_sample_row(sample: TrajectoryItem) -> list[Any]:
+def distill_sample_row(sample: TrajectorySample) -> list[Any]:
     """Shape one Reef sample into the family's 7-element wire row.
 
     A sample without a ``distill_sample_weight`` in its training data
@@ -455,7 +455,7 @@ class DistillAlgorithm(SlimeAlgorithm):
     ) -> DistillAlgorithm:
         # A checkpoint teacher travels on args; a teacher engine is scored by the bound instance.
         if config is not None and not isinstance(config, DistillSettings):
-            raise TypeError(f"{self.loss_family} bridge algorithm config must be {self.settings_type.__name__}")
+            raise TypeError(f"{self.loss_family} algorithm config must be {self.settings_type.__name__}")
         if isinstance(config, DistillSettings) and config.teacher_url:
             teacher = TeacherEngine(
                 url=config.teacher_url,
@@ -467,14 +467,14 @@ class DistillAlgorithm(SlimeAlgorithm):
         return self
 
     def prepare_rollout(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
-        """Score with the teacher engine before tensorization and the training job marker."""
+        """Score with the teacher engine before tensorization."""
         if self.teacher is None:
             return {}
         return self.teacher.prepare(rollout_data)
 
     # --- stage 2: shape row ---
 
-    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
+    def shape_sample_row(self, sample: TrajectorySample) -> list[Any]:
         return distill_sample_row(sample)
 
     # --- stage 3: build batch ---
@@ -484,7 +484,7 @@ class DistillAlgorithm(SlimeAlgorithm):
 
 
 def settings_from_args(args: Namespace) -> DistillSettings:
-    """The family's settings as the driver stamped them on ``args`` (worker side)."""
+    """The family's settings as the training component stamped them on ``args`` (worker side)."""
     return DistillSettings(
         teacher=args.distill_teacher,
         divergence=args.distill_divergence,

@@ -48,9 +48,6 @@ class SGLangConfig(EngineConfig):
     router_port: int | None = None
     router_options: dict[str, Any] = field(default_factory=dict)
     env_vars: dict[str, str] = field(default_factory=dict)
-    offload: bool = False
-    shared_gpus: int = 0
-    check_weights: bool = False
     pause_mode: str = "in_place"
     health_enabled: bool = False
     health_interval: float = 30
@@ -85,8 +82,6 @@ class SGLangConfig(EngineConfig):
             if group.options.get("incremental_streaming_output", True) is not True:
                 raise ValueError("Reef SGLang inference requires incremental_streaming_output=true in every group")
             self._require_safe_prefix_sharing({**options, **group.options})
-            if self.offload and group.worker_type in {"prefill", "decode"}:
-                raise ValueError("colocated SGLang serving requires regular engines")
             if self.pause_mode == "retract" and group.worker_type in {"prefill", "decode"}:
                 # The pinned SGLang scheduler cannot retract disaggregated requests.
                 raise ValueError("retracting publication requires regular SGLang engines, not PD disaggregation")

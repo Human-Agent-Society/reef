@@ -14,7 +14,7 @@ from reef.harness import compose
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import FiberState
 from reef.harness.compose.loader import Loader
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.runners.native import DEFAULT_SYSTEM_PROMPT, LoadError, Session, _Loop
 from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Run, narrow_allow
 from reef.harness.runners.native.host import NativeHost
@@ -244,7 +244,7 @@ def test_kinds_the_loop_never_reads_resolve_to_no_plugin(tmp_path: Path, caplog:
     assert list(host.tools) == ["good"]
 
 
-def test_the_episode_form_reads_the_same_host_from_the_rendered_files(tmp_path: Path) -> None:
+def test_the_rollout_form_reads_the_same_host_from_the_rendered_files(tmp_path: Path) -> None:
     descriptor = get_adapter("native")
     nodes = [
         *((entry["name"], entry["config"]) for entry in SEED_NODES),

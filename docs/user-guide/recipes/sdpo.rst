@@ -19,7 +19,7 @@ reports that SDPO reaches GRPO's accuracy with fewer samples.
 +-------------+------------------------------------------------------------+
 | Package     | ``recipes/sdpo/``                                          |
 +-------------+------------------------------------------------------------+
-| Pipeline    | reported feedback, one batch per sampling grid             |
+| Pipeline    | reported feedback, one job per sampling grid               |
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
@@ -47,8 +47,8 @@ How Reef implements it
 
 SDPO has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
-``SDPORecord2Record`` groups the reports of one grid. ``SDPOTasks`` turns
-each rollout's report into a task. ``SDPOBatches`` batches one complete grid.
+``SDPORecord2Record`` groups the reports of one grid. ``SDPOSamples`` turns
+each rollout's report into a task. ``SDPOJobData`` makes one job's data of one complete grid.
 
 The teacher's request is the question with the first correct attempt by
 another rollout appended, in the reference implementation's words. An attempt whose question no other rollout got right keeps the plain
@@ -89,29 +89,29 @@ The deployment's top-level ``pipeline`` section configures the three stages.
 Each stage reads only its own ``config``. A later stage reads the values it
 needs from an earlier stage:
 
-- ``record2record`` (``SDPORecord2Record``) sets the grid. ``SDPOTasks``
+- ``record2record`` (``SDPORecord2Record``) sets the grid. ``SDPOSamples``
   reads the grid from it.
-- ``record2task`` (``SDPOTasks``) sets the teacher's tokenizer and windows.
-  ``SDPOBatches`` reads them from it.
-- ``task2batch`` (``SDPOBatches``) sets what the teacher reads.
+- ``record2sample`` (``SDPOSamples``) sets the teacher's tokenizer and windows.
+  ``SDPOJobData`` reads them from it.
+- ``sample2job`` (``SDPOJobData``) sets the job size and what the teacher reads.
 
 .. code:: yaml
 
    recipe:
      implementation: recipes.sdpo.recipe:SDPORecipe
-     config:
-       max-staleness: 0
    pipeline:
      record2record:
        config:
+         max_staleness: 0
          groups_per_step: 32
          rollouts_per_group: 8
-     record2task:
+     record2sample:
        config:
          tokenizer_path: /models/Qwen3-8B
          max_teacher_tokens: 18944
-     task2batch:
+     sample2job:
        config:
+         job_samples: ${training.config.global_batch_size}
          include_environment_feedback: false
    training:
      config:
@@ -125,26 +125,27 @@ in ``pipeline``.
 
    pipeline.record2record.config.groups_per_step | 32 | questions in a grid.
    pipeline.record2record.config.rollouts_per_group | 8 | attempts at each question. At least 2.
-   pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
-   pipeline.record2task.config.max_teacher_prompt_tokens | 10240 | the rendered teacher prompt is cut to this many tokens.
-   pipeline.record2task.config.max_teacher_tokens | 18432 | a longer teacher sequence fails the step. Set it to the trainer's window. Must be at least ``max_teacher_prompt_tokens``.
-   pipeline.record2task.config.enable_thinking | false | the chat template's thinking switch, set as the engine sampled.
-   pipeline.task2batch.config.success_reward_threshold | 0.5 | an attempt at or above this score is correct.
-   pipeline.task2batch.config.allow_own_success_as_demonstration | false | let a correct attempt read its own response.
-   pipeline.task2batch.config.remove_thinking_from_demonstration | true | strip ``<think>`` blocks from the demonstration.
-   pipeline.task2batch.config.include_environment_feedback | false | add the report's ``teacher_context`` to the teacher's prompt.
-   pipeline.task2batch.config.environment_feedback_only_without_solution | true | use the feedback only when no correct sibling exists.
-   recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
+   pipeline.record2sample.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
+   pipeline.record2sample.config.max_teacher_prompt_tokens | 10240 | the rendered teacher prompt is cut to this many tokens.
+   pipeline.record2sample.config.max_teacher_tokens | 18432 | a longer teacher sequence fails the step. Set it to the trainer's window. Must be at least ``max_teacher_prompt_tokens``.
+   pipeline.record2sample.config.enable_thinking | false | the chat template's thinking switch, set as the engine sampled.
+   pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+   pipeline.sample2job.config.success_reward_threshold | 0.5 | an attempt at or above this score is correct.
+   pipeline.sample2job.config.allow_own_success_as_demonstration | false | let a correct attempt read its own response.
+   pipeline.sample2job.config.remove_thinking_from_demonstration | true | strip ``<think>`` blocks from the demonstration.
+   pipeline.sample2job.config.include_environment_feedback | false | add the report's ``teacher_context`` to the teacher's prompt.
+   pipeline.sample2job.config.environment_feedback_only_without_solution | true | use the feedback only when no correct sibling exists.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
 
-``SDPOTasks`` also takes the sample assembly's keys
+``SDPOSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
-``scaffold_tolerance``). One batch is always one grid. The batch size, Slime's
-``--global-batch-size``, must not exceed the grid's rollouts
-(``groups_per_step x rollouts_per_group``); with a larger one the scenario's pipeline fails to build. Set
-it equal to the grid to train one optimizer step per grid, as the example
-does.
+``scaffold_tolerance``). One job's data is always one grid. ``job_samples``
+must not exceed the grid's rollouts (``groups_per_step x rollouts_per_group``);
+with a larger one the scenario's pipeline fails to build. Set it and Slime's
+``--global-batch-size`` equal to the grid to train one optimizer step per
+grid, as the example does.
 
-The Slime driver takes ``--loss-type custom_loss`` and
+Slime takes ``--loss-type custom_loss`` and
 ``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.
 The family adds its own flags:
 
@@ -169,7 +170,8 @@ Run the example
 ---------------
 
 The `example <../../../recipes/sdpo/examples/sciknoweval>`__ trains Qwen3-8B
-on the Chemistry split of SciKnowEval on four GPUs. Each step samples 32
+on the Chemistry split of SciKnowEval on eight GPUs: four for the actor and
+four for the serving engines. Each step samples 32
 questions eight times and the test split is scored every five steps. The
 example's README describes the protocol.
 

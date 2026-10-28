@@ -16,20 +16,18 @@ from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportVal
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
 from reef.storage.records import RecordStore
 from reef.evaluation import (
+    ActivationRule,
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
-    CandidateEvaluationConfig,
-    CandidateEvaluationConfigError,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
-    ConfiguredEvaluationPlugin,
     EvaluationResult,
+    MadeArtifact,
     RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
-    build_candidate_evaluation,
 )
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.scenario import Scenario
@@ -38,26 +36,27 @@ from reef.recipe import (
     Recipe,
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.train import Task2Batch, Trainer, TrainingPipeline
-from reef.runtime.interfaces import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
+from reef.train import Sample2Job, Trainer, TrainingPipeline
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import TrainingComponent, TrainingJob
+from reef.train.jobs import JobPlan, JobRequest
 
 __all__ = [
     "SCENARIO_METADATA_KEY",
-    "ActivatedModel",
+    "ActivationRule",
     "AgentRecord",
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
-    "CandidateEvaluationConfig",
-    "CandidateEvaluationConfigError",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
-    "ConfiguredEvaluationPlugin",
     "Dispatcher",
     "EvaluationResult",
     "InferenceRuntime",
-    "ModelCandidate",
+    "JobPlan",
+    "JobRequest",
+    "MadeArtifact",
     "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",
@@ -70,15 +69,15 @@ __all__ = [
     "RequestHeaders",
     "RequestType",
     "SQLiteRecordStore",
+    "Sample2Job",
     "Scenario",
     "SelectionDecision",
-    "Task2Batch",
     "Trainer",
+    "TrainingComponent",
+    "TrainingJob",
     "TrainingPipeline",
-    "TrainingRuntime",
     "UpdateCandidate",
     "__version__",
-    "build_candidate_evaluation",
     "build_default_dispatcher",
     "parse_request_headers",
 ]

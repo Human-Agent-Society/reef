@@ -11,18 +11,19 @@ Entry point: ``Record2Record`` in ``base.py``.
   deployment's ``pipeline.record2record`` names, built with ``from_config``.
   The pipeline pushes every record except training instructions (``push``).
 * The stage forms ``RecordSet`` values, which the pipeline pulls (``pull``):
-  the records that the record-to-task stage makes tasks from, together. No
+  the records that the record-to-sample stage makes tasks from, together. No
   record is in two record sets. The pipeline gives each task result back
   (``settle``). The stage holds the sets that train in ``RecordSetUnit`` values
   in its pool, drops the units that can no longer train, and gives the
-  pipeline the next batch's units in order. The stage never calls the other stages.
+  pipeline the units of the next job's data in order. The stage never calls the other stages.
 * Before task creation, ``form`` rejects any set containing an engine-aborted
   inference, including report references. Replay applies the same check; stored
   response data stays unchanged.
 * Every stage runs the staleness check. It is the only place where Reef
   compares the version that produced training data with the version that the
   scenario serves, and drops data that is more than ``max_staleness`` versions
-  behind.
+  behind. ``max_staleness`` is the stage's setting (``Record2RecordSettings``,
+  ``pipeline.record2record.config.max_staleness``).
 
 Stages:
 
@@ -40,22 +41,28 @@ Stages:
 Components of the pool:
 
 * ``RecordSet`` and ``RecordSetUnit`` (``sets.py``): the input of the
-  record-to-task stage, and the record sets that train in one batch, the unit
-  that a batch takes whole.
-* ``RecordSetUnitPool`` (``pool.py``): the held units, and the reserved batch.
-* ``SelectionPolicy`` (``selection.py``): the order in which units go into a
-  batch. ``ArrivalOrder`` takes the oldest first. ``GroupKeyOrder`` takes
+  record-to-sample stage, and the record sets that train in one job's data, the unit
+  that job data takes whole.
+* ``RecordSetUnitPool`` (``pool.py``): the held units, and the reserved job data.
+* ``SelectionPolicy`` (``selection.py``): the order in which units go into job data. ``ArrivalOrder`` takes the oldest first. ``GroupKeyOrder`` takes
   ungrouped units, then groups by key.
 * ``stale_units`` (``staleness.py``): finds held units whose training data is more
   than ``max_staleness`` versions behind the version that the scenario serves.
   The lag counts the versions that the scenario served after the producing one.
 
 The package depends only on ``reef.core``, ``reef.runtime.interfaces``,
-``reef.observability``, ``reef.background_jobs``, and ``reef.pipeline_context``. Thus record-to-task and
+``reef.observability``, ``reef.background_jobs``, and ``reef.pipeline_context``. Thus record-to-sample and
 the trainer can both use it.
 """
 
-from reef.record2record.base import InferenceRecord2Record, NoRecordSets, Record2Record, TaskStatus, UnitDropReason
+from reef.record2record.base import (
+    InferenceRecord2Record,
+    NoRecordSets,
+    Record2Record,
+    Record2RecordSettings,
+    SampleStatus,
+    UnitDropReason,
+)
 from reef.record2record.judging import JudgedSet, JudgingRecord2Record, RecordJudging
 from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.reports import (
@@ -80,6 +87,7 @@ __all__ = [
     "JudgingRecord2Record",
     "NoRecordSets",
     "Record2Record",
+    "Record2RecordSettings",
     "RecordJudging",
     "RecordSet",
     "RecordSetUnit",
@@ -89,9 +97,9 @@ __all__ = [
     "ReportGrouping",
     "ReportRecord2Record",
     "ReportSet",
+    "SampleStatus",
     "SelectionPolicy",
     "SingleRecordSet",
     "SingleSetUnit",
-    "TaskStatus",
     "UnitDropReason",
 ]

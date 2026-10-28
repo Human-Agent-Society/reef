@@ -26,7 +26,6 @@ from reef.evaluation import (
     UpdateCandidate,
 )
 from reef.evaluation.harness import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate
 from reef.train.backend import CandidateBackend
 
 
@@ -148,7 +147,10 @@ def test_a_policy_mixin_pairs_with_the_backend_evaluate_mixin() -> None:
             return EvaluationResult(
                 evaluator="pairs",
                 evaluator_version="1",
-                metrics={"candidate_scores": (1.0, 1.0), "current_scores": (0.0, 0.0)},
+                metrics={
+                    "candidate_scores": [{"task": "t", "scores": [1.0, 1.0]}],
+                    "current_scores": [{"task": "t", "scores": [0.0, 0.0]}],
+                },
             )
 
     plugin = ScoreComparisonPlugin(Backend())
@@ -204,18 +206,6 @@ def test_decision_rejects_non_boolean_selected(selected: object) -> None:
             reason="invalid selection flag",
             evaluation=evaluation(),
         )
-
-
-def test_model_candidate_records_the_unactivated_checkpoint() -> None:
-    candidate = ModelCandidate(
-        candidate_id="job-7",
-        training_job_id="job-7",
-        checkpoint_path="/checkpoints/job-7",
-        current_runtime_load_id="inc:6",
-    )
-
-    assert candidate.current_runtime_load_id == "inc:6"
-    assert ActivatedModel(candidate.candidate_id, "inc:7").runtime_load_id == "inc:7"
 
 
 def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:

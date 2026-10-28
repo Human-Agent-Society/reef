@@ -1,4 +1,4 @@
-"""The record set units that a record stage holds, and the batch that the pipeline reserved from them."""
+"""The record set units that a record stage holds, and the job data that the pipeline reserved from them."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from reef.record2record.sets import RecordSetUnit
 
 
 class RecordSetUnitPool:
-    """Hold the record set units that a batch can use, and the reserved batch.
+    """Hold the record set units that job data can use, and the reserved job data.
 
     The stage adds and removes units. It also decides what a consumed unit
     releases. The pool orders units only through its ``SelectionPolicy``.
     A reservation does not change until the pipeline consumes it or reserves
-    again. Thus the pipeline can return the same batch until the trainer
+    again. Thus the pipeline can return the same job data until the trainer
     acknowledges it.
     """
 
@@ -49,11 +49,11 @@ class RecordSetUnitPool:
         return self.select(len(self.units_by_id))
 
     def reserved_units(self) -> tuple[RecordSetUnit, ...]:
-        """Return the reserved units. Return an empty tuple if no batch is reserved."""
+        """Return the reserved units. Return an empty tuple if no job data is reserved."""
         return () if self.reserved is None else self.reserved
 
     def reserve(self, units: tuple[RecordSetUnit, ...]) -> tuple[RecordSetUnit, ...]:
-        """Keep ``units``, distinct held units in batch order, reserved as the next batch, and return them."""
+        """Keep ``units``, distinct held units in selection order, reserved as the next job's data, and return them."""
         unit_ids = [unit.unit_id for unit in units]
         if len(set(unit_ids)) != len(unit_ids):
             raise ValueError("a reservation must not name a unit more than one time")

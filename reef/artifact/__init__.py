@@ -9,11 +9,11 @@ level up. Boundaries this package holds:
   here knows what a scenario, trainer, or commit history is;
   ``ArtifactReleaseChain``'s caller decides transaction ordering.
 - Releases are immutable and heads move only by compare-and-swap
-  (``advance_current`` takes ``expected``; ``publish`` takes
+  (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
   (``ArtifactConflict``) instead of losing a release.
-- A ``local:`` release has identity but no durable bytes; recovery and
-  rollback refuse it as a restore source (``ReleaseNotRestorable``).
+- A ``local:`` release has identity but no durable bytes; activation and
+  a new training start refuse it as a source (``ReleaseNotRestorable``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
@@ -21,6 +21,12 @@ any ``RepositoryBackendFactory``. A deployment selects a factory that also
 inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend``;
 Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
+
+Every repository starts from a base artifact. A configured backend imports
+``RepositoryBackendContext.base`` (a ``BaseArtifactSource``) into a
+repository that has none, with ``base.content_id`` as its content ID, and
+refuses to open a repository whose base was imported from other
+``base.inputs``.
 
 Backends used with a scenario commit history must subclass
 ``StagedReleaseRepositoryBackend``. ``publish`` must accept
@@ -51,6 +57,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
+    BaseArtifactSource,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     EnumerableRepositoryBackendFactory,
@@ -62,12 +69,16 @@ from reef.artifact.repository import (
     StagedReleaseRepositoryBackend,
 )
 from reef.artifact.sources import (
-    ArtifactSource,
+    ArtifactSourceReader,
+    ArtifactSources,
     DownloadedSnapshot,
-    GitVersionSource,
+    FileReader,
+    HuggingFaceReader,
     HuggingFaceSource,
+    S3Reader,
+    directory_content_id,
     download_huggingface_snapshot,
-    parse_artifact_source,
+    parse_huggingface_source,
 )
 
 __all__ = [
@@ -80,16 +91,19 @@ __all__ = [
     "ArtifactPublicationError",
     "ArtifactRef",
     "ArtifactReleaseChain",
-    "ArtifactSource",
     "ArtifactSourceError",
+    "ArtifactSourceReader",
+    "ArtifactSources",
     "ArtifactValidator",
+    "BaseArtifactSource",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",
+    "FileReader",
     "GitLFSRepositoryBackend",
     "GitLFSRepositoryBackendFactory",
-    "GitVersionSource",
+    "HuggingFaceReader",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
     "PEFTValidator",
@@ -99,9 +113,11 @@ __all__ = [
     "RepositoryBackend",
     "RepositoryBackendContext",
     "RepositoryBackendFactory",
+    "S3Reader",
     "StagedReleaseRepositoryBackend",
     "compose_release",
+    "directory_content_id",
     "download_huggingface_snapshot",
-    "parse_artifact_source",
+    "parse_huggingface_source",
     "read_peft_config",
 ]

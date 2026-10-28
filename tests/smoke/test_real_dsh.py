@@ -1,7 +1,7 @@
-"""Smoke of the real dsh binary: render, episode, and trajectory against the
+"""Smoke of the real dsh binary: render, rollout, and trajectory against the
 real thing. The hermetic suites drive scripted fakes, so every format and
 environment assumption about the real DeepSeek Harness lives here: a pinned
-dsh runs one episode against a stdlib OpenAI-compatible stub and must read
+dsh runs one rollout against a stdlib OpenAI-compatible stub and must read
 our rendered patch layer, reach the stub with the rules text and the bound
 key, write a session our reader parses, and leave no unexplained residue.
 Skipped unless REEF_REAL_DSH_BINARY points at an installed dsh
@@ -18,8 +18,8 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import run_episode
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import run_rollout
 from reef.harness.tree.render import render_composition
 
 REAL_DSH = os.environ.get("REEF_REAL_DSH_BINARY", "")
@@ -79,7 +79,7 @@ class StubHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
 
-def test_real_dsh_episode_renders_runs_and_cleans_up() -> None:
+def test_real_dsh_rollout_renders_runs_and_cleans_up() -> None:
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("dsh")
@@ -90,7 +90,7 @@ def test_real_dsh_episode_renders_runs_and_cleans_up() -> None:
         nodes = [("rules", {"text": RULES_SENTENCE}), *binding.compose_nodes(descriptor)]
         files = render_composition(nodes, descriptor)
         # The task starts with a dash on purpose: it must pass both commander layers as a positional.
-        result = run_episode(descriptor, files, "- Reply with exactly the word READY", binary=REAL_DSH, timeout=180.0)
+        result = run_rollout(descriptor, files, "- Reply with exactly the word READY", binary=REAL_DSH, timeout=180.0)
     finally:
         server.shutdown()
         server.server_close()
@@ -143,7 +143,7 @@ def test_real_dsh_runs_a_command_that_the_model_cannot_list() -> None:
         ]
         files = render_composition(nodes, descriptor)
         task = " ".join(f"/{name}" for name in headers) + " say hi"
-        result = run_episode(descriptor, files, task, binary=REAL_DSH, timeout=180.0)
+        result = run_rollout(descriptor, files, task, binary=REAL_DSH, timeout=180.0)
     finally:
         server.shutdown()
         server.server_close()

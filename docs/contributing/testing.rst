@@ -25,45 +25,40 @@ CI supplies PostgreSQL 16 and runs these cases on all supported Python versions.
 Run the full suite
 ------------------
 
-Managed deployment recovery also has opt-in CPU tests using real Ray processes:
-
-.. code:: bash
-
-   REEF_TEST_RAY=1 PYTHONPATH="$PWD" NO_PROXY='*' \
-     .venv/bin/python -m pytest tests/runtime/test_training_restart.py \
-       tests/runtime/test_model_supervision_ray.py -q
-
-Install the Python dependencies from ``.[slime]`` first. These tests use private
-local Ray clusters and fake CPU weights. They inject process death and check
-durable publication, readiness, child cleanup and HTTP endpoint reconnection;
-they do not validate Slime's real GPU checkpoint or collective transport.
-
-LoRA and colocated contract tests run in the regular CPU suite:
-
-.. code:: bash
-
-   .venv/bin/python -m pytest tests/slime_backend/test_driver_runtime_env.py \
-     tests/slime_backend/test_rollout_recovery.py \
-     tests/slime_backend/test_sglang_engine.py \
-     tests/reef_service/test_multi_scenario_bridge.py -q
-
-These cover independent component selection, inference-owned startup offload,
-paired memory transitions, cold reconstruction of scenario adapters and the
-commit barrier, including retaining the frozen base between training steps.
-The memory fixture rejects publication without resident weights and training
-while inference KV/graphs remain resident. It models ordering, not GPU capacity;
-real LoRA IPC/NCCL transport, CUDA memory use and combined-mode performance
-require a supported GPU run.
-
 .. code:: bash
 
    pytest tests/
 
 Run it in the supported container environment. Many torch-dependent tests use
 ``pytest.importorskip`` and skip when torch is unavailable. Others, including
-``tests/slime_backend/test_slime_bridge.py``, import Slime and torch during
+``tests/slime_backend/test_slime_train_group.py``, import Slime during
 collection. Without the training dependencies, pytest cannot collect the full
 suite.
+
+Training job and serving contracts run in the regular CPU suite:
+
+.. code:: bash
+
+   .venv/bin/python -m pytest tests/runtime/test_jobs.py tests/train/test_local_jobs.py \
+     tests/train/test_jobs.py tests/runtime/test_serving.py -q
+
+These cover job identity, durable job submission and resumption after a
+restart, the trainer's job loop, and loading published releases into serving
+engines. They use fake components and engines. Real Slime training and
+engine weight loads require a supported GPU run.
+
+Service process and engine control also have opt-in CPU tests that use real
+Ray processes:
+
+.. code:: bash
+
+   REEF_TEST_RAY=1 PYTHONPATH="$PWD" NO_PROXY='*' \
+     .venv/bin/python -m pytest tests/reef_service/test_service_executor_ray.py \
+       tests/inference/test_inference_control.py -q
+
+Install the Python dependencies from ``.[slime]`` first. These tests use
+private local Ray clusters and CPU engines. They inject process death and
+check service address publication, child cleanup and engine control.
 
 CI runs source and installed-wheel tests on Python 3.12 on
 Blacksmith. Source tests use eight workers on an 8-vCPU runner; installed-wheel
@@ -87,12 +82,11 @@ that PR's required checks. See the
 `maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
 
 Tests in the same file stay in one worker, preserving
-module fixture reuse. In an activated development environment, install the same
-test runner plugin and reproduce the parallel run:
+module fixture reuse. The ``dev`` extra installs the same test runner plugin,
+so an activated development environment reproduces the parallel run:
 
 .. code:: bash
 
-   uv pip install pytest-xdist==3.8.0
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
      pytest tests/ -n 8 --dist loadfile
 
@@ -112,7 +106,7 @@ cancelled, or skipped matrix cannot pass it. The same gate combines and
 validates coverage.
 
 Installed-wheel selection
-------------------------
+-------------------------
 
 ``tests/packaging/wheel-tests.txt`` lists the contract modules that also run
 against installed packages. Selection is independent of their owner directory.
@@ -127,21 +121,32 @@ there, as the CI job does. Do not add the checkout root to ``PYTHONPATH``: its
 Run one area
 ------------
 
-Hosted episode acceptance is opt-in and creates paid E2B sandboxes and small
+Hosted rollout acceptance is opt-in and creates paid E2B sandboxes and small
 OpenRouter model requests. Set ``E2B_API_KEY`` and ``OPENROUTER_API_KEY`` in the
 test process (never commit them), then run::
 
     REEF_TEST_E2B=1 REEF_E2B_TEST_MODEL=deepseek/deepseek-v4.1-flash \
-      .venv/bin/python -m pytest tests/smoke/test_e2b_episode.py -q
+      .venv/bin/python -m pytest tests/smoke/test_e2b_rollout.py -q
 
 The tests exercise pi and Codex through the ordinary executor factory, model
 traffic through a localhost tunnel, trajectory and residue read-back, immutable
 inputs, timeout cleanup, and Cordis/GEPA scoring. The selected model must support
 both Chat Completions and Responses through OpenRouter and be available to the
 account in its region. Provider credentials remain in a local test HTTP server;
-only a synthetic prompt and an episode token enter the sandbox. Default CI skips
+only a synthetic prompt and a rollout token enter the sandbox. Default CI skips
 these paid tests; ``test_e2b_executor.py`` and ``test_e2b_tunnel.py`` cover the
 contracts and failure paths without provider access.
+
+The Modal sandbox has its own opt-in acceptance, which costs a few cents of
+Modal CPU time and needs Modal credentials (``MODAL_TOKEN_ID`` and
+``MODAL_TOKEN_SECRET``, or ``~/.modal.toml``)::
+
+    REEF_TEST_MODAL=1 .venv/bin/python -m pytest tests/smoke/test_modal_sandbox.py -q
+
+It builds an image for a small npm program and checks one jailed process: the
+tunnel to this host, the workspace copy in and back, the read-only filesystem
+outside it, and the timeout. ``tests/sandbox/test_modal_executor.py`` covers the
+settings, the sandbox lifecycle and the launch without provider access.
 
 Choose a component suite or one test module. For example, artifact contracts
 need no GPU:

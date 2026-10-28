@@ -1,22 +1,22 @@
-# Claude Code, driven headless per episode.
+# Claude Code, driven headless per rollout.
 #
 # CLAUDE_CONFIG_DIR relocates the whole config tree (settings.json, CLAUDE.md,
 # skills/, commands/, plugins/, and the session transcripts under projects/)
-# into the episode root, so nothing is read from or written to the user's real
+# into the rollout root, so nothing is read from or written to the user's real
 # ~/.claude. DISABLE_AUTOUPDATER, DISABLE_TELEMETRY and
 # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC stop the startup network work
 # (auto-update, telemetry, and the non-essential background traffic) that
-# would otherwise make episodes non-deterministic. DISABLE_UPDATES makes
-# Claude Code's own update and install commands refuse, so an episode's shell
+# would otherwise make rollouts non-deterministic. DISABLE_UPDATES makes
+# Claude Code's own update and install commands refuse, so a rollout's shell
 # commands cannot replace the pinned version either. `-p --output-format json`
 # is Claude Code's headless mode, which skips the folder trust prompt;
 # `--permission-mode auto` matches opencode's `--auto` and pi's json
 # mode — auto-approve without dropping every safety check, which is the
-# right level for a hermetic episode root.
+# right level for a hermetic rollout root.
 name: claude
 binary: claude
 # The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# GET /reef/harness/install script, never by rollout runs.
 install:
   kind: npm
   package: "@anthropic-ai/claude-code"
@@ -29,7 +29,7 @@ env:
   DISABLE_UPDATES: "1"
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-# Keep interactive installs on the same pinned version as evaluation episodes.
+# Keep interactive installs on the same pinned version as evaluation rollouts.
 # An interactive run through reef-claude gets only CLAUDE_CONFIG_DIR from the
 # env above. reef pins Claude Code's version, and Claude Code's own updater
 # would otherwise install the latest release over the person's own claude:
@@ -79,7 +79,7 @@ files:
     primary:
       path: "claude/settings.json"
       defaults:
-        # No Co-Authored-By trailer written into commits an episode makes;
+        # No Co-Authored-By trailer written into commits a rollout makes;
         # the updater is off through env and client_env, not here.
         includeCoAuthoredBy: false
         # Covers a run where the person passes their own --settings, which
@@ -102,10 +102,10 @@ files:
         # neither, under any name Windows matches without case.
         - key: env
           match: Each(Key(Not(Uppercase(IsIn(["DISABLE_AUTOUPDATER", "DISABLE_UPDATES"])))))
-          reason: the episode env and reef-claude set it so Claude Code keeps the pinned version
+          reason: the rollout env and reef-claude set it so Claude Code keeps the pinned version
         - key: [env.DISABLE_TELEMETRY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC]
           match: Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
-          reason: benchmark episodes keep telemetry and non-essential traffic off
+          reason: benchmark rollouts keep telemetry and non-essential traffic off
         # The env names Claude Code 2.1.257 reads to choose the endpoint, the
         # provider, the credential or the model of a model call: every
         # ANTHROPIC_ name, the cloud providers and their credentials, the
@@ -159,7 +159,7 @@ cleanup_whitelist:
   - "claude/projects/**"
   # Claude Code's boot persists local state beside the rendered config:
   # a top-level state file, feature-gate cache, per-session todo lists, and
-  # captured shell snapshots. Episode state, not residue.
+  # captured shell snapshots. Rollout state, not residue.
   - "claude/.claude.json"
   - "claude/statsig/**"
   - "claude/todos/**"
@@ -169,7 +169,7 @@ quirks: reef.harness.adapters.claude.quirks
 # Anthropic Messages API natively, so only the anthropic dialect is bound:
 # settings.json's `env` block redirects the client at Reef's endpoint, which
 # is Anthropic-compatible at {base_url}/v1/messages. Reef appends this set
-# when it runs evaluation episodes; the served tree never carries a provider.
+# when it runs evaluation rollouts; the served tree never carries a provider.
 model_binding:
   anthropic:
     - target: primary

@@ -3,8 +3,8 @@
 A client can upload an ATIF trajectory to train on directly. An uploaded
 trajectory is not a record. The trajectory store keeps the uploaded trajectories
 of one scenario in upload order. A trainer reads them after its cursor and gives
-them to the task-to-batch stage. A commit lists the uploaded trajectories that
-its batch consumed, by :func:`consumed_trajectory_id`, so a rebuilt trainer
+them to the sample-to-job stage. A commit lists the uploaded trajectories that
+its job data consumed, by :func:`consumed_trajectory_id`, so a rebuilt trainer
 skips them. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
 """
@@ -14,8 +14,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from reef.core.batches import TrajectoryItem
 from reef.core.errors import ReefError
+from reef.core.job_data import TrajectorySample
 
 #: Marks the ID of a consumed uploaded trajectory in a commit, so that it cannot be a record ID.
 CONSUMED_TRAJECTORY_PREFIX = "trajectory:"
@@ -36,19 +36,19 @@ class StoredTrajectory:
 
     Values: ``(sequence, trajectory_id, trajectory)`` is a stored trajectory if
     and only if ``sequence`` is a positive integer, ``trajectory_id`` is a
-    non-empty string, and ``trajectory`` is a ``TrajectoryItem``. ``sequence`` is
+    non-empty string, and ``trajectory`` is a ``TrajectorySample``. ``sequence`` is
     the position of the trajectory in upload order. ``trajectory_id`` is the ID
     that the client gave it.
 
     Purpose: ``TrajectoryStore.page`` makes it. The trainer reads it:
     ``sequence`` moves the trainer's cursor,
     ``consumed_trajectory_id(trajectory_id)`` tells whether a commit consumed
-    it, and the pipeline batches ``trajectory``.
+    it, and the pipeline puts ``trajectory`` into job data.
     """
 
     sequence: int
     trajectory_id: str
-    trajectory: TrajectoryItem
+    trajectory: TrajectorySample
 
     def __post_init__(self) -> None:
         if self.sequence < 1 or not self.trajectory_id:
@@ -68,7 +68,7 @@ class TrajectoryStore(ABC):
     """
 
     @abstractmethod
-    def add(self, trajectories: tuple[tuple[str, TrajectoryItem], ...]) -> bool:
+    def add(self, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
         """Save each ``(trajectory_id, trajectory)`` pair in one transaction, in order. Return True if one or more is new.
 
         A pair whose ID is stored with the same trajectory changes nothing.

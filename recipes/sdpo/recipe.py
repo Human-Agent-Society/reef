@@ -6,12 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from recipes.sdpo.processor import SDPOBatches, SDPORecord2Record, SDPOTasks
+from recipes.sdpo.processor import SDPOJobData, SDPORecord2Record, SDPOSamples
 from recipes.sdpo.report import SDPOReport
 from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.train.algos import StepScheduling
 from reef.train.pipeline import PipelineSpec
 
 
@@ -28,11 +27,11 @@ class SDPORecipe(WeightTrainingRecipe):
     its coordinates, and the grid trains as one optimizer step once complete.
 
     The recipe binds the objective, the step schedule, and the report
-    contract. Its stages are ``SDPORecord2Record``, ``SDPOTasks``, and
-    ``SDPOBatches``; the deployment's ``pipeline`` section gives their config:
+    contract. Its stages are ``SDPORecord2Record``, ``SDPOSamples``, and
+    ``SDPOJobData``; the deployment's ``pipeline`` section gives their config:
     the grid in ``record2record``; the teacher's tokenizer and windows in
-    ``record2task`` (``tokenizer_path`` is required); and the choice of
-    demonstration and feedback in ``task2batch``.
+    ``record2sample`` (``tokenizer_path`` is required); and the choice of
+    demonstration and feedback in ``sample2job``.
 
     Objective settings such as the divergence, the top-K and the teacher's
     update rate belong to the training backend; for Slime they are
@@ -47,12 +46,11 @@ class SDPORecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        # A batch is one grid; a batch size equal to the grid trains it as one optimizer step.
-        return WeightTrainingSpec(objective="sdpo", scheduling=StepScheduling(unit="sample"))
+        return WeightTrainingSpec(objective="sdpo")
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SDPORecord2Record, record2task=SDPOTasks, task2batch=SDPOBatches)
+        return PipelineSpec(record2record=SDPORecord2Record, record2sample=SDPOSamples, sample2job=SDPOJobData)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

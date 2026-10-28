@@ -7,14 +7,14 @@ from typing import Any, Self
 
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2task import Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import BufferSettings, Task2Batch
+from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 
-class ThresholdTasks(ReportTasks):
+class ThresholdSamples(ReportSamples):
     """One report becomes one sample, with no score filtering."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
@@ -32,12 +32,12 @@ class ThresholdTasks(ReportTasks):
     ) -> Self:
         return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         return self.assembly.build(context, context.require_score())
 
 
-class ThresholdBatches(Task2Batch):
-    """Batch the tasks of ``ThresholdTasks`` as they come."""
+class ThresholdJobData(Sample2Job):
+    """Batch the tasks of ``ThresholdSamples`` as they come."""
 
     @classmethod
     def from_config(
@@ -46,13 +46,14 @@ class ThresholdBatches(Task2Batch):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 def threshold_pipeline(
@@ -61,12 +62,20 @@ def threshold_pipeline(
     buffer_size: int | None = None,
     accept_multi_turn: bool = False,
     record2record: ReportRecord2Record | None = None,
-    task2batch: Task2Batch | None = None,
+    sample2job: Sample2Job | None = None,
+    max_staleness: int = 0,
 ) -> TrainingPipeline:
-    """Every report by itself (or ``record2record``), one sample each, batched by ``ThresholdBatches`` (or ``task2batch``)."""
+    """Every report by itself (or ``record2record``), one sample each, batched by ``ThresholdJobData`` (or ``sample2job``).
+
+    ``max_staleness`` is the staleness limit of the default record stage.
+    """
     return TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ReportGrouping()) if record2record is None else record2record,
-        record2task=ThresholdTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
-        task2batch=ThresholdBatches(context, buffer_size) if task2batch is None else task2batch,
+        record2record=(
+            ReportRecord2Record(context, ReportGrouping(), max_staleness=max_staleness)
+            if record2record is None
+            else record2record
+        ),
+        record2sample=ThresholdSamples(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        sample2job=ThresholdJobData(context, buffer_size, None) if sample2job is None else sample2job,
     )

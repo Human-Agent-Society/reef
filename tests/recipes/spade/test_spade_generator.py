@@ -15,7 +15,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskTasks
+from reef.recipe.generated_tasks import GeneratedTaskSamples
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -29,8 +29,9 @@ from reef.recipe.generated_tasks.processor import (
     RoundSettings,
     TaskGroupSettings,
 )
-from reef.record2task.generator import GeneratorError, TaskNameConflict
-from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.recipe.generated_tasks.results import TaskRolloutResult
+from reef.record2sample.generator import GeneratorError, TaskNameConflict
+from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
@@ -139,7 +140,7 @@ def test_the_results_close_the_generation_with_regret_reports_and_the_next_exper
     names = ["harbor-00000-000-inspection", "harbor-00000-002-inspection"]
     # The hint plays of each played task, on a copy written again in place, after the recipe's plays.
     assert [
-        (c["task"], c["arm"], c["count"], c["extra"], c["tags"], c["model"]) for c in service.episode_requests
+        (c["task"], c["arm"], c["count"], c["extra"], c["tags"], c["model"]) for c in service.rollout_requests
     ] == [(name, "hint", 1, ("solution/hint.txt",), {"generation": "0"}, "Qwen/Qwen3-8B") for name in names]
     assert service.deleted[-2:] == names
     assert [(r["record_id"], r["score"]) for r in service.reports] == [
@@ -167,7 +168,7 @@ def test_the_results_close_the_generation_with_regret_reports_and_the_next_exper
     assert service.proposals[3]["tags"]["generation"] == "1"
 
 
-def test_a_task_that_ran_no_episodes_scores_zero_with_its_error(tmp_path: Path) -> None:
+def test_a_task_that_ran_no_rollouts_scores_zero_with_its_error(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = spade(tmp_path, service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
@@ -184,7 +185,7 @@ def test_eval_tasks_receive_no_designer_reward_or_training_experience(tmp_path: 
     (generated,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(generated)).is_valid
     asyncio.run(generator.record_results((HeldOutTask(generated),), generation=0))
-    assert service.reports == [] and service.episode_requests == []
+    assert service.reports == [] and service.rollout_requests == []
     assert generator.experience == ()
     document = report(tmp_path, 0)
     assert document["tasks"] == []
@@ -215,25 +216,25 @@ def test_a_service_that_goes_away_ends_the_generation_with_what_ran(tmp_path: Pa
     ]
 
 
-class FailingEpisodes(StandInGenerator):
-    """A generator service that writes tasks but cannot run their episodes."""
+class FailingRollouts(StandInGenerator):
+    """A generator service that writes tasks but cannot run their rollouts."""
 
-    async def run_episodes(self, task_path, **arguments):
-        raise GeneratorError("the episode job failed")
+    async def run_rollouts(self, task_path, **arguments):
+        raise GeneratorError("the rollout job failed")
 
 
 def test_without_hint_plays_or_when_they_fail_the_return_with_hint_is_the_plain_return(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = spade(tmp_path, service, count=1, hint_plays=0)
     asyncio.run(generator.record_results(run_tasks(generator), generation=0))
-    assert service.episode_requests == [] and service.reports[0]["score"] == 0.0
+    assert service.rollout_requests == [] and service.reports[0]["score"] == 0.0
 
-    failing = FailingEpisodes(tmp_path / "failing")
+    failing = FailingRollouts(tmp_path / "failing")
     generator = spade(tmp_path / "second", failing, count=1)
     asyncio.run(generator.record_results(run_tasks(generator), generation=0))
     assert failing.reports[0]["score"] == 0.0
     document = json.loads((tmp_path / "second" / "state" / "generation-00000.json").read_text())
-    assert document["error"] == "the hint plays of harbor-00000-000-inspection failed: the episode job failed"
+    assert document["error"] == "the hint plays of harbor-00000-000-inspection failed: the rollout job failed"
 
 
 def test_a_check_that_could_not_run_raises_and_is_named_in_the_report(tmp_path: Path) -> None:
@@ -284,7 +285,7 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
     context = PipelineContext("spade", task_storage=SQLiteScenarioStorage(tmp_path / "records").open("spade").tasks)
-    generation = GeneratedTaskTasks(
+    generation = GeneratedTaskSamples(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
         GeneratedTaskRecord2Record(context, TaskGroupSettings()),
@@ -294,14 +295,13 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
     saved_tasks = generation.task_store.tasks(split="train")
     for task in generated.tasks:
-        asyncio.run(generation.run_and_record(task, count=2))
+        # The end of the task job saves each task's training rewards, from the training component's rollout.
+        generation.save_result(TaskRolloutResult(task.metadata["task"]["name"], (0.25, 0.25)))
     delivery_error = asyncio.run(generation.deliver_results())
     generation.close()
     assert len(generated.tasks) == len(saved_tasks) == 2 and delivery_error == ""
-    requests = [(call["task"], call["arm"], call["count"], call["extra"]) for call in service.episode_requests]
+    requests = [(call["task"], call["arm"], call["count"], call["extra"]) for call in service.rollout_requests]
     assert requests == [
-        ("harbor-00000-000-inspection", "plain", 2, ()),
-        ("harbor-00000-002-inspection", "plain", 2, ()),
         ("harbor-00000-000-inspection", "hint", 1, ("solution/hint.txt",)),
         ("harbor-00000-002-inspection", "hint", 1, ("solution/hint.txt",)),
     ]

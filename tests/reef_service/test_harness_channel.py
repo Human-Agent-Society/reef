@@ -1,7 +1,7 @@
 """Update-channel guarantees of the harness read routes: the release catalog
 with its gate metrics, version-addressed pulls, the byte identity of a
 pulled tree with the composition the gate measured, and the one-command
-install script. Hermetic like test_harness_recipe.py (episodes run a fake
+install script. Hermetic like test_harness_recipe.py (rollouts run a fake
 pi binary through the real adapter path); pulls go through the real HTTP
 app with the stdlib client, and the install-script tests execute the
 generated script under ``sh`` with the vendor tools shimmed on PATH."""
@@ -25,7 +25,7 @@ import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import ReefClient
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.train.test_harness_evolve_processor import harness_stages
 
 import reef.harness.adapters
@@ -36,9 +36,9 @@ from reef.core.model_metadata import ModelMetadata
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, DescriptorError, load_descriptor
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.version_check import version_check_entry
 from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
@@ -143,7 +143,7 @@ class _ReleaseClient(ReefClient):
 _ASYNC_UPDATE_POLL_S = 0.01
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
+def evaluate(task: str, result: RolloutResult) -> float:
     del task
     return float(result.trajectory[-1]["rules"].count("marker"))
 
@@ -173,7 +173,7 @@ def _dispatcher(
     binary.chmod(0o755)
     recipe = CordisRecipe(
         resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
-        resolve_episode_scorer(evaluate),
+        resolve_rollout_scorer(evaluate),
         ("task one",),
         binary=str(binary),
         adapter=adapter,
@@ -186,7 +186,7 @@ def _dispatcher(
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in {**(recipe.base_artifact_files() or {}), **(bootstrap_files or {})}.items():
+    for relative, text in {**recipe.base_artifact_source().files, **(bootstrap_files or {})}.items():
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -462,7 +462,7 @@ def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) ->
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
             assert head["release_id"] == manifest["release_id"]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["published"] is True
             assert head["metrics"]["wins"] == 1
@@ -524,7 +524,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             )
             assert current == pinned == first
             head = catalog["releases"][-1]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["release_id"] == first["release_id"]
             assert head["content_id"] == first["content_id"]
             assert head["metrics"] == first["evaluation"]
@@ -533,9 +533,9 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             second = await asyncio.wait_for(second_step, _ASYNC_UPDATE_TIMEOUT_S)
             updated = await read_release("/reef/harness/releases")
             assert len(updated["releases"]) == len(catalog["releases"]) + 1
-            assert updated["releases"][-2]["current"] is False
+            assert updated["releases"][-2]["active"] is False
             head = updated["releases"][-1]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["release_id"] == second["release_id"] != first["release_id"]
             assert head["content_id"] == second["content_id"]
             assert head["metrics"] == second["evaluation"]
@@ -2415,7 +2415,7 @@ def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) ->
     data["writable_paths"] = [path]
     target = tmp_path / "descriptor.yaml"
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+    with pytest.raises(DescriptorError, match=r"writable_paths.*rollout root"):
         load_descriptor(target)
 
 
@@ -2917,8 +2917,8 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
         )
         await client.start_server()
         try:
-            rows = (await (await client.get("/reef/scenarios/delivery/releases")).json())["releases"]
-            current = next(row["release_id"] for row in rows if row["current"])
+            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
+            current = next(row["release_id"] for row in rows if row["active"])
             body = {"messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "delivery"}, json=body)
             assert response.status == 200 and response.headers["x-reef-release-id"] == current
@@ -2963,7 +2963,9 @@ def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one
             assert entries[1] == {"id": "r1", "name": "rules", "config": {"text": "marker rules"}}
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            committed = scenario.release_queries.entries_for_version(manifest["release_id"])
+            committed = scenario.release_queries.entries_for_version(
+                manifest["release_id"], scenario.surface.files_component
+            )
             assert committed is not None and text == json.dumps(list(committed), indent=2, sort_keys=True) + "\n"
             assert "pi-agent/tree.json" not in render_composition(NODES_V1, get_adapter("pi"))
         finally:
@@ -3004,7 +3006,9 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
             # The entries live in the commit history, where the proposals route and the step's proposer read them.
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            entries = scenario.release_queries.entries_for_version(manifest["release_id"])
+            entries = scenario.release_queries.entries_for_version(
+                manifest["release_id"], scenario.surface.files_component
+            )
             assert entries is not None and list(entries) == [notice, *ENTRIES_V1]
             assert tree_files(get_adapter("pi"), entries) == {}
         finally:
@@ -3302,7 +3306,7 @@ def test_codex_install_resolves_same_model_on_changed_endpoint(
             return ModelMetadata(640_000, True)
         return ModelMetadata(32_000, False)
 
-    monkeypatch.setattr("reef.harness.episodes.model_binding.provider_model_metadata", metadata)
+    monkeypatch.setattr("reef.harness.rollouts.model_binding.provider_model_metadata", metadata)
     seed = ({"id": "style", "name": "rules", "config": {"text": "Answer briefly."}},)
     dispatcher = _dispatcher(tmp_path, (), seed=seed, api="responses", adapter="codex")
     scenario = dispatcher.get_or_create_scenario("delivery")

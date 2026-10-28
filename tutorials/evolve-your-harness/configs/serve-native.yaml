@@ -49,7 +49,7 @@ recipe:
       # write_file, run_bash) and its loop guard hook, seeded by reference so
       # the proposer may retune or replace them, plus the starter skill. It
       # carries no provider: Reef renders its own model binding into each
-      # evaluation episode.
+      # evaluation rollout.
       seed:
         - reef.harness.runners.native.seed:SEED_NODES
         - id: answer-style

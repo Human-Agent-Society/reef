@@ -20,6 +20,7 @@ from typing import Any
 from aiohttp import web
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
+from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
@@ -28,11 +29,15 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.deployment import RuntimeRegistry, runtime_pair
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
+from reef.runtime.deployment import RuntimeRegistry, build_training_component, close_runtimes
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
+from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
+from reef.service.artifact_imports import ArtifactImports
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
+from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.lifecycle import LifecycleSettings
 from reef.service.routing import RoutingAdapter
@@ -79,28 +84,27 @@ def _require_non_empty(value: str | None, setting: str) -> str:
     return value.strip()
 
 
-def _connect_training_runtime(
-    settings: ServiceConfig,
-    *,
-    model_path: str,
-    connector: Any = None,
-) -> tuple[TrainingRuntime, InferenceRuntime]:
-    """Build the selected integration's runtime, independently of its process topology."""
+def connect_training_component(
+    settings: ServiceConfig, *, model_path: str, loss_family: str
+) -> tuple[TrainingComponent, InferenceRuntime]:
+    """Build the selected training component for the recipe's ``loss_family``, then the serving of its releases.
+
+    The training backend builds only the component. The serving runtime comes
+    from the deployment's ``inference`` settings and the component's
+    ``release_format`` (``reef.service.deploy.serving``).
+    """
     backend = training_deployment_for(settings.training_backend)
-    runtime_config = backend.runtime_config(asdict(settings), connector=connector)
-    built = RuntimeRegistry().build(runtime_config, model_path=model_path)
-    pair = runtime_pair(built)
-    if pair is None:
-        raise TypeError("training backend runtime factory must build a (TrainingRuntime, InferenceRuntime) pair")
-    return pair
-
-
-def shutdown_runtimes(*components: TrainingRuntime | InferenceRuntime | None) -> None:
-    """Release the runtimes of a failed build; the build error stays the one raised."""
-    for component in components:
-        if component is not None:
-            with suppress(Exception):
-                component.shutdown()
+    component = build_training_component(
+        backend.component_config(asdict(settings), loss_family=loss_family), model_path=model_path
+    )
+    try:
+        serving = RuntimeRegistry().build(
+            serving_runtime_config(settings, backend, component.release_format), model_path=model_path
+        )
+    except BaseException:
+        component.close()
+        raise
+    return component, serving
 
 
 def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
@@ -122,25 +126,26 @@ def _training_recipe(
     recipe_type: type[WeightTrainingRecipe],
     settings: ServiceConfig,
     env: Mapping[str, str],
-    connector: Any,
 ) -> Recipe:
     """Build a weight-training recipe on the selected backend runtime."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     # Resolve the recipe fields once before connecting its runtime.
     # Construction consumes those same resolved values.
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
-    if settings.evaluation_settings is not None:
-        recipe_config["evaluation"] = dict(settings.evaluation_settings)
+    if settings.activation_settings is not None:
+        recipe_config["activation"] = dict(settings.activation_settings)
     if settings.pipeline_settings is not None:
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
-    training_runtime, runtime = _connect_training_runtime(settings, model_path=model_path, connector=connector)
+    training_component, runtime = connect_training_component(
+        settings, model_path=model_path, loss_family=recipe_type.training_spec().loss_family
+    )
     try:
         return recipe_type.from_resolved_config(
-            recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_runtime=training_runtime
+            recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_component=training_component
         )
     except BaseException:
-        shutdown_runtimes(training_runtime, runtime)
+        close_runtimes(training_component, runtime)
         raise
 
 
@@ -155,7 +160,6 @@ def composed_training_recipe(
     weight_type: type[WeightTrainingRecipe],
     settings: ServiceConfig,
     env: Mapping[str, str],
-    connector: Any,
 ) -> Recipe:
     """Build a recipe that trains weights through one of its components, on the selected backend runtime.
 
@@ -174,37 +178,31 @@ def composed_training_recipe(
             f"reef.{unknown[0]} is not a setting of {recipe_type.__name__}; a component's settings go under "
             "components.<name>.config"
         )
-    training_runtime, runtime = _connect_training_runtime(settings, model_path=model_path, connector=connector)
+    training_component, runtime = connect_training_component(
+        settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family
+    )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
-    framework_sections = {
-        key: value
-        for key, value in (
-            ("evaluation", settings.evaluation_settings),
-            ("pipeline", settings.pipeline_settings),
-        )
-        if value is not None
-    }
-    if framework_sections:
-        # The component that trains weights keeps these sections under its own config.
+    if settings.pipeline_settings is not None:
+        # The component that trains weights keeps the pipeline section under its own config.
         components = dict(config["components"])
         for name, section in components.items():
             if recipe_class_for(section["implementation"]) is weight_type:
-                components[name] = {**section, "config": {**section.get("config", {}), **framework_sections}}
+                components[name] = {
+                    **section,
+                    "config": {**section.get("config", {}), "pipeline": dict(settings.pipeline_settings)},
+                }
         config = {**config, "components": components}
+    if settings.activation_settings is not None:
+        # The composite activates the artifacts of all its components with one rule.
+        config = {**config, "activation": dict(settings.activation_settings)}
     try:
-        return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
+        return build_recipe(selected, env, config=config, runtime=runtime, training_component=training_component)
     except BaseException:
-        shutdown_runtimes(training_runtime, runtime)
+        close_runtimes(training_component, runtime)
         raise
 
 
-def refuse_weight_training_sections(settings: ServiceConfig) -> None:
-    """Refuse the top-level section that only a recipe that trains weights reads."""
-    if settings.evaluation_settings is not None:
-        raise ValueError("the top-level evaluation section requires a weight-training recipe")
-
-
-def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str], connector: Any) -> Recipe:
+def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
     The spellings differ only in where config and runtime come from: a dotted
@@ -217,7 +215,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
     """
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
-        return _training_recipe(training_recipe_type, settings, env, connector)
+        return _training_recipe(training_recipe_type, settings, env)
     if ":" in selected:
         config = _recipe_owned_settings(settings)
         if settings.preset_config is not None:
@@ -231,12 +229,11 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
-            return composed_training_recipe(
-                selected, recipe_type, config, weight_training[0], settings, env, connector
-            )
-        refuse_weight_training_sections(settings)
+            return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env)
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
+        if settings.activation_settings is not None:
+            config["activation"] = dict(settings.activation_settings)
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(
@@ -248,17 +245,15 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
             if runtime_config
             else _upstream_runtime(settings)
         )
-        training_runtime = None
-        if isinstance(runtime, tuple):
-            training_runtime, runtime = runtime
         try:
-            return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
+            return build_recipe(selected, env, config=config, runtime=runtime)
         except BaseException:
-            shutdown_runtimes(training_runtime, runtime)
+            close_runtimes(None, runtime)
             raise
-    refuse_weight_training_sections(settings)
-    if settings.pipeline_settings is not None:
-        raise ValueError(f"recipe {selected!r} is a preset: set its pipeline section in the preset file")
+    if settings.pipeline_settings is not None or settings.activation_settings is not None:
+        raise ValueError(
+            f"recipe {selected!r} is a preset: set its pipeline and activation sections in the preset file"
+        )
     return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
 
 
@@ -283,11 +278,14 @@ def build_dispatcher(
     settings: ServiceConfig,
     *,
     environ: Mapping[str, str] | None = None,
-    connector: Any = None,
     hold_local_cycles: bool = False,
     evaluation_token: str | None = None,
+    new_artifacts: NewArtifacts | None = None,
 ) -> Dispatcher:
     """Build the dispatcher of a service.
+
+    ``new_artifacts`` observes the scenario storage's commits, so the service
+    evaluates each new artifact with its scenario's settings.
 
     A composite recipe's evaluation calls come back to this service, so a
     candidate of one component is evaluated against the release the others
@@ -299,7 +297,7 @@ def build_dispatcher(
     """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
-    recipe = _serving_recipe(selected_recipe, settings, env, connector)
+    recipe = _serving_recipe(selected_recipe, settings, env)
     calls_service = isinstance(recipe, CompositeRecipe)
     if calls_service:
         # A composite's evaluation calls come back to this Reef, so they sample the release it serves.
@@ -346,6 +344,8 @@ def build_dispatcher(
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
             scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
+        if new_artifacts is not None:
+            scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
         artifact_backend = (
             {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
             if settings.artifact_backend == "git_lfs"
@@ -355,12 +355,11 @@ def build_dispatcher(
             artifact_backend, setting="storage.artifact_backend"
         )
         factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
-        # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
+        # Every scenario starts from the recipe's base artifact: the base model, the base harness, or both.
         context = RepositoryBackendContext(
             work_dir=Path(settings.artifact_work_dir),
             cache_dir=Path(settings.artifact_cache_dir),
-            bootstrap_files=recipe.base_artifact_files() or {},
-            bootstrap_component=recipe.bootstrap_artifact_component(),
+            base=recipe.base_artifact_source(),
         )
         try:
             backend_factory = factory_class.from_config(reference.config, context=context)
@@ -395,7 +394,7 @@ def build_dispatcher(
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
-        shutdown_runtimes(recipe.training_runtime, recipe.runtime)
+        close_runtimes(recipe.training_component, recipe.runtime)
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
@@ -406,7 +405,6 @@ def build_app(
     settings: ServiceConfig,
     *,
     environ: Mapping[str, str] | None = None,
-    connector: Any = None,
     inference_handler: InferenceHandler | None = None,
     lifecycle: LifecycleSettings | None = None,
 ) -> web.Application:
@@ -453,12 +451,13 @@ def build_app(
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token; a restart issues a new one with the recipe it rebuilds.
     evaluation_token = secrets.token_urlsafe(32) if settings.tokens else None
+    new_artifacts = NewArtifacts()
     dispatcher = build_dispatcher(
         settings,
         environ=environ,
-        connector=connector,
         hold_local_cycles=True,
         evaluation_token=evaluation_token,
+        new_artifacts=new_artifacts,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
@@ -476,6 +475,11 @@ def build_app(
             routing=routing,
             lifecycle=lifecycle,
             preview=preview,
+            evaluations=ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts),
+            artifact_imports=ArtifactImports(
+                ArtifactSources.from_setting(settings.artifact_sources),
+                Path(settings.artifact_cache_dir) / "imports",
+            ),
         )
     except BaseException:
         with suppress(Exception):

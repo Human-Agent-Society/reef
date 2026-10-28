@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
+from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
@@ -73,10 +74,7 @@ class ServiceConfig:
     routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
     ray_namespace: str = config_option(
-        "reef", public_path=("training", "ray_namespace"), help="Ray namespace for the training bridge."
-    )
-    ray_actor_name: str = config_option(
-        "reef-train-bridge", public_path=("training", "ray_actor_name"), help="Training bridge actor name."
+        "reef", public_path=("training", "ray_namespace"), help="Ray namespace of the training component."
     )
     inference_url: str | None = config_option(None, public_path=("inference", "url"), help="Local inference endpoint.")
     model_path: str | None = config_option(
@@ -110,6 +108,35 @@ class ServiceConfig:
             public_path=("inference", "remote"),
         ),
     )
+    inference_serving: str | None = config_option(
+        None,
+        public_path=("inference", "serving"),
+        help=(
+            "How a weight-training deployment serves its releases: engines (Reef's engines on an inference "
+            "component), trainer (the training backend's own serving, such as Tinker's sampler), none, or a "
+            "module:Factory runtime factory. Default: engines when engine settings are given, else the "
+            "training backend's default."
+        ),
+    )
+    inference_serving_config: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata(
+            "The settings of a module:Factory serving runtime.", public_path=("inference", "serving_config")
+        ),
+    )
+    inference_max_loaded_adapters: int = config_option(
+        1,
+        public_path=("inference", "max_loaded_adapters"),
+        help="Adapters the serving engines keep resident when the releases are PEFT adapters.",
+    )
+    inference_prefix_sharing: bool = config_option(
+        False,
+        public_path=("inference", "prefix_sharing"),
+        help=(
+            "Share prefix-cache entries between requests. Each release load then retracts the requests in "
+            "flight, which prefill again on the new weights."
+        ),
+    )
     teacher_model_path: str | None = config_option(
         None, public_path=("teacher", "model_path"), help="Teacher engine HF model or directory; frozen SGLang."
     )
@@ -138,16 +165,11 @@ class ServiceConfig:
             "Options owned by the selected training backend.", public_path=("training", "options")
         ),
     )
-    colocate: bool = config_option(
-        False,
-        public_path=("training", "colocate"),
-        help="Train on the inference GPUs; Reef reserves one shared allocation and hands memory between them.",
-    )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
-    #: evaluation episodes from it. ``upstream_model`` is a provider model
+    #: evaluation rollouts from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
     upstream_url: str | None = config_option(
         None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."
@@ -205,6 +227,12 @@ class ServiceConfig:
     )
     artifact_cache_dir: str = config_option(
         ".reef/artifact-cache", public_path=("storage", "artifact_cache_dir"), help="Artifact cache directory."
+    )
+    #: ``ArtifactSourceReader`` plugins beside the built-in ``hf``, ``file`` and ``s3`` readers of artifact imports.
+    artifact_sources: tuple[str | Mapping[str, Any], ...] = config_option(
+        (),
+        public_path=("storage", "artifact_sources"),
+        help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
     )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
@@ -291,16 +319,16 @@ class ServiceConfig:
             "Training settings as a JSON/YAML object.", path=("training",), public_path=("training", "config")
         ),
     )
-    #: Optional pre-publication checkpoint evaluator and selection plugin.
-    evaluation_settings: Mapping[str, Any] | None = field(
+    #: The rule that activates the artifacts that training makes, for any recipe.
+    activation_settings: Mapping[str, Any] | None = field(
         default=None,
-        metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
+        metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
     )
-    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2batch``.
+    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2batch, each with module and "
+            "Pipeline stages as a JSON/YAML object: record2record, record2sample and sample2job, each with module and "
             "config.",
             path=("pipeline",),
         ),
@@ -314,6 +342,9 @@ class ServiceConfig:
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)
     preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
+    #: The deployment's ``execution`` and ``executors`` sections, which select each role's executor.
+    #: Its keys are a subset of ``{"execution", "executors"}``; a training integration reads it.
+    execution_config: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.routing_manifest is not None and (
@@ -321,8 +352,25 @@ class ServiceConfig:
         ):
             raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
+        if not isinstance(self.execution_config, Mapping):
+            raise TypeError("ServiceConfig.execution_config must be a mapping")
+        unknown_execution_keys = set(self.execution_config) - {"execution", "executors"}
+        if unknown_execution_keys:
+            raise ValueError(
+                "ServiceConfig.execution_config holds only the execution and executors sections, got "
+                + ", ".join(sorted(map(str, unknown_execution_keys)))
+            )
         if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
             raise ValueError("reef.scenario_idle_unload_s must be positive")
+        adapters = self.inference_max_loaded_adapters
+        if isinstance(adapters, bool) or not isinstance(adapters, int) or adapters <= 0:
+            raise ValueError("inference.max-loaded-adapters must be a positive int")
+        if self.inference_serving is not None and (
+            not isinstance(self.inference_serving, str) or not self.inference_serving.strip()
+        ):
+            raise ValueError("inference.serving must be a non-empty string")
+        if not isinstance(self.inference_serving_config, Mapping):
+            raise ValueError("inference.serving-config must be an object")
         # The built-in admission checks its own limits.
         ScenarioLimits(max_loaded_scenarios=self.max_loaded_scenarios, max_scenarios=self.max_scenarios)
         if self.scenario_admission is not None:
@@ -341,6 +389,8 @@ class ServiceConfig:
                     "storage.artifact_repository requires storage.artifact_backend: git_lfs; "
                     "a plugin backend reads its own config"
                 )
+        for reader in self.artifact_sources:
+            ArtifactSourceReader.reference(reader, setting="storage.artifact_sources")
         if self.record_backend not in ("sqlite", "postgres"):
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
@@ -387,7 +437,7 @@ SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
     non_reef_fields = {
-        "evaluation_settings",
+        "activation_settings",
         "generator_settings",
         "pipeline_settings",
         "tracing_config",
@@ -506,4 +556,7 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
-    return ServiceConfig(**values, recipe_settings=_reef_section(config), preset_config=preset)
+    execution = {key: config[key] for key in ("execution", "executors") if key in config}
+    return ServiceConfig(
+        **values, recipe_settings=_reef_section(config), preset_config=preset, execution_config=execution
+    )

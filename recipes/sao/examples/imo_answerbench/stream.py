@@ -5,7 +5,7 @@ size of 1: every rollout in a step comes from a different prompt, and a rollout
 joins the next step the moment it is scored, without waiting for siblings. The
 Harbor loop in ``run.py`` is the smallest possible instance of that (six
 rollouts of one problem, one optimizer step each) and is meant as a smoke
-test. This driver is the paper's shape at a budget one node can afford: it
+test. This driver is the paper's shape at the two-node budget of serve-30b.yaml: it
 keeps ``IN_FLIGHT`` requests open at all times, each on a problem drawn from a
 training pool, grades each completion with the same strict rule the Harbor
 verifier uses, and reports the score against that rollout's receipt. Reef
@@ -109,28 +109,43 @@ def problem_order(problems: list[dict], budget: int) -> list[dict]:
     return order[:budget]
 
 
-def releases() -> list[dict] | None:
-    """The scenario's release chain, or None while the service cannot answer."""
+def artifacts() -> list[dict] | None:
+    """The scenario's artifacts, newest first, or None while the service cannot answer."""
     request = urllib.request.Request(
-        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases", headers={"Authorization": f"Bearer {TOKEN}"}
+        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/artifacts", headers={"Authorization": f"Bearer {TOKEN}"}
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())["releases"]
+            return json.loads(response.read())["artifacts"]
     except (urllib.error.URLError, TimeoutError):
         return None
 
 
+def training_step_count() -> int | None:
+    """The scenario's training steps so far, or None while the service cannot answer.
+
+    The stream activates nothing and sets no training start, so each commit of the scenario is a training step.
+    """
+    request = urllib.request.Request(f"{SERVICE_URL}/reef/status", headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError):
+        return None
+    scenario = payload["scenarios"].get(SCENARIO)
+    return 0 if scenario is None else int(scenario["scenario_step"])
+
+
 def serving_release() -> str | None:
-    """The scenario's latest release id, so each record names the weights that served it."""
-    rows = releases()
-    return str(rows[-1]["release_id"]) if rows else None
+    """The release of the scenario's active artifact, so each record names the weights that served it."""
+    rows = artifacts()
+    return next((str(row["release_id"]) for row in rows or () if row["active"]), None)
 
 
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops rollouts that exceed max-staleness, and the driver
+    Reef drops rollouts that exceed pipeline.record2record.config.max_staleness, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """
@@ -168,17 +183,16 @@ class TrainerPacer:
 
 
 def wait_for_training(expected: int) -> None:
-    """Block until ``expected`` training releases exist, so the last step is not cut off."""
+    """Block until ``expected`` training commits exist, so the last step is not cut off."""
     deadline = time.time() + TRAIN_DRAIN_TIMEOUT_S
     trained = None
     while time.time() < deadline:
-        rows = releases()
-        trained = None if rows is None else sum(1 for r in rows if r.get("operation") == "training")
+        trained = training_step_count()
         if trained is not None and trained >= expected:
             print(f"trained: {trained}/{expected} steps committed", flush=True)
             return
         time.sleep(15)
-    print(f"WARNING: only {trained}/{expected} steps trained within {TRAIN_DRAIN_TIMEOUT_S}s", flush=True)
+    raise TimeoutError(f"Only {trained}/{expected} steps trained within {TRAIN_DRAIN_TIMEOUT_S}s")
 
 
 def one_rollout(client: ReefClient, model: str, problem: dict, position: int) -> dict:

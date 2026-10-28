@@ -7,7 +7,6 @@ from reef.recipe.base import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
     AdapterWeightRuntime,
-    ArtifactActivator,
     ArtifactLoader,
     ComponentSurface,
     InferenceHooks,
@@ -18,6 +17,7 @@ from reef.surface import (
     WeightInferenceHooks,
     WeightLoader,
     WeightRuntime,
+    create_config_surface,
     create_harness_surface,
     create_skill_surface,
     create_weight_surface,
@@ -59,17 +59,31 @@ def test_recipe_default_surface_is_noop() -> None:
 
 
 def test_surface_factories_return_composed_surface_instances() -> None:
-    assert type(create_weight_surface()) is Surface
+    assert type(create_weight_surface(kind="model")) is Surface
     assert type(create_harness_surface()) is Surface
     assert type(create_skill_surface([_PullOnlyModule()])) is Surface
+
+
+def test_each_built_in_surface_declares_the_kind_of_its_component() -> None:
+    def kinds(surface: Surface) -> dict[str, str | None]:
+        return {name: component.kind for name, component in surface.components.items()}
+
+    assert kinds(create_weight_surface(kind="model")) == {"weights": "model"}
+    assert kinds(create_weight_surface(kind="model_adapter")) == {"weights": "model_adapter"}
+    assert kinds(create_harness_surface()) == {"harness": "harness_plugin"}
+    assert kinds(create_skill_surface([_PullOnlyModule()])) == {"skills": "harness_plugin"}
+    assert kinds(create_config_surface()) == {"config": "harness_plugin"}
+    assert kinds(Surface(loader=WeightLoader())) == {"release": None}, "a surface may declare no kind"
+    with pytest.raises(ValueError, match="model or a model_adapter"):
+        create_weight_surface(kind="harness_plugin")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="component kind"):
+        ComponentSurface(kind="weights")  # type: ignore[arg-type]
 
 
 def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations() -> None:
     loader = WeightLoader()
     hooks = WeightInferenceHooks()
     assert isinstance(loader, ArtifactLoader)
-    # Weight surfaces activate: a runtime serving remote snapshots binds the published head there.
-    assert isinstance(loader, ArtifactActivator)
     assert isinstance(hooks, InferenceHooks)
     assert not isinstance(hooks, LeasingInferenceHooks)
     assert isinstance(_InjectingModule(), RequestSkillLayer)
@@ -167,52 +181,10 @@ def _checkpoint_artifact(tmp_path):
     return Artifact.local(d)
 
 
-def _release_without_files():
-    from reef.artifact import Artifact, ArtifactRef
-
-    return Artifact(ArtifactRef(content_id="artifact:release", release_id="release:1", parent_release_id=None), None)
-
-
 def _weight_hooks(surface: Surface | None = None):
-    hooks = (surface or create_weight_surface()).inference
+    hooks = (surface or create_weight_surface(kind="model")).inference
     assert hooks is not None
     return hooks
-
-
-def _weight_loader(surface: Surface | None = None):
-    loader = (surface or create_weight_surface()).loader
-    assert loader is not None
-    return loader
-
-
-def test_weight_surface_addresses_every_request_to_the_served_adapter(tmp_path) -> None:
-    # The engine applies an adapter only when the request names it, so a
-    # LoRA deployment must name it on every request — including the
-    # checkpoint and streaming paths that skip version echoing.
-    surface = create_weight_surface(adapter_name="reef_lora")
-    payload = {"model": "m", "messages": []}
-    checkpoint = _weight_hooks(surface).prepare_request(
-        _checkpoint_artifact(tmp_path), "/v1/chat/completions", payload
-    )
-    assert checkpoint == {**payload, "lora_path": "reef_lora"}
-    streaming = _weight_hooks(surface).prepare_request(
-        _checkpoint_artifact(tmp_path), "/v1/chat/completions", {**payload, "stream": True}
-    )
-    assert streaming == {**payload, "stream": True, "lora_path": "reef_lora"}
-    assert "lora_path" not in payload
-
-
-def test_weight_surface_refuses_a_request_naming_another_adapter() -> None:
-    surface = create_weight_surface(adapter_name="reef_lora")
-    with pytest.raises(ReefError, match="serves adapter 'reef_lora'"):
-        _weight_hooks(surface).prepare_request(
-            _release_without_files(), "/v1/chat/completions", {"lora_path": "other"}
-        )
-    # Naming the served adapter explicitly is redundant, not wrong.
-    out = _weight_hooks(surface).prepare_request(
-        _release_without_files(), "/v1/chat/completions", {"lora_path": "reef_lora"}
-    )
-    assert out["lora_path"] == "reef_lora"
 
 
 def test_weight_surface_without_an_adapter_leaves_requests_alone(tmp_path) -> None:
@@ -354,14 +326,8 @@ class _StubTrainingRuntime(WeightRuntime):
     def base_url(self) -> str:
         return "http://engine.invalid"
 
-    def serving_runtime_load_id(self) -> str | None:
-        return self._served
-
     def current_runtime_load_id(self) -> str | None:
         return self._published
-
-    def restore_checkpoint(self, artifact, *, scenario=None) -> str:
-        raise AssertionError("recover must not restore a checkpoint")
 
     def activate_checkpoint(self, artifact, *, scenario=None) -> str:
         return artifact.ref.release_id
@@ -378,43 +344,21 @@ class _StubAdapterRuntime(_StubTrainingRuntime, AdapterWeightRuntime):
         return self._adapters.get(scenario)
 
 
-def _checkpoint_ref(version: str = "checkpoint:step-7"):
-    from reef.artifact import ArtifactRef
-
-    return ArtifactRef(content_id="artifact:ckpt", release_id=version, parent_release_id=None)
-
-
 def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
     from reef.artifact import Artifact
 
-    # A rollback or a restart loaded the release again, under a new version.
-    restored = Artifact.local(tmp_path, metadata={"runtime_load_id": "e:1"})
+    # A commit, a rollback or a restart loaded the release under a version that the runtime names.
+    release = Artifact.local(tmp_path)
     runtime = _StubTrainingRuntime("e:6", published="e:5")
-    assert create_weight_surface().served_runtime_load_id(restored, runtime) == "e:5"
-    # A release that no version published, such as the initial one, has no served version.
-    assert create_weight_surface().served_runtime_load_id(Artifact.local(tmp_path), runtime) is None
+    assert create_weight_surface(kind="model").served_runtime_load_id(release, runtime) == "e:5"
+    # A runtime that serves no weights leaves the served version unknown.
+    assert create_weight_surface(kind="model").served_runtime_load_id(release, None) is None
     # A per-scenario adapter serves a durable release under the version the engine holds for the scenario.
     adapters = _StubAdapterRuntime("e:6", {"math": "e:4"})
-    surface = create_weight_surface(scenario="math", runtime=adapters)
-    assert surface.served_runtime_load_id(restored, adapters) == "e:4"
-    assert surface.served_runtime_load_id(Artifact.local(tmp_path), adapters) is None
+    surface = create_weight_surface(scenario="math", runtime=adapters, kind="model_adapter")
+    assert surface.served_runtime_load_id(release, adapters) == "e:4"
     # An engine that holds no adapter for the scenario leaves the served version unknown.
-    assert surface.served_runtime_load_id(restored, _StubAdapterRuntime("e:6", {})) is None
-
-
-def test_recover_serves_the_checkpoint_when_the_head_is_not_durable() -> None:
-    local = _release_without_files().ref
-    checkpoint = _checkpoint_ref()
-    assert _weight_loader().recover(local, checkpoint, _StubTrainingRuntime("session:1")) is checkpoint
-    assert _weight_loader().recover(local, checkpoint, None) is checkpoint
-
-
-def test_recover_short_circuits_when_already_at_the_head() -> None:
-    surface = create_weight_surface()
-    checkpoint = _checkpoint_ref()
-    assert _weight_loader(surface).recover(None, checkpoint, _StubTrainingRuntime("wv-1")) is checkpoint
-    same = _checkpoint_ref(checkpoint.release_id)
-    assert _weight_loader(surface).recover(same, checkpoint, _StubTrainingRuntime("nope")) is checkpoint
+    assert surface.served_runtime_load_id(release, _StubAdapterRuntime("e:6", {})) is None
 
 
 def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision(tmp_path) -> None:
@@ -438,8 +382,27 @@ def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> N
         hooks.prepare_request(checkpoint, "/v1/chat/completions", {"lora_path": "anything"})
 
 
-def test_weight_hooks_refuse_both_a_shared_and_a_scenario_adapter() -> None:
-    with pytest.raises(ValueError, match="either one shared adapter or per-scenario"):
-        WeightInferenceHooks("shared", scenario="math", runtime=_StubAdapterRuntime(None, {}))
+def test_weight_hooks_need_the_scenario_and_its_runtime_together() -> None:
     with pytest.raises(ValueError, match="both the scenario and the runtime"):
         WeightInferenceHooks(scenario="math")
+
+
+def test_a_harness_artifact_holds_its_entries_and_a_client_pull_leaves_them_out(tmp_path) -> None:
+    from reef.artifact import Artifact
+    from reef.surface.files import ENTRIES_FILE, TextFileTree, entries_file, read_entries
+
+    entries = ({"id": "rules", "name": "rules", "config": {"text": "be brief"}},)
+    tree = tmp_path / "harness"
+    tree.mkdir()
+    (tree / "AGENTS.md").write_text("be brief\n", encoding="utf-8")
+    for relative, text in entries_file(entries).items():
+        (tree / relative).write_text(text, encoding="utf-8")
+
+    assert read_entries(tree) == entries
+    assert TextFileTree().read_files(Artifact.local(tree)) == {"AGENTS.md": "be brief\n"}
+    (tree / ENTRIES_FILE).write_text('{"not": "a list"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="not a list of objects"):
+        read_entries(tree)
+    (tree / ENTRIES_FILE).unlink()
+    with pytest.raises(ValueError, match="no readable"):
+        read_entries(tree)

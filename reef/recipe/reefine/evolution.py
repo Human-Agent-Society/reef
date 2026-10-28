@@ -26,20 +26,20 @@ from typing import Any
 from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
-from reef.evaluation.harness import EpisodeScorer, verifier_reward
+from reef.evaluation.harness import RolloutScorer, verifier_reward
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import final_assistant_text
-from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.requests import REQUESTS_ENTRY_ID, ships_requests
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.trajectory import final_assistant_text
+from reef.harness.rollouts.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 Proposal = tuple[str, str, dict[str, Any]]
 
@@ -460,7 +460,7 @@ API_SECTION = (
 
 def propose(
     nodes: Sequence[tuple[str, Any]],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     *,
     requests: Sequence[Mapping[str, Any]] = (),
@@ -471,13 +471,13 @@ def propose(
 
     ``nodes`` are the composition's (kind, config) pairs, ``entries`` the
     same tree as ``{"id", "name", "config"}`` mappings when the step handed
-    them over, and ``samples`` the batched failing requests. ``requests`` is
+    them over, and ``samples`` the failing requests of the job's data. ``requests`` is
     what the person asked for through ``POST /reef/train`` in ``manual`` or
     ``hybrid`` mode, one per step; when one is present the model designs the
     change, writes mutations of the kinds ``adapter`` takes from this
     proposer (every kind on pi, no code extension elsewhere) and reviews
     them, with the failures beside it as context (``hybrid`` hands over what
-    an automatic batch would take next, ``manual`` none), and the step gets
+    automatic job data would take next, ``manual`` none), and the step gets
     a :class:`StepProposal` whose notes carry the design and the review;
     else it learns from the failures as before. An endpoint or parse
     failure never crashes the step: on the failure path it returns
@@ -529,7 +529,7 @@ def propose(
 def _answer_request(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
     adapter: str = EXTENSION_ADAPTER,
@@ -966,7 +966,7 @@ def reserved_sentence(adapter: str) -> str:
 def _request_prompt(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
-    samples: Sequence[TrajectoryItem],
+    samples: Sequence[TrajectorySample],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
     adapter: str = EXTENSION_ADAPTER,
@@ -1256,7 +1256,7 @@ def _max_tokens(default: int) -> int:
         return default
 
 
-def failures_text(samples: Sequence[TrajectoryItem]) -> str:
+def failures_text(samples: Sequence[TrajectorySample]) -> str:
     """The failing samples as the proposer reads them: one object per sample with the request as served, the
     score its report gave and the report's feedback verbatim (``null`` when the report carried none)."""
     views = [
@@ -1323,8 +1323,8 @@ def _entry_view(kind: str, config: Any, entry_id: Any = None) -> dict[str, Any]:
     return {"id": entry_id, "kind": kind, "body": body[:_PREVIEW_CHARS]}
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    """Grade the last line of the episode's final assistant text, 1.0 exact; the health task directory scores
+def evaluate(task: str, result: RolloutResult) -> float:
+    """Grade the last line of the rollout's final assistant text, 1.0 exact; the health task directory scores
     its verifier's reward."""
     if task == HEALTH_TASK_DIRECTORY:
         return verifier_reward(task, result)
@@ -1344,7 +1344,7 @@ class TextProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
@@ -1358,10 +1358,10 @@ class TextProposer(Proposer):
         return propose(nodes, samples, models, requests=requests, entries=entries, adapter=self.adapter)
 
 
-class AnswerScorer(EpisodeScorer):
+class AnswerScorer(RolloutScorer):
     """:func:`evaluate` as an ``evolution.evaluate`` plugin."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return evaluate(task, result)
 
 

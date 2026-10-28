@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from reef.runtime.recovery import fsync_dir
+from reef.runtime.durable_files import fsync_dir
 from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
 
 # Kept in sync with the submodule gitlink by the source dependency test; wheels need no Git checkout.

@@ -2,10 +2,10 @@
 
 Group-relative pg is the shape a cookbook grouped method would register: a
 processor that groups reports by ``metadata.comparison_set`` and an objective
-that turns the resulting ``TrainingBatch`` into group-relative
+that turns the resulting ``JobData`` into group-relative
 advantages. Both live here rather than in ``reef`` because no bundled recipe
 uses them — the grouping machinery they exercise (group keys, slots, the
-``ReportGrouping.decide`` barrier, ``TrainingBatch`` through the trainer and the
+``ReportGrouping.decide`` barrier, ``JobData`` through the trainer and the
 runtime) IS production code, and these suites are what keep it pinned.
 
 ``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
@@ -23,13 +23,13 @@ from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2task import ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import Task2Batch
-from reef.train.algos import StepSignal, TrainingObjective
+from reef.record2sample import ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.sample2job import Sample2Job
+from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectory_groups
+from reef.train.types import JobData, Sample, TrajectorySample, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 
@@ -37,8 +37,9 @@ GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 class GroupedPolicyObjective(TrainingObjective):
     name = "test-grouped-pg"
     loss_family = "pg"
+    rollout_unit = "comparison_set"
 
-    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+    def prepare(self, batch: JobData, state: Mapping[str, Any]) -> TrainingSignal:
         advantages: list[float] = []
         for comparison_set in trajectory_groups(batch):
             rewards = [trajectory_reward(sample) for sample in comparison_set]
@@ -47,7 +48,7 @@ class GroupedPolicyObjective(TrainingObjective):
             advantages.extend((reward - mean) / std if std else 0.0 for reward in rewards)
         steps = next_steps(state)
         normalized = tuple(advantages)
-        return StepSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
+        return TrainingSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
 
 
 def _comparison_set_id(report: AgentRecord) -> str | None:
@@ -66,23 +67,23 @@ class ComparisonSetGrouping(ReportGrouping):
         return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
 
 
-class ComparisonSetTasks(ReportTasks):
+class ComparisonSetSamples(ReportSamples):
     """One report as one sample in its comparison set."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
         super().__init__()
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         set_id = _comparison_set_id(context.report)
         if set_id is None:
             raise ValueError("grouped training requires metadata.comparison_set")
         return replace(self.assembly.build(context, context.require_score()), group_id=set_id)
 
 
-class GroupedPolicyBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+class GroupedPolicyJobData(Sample2Job):
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
@@ -90,6 +91,6 @@ def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = 
     return TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ComparisonSetGrouping()),
-        record2task=ComparisonSetTasks(),
-        task2batch=GroupedPolicyBatches(context, buffer_size),
+        record2sample=ComparisonSetSamples(),
+        sample2job=GroupedPolicyJobData(context, buffer_size, None),
     )

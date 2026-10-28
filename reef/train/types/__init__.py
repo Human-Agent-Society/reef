@@ -1,23 +1,17 @@
-from reef.core.batches import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
+from reef.core.job_data import JobData, Sample, TaskSample, TrajectorySample, trajectories, trajectory_groups
 from reef.train.types.commits import PreparedCommit
-from reef.train.types.results import (
-    DurableWeightsPublication,
-    NoArtifactPublication,
-    SavedArtifactPublication,
-    TrainStepResult,
-)
+from reef.train.types.results import NoArtifactPublication, SavedArtifactPublication, TrainStepResult
 from reef.train.types.rows import policy_row_violation
 
 __all__ = [
-    "DurableWeightsPublication",
+    "JobData",
     "NoArtifactPublication",
     "PreparedCommit",
+    "Sample",
     "SavedArtifactPublication",
-    "TaskItem",
-    "TrainDataItem",
+    "TaskSample",
     "TrainStepResult",
-    "TrainingBatch",
-    "TrajectoryItem",
+    "TrajectorySample",
     "policy_row_violation",
     "trajectories",
     "trajectory_groups",

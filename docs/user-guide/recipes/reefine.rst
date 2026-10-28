@@ -71,7 +71,7 @@ How it works
    remain. The evaluation runs the candidate on the health task: it
    publishes when the tree still works, and both pages say the health task
    is no test of the requested behavior, which only the review reads; when
-   every candidate episode fails before it is scored (the runner was not
+   every candidate rollout fails before it is scored (the runner was not
    found, say), both pages say the evaluation could not run and quote the
    cause. The step's page carries the design and the review either way. A
    review call that answers with no text is asked once more with room for
@@ -83,14 +83,14 @@ How it works
    published as a release, ready but waiting for your review because it
    changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
-4. Read. A release that touches a ``code_extension`` is held back from the
-   served head, so it reaches no session on its own. ``/versions
+4. Read. A release that touches a ``code_extension`` is inactive: Reef does
+   not serve it, so it reaches no session on its own. ``/versions
    <step>`` opens its page (``reef-pi page <version>`` from the shell), which
    carries the design, how to use the change, the review and the numbers.
 5. Install and set up. A step that settles while you are between turns offers
    its install there; otherwise run ``/versions <version> install``
-   (``reef-pi update`` from the shell). A release held back from the head is
-   served as part of installing it, so installing is the one decision. After
+   (``reef-pi update`` from the shell). An inactive release is activated as
+   part of installing it, so installing is the one decision. After
    confirmation, the session collects what the change needs: for each unmet ``requires`` item it shows the item's
    ``prompt`` and asks for the value of an ``env`` item, kept in
    ``.reef-harness-env`` beside the install, or for a confirmation before a
@@ -113,12 +113,15 @@ Behavior and configuration
   that integration and the path from invocation to a visible result, including
   state and an off command for modes. Headless trials cannot verify the dropdown;
   the agent records any unverified interactive checks in its design.
-* ``evolution.review_kinds: [code_extension]`` holds code changes pending
-  human promotion. Client requirements must pass setup before installation.
+* The default activation rule, ``always`` with
+  ``review_kinds: [code_extension]``, leaves each release with a code change
+  inactive until a person activates it. A top-level ``activation`` section
+  replaces it. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
-  ``evolution.floor_score`` (``1.0``). The current release is not run, and an
-  episode that could not run misses the floor.
+  ``evolution.floor_score`` (``1.0``). The training start is not run. A
+  rollout that gave no answer misses the floor; one that the environment
+  could not run does not.
 * What only you can provide (a phone number, a credential, a permission, an
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
   ``prompt`` is one sentence of at most 200 characters that setup shows when
@@ -326,7 +329,7 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
   agent's files are copied in, refreshed for each check and trial, and copied
   back when it stops. It needs ``pip install 'reef-infra[e2b]'`` and an E2B
   key (``e2b_api_key``, else ``E2B_API_KEY``); ``e2b_template`` names the
-  sandbox image, else Reef builds ``reef-pi-<version>-episodes-v1`` (the pinned
+  sandbox image, else Reef builds ``reef-pi-<version>-rollouts-v1`` (the pinned
   pi and bubblewrap on Node 22) on first use. A custom template must include
   bubblewrap. The agent runs with rendered inputs read-only and only its
   workspace and declared state writable; it cannot use sudo to remove that
@@ -346,6 +349,14 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
        --inference.upstream-model z-ai/glm-5.3 \
        --recipe.config.evolution.proposer_agent.sandbox e2b
 
+* ``modal``: the same, in a `Modal <https://modal.com/docs/guide/sandboxes>`__
+  Sandbox instead of an E2B microVM. It needs ``pip install 'reef-infra[modal]'``
+  and Modal's credentials (``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``, or the
+  profile ``modal setup`` writes). Reef builds the image (the pinned pi,
+  bubblewrap, Python 3 and coreutils on Node 22) on first use, and Modal caches
+  it; ``modal_image`` names another, ``modal_app`` the Modal app the sandboxes
+  belong to. A Modal sandbox lives at most a day, and the command runs to its
+  end or its limit without a reconnect.
 * ``none``: no isolation. The agent runs with the service's user and full
   network access, fed your clients' text. Choose it only where you trust
   every client, such as your own machine.
@@ -408,7 +419,7 @@ nothing about whether the change does what was asked; the step's design and
 review notes and the person judge that. Set both ``evolution.tasks`` and
 ``evolution.evaluate`` for a workload of your own, and
 ``evolution.selection: score_comparison`` to require the candidate to beat
-the current release on them instead.
+the training start on them instead.
 
 An adapter whose prompt is a Harbor task directory, ``terminus``, cannot
 take this prompt. There the recipe runs the same check as the task
@@ -421,12 +432,12 @@ Terminus
 
 ``--recipe.config.evolution.adapter terminus`` runs the profile on
 Terminal-Bench's Terminus 2. Prepare a model endpoint with its API key, and
-Docker or E2B for the task container. With Docker, the default, prepare a
+Docker or a remote Harbor environment (E2B or Modal) for the task container. With Docker, the default, prepare a
 working Docker installation on the service host. On macOS, Docker must share
-``~/.reef/episodes`` with the host. Other platforms use the temp directory;
+``~/.reef/rollouts`` with the host. Other platforms use the temp directory;
 set ``TMPDIR`` for the service if Docker's VM does not share it. To run the
-task containers on E2B instead, see `Docker or E2B
-<../../developer-guide/harness-adapters.rst#docker-or-e2b>`__.
+task containers remotely instead, see `Docker or a remote environment
+<../../developer-guide/harness-adapters.rst#docker-or-a-remote-environment>`__.
 
 Terminus runs one Harbor task at a time through ``reef-terminus --task``.
 Submit evolution requests over HTTP and inspect their result pages. The
@@ -475,12 +486,12 @@ on the page before using the new tree.
 Docker context and published files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-With local Docker, the episode uses the Docker your shell uses: it keeps the
+With local Docker, the rollout uses the Docker your shell uses: it keeps the
 service's ``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
 ``~/.docker``, where colima and Docker Desktop set the current context). On
-macOS its files live under ``~/.reef/episodes``, because colima does not
+macOS its files live under ``~/.reef/rollouts``, because colima does not
 share ``$TMPDIR`` with its VM; on Linux, WSL and Windows they stay in the
-temp directory. An episode on E2B gets none of these.
+temp directory. A rollout on E2B gets none of these.
 ``GET /reef/harness`` serves the published tree; `Harness adapters
 <../../developer-guide/harness-adapters.rst>`__ shows the config that runs
 it through Reef yourself, including the ``x-reef-scenario`` header.

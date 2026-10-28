@@ -1,4 +1,4 @@
-"""Record sets, batch units and their pool: the type definitions, selection order, reservations, and staleness."""
+"""Record sets, record set units and their pool: the type definitions, selection order, reservations, and staleness."""
 
 from __future__ import annotations
 
@@ -11,23 +11,25 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import RuntimeLoadSpan
-from reef.core.batches import TaskItem
+from reef.core.job_data import TaskSample
+from reef.core.plugins import PluginConfigError
 from reef.record2record import (
     ArrivalOrder,
     GroupKeyOrder,
     InferenceRecord2Record,
+    Record2RecordSettings,
     RecordSet,
     RecordSetUnit,
     RecordSetUnitPool,
     ReportGrouping,
     ReportRecord2Record,
+    SampleStatus,
     SelectionPolicy,
     SingleRecordSet,
     SingleSetUnit,
-    TaskStatus,
 )
 from reef.record2record.staleness import producing_runtime_load_ids, stale_units
-from reef.record2task import TaskResult
+from reef.record2sample import SampleResult
 from reef.train import PipelineContext
 
 
@@ -102,12 +104,12 @@ def test_a_stage_puts_a_record_in_one_record_set_only() -> None:
     stage.form(RecordsSet(set_id="second", arrival_index=2, held=(inference("i"), report("r2", "i"))))
 
 
-def test_a_ready_result_holds_one_or_more_tasks_and_a_skipped_result_none() -> None:
-    task = TaskItem(Path("task"))
-    assert TaskResult.ready((task,)).tasks == (task,)
-    for status, tasks in ((TaskStatus.READY, ()), (TaskStatus.SKIPPED, (task,))):
-        with pytest.raises(ValueError, match="READY result holds one or more tasks"):
-            TaskResult(status, tasks)
+def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() -> None:
+    sample = TaskSample(Path("task"))
+    assert SampleResult.ready((sample,)).samples == (sample,)
+    for status, samples in ((SampleStatus.READY, ()), (SampleStatus.SKIPPED, (sample,))):
+        with pytest.raises(ValueError, match="READY result holds one or more samples"):
+            SampleResult(status, samples)
 
 
 def test_arrival_order_takes_the_oldest_units_up_to_the_maximum_count() -> None:
@@ -190,7 +192,7 @@ def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> N
         policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:3"),
         policy_trajectory("b", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, runtime_load_spans=spans),
         policy_trajectory("c", (1, 2), (1,), (-0.1,), 1.0),
-        TaskItem(Path("task")),
+        TaskSample(Path("task")),
     )
     assert producing_runtime_load_ids(tasks) == frozenset({"e:1", "e:2", "e:3", None})
 
@@ -198,19 +200,39 @@ def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> N
 def test_the_stage_drops_held_units_behind_the_serving_version_but_not_a_reserved_batch() -> None:
     stage = InferenceRecord2Record()
     for record_id, version in (("old", "e:1"), ("new", "e:2")):
-        stage.settle(single(record_id, stage.pool.next_arrival_index()), TaskStatus.READY, frozenset({version}))
+        stage.settle(single(record_id, stage.pool.next_arrival_index()), SampleStatus.READY, frozenset({version}))
     stage.observe_serving_runtime_load_id("e:1")
     stage.observe_serving_runtime_load_id("e:2")
     stage.pool.reserve(stage.pool.ordered_units())
-    stage.drop_stale_units(0)
+    stage.drop_stale_units()
     assert len(stage.pool) == 2
 
     stage.pool.release_reservation()
-    stage.drop_stale_units(0)
+    stage.drop_stale_units()
     assert [held.unit_id for held in stage.pool.units()] == ["new"]
     assert stage.take_ended() == frozenset({"old"})
     assert "old" in stage.releasable_record_ids()
     assert set(stage.producing_runtime_load_ids) == {"new"}
+
+
+def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
+    assert Record2RecordSettings().max_staleness == 0
+    assert InferenceRecord2Record.from_config({}, context=PipelineContext("s"), environ={}).max_staleness == 0
+    with pytest.raises(ValueError, match="max_staleness must be a non-negative int"):
+        Record2RecordSettings(max_staleness=-1)
+    with pytest.raises(PluginConfigError, match="max_staleness must be a non-negative int"):
+        InferenceRecord2Record.from_config({"max_staleness": -1}, context=PipelineContext("s"), environ={})
+
+
+def test_a_stage_drops_only_the_units_more_than_its_configured_limit_behind() -> None:
+    stage = InferenceRecord2Record.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
+    for record_id, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3")):
+        stage.settle(single(record_id, stage.pool.next_arrival_index()), SampleStatus.READY, frozenset({version}))
+    for version in ("e:1", "e:2", "e:3"):
+        stage.observe_serving_runtime_load_id(version)
+    stage.drop_stale_units()
+    assert [held.unit_id for held in stage.pool.units()] == ["one-behind", "current"]
+    assert stage.take_ended() == frozenset({"two-behind"})
 
 
 def test_a_serving_version_of_another_incarnation_restarts_the_served_versions() -> None:

@@ -14,7 +14,7 @@ A typical Reef workflow includes the following steps:
 3. **Report.** An entity provides a *report* containing feedback for the
    response associated with the *receipt* to Reef.
 4. **Learn.** Reef runs the training / learning process against the reports in
-   batches according to its *recipe*.
+   training jobs according to its *recipe*.
 5. **Evolve.** Reef potentially creates a new version of the *artifact*, which
    may become immediately effective (e.g. model evolution) or requires a pull
    from the harness to take effect (e.g. harness evolution).
@@ -146,21 +146,21 @@ with no GPU.
            -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
          # x-reef-agent-record-id: ee5aa401634b4567bf9dae21816abde4
 
-   #. **Read the release chain.**
+   #. **Read the artifacts.**
 
       .. code:: bash
 
          curl -sS -H "Authorization: Bearer reef-local" \
-           http://127.0.0.1:8900/reef/scenarios/hello-reef/releases
-         # {"scenario": "hello-reef", "releases": [{"release_id": "...", "operation": "creation", "current": true, ...}]}
+           http://127.0.0.1:8900/reef/scenarios/hello-reef/artifacts
+         # {"scenario": "hello-reef", "artifacts": [{"artifact_id": "...", "operation": "creation", "active": true, ...}]}
 
-      One release, and it will stay at one: this deployment's recipe is the
+      One artifact, and it will stay at one: this deployment's recipe is the
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
 start from ``recipes/sao/examples/imo_answerbench/serve.yaml``. It selects
 ``recipe.implementation: recipes.sao.recipe:SAORecipe`` and configures the
-training driver and model workers.
+Slime training workers and the serving engine.
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 

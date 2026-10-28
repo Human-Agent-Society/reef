@@ -27,17 +27,17 @@ from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
-    EpisodeScorer,
     FailureObservation,
     HarnessCandidate,
-    HarnessEpisodeEvaluator,
+    HarnessRolloutEvaluator,
+    RolloutScorer,
     evaluation_selection,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.mutations import (
     Mutation,
     MutationError,
@@ -47,25 +47,19 @@ from reef.harness.tree.mutations import (
     admit_mutations,
     nodes_from_entries,
 )
-from reef.harness.tree.nodes import (
-    ALWAYS_REVIEWED_KINDS,
-    NODE_KINDS,
-    RESERVED_ENTRY_IDS,
-    clip_record_text,
-    directive_shaped,
-    secret_shaped,
-)
+from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_text, directive_shaped, secret_shaped
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor
+from reef.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.storage.tasks import TaskStore
+from reef.surface.files import entries_file, read_entries
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.manifest import FailureManifest, advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import AgentHost, Promoter, Proposer, ProposerCalls, StepProposal
-from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
+from reef.train.types import JobData, TrainStepResult, TrajectorySample, trajectories
 
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
@@ -91,7 +85,7 @@ def _mutation_record(mutation: Mutation) -> dict[str, Any]:
     return {"op": mutation.op, "id": mutation.id, "options": options}
 
 
-def _prompt_of(sample: TrajectoryItem) -> str | None:
+def _prompt_of(sample: TrajectorySample) -> str | None:
     """The trace's last user message, the prompt ``evaluate`` scores; ``None`` for a tool-only turn."""
     messages = recorded_payload(sample).get("messages")
     if not isinstance(messages, Sequence):
@@ -111,13 +105,13 @@ def _prompt_of(sample: TrajectoryItem) -> str | None:
     return None
 
 
-def _default_promote(samples: Sequence[TrajectoryItem]) -> list[str]:
+def _default_promote(samples: Sequence[TrajectorySample]) -> list[str]:
     """The default policy: every trace's user prompt is a candidate task."""
     prompts = (_prompt_of(sample) for sample in samples)
     return [prompt for prompt in prompts if prompt is not None]
 
 
-def _client_of(sample: TrajectoryItem) -> str:
+def _client_of(sample: TrajectorySample) -> str:
     """The client that sent a trace: its x-reef-tag-client, else its session tag, else ``untagged``."""
     metadata = recorded_payload(sample).get("metadata")
     tags = metadata.get("tags") if isinstance(metadata, Mapping) else None
@@ -128,7 +122,7 @@ def _client_of(sample: TrajectoryItem) -> str:
     return "untagged"
 
 
-def _source_of(sample: TrajectoryItem) -> dict[str, Any]:
+def _source_of(sample: TrajectorySample) -> dict[str, Any]:
     """What a proposer may know about where a sample came from; the text itself stays untrusted."""
     return {"record": source_record_id(sample), "client": _client_of(sample), "untrusted": True}
 
@@ -347,7 +341,7 @@ def eval_task_paths(store: TaskStore) -> tuple[str, ...]:
 
 
 class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgressReader):
-    """Settle one proposal per step through episode pairs.
+    """Settle one proposal per step through rollout pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies
     under one snapshot and settles under one selection decision: the whole set
@@ -376,32 +370,30 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         *,
         descriptor: AdapterDescriptor,
         propose: Proposer,
-        score_episode: EpisodeScorer,
+        score_rollout: RolloutScorer,
         tasks: tuple[str, ...],
         models: ModelBindings | ModelBinding,
         model_resolver: ModelBindingsResolver | None = None,
         binary: str | None = None,
-        episode_timeout_s: float = 600.0,
-        episode_repeats: int = 1,
+        rollout_timeout_s: float = 600.0,
+        rollout_repeats: int = 1,
         forbid_residue: bool = False,
         max_steps: int = 0,
         max_failure_streak: int = 0,
         max_model_calls_per_step: int = 0,
-        executor: EpisodeExecutor | None = None,
+        executor: ProgramExecutor | None = None,
         promote_failures: bool = False,
         max_promoted_tasks: int = 50,
         max_promoted_per_client: int = 5,
         promote: Promoter | None = None,
         recheck_every: int = 0,
         max_rejected_history: int = 25,
-        publish: str = "auto",
-        review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         proposals_dir: str | Path | None = None,
         max_pending_proposals: int = 8,
         step_record_dir: str | Path | None = None,
         worker_executor: ExecutorSettings | None = None,
-        agent_executor: EpisodeExecutor | None = None,
+        agent_executor: ProgramExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
         eval_task_store: TaskStore | None = None,
@@ -423,13 +415,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._models = models
         self._model_resolver = model_resolver
         if (
-            isinstance(episode_timeout_s, bool)
-            or not isinstance(episode_timeout_s, (int, float))
-            or episode_timeout_s <= 0
+            isinstance(rollout_timeout_s, bool)
+            or not isinstance(rollout_timeout_s, (int, float))
+            or rollout_timeout_s <= 0
         ):
-            raise ValueError("episode_timeout_s must be a positive number")
-        if isinstance(episode_repeats, bool) or not isinstance(episode_repeats, int) or episode_repeats < 1:
-            raise ValueError("episode_repeats must be an integer of at least 1")
+            raise ValueError("rollout_timeout_s must be a positive number")
+        if isinstance(rollout_repeats, bool) or not isinstance(rollout_repeats, int) or rollout_repeats < 1:
+            raise ValueError("rollout_repeats must be an integer of at least 1")
         if not isinstance(forbid_residue, bool):
             raise ValueError("forbid_residue must be a boolean")
         for label, value in (
@@ -442,7 +434,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
         worker_selection, worker_requirements = evaluation_selection(
-            score_episode, worker_executor or ExecutorSettings()
+            score_rollout, worker_executor or ExecutorSettings()
         )
         Executor.get_class(worker_selection.settings.backend)
         # Proposals that a settlement filed already. A later abort of the same step does not refuse them.
@@ -452,7 +444,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._max_failure_streak = max_failure_streak
         self._max_model_calls_per_step = max_model_calls_per_step
         # Preflighted at build (recipe.build), so a hosted deployment that
-        # requires the sandbox fails to start, not at the first episode.
+        # requires the sandbox fails to start, not at the first rollout.
         self._executor = executor or LocalExecutor()
         if max_promoted_tasks < 0:
             raise ValueError("max_promoted_tasks must be at least 0")
@@ -464,10 +456,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._promote_task = promote
         self._recheck_every = recheck_every
         self._max_rejected_history = max_rejected_history
-        if publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
-        self._publish = publish
-        self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
         # Selected compositions render into temporary source trees before the
         # scenario committer copies them into repository-owned storage.
@@ -501,7 +489,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         for label, timeout in (("agent_timeout_s", agent_timeout_s), ("agent_trial_timeout_s", agent_trial_timeout_s)):
             if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
                 raise ValueError(f"{label} must be a positive number")
-        # The agent proposer runs the same harness as the episodes, under its own isolation.
+        # The agent proposer runs the same harness as the rollouts, under its own isolation.
         self._agent_binary = self._binary
         if agent_executor is not None:
             agent_executor, self._agent_binary = agent_executor.for_program(program, binary=binary)
@@ -509,24 +497,24 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._agent_executor = agent_executor
         self._agent_timeout_s = float(agent_timeout_s)
         self._agent_trial_timeout_s = float(agent_trial_timeout_s)
-        # The served binding renders into episodes only. The evaluator resolves
+        # The served binding renders into rollouts only. The evaluator resolves
         # it here, so an adapter without a matching model_binding refuses boot,
         # not the first step.
-        self._episode_evaluator = HarnessEpisodeEvaluator(
+        self._rollout_evaluator = HarnessRolloutEvaluator(
             descriptor=descriptor,
-            scorer=score_episode,
+            scorer=score_rollout,
             tasks=tasks,
             models=models,
             binary=self._binary,
-            episode_timeout_s=float(episode_timeout_s),
-            episode_repeats=episode_repeats,
+            rollout_timeout_s=float(rollout_timeout_s),
+            rollout_repeats=rollout_repeats,
             executor=self._executor,
             forbid_residue=forbid_residue,
             worker_selection=worker_selection,
             worker_requirements=worker_requirements,
         )
         # Direct Python users should close explicitly; GC is a fallback only.
-        self._pool_finalizer = weakref.finalize(self, self._episode_evaluator.close)
+        self._pool_finalizer = weakref.finalize(self, self._rollout_evaluator.close)
 
     def close(self) -> None:
         self._pool_finalizer()
@@ -616,6 +604,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         published = {
             **render_composition(nodes_from_entries(entries), self._descriptor),
             **tree_files(self._descriptor, entries),
+            **entries_file(entries),
         }
         artifact = Artifact.local(_write_rendered_files(published))
         # commit_applied discards the rendered directory once the commit is durable, as it does a step's.
@@ -629,6 +618,24 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
         )
 
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step evolves the entries that ``artifact`` holds (``read_entries``).
+
+        The recheck target belongs to the old start, so it is dropped. Raise
+        ``ValueError`` when the artifact holds no entries, or when they do not
+        pass the admission a proposal meets.
+        """
+        if artifact.local_path is None:
+            raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
+        entries = read_entries(artifact.local_path)
+        admitted, refusal = admit_mutations(entries, (), self._descriptor)
+        if refusal is not None:
+            raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
+        kept = {
+            key: value for key, value in state.items() if key not in ("recheck_entries", "recheck_evaluation_context")
+        }
+        return {**kept, "entries": [dict(entry) for entry in admitted]}
+
     @property
     def step_progress(self) -> StepProgress | None:
         """The running step's phase, start and activity so far, ``None`` between steps (see ``StepProgress``)."""
@@ -639,7 +646,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     def prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
@@ -647,7 +654,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._step_progress = None
         self._failed_step = {}
         try:
-            prepared = self._prepare_step(batch, state, scenario_step)
+            prepared = self._prepare_step(data, state, scenario_step)
         except BaseException:
             if self._step_progress is not None:
                 self._failed_step = {"failed_stage": self._step_progress.phase}
@@ -663,14 +670,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     def _prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
-        samples = trajectories(batch)
+        samples = trajectories(data)
         if self._model_resolver is not None:
             self._models = self._model_resolver.resolve()
-            self._episode_evaluator.use_models(self._models)
+            self._rollout_evaluator.use_models(self._models)
         steps = int(state.get("steps", 0)) + 1
         entries = state.get("entries")
         if entries is not None:
@@ -705,25 +712,25 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         promoted_clients = dict(state.get("promoted_clients", {}))
         if promoted_clients:
             carried["promoted_clients"] = promoted_clients
-        # Carried through skips so a no-commit step keeps the rollback target.
-        rollback_entries = state.get("rollback_entries")
-        rollback_evaluation_context = state.get("rollback_evaluation_context")
-        if rollback_entries is not None:
-            carried["rollback_entries"] = rollback_entries
-            carried["rollback_evaluation_context"] = rollback_evaluation_context
+        # Carried through skips so a no-commit step keeps the recheck target.
+        recheck_entries = state.get("recheck_entries")
+        recheck_evaluation_context = state.get("recheck_evaluation_context")
+        if recheck_entries is not None:
+            carried["recheck_entries"] = recheck_entries
+            carried["recheck_evaluation_context"] = recheck_evaluation_context
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(samples)}
-        # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
-        if batch.request is None and self._max_steps and steps > self._max_steps:
+        # The budgets stop a runaway automatic loop; a skip consumes its data, so an instruction runs instead.
+        if data.request is None and self._max_steps and steps > self._max_steps:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
                 metrics={**metrics, "skipped": f"step budget of {self._max_steps} exhausted"},
             )
         streak = int(state.get("failure_streak", 0))
-        if batch.request is None and self._max_failure_streak and streak >= self._max_failure_streak:
+        if data.request is None and self._max_failure_streak and streak >= self._max_failure_streak:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
                 metrics={
@@ -768,7 +775,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["step_record"] = str(step_dir)
         # From here the step is under way for the request page; the proposer runs next.
         self._step_calls = None
-        self.step_request_id = None if batch.request is None else batch.request.id
+        self.step_request_id = None if data.request is None else data.request.id
         self._step_progress = StepProgress(
             request_id=self.step_request_id,
             phase="proposing",
@@ -776,20 +783,20 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             step_record=None if step_dir is None else str(step_dir),
         )
         # Re-evaluate the last-good tree against the published one on cadence or when the served model changed.
-        drifted = rollback_evaluation_context is not None and rollback_evaluation_context != self.evaluation_context()
+        drifted = recheck_evaluation_context is not None and recheck_evaluation_context != self.evaluation_context()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
-        if batch.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
-            target = [dict(entry) for entry in rollback_entries]
+        if data.request is None and self._recheck_every and recheck_entries is not None and (due or drifted):
+            target = [dict(entry) for entry in recheck_entries]
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
             metrics["recheck_reason"] = "drift" if drifted else "cadence"
-            # A recheck asks the proposer nothing, so its record holds episodes only.
+            # A recheck asks the proposer nothing, so its record holds rollouts only.
             metrics["proposer_calls"] = 0
             metrics["proposer_seconds"] = 0.0
             metrics["proposer_input_tokens"] = metrics["proposer_output_tokens"] = 0
             return PreparedStep.with_candidate(
                 HarnessCandidate(
-                    candidate_id=f"{batch.batch_id}:recheck",
+                    candidate_id=f"{data.data_id}:recheck",
                     candidate_files=render_composition(nodes_from_entries(target), self._descriptor),
                     current_files=render_composition(nodes_from_entries(published), self._descriptor),
                     candidate_entries=tuple(target),
@@ -809,8 +816,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # An agent's pending proposal goes first; the method proposes only when none waits.
         inbox = self.proposals
         # A manual request owns this step; an unrelated inbox proposal must
-        # not consume its batch without the proposer reading the instruction.
-        claimed = None if inbox is None or batch.request is not None else inbox.claim()
+        # not consume its data without the proposer reading the instruction.
+        claimed = None if inbox is None or data.request is not None else inbox.claim()
         if inbox is not None and claimed is not None:
             metrics["proposal"] = {
                 "id": claimed.id,
@@ -837,14 +844,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if self._propose.runs_agent:
                 # No agent executor configured: the proposer gets None and answers without an agent.
                 agent_host = self._agent_host(step_dir, calls)
-                if agent_host is None and batch.request is not None:
+                if agent_host is None and data.request is not None:
                     calls.note("proposer", "the agent proposer is off on this host; the text proposer answers")
             handed: dict[str, Any] | None = None
-            if batch.request is not None:
+            if data.request is not None:
                 if not self._propose.reads_requests:
                     raise ValueError("an instruction step requires a proposer whose reads_requests is true")
                 # A fresh dict the method may extend: the requires items it adds join the commit's after the screens.
-                handed = {"id": batch.request.id, **batch.request.to_dict(), "untrusted": True}
+                handed = {"id": data.request.id, **data.request.to_dict(), "untrusted": True}
             try:
                 proposal = self._propose.propose(
                     self._nodes(),
@@ -865,10 +872,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
             # Recorded, not charged: the platform meters served traffic, the evolve step only counts its own.
             metrics["proposer_input_tokens"], metrics["proposer_output_tokens"] = _proposer_tokens(record)
-            if batch.request is not None and handed is not None:
-                requires, refused = merged_requires(batch.request.requires, handed.get("requires"))
+            if data.request is not None and handed is not None:
+                requires, refused = merged_requires(data.request.requires, handed.get("requires"))
                 requires_count = len(requires)
-                metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
+                metrics["training_request"] = {"id": data.request.id, **data.request.to_dict(), "requires": requires}
                 if refused:
                     metrics["training_request"]["refused_requires"] = refused
             if isinstance(proposal, StepProposal):
@@ -897,7 +904,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._loader.root.update([dict(entry) for entry in admitted])
         return PreparedStep.with_candidate(
             HarnessCandidate(
-                candidate_id=f"{batch.batch_id}:candidate",
+                candidate_id=f"{data.data_id}:candidate",
                 candidate_files=render_composition(self._nodes(), self._descriptor),
                 current_files=current_files,
                 candidate_entries=tuple(dict(entry) for entry in self._entries()),
@@ -912,21 +919,21 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         )
 
     def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
-        """Run the evaluation episodes of the named ``sides`` with :class:`HarnessEpisodeEvaluator`."""
+        """Run the evaluation rollouts of the named ``sides`` with :class:`HarnessRolloutEvaluator`."""
         candidate = self._require_harness_candidate(candidate)
         progress = self._step_progress
         if progress is not None:
-            # The evaluation's size for the page; the pool answers all at once, so no per-episode count is kept.
-            episodes_total = self._episode_evaluator.episode_count(candidate, len(tuple(sides)))
-            self._step_progress = replace(progress, phase="evaluating", episodes_total=episodes_total)
-        return self._episode_evaluator.evaluate(candidate, sides=sides)
+            # The evaluation's size for the page; the pool answers all at once, so no per-rollout count is kept.
+            rollouts_total = self._rollout_evaluator.rollout_count(candidate, len(tuple(sides)))
+            self._step_progress = replace(progress, phase="evaluating", rollouts_total=rollouts_total)
+        return self._rollout_evaluator.evaluate(candidate, sides=sides)
 
     def settle_step(
         self,
         prepared: PreparedStep,
         decision: SelectionDecision,
     ) -> TrainStepResult:
-        # The result is in: the page reads the committed row from here on, the trainer's reserved batch covering
+        # The result is in: the page reads the committed row from here on, the trainer's reserved data covering
         # the commit window.
         self._step_progress = None
         candidate = self._candidate_from(prepared)
@@ -934,7 +941,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
         # Raw score vectors and failure observations stay inside the
         # structured evaluation record. The policy owns any derived
-        # comparison metrics, while this backend keeps the stable episode
+        # comparison metrics, while this backend keeps the stable rollout
         # totals at the top level of the commit metrics.
         evaluation_metrics = dict(decision.evaluation.metrics)
         evaluation_metrics.pop("candidate_scores", None)
@@ -967,26 +974,26 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         else:
             streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
         metrics["evaluation_context"] = self.evaluation_context()
-        # A publish stores the replaced tree and its evaluation stamp as the rollback target; a rollback consumes it.
-        rollback_entries = prepared.state.get("rollback_entries")
-        rollback_evaluation_context = prepared.state.get("rollback_evaluation_context")
+        # A publish stores the replaced tree and its evaluation stamp as the recheck target; a recheck consumes it.
+        recheck_entries = prepared.state.get("recheck_entries")
+        recheck_evaluation_context = prepared.state.get("recheck_evaluation_context")
         if candidate.recheck and decision.selected:
             metrics["rolled_back"] = True
-            rollback_entries = None
-            rollback_evaluation_context = None
+            recheck_entries = None
+            recheck_evaluation_context = None
         elif candidate.recheck:
             metrics["rolled_back"] = False
         elif decision.selected and self._recheck_every:
-            rollback_entries = list(candidate.current_entries)
-            rollback_evaluation_context = metrics["evaluation_context"]
+            recheck_entries = list(candidate.current_entries)
+            recheck_evaluation_context = metrics["evaluation_context"]
         state = {**prepared.state, "failure_streak": streak}
         if manifest is not None:
             state["failure_manifest"] = manifest.to_state()
-        state.pop("rollback_entries", None)
-        state.pop("rollback_evaluation_context", None)
-        if rollback_entries is not None:
-            state["rollback_entries"] = rollback_entries
-            state["rollback_evaluation_context"] = rollback_evaluation_context
+        state.pop("recheck_entries", None)
+        state.pop("recheck_evaluation_context", None)
+        if recheck_entries is not None:
+            state["recheck_entries"] = recheck_entries
+            state["recheck_evaluation_context"] = recheck_evaluation_context
         # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))
@@ -1025,19 +1032,20 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # The loader writes live changes into the rows it holds, config included; the returned state shares none.
             self._loader.root.update([copy.deepcopy(entry) for entry in entries])
             # The published tree carries its entries list too, so a resident process can mount it entry by entry.
-            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries)}
+            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries), **entries_file(entries)}
             artifact = Artifact.local(_write_rendered_files(published))
             step = int(state["steps"])
             replaced = self._rendered_publications.get(step)
             if replaced is not None:
                 replaced.discard()
             self._rendered_publications[step] = artifact
-            # Under review, or when a reviewed kind is touched, the release waits for a promote; loop code is
-            # reviewed whether or not the deployment listed it.
-            pending = self._publish == "review" or bool(
-                (self._review_kinds | ALWAYS_REVIEWED_KINDS) & self._mutation_kinds(candidate)
+            # The scenario's activation rule decides whether the kept tree serves, from the kinds it changes.
+            return TrainStepResult(
+                {**state, "entries": entries},
+                metrics,
+                artifact=artifact,
+                changed_kinds=frozenset(self._mutation_kinds(candidate)),
             )
-            return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])

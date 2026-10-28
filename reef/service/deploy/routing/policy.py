@@ -31,7 +31,7 @@ from aiohttp import (
     DummyCookieJar,
 )
 
-from reef.runtime.recovery import fsync_dir, write_json
+from reef.runtime.durable_files import fsync_dir, write_json
 
 #: At most this many bytes of one management reply are read and decoded; any remainder is not read.
 MANAGEMENT_REPLY_LIMIT_BYTES = 16 * 1024 * 1024

@@ -45,8 +45,8 @@ to Reef's training or inference-token capture path.
 ## Offline tasks with a known answer
 
 Independent tasks from a fixed set, each with a reference answer. The recipe
-samples a batch through Reef, trains on it, and serves the next batch from
-the update.
+samples one job's responses through Reef, trains on them, and serves the next
+responses from the update.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
@@ -69,9 +69,9 @@ with its prompt, tools, and tool executor taken from the pinned checkout in
 the task image and its model calls served by Reef; the two simulator roles
 stay outside Reef, the verifier scores the run from its `world.nmdb`, and
 each finished week's change in company value is reported against the
-week's decision turns while the episode runs. It demonstrates how to adopt
+week's decision turns while the rollout runs. It demonstrates how to adopt
 a benchmark's agent as a Reef harness and how to shape an online,
-per-period reward for one long episode.
+per-period reward for one long rollout.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto
@@ -123,14 +123,14 @@ from `GET /reef/harness`, and seals rounds for the preregistered gain
 criterion carried verbatim from the sealed campaign. Its `harbor/` is one
 WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
-one-episode reef-eval smoke over it.
+one-rollout reef-eval smoke over it.
 
 [Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
 turns a plain-language request into a harness update. The served model
-proposes the change and the gate scores it, and code extensions wait for a
-promote before they run. `reef serve --recipe reefine` starts its profile
+proposes the change and an evaluation checks it. Code extensions wait for a
+person to activate them before they run. `reef serve --recipe reefine` starts its profile
 without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
-records a bug-fix flow, a research loop, and which requests won the gate.
+records a bug-fix flow, a research loop, and which requests passed the evaluation.
 
 ## Basic
 
@@ -170,7 +170,7 @@ Around those stacks, the loop on the Harbor task standard: a
 Harbor agent harness that records its model call through Reef and reports
 the verifier reward back at trial end (`harness/`), the loop written out
 (`run.py` — [reef-eval](https://github.com/Human-Agent-Society/reef-eval)'s
-`Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
+`Lab.run`, one rollout), and a launcher (`run.sh`) that starts Reef from
 `external-provider.yaml` with local overrides and runs it.
 
 ## Beta recipes
@@ -202,7 +202,7 @@ instruction, a container, a verifier and a reference solution, a task any
 Harbor agent can run. SPADE is a task generator. The deployment selects it as
 the generator of the generated-task stages in its `pipeline` section, and the
 built-in generated-task recipe runs the tasks and trains on them. Writing, checking and running tasks is Reef's
-(`reef.record2task.generator`, the generator service `reef serve` starts beside the
+(`reef.record2sample.generator`, the generator service `reef serve` starts beside the
 HTTP service). The package holds the method: the Designer's adversarial
 experience section, the hint arm each task asks for, and the hint based regret
 reported against the Designer's receipt. The Designer's own training follows.

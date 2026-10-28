@@ -76,6 +76,7 @@ def create_skill_surface(layers: Sequence[SkillLayer]) -> Surface:
                 validator=SkillValidator(layer_tuple),
                 inference=SkillInferenceHooks(request_layers) if request_layers else None,
                 files=TextFileTree(),
+                kind="harness_plugin",
             )
         }
     )

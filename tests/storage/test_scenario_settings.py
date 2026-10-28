@@ -46,7 +46,12 @@ def open_storage(request, tmp_path):
 def test_settings_default_replace_and_stay_per_scenario(open_storage):
     storage = open_storage()
     assert storage.read_settings("math") == ScenarioSettings()
-    settings = ScenarioSettings(model_config=MODEL, training_mode="manual")
+    settings = ScenarioSettings(
+        model_config=MODEL,
+        training_mode="manual",
+        artifact_evaluation={"harness": {"name": "terminus-2"}},
+        activation={"module": "evaluated", "config": {"min_mean_score": 0.5}},
+    )
     storage.write_settings("math", settings)
     assert open_storage().read_settings("math") == settings
     assert open_storage().read_settings("code") == ScenarioSettings()

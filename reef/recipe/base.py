@@ -14,34 +14,30 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.repository import BaseArtifactSource
+from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
-from reef.core.plugins import PluginConfigError
+from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
-from reef.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
+from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.record2task import Record2Task
-from reef.runtime.interfaces import (
-    InferenceHandler,
-    InferenceRuntime,
-    MultimodalRelay,
-    TrainingMethod,
-    TrainingRuntime,
-)
+from reef.record2sample import Record2Sample
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingMethod
+from reef.runtime.jobs import ReleaseLayout, TrainingComponent
+from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
-from reef.task2batch import NoBatches
-from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
+from reef.train.jobs import FixedJobPlan, JobLoop, JobPlan, JobRequest
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
-from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
@@ -71,7 +67,7 @@ class ServedEndpoint:
     ``url`` is the service's base URL and ``token`` a bearer token it accepts.
     ``component`` names the release component the recipe evolves when it is
     one of several: its evaluation calls then leave that component's served
-    hooks out, since the episode runs a candidate of it.
+    hooks out, since the rollout runs a candidate of it.
     """
 
     url: str
@@ -88,8 +84,8 @@ class ServedEndpoint:
 class Recipe:
     """Default inference recipe and base contract for update recipes.
 
-    Instantiating ``Recipe`` directly records traffic without producing update
-    batches. Specialized recipes are frozen dataclasses over this base: they
+    Instantiating ``Recipe`` directly records traffic without producing job
+    data. Specialized recipes are frozen dataclasses over this base: they
     add their own fields, override ``build`` and, when needed, narrow the
     ``runtime`` field.
     """
@@ -99,11 +95,13 @@ class Recipe:
 
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
-    training_runtime: TrainingRuntime | None = None
+    training_component: TrainingComponent | None = None
 
     training_mode: str = config_field("auto")
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
     pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
+    #: The deployment's ``activation`` section: the rule that activates new artifacts; None is ``always``.
+    activation: PluginReference | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):
@@ -113,8 +111,15 @@ class Recipe:
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        """The recipe's default stage classes. The default passes records through and makes no batch."""
+        """The recipe's default stage classes. The default passes records through and makes no job data."""
         return PipelineSpec()
+
+    def activation_rule(self) -> ActivationRule:
+        """The rule that decides whether an artifact that the recipe's trainers make serves (``activation``)."""
+        try:
+            return build_activation_rule(self.activation)
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc
 
     def stages(self) -> PipelineConfig:
         """The pipeline's stage classes and their configs."""
@@ -135,14 +140,14 @@ class Recipe:
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """Directories that belong to one scenario alone, archived when the scenario is deleted.
 
-        The record-to-task stage names them.
+        The record-to-sample stage names them.
         """
-        stage = self.stages().record2task
-        return Record2Task.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
+        stage = self.stages().record2sample
+        return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
-        if config.runtime is not None and self.training_runtime is not None:
+        if config.runtime is not None and self.training_component is not None:
             raise RecipeConfigError("model overrides require an inference-only runtime")
         return self
 
@@ -153,14 +158,14 @@ class Recipe:
         *,
         config: Mapping[str, Any] | None = None,
         runtime: InferenceRuntime | None = None,
-        training_runtime: TrainingRuntime | None = None,
+        training_component: TrainingComponent | None = None,
     ) -> Recipe:
         values = os.environ if environ is None else environ
         settings = config or {}
         data = settings.get("data", {})
         resolved = resolve_config_field_values(cls, data, values)
         return cls.from_resolved_config(
-            settings, resolved, environ=values, runtime=runtime, training_runtime=training_runtime
+            settings, resolved, environ=values, runtime=runtime, training_component=training_component
         )
 
     @classmethod
@@ -171,7 +176,7 @@ class Recipe:
         *,
         environ: Mapping[str, str],
         runtime: InferenceRuntime | None = None,
-        training_runtime: TrainingRuntime | None = None,
+        training_component: TrainingComponent | None = None,
     ) -> Recipe:
         """Construct from values resolved before runtime allocation.
 
@@ -182,7 +187,7 @@ class Recipe:
             return cls(
                 **cls._recipe_kwargs(config, environ),
                 runtime=cls._resolve_runtime(environ, runtime),
-                training_runtime=training_runtime,
+                training_component=training_component,
                 **field_values,
             )
         except ValueError as exc:
@@ -194,14 +199,21 @@ class Recipe:
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        """Recipe-specific keyword arguments resolved from config sections: the ``pipeline`` section's stages."""
+        """Recipe-specific keyword arguments resolved from config sections: the ``pipeline`` section's stages and
+        the ``activation`` section's rule."""
+        kwargs: dict[str, Any] = {}
         pipeline = settings.get("pipeline")
-        if pipeline is None:
-            return {}
+        activation = settings.get("activation")
         try:
-            return {"pipeline_stages": PipelineConfig.from_setting(pipeline, spec=cls.pipeline_spec(), environ=values)}
+            if pipeline is not None:
+                kwargs["pipeline_stages"] = PipelineConfig.from_setting(
+                    pipeline, spec=cls.pipeline_spec(), environ=values
+                )
+            if activation is not None:
+                kwargs["activation"] = activation_reference(activation)
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        return kwargs
 
     @classmethod
     def select_weight_training(
@@ -210,7 +222,7 @@ class Recipe:
         """The weight training recipe class a deployment of this class trains with, and that recipe's own config.
 
         Read from ``config`` alone, before anything is constructed: the service
-        decides from it whether to connect a training runtime and launch a
+        decides from it whether to connect a training component and launch a
         training backend. ``None`` for a recipe that trains no weights.
         """
         return None
@@ -346,9 +358,9 @@ class Recipe:
         checks = every_check(component.validator, self.build_artifact_validator())
         return replace(surface, components={name: replace(component, validator=checks)})
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
-        return None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The content of the deployment's base artifact, which every new scenario starts from; empty by default."""
+        return BaseArtifactSource()
 
     @property
     def harness_adapter(self) -> str | None:
@@ -358,10 +370,6 @@ class Recipe:
         the process shares it, so the scenario list names it before a
         scenario loads.
         """
-        return None
-
-    def bootstrap_artifact_component(self) -> str | None:
-        """The release component a bootstrap model snapshot belongs to; ``None`` places it at the release root."""
         return None
 
     def serving_status(self) -> Mapping[str, Any] | None:
@@ -378,21 +386,16 @@ class WeightTrainingSpec:
     """Static machinery a weight-training recipe binds to its configuration.
 
     Keeping the binding behind one explicit hook leaves the recipe dataclass
-    to describe instance configuration only. The service and training driver
-    can still inspect a recipe class without constructing it.
+    to describe instance configuration only. The service can still inspect a
+    recipe class without constructing it.
 
-    ``scheduling`` is how the training runtime cuts each reserved batch into
-    optimizer steps (rollout unit, step size, epochs, shuffle, remainder). It
-    is the recipe's choice, not the objective's; the objective only rejects a
-    schedule its loss cannot train, at build time and again in the backend.
-
-    ``objective`` is the recipe's startup objective: the training backend
-    starts with its loss family, and every job trains with it unless the
-    recipe overrides :meth:`WeightTrainingRecipe.training_method_selector`.
+    ``objective`` is the recipe's objective: a registered name or a dotted
+    ``package.module:Objective`` reference. Every job trains with it unless
+    the recipe overrides :meth:`WeightTrainingRecipe.job_plan`. How a job's
+    data is cut into optimizer steps belongs to the training component.
     """
 
     objective: str
-    scheduling: StepScheduling = field(default_factory=StepScheduling)
 
     @property
     def loss_family(self) -> str:
@@ -404,79 +407,84 @@ class WeightTrainingSpec:
 class WeightTrainingRecipe(Recipe):
     """Shared recipe contract for backend algorithms that update weights.
 
-    Requires an independent :class:`TrainingRuntime` in ``training_runtime``
-    (the first positional argument of every training recipe).
+    Requires a :class:`~reef.runtime.jobs.TrainingComponent` in
+    ``training_component`` (the first positional argument of every training
+    recipe), which runs the recipe's training jobs.
 
-    :meth:`training_spec` binds the task-to-batch stage, the training objective, which declares its
-    backend loss family, and the step schedule. Keeping that static machinery in one structured return value
-    means the dataclass fields remain the recipe's instance configuration. The
-    training driver reads the selected class from the same deployment config
-    and obtains its loss family from this hook; deployments do not repeat that
-    binding in an environment variable.
-
-    ``max_staleness`` is the number of versions that a sample can lag behind
-    the version that the scenario serves and still train. Zero keeps
-    exact-version training. The default :meth:`build` gives the value to the
-    pipeline as ``PipelineContext.max_staleness``. The record-to-record stage
-    drops the data that lags more.
-
-    ``candidate_evaluation`` is framework-owned configuration derived from an
-    optional top-level ``evaluation`` section. The plugin class it names builds one
-    candidate evaluator per scenario with ``from_config``, replacing the backend's default
-    metrics-only evaluator and selection policy without changing the recipe's
-    method-specific config fields.
+    :meth:`training_spec` binds the training objective, which declares its
+    backend loss family. Keeping that static machinery in one structured
+    return value means the dataclass fields remain the recipe's instance
+    configuration. The service reads the selected class from the same
+    deployment config and obtains its loss family from this hook; deployments
+    do not repeat that binding in an environment variable.
 
     ``pipeline_stages`` is framework-owned configuration derived from an
     optional top-level ``pipeline`` section: each stage's class, the recipe's
     :meth:`pipeline_spec` unless the section names another, and its config.
 
-    Configuration is declared as fields: a config field
-    (``max_staleness: int = config_field(0, env="REEF_MAX_STALENESS")``, see
+    Configuration is declared as fields: a config field (see
     :mod:`reef.recipe.config_fields`) is simultaneously the YAML key, the
     environment fallback, and the type-aware parser. :meth:`service_config`
     and :meth:`from_environment` derive everything from those fields, so a
     recipe never repeats a setting's name or type anywhere else.
     """
 
-    training_runtime: TrainingRuntime = field(kw_only=False)
+    training_component: TrainingComponent = field(kw_only=False)
     runtime: InferenceRuntime = field(kw_only=True)
-    max_staleness: int = config_field(0, env="REEF_MAX_STALENESS")
-    candidate_evaluation: CandidateEvaluationConfig | None = field(default=None, repr=False, compare=False)
+    job_parameters: Mapping[str, Any] | None = config_field(
+        None,
+        help=(
+            "Job parameters that the default job plan sends with every job, beside method; the training "
+            "component refuses a parameter it does not take."
+        ),
+    )
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        """Return the task-to-batch stage, objective and step-schedule binding for this recipe.
+        """Return the objective binding for this recipe.
 
-        Concrete weight recipes override this hook. A recipe with bespoke
-        trainer wiring may omit ``task2batch`` and override :meth:`build`.
+        Concrete weight recipes override this hook to name their objective.
         """
         return WeightTrainingSpec(objective="")
 
-    def training_method_selector(self) -> TrainingMethodSelector:
-        """How this recipe picks the objective and learning-rate schedule of each training job.
+    def job_plan(self) -> JobPlan:
+        """How this recipe chooses each training job.
 
-        The default trains every job with ``training_spec().objective`` and the
-        backend's configured learning rate. A recipe that switches methods
+        The default submits one job each time job data is ready to the recipe's
+        training component, with ``training_spec()``'s objective (the
+        parameter ``method``) and the ``job_parameters`` config, such as a
+        ``scheduling`` or a ``save_interval``. The component's own defaults
+        fill the rest, such as its learning rate. A recipe that switches methods
         within one run (a supervised phase before policy training, a
-        distillation phase after it) returns its own selector, built from its
-        config fields; the backend still starts with the spec's objective.
+        distillation phase after it) returns its own plan, built from its
+        config fields; the training component switches the objective from one
+        job to the next.
         """
-        return FixedTrainingMethodSelector(TrainingMethod(type(self).training_spec().objective))
+        spec = type(self).training_spec()
+        parameters = dict(self.job_parameters or {})
+        parameters["method"] = TrainingMethod(spec.objective).to_dict()
+        return FixedJobPlan(JobRequest(parameters))
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
-            raise ValueError("max_staleness must be a non-negative integer")
-        self.resolve_training_runtime(self.training_runtime)
+        if self.job_parameters is not None and "method" in self.job_parameters:
+            raise RecipeConfigError("job_parameters cannot set method: the recipe's objective is the job's method")
+        self.resolve_training_component(self.training_component)
         if not isinstance(self.runtime, InferenceRuntime):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
 
     def build_surface(self, scenario: str) -> Surface:
-        if self.training_runtime.concurrent_training_scenarios:
-            # Every scenario owns an adapter on the shared base: route by
-            # scenario and the frozen artifact's publication.
-            return create_weight_surface(scenario=scenario, runtime=self.runtime)
-        return create_weight_surface(adapter_name=self.runtime.serving_adapter_name())
+        layout = ReleaseLayout(self.training_component)
+        if self.runtime.per_scenario_adapters:
+            # Every scenario owns an adapter on the shared base: route by scenario.
+            return create_weight_surface(
+                scenario=scenario, runtime=self.runtime, kind=self.runtime.served_weight_kind, layout=layout
+            )
+        return create_weight_surface(kind=self.runtime.served_weight_kind, layout=layout)
+
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The training component's untrained checkpoint (``TrainingComponent.base_artifact_source``)."""
+        return self.training_component.base_artifact_source()
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """The engine's adapter residency on a runtime that serves per-scenario adapters."""
@@ -484,14 +492,14 @@ class WeightTrainingRecipe(Recipe):
         return None if status is None else {"adapters": status}
 
     @classmethod
-    def resolve_training_runtime(cls, runtime: TrainingRuntime | None) -> TrainingRuntime:
-        if runtime is None:
+    def resolve_training_component(cls, component: TrainingComponent | None) -> TrainingComponent:
+        if component is None:
             raise RecipeConfigError(
-                f"{cls.__name__} requires a training runtime; pass one via the 'training_runtime' argument"
+                f"{cls.__name__} requires a training component; pass one via the 'training_component' argument"
             )
-        if not isinstance(runtime, TrainingRuntime):
-            raise TypeError(f"{cls.__name__} requires a TrainingRuntime, got {type(runtime).__name__}")
-        return runtime
+        if not isinstance(component, TrainingComponent):
+            raise TypeError(f"{cls.__name__} requires a TrainingComponent, got {type(component).__name__}")
+        return component
 
     @classmethod
     def select_weight_training(
@@ -535,16 +543,7 @@ class WeightTrainingRecipe(Recipe):
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
         cls._validate_config(settings)
-        kwargs = super()._recipe_kwargs(settings, values)
-        evaluation = settings.get("evaluation")
-        if evaluation is not None:
-            if not isinstance(evaluation, Mapping):
-                raise RecipeConfigError("evaluation must be an object")
-            try:
-                kwargs["candidate_evaluation"] = CandidateEvaluationConfig.from_dict(evaluation, environ=values)
-            except CandidateEvaluationConfigError as exc:
-                raise RecipeConfigError(str(exc)) from exc
-        return kwargs
+        return super()._recipe_kwargs(settings, values)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:
@@ -589,9 +588,9 @@ class WeightTrainingRecipe(Recipe):
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
-        if type(self).pipeline_spec().task2batch is NoBatches:
+        if type(self).pipeline_spec().sample2job is NoJobData:
             raise TypeError(
-                f"{type(self).__name__} declares no task2batch: return a PipelineSpec with a Task2Batch subclass "
+                f"{type(self).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
                 f"from pipeline_spec() or override build() for bespoke trainer wiring"
             )
         if not spec.objective:
@@ -600,36 +599,20 @@ class WeightTrainingRecipe(Recipe):
                 f"(see reef.train.algos) or a dotted 'module:Objective' path from training_spec(), "
                 f"or override build()"
             )
-        # Validate the method and its schedule before starting workers. The
-        # runtime carries the reference and the schedule to the backend, which
-        # resolves the objective in its own process before batch partitioning.
-        resolve_objective(spec.objective).validate_scheduling(spec.scheduling)
-        candidate_evaluator = None
-        if self.candidate_evaluation is not None:
-            candidate_evaluator = build_candidate_evaluation(
-                self.candidate_evaluation,
-                runtime=self.runtime,
-                training_runtime=self.training_runtime,
-                scenario=scenario,
+        # Resolve the objective before starting workers, so an unknown reference fails the build.
+        resolve_objective(spec.objective)
+        # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
+        try:
+            return Trainer.build(
+                scenario,
+                records,
+                pipeline_factory=self.build_pipeline,
+                job_loop=JobLoop(self.training_component, self.job_plan(), scenario=scenario),
+                algorithm_state=algorithm_state,
+                report_type=self.report_type,
+                experiment_logger=experiment_logger,
+                training_mode=self.training_mode,
+                task_storage=task_storage,
             )
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=self.build_pipeline,
-            candidate_backend=RuntimeCandidateBackend(
-                self.training_runtime,
-                self.training_method_selector(),
-                spec.scheduling,
-                inference_runtime=self.runtime,
-                loss_family=spec.loss_family,
-                scenario=scenario,
-            ),
-            candidate_evaluator=candidate_evaluator,
-            algorithm_state=algorithm_state,
-            report_type=self.report_type,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-            max_staleness=self.max_staleness,
-            task_storage=task_storage,
-            batch_size=self.training_runtime.batch_size,
-        )
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc

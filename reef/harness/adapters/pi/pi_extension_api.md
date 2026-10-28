@@ -166,7 +166,7 @@ Name the model in the body. These routes do not stream, and answer 501 when the 
 
 ## Rules for a reef tree entry
 
-- Return before registering anything when process.env.PI_OFFLINE is set: evaluation episodes are hermetic and must see no network calls, prompts or timers.
+- Return before registering anything when process.env.PI_OFFLINE is set: evaluation rollouts are hermetic and must see no network calls, prompts or timers.
 - Credentials come from process.env at run time, never from the file: admission refuses a credential shaped literal, and the tree persists every version.
 - Choose state lifetime deliberately. Transient mode state can live in the extension factory and reset when
   the session runtime is recreated. State that must survive resume/fork needs session entries or tool result

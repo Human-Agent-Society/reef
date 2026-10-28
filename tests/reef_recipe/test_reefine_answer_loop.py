@@ -26,7 +26,7 @@ from tests.reef_service.test_harness_example import (
     skill,
 )
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.recipe.reefine import evolution
 
 #: An extension pi's admission refuses: it writes to the session's stdout while it has a UI.

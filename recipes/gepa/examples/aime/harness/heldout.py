@@ -1,6 +1,6 @@
 """Per-example checkpoints for the two sealed test passes.
 
-A test pass is 150 Pi episodes against one composition, so it is the part of
+A test pass is 150 Pi rollouts against one composition, so it is the part of
 a run most likely to be interrupted and the part that must never be paid for
 twice. Each example's score lands in its own file keyed by the example and
 the composition it was measured on; a resumed pass skips what is finished and
@@ -26,9 +26,9 @@ def fingerprint(value: Any) -> str:
 class CheckpointedEvaluator:
     """Score a held-out batch with one durable result file per example.
 
-    Episodes are independent, so ``workers`` of them run at once; each writes
+    Rollouts are independent, so ``workers`` of them run at once; each writes
     its own checkpoint the moment it finishes, so an interruption mid-wave
-    loses only the episodes still in flight.
+    loses only the rollouts still in flight.
     """
 
     def __init__(self, root: Path, *, workers: int = 1) -> None:
@@ -47,7 +47,7 @@ class CheckpointedEvaluator:
         """The per-example scores for ``tasks`` under ``composition``.
 
         ``run`` is called only for examples with no checkpoint; it returns the
-        score and whatever record of the episode belongs beside it.
+        score and whatever record of the rollout belongs beside it.
         """
         composition_sha256 = fingerprint(dict(composition))
 

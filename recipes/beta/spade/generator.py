@@ -1,7 +1,7 @@
 """The SPADE task generator: the Environment Designer's generations, with the hint based regret as its signal.
 
 One ``generate`` call is one generation: ``count`` proposals across the configured ``skills``, each a
-Designer call through the generator service (``reef.record2task.generator``), with the last generation's
+Designer call through the generator service (``reef.record2sample.generator``), with the last generation's
 results in the prompt as SPADE's experience section.
 
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
@@ -47,6 +47,7 @@ from recipes.beta.spade.generation import (
 )
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
+from reef.harness.client.tasks import rewards_of
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -55,8 +56,7 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.processor import rewards_of
-from reef.record2task.generator.client import (
+from reef.record2sample.generator.client import (
     DuplicateTask,
     Generator,
     GeneratorError,
@@ -65,8 +65,8 @@ from reef.record2task.generator.client import (
     TaskNameConflict,
     WrittenTask,
 )
-from reef.record2task.generator.designer import DIFFICULTIES, DesignerRequest
-from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator.designer import DIFFICULTIES, DesignerRequest
+from reef.record2sample.generator.inputs import TaskGenerationRequest
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,7 @@ class SpadeTaskGenerator(TaskGenerator):
         Staging the task again returns the copy that the recipe ran. The plays report on the ``hint`` arm,
         which the recipe does not train on.
         """
-        episodes = await self.service.run_episodes(
+        rollouts = await self.service.run_rollouts(
             (await self.service.write_task(task)).path,
             scenario=self.scenario,
             arm=HINT_ARM,
@@ -301,7 +301,7 @@ class SpadeTaskGenerator(TaskGenerator):
             tags={"generation": str(generation)},
             model=self.served_model,
         )
-        return rewards_of(episodes)
+        return rewards_of(rollouts)
 
     async def write(self, task: HarborTask) -> WrittenTask:
         """Write a task; only a description-based generation's rerun may replace a conflicting name."""

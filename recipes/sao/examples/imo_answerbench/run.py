@@ -11,10 +11,10 @@ For each task, in order:
 
 The ordering is the experiment: task N+1 measures what task N taught. That
 only holds if task N's rollouts have actually trained before task N+1
-starts, so after each episode the loop blocks until the scenario's version
-chain carries one ``training`` release per scored rollout so far. Rollouts
+starts, so after each rollout the loop blocks until the scenario's version
+log carries one ``training`` step per scored rollout so far. Rollouts
 are quick at this model size while a train step also saves a checkpoint and
-publishes weights; without the barrier the episode loop finishes ahead of
+publishes weights; without the barrier the rollout loop finishes ahead of
 training and the process exit tears the stack down over a queue of
 never-trained rollouts.
 """
@@ -42,27 +42,24 @@ HERE = Path(__file__).resolve().parent
 TASKS = ["imo-4", "imo-8", "imo-12"]
 AGENT = {"name": "harness:HarborAgent", "model_name": MODEL}
 #: Ceiling on waiting for one task's six training steps (checkpoint saves
-#: and weight publishes included) before moving on with a warning.
+#: and weight publishes included) before failing the run.
 TRAIN_DRAIN_TIMEOUT_S = 1800
 
 #: The service is gone or rejecting requests; waiting cannot help.
 _SERVICE_GONE = -1
 
 
-def training_release_count() -> int | None:
-    """Training releases committed so far; ``None`` while the service is busy.
+def training_step_count() -> int | None:
+    """Training steps committed so far; ``None`` while the service is busy.
 
-    The scenario's registry lock serializes release reads with training, so
+    The scenario's registry lock serializes status reads with training, so
     this request legitimately stalls for the length of an in-flight train
     step (which includes a checkpoint save and a weight publish). A timeout
     is "try again", not an error. A refused connection or an HTTP rejection
     is terminal: the stack is gone or this loop is talking to something that
     is not its deployment, and waiting cannot change either.
     """
-    request = urllib.request.Request(
-        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-    )
+    request = urllib.request.Request(f"{SERVICE_URL}/reef/status", headers={"Authorization": f"Bearer {TOKEN}"})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read())
@@ -74,23 +71,24 @@ def training_release_count() -> int | None:
         return None  # stalled behind a train step — try again
     except TimeoutError:
         return None
-    return sum(1 for row in payload["releases"] if row.get("operation") == "training")
+    # This run activates nothing and sets no training start, so each commit of the scenario is a training step.
+    scenario = payload["scenarios"].get(SCENARIO)
+    return 0 if scenario is None else int(scenario["scenario_step"])
 
 
 def wait_for_training(expected: int) -> None:
-    """Block until ``expected`` rollouts have each committed a training release."""
+    """Block until ``expected`` rollouts have each committed a training step."""
     deadline = time.time() + TRAIN_DRAIN_TIMEOUT_S
     trained = None
     while time.time() < deadline:
-        trained = training_release_count()
+        trained = training_step_count()
         if trained == _SERVICE_GONE:
-            print("    WARNING: the Reef service is not reachable; skipping the training drain")
-            return
+            raise RuntimeError("The Reef service is not reachable during the training drain")
         if trained is not None and trained >= expected:
             print(f"    trained: {trained}/{expected} rollouts committed")
             return
         time.sleep(10)
-    print(f"    WARNING: only {trained}/{expected} rollouts trained within {TRAIN_DRAIN_TIMEOUT_S}s")
+    raise TimeoutError(f"Only {trained}/{expected} rollouts trained within {TRAIN_DRAIN_TIMEOUT_S}s")
 
 
 async def main():
@@ -101,4 +99,5 @@ async def main():
         wait_for_training(expected=(position + 1) * ROLLOUTS)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

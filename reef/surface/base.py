@@ -12,11 +12,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.components import validate_component_name
+from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
 
 
@@ -37,36 +39,31 @@ class ServingRuntime(ABC):
 
 
 class WeightRuntime(ServingRuntime):
-    """A runtime that can inspect and restore served model weights."""
+    """A runtime that serves published model weights.
 
-    @abstractmethod
-    def serving_runtime_load_id(self) -> str | None: ...
+    A runtime load ID names the weights that serve a request. A runtime that
+    loads weights makes a new ``RuntimeLoadId`` string for each load. A
+    runtime that loads nothing, such as a proxy, uses the release ID, since the
+    release alone names what serves.
+    """
 
     @abstractmethod
     def current_runtime_load_id(self) -> str | None:
-        """Return the version that Reef acknowledged as published. An update that is not committed does not count."""
+        """The runtime load ID of the last release the runtime activated, of any scenario.
+
+        ``None`` when the runtime activated none, or loads nothing and names no load.
+        """
 
     @abstractmethod
-    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Load the rolled-back release ``artifact``; return the runtime load ID that serves it.
-
-        ``scenario`` names the release's scenario exactly when the runtime
-        serves a separate adapter per scenario.
-        """
-
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Bind a recovered or republished artifact before the scenario serves it.
+        """Serve the published release ``artifact``; return the runtime load ID that serves it.
 
-        Called once a release is final and before traffic routes to it, with
-        ``scenario`` as for :meth:`restore_checkpoint`. The
-        default binds nothing and returns the release ID: for runtimes whose
-        serving update and Reef publication are one operation, the artifact
-        already names what the engine serves. A runtime that serves immutable
-        remote snapshots overrides this to select the sampler and training
-        state the artifact references, and returns the runtime load ID it
-        now serves under.
+        Reef calls it at a commit that activates a release, at an activation
+        and at a start, before traffic routes to the release. ``scenario`` names
+        the release's scenario exactly when the runtime serves a separate
+        adapter per scenario. A raise leaves the runtime serving what it served
+        before.
         """
-        return artifact.ref.release_id
 
 
 class AdapterWeightRuntime(WeightRuntime):
@@ -77,37 +74,22 @@ class AdapterWeightRuntime(WeightRuntime):
 
 
 class ArtifactLoader(ABC):
-    """Runtime-backed artifact loading and startup recovery."""
+    """Make a component's published releases servable on the runtime."""
 
     @abstractmethod
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef: ...
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
+        """Make the published release ``artifact`` servable; return the runtime load ID that serves it.
 
-    @abstractmethod
-    def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str: ...
+        Called once a release is final: after startup recovery has read the
+        active artifact from the commit history, after a commit has published
+        its release, and at an activation. It runs before the scenario routes
+        traffic to the release. ``source`` names the staged artifact whose
+        bytes a commit published.
+        """
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
         """Return the runtime load ID that serves the committed ``artifact``, or None when it is unknown."""
         return None
-
-
-class ArtifactActivator(ArtifactLoader):
-    """Optional loader capability: make a published release servable.
-
-    Called once a release is final — after startup recovery has a
-    materializable head and after a publication or rollback commit has
-    minted its release — and before the scenario routes traffic to it.
-    ``source`` names the artifact whose bytes a rollback republished.
-    """
-
-    @abstractmethod
-    def activate(
-        self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None
-    ) -> str: ...
 
 
 class InferenceHooks(ABC):
@@ -148,9 +130,8 @@ class FileTree(ABC):
 
 @dataclass(frozen=True)
 class HarnessInfo:
-    """What the harness routes need beyond the file tree: the seed behind the base release and the served model."""
+    """What the harness routes need beyond the file tree: the served model and the models a client may pick."""
 
-    seed_entries: tuple[Mapping[str, Any], ...] = ()
     served_model: str | None = None
     #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
     served_api: str = "openai"
@@ -162,18 +143,42 @@ class HarnessInfo:
     served_metadata: ModelMetadata | None = None
 
 
+class ArtifactLayout(ABC):
+    """The directory layout of one component's artifacts, which an artifact import must meet (RFC #980).
+
+    ``check(directory)`` returns when ``directory`` holds an artifact of the component, in the layout of the
+    component's releases, and every remote path it names resolves on the component's service. Otherwise it raises
+    ``ValueError`` naming what does not hold. Purpose: a recipe binds it on ``ComponentSurface.layout``; the
+    committer checks an import's directory with it.
+    """
+
+    @abstractmethod
+    def check(self, directory: Path) -> None: ...
+
+
 @dataclass(frozen=True)
 class ComponentSurface:
-    """How one named component of a release is admitted, loaded, injected, and read.
+    """How one named component of a release is admitted, loaded, injected, and read, and what kind it is.
 
     ``None`` means the capability is absent. ``validator`` runs before the
     component is published or restored; it defaults to accepting anything.
+    ``kind`` is the ``ArtifactKind`` of every artifact of the component, or
+    ``None`` when the component is no side of a policy, such as the records
+    of a trainer that serves nothing, or when the surface declares no kind.
+    ``layout`` checks an imported directory; ``None`` means the component
+    takes no import.
     """
 
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
     loader: ArtifactLoader | None = None
     inference: InferenceHooks | None = None
     files: FileTree | None = None
+    kind: ArtifactKind | None = None
+    layout: ArtifactLayout | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is not None and self.kind not in ARTIFACT_KINDS:
+            raise ValueError(f"component kind must be one of {ARTIFACT_KINDS} or None, got {self.kind!r}")
 
 
 class ChainedLease(InferenceLease):
@@ -260,7 +265,7 @@ class Surface:
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
     harness: HarnessInfo | None = None
     #: The whole release's own admission check, run before each component's: on the release a step publishes and
-    #: on a release a rollback or promote restores. A recipe binds its checks on ``ComponentSurface.validator``; this
+    #: on a release an activation serves. A recipe binds its checks on ``ComponentSurface.validator``; this
     #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
     #: a whole, as every recipe's did before components existed (a composite moves it onto that recipe's component).
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
@@ -360,7 +365,7 @@ class Surface:
     def inference_for_evaluation(self, component: str | None) -> InferenceHooks | None:
         """The request hooks of an evaluation call that runs a candidate of ``component``: every other component's.
 
-        The episode renders its own candidate of that component, so the served
+        The rollout renders its own candidate of that component, so the served
         release's hooks for it would mix the served content into the
         candidate's calls (a skill catalog, for one); the rest of the release
         (weights, request defaults) is served as it is. ``None`` names the only
@@ -412,16 +417,6 @@ class Surface:
             return True
         return current.entries[name].content_id != before.entries[name].content_id
 
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef:
-        """The head the runtime can still serve after a restart; the checkpoint without a loader."""
-        loader = self.loader
-        return checkpoint if loader is None else loader.recover(current, checkpoint, runtime)
-
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
         """Return the runtime load ID that serves the committed release, or None when no component has a loader."""
         name = self.loader_component
@@ -431,15 +426,6 @@ class Surface:
         if loader is None:
             return None
         return loader.served_runtime_load_id(self.component_artifact(artifact, name), runtime)
-
-    def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> None:
-        """Load the runtime-loaded component of a rollback target; nothing without a loader."""
-        name = self.loader_component
-        if name is None:
-            return
-        loader = self.components[name].loader
-        if loader is not None:
-            loader.load(self.component_artifact(artifact, name), runtime)
 
     def activate(
         self,
@@ -458,7 +444,7 @@ class Surface:
         if name is None:
             return
         loader = self.components[name].loader
-        if not isinstance(loader, ArtifactActivator):
+        if loader is None:
             return
         if previous is not None and not self.component_changed(artifact, previous, name):
             return
@@ -472,7 +458,6 @@ class Surface:
 __all__ = [
     "AcceptAnyArtifact",
     "AdapterWeightRuntime",
-    "ArtifactActivator",
     "ArtifactLoader",
     "ComponentSurface",
     "FileTree",

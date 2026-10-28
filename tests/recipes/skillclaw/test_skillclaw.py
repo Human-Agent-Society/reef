@@ -1,5 +1,5 @@
 """Guarantees of the recipes/skillclaw method package, hermetic: the
-night's LLM is stubbed, probe episodes run a fake pi binary, docker tasks are
+night's LLM is stubbed, probe rollouts run a fake pi binary, docker tasks are
 faked, and the driver's dry run replays traffic through the real embedded
 service so the recorded requests carry the served pool's catalog."""
 
@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.train.test_harness_evolve_processor import harness_stages
 
@@ -23,7 +23,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.trajectories import recorded_payload
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
@@ -33,7 +33,7 @@ from reef.train.cordis_backend import Mutation
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "recipes" / "skillclaw"
 
-# A pi stand-in for the probe episodes: it writes the session file the
+# A pi stand-in for the probe rollouts: it writes the session file the
 # runner reads back as the trajectory and answers nothing, so probes dead
 # tie at 0.0 and publishing is the selection policy's call alone.
 PI_FAKE = """\
@@ -60,7 +60,7 @@ NODES = (("skill", {"name": "answer-style", "text": _STARTER_TEXT}),)
 SEED = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": _STARTER_TEXT}},)
 
 #: The deployment's model binding, as reef passes it to propose and renders
-#: it into probe episodes. Tests stub the evolver's chat loop, so no call
+#: it into probe rollouts. Tests stub the evolver's chat loop, so no call
 #: ever reaches this endpoint.
 MODEL = ModelBindings(served=ModelBinding(base_url="http://127.0.0.1:9", model="demo-model", api_key="dummy"))
 
@@ -374,8 +374,8 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["pi-agent"]
     # The pool reaches traffic through the proxy; no harness tree is installed, so no adapter is named.
     assert surface.harness is None and built.harness_adapter is None
-    trainer = built.build("demo", SQLiteRecordStore())  # loads the seed; no episodes
-    assert isinstance(trainer, Trainer) and trainer.batch_size == 60
+    trainer = built.build("demo", SQLiteRecordStore())  # loads the seed; no rollouts
+    assert isinstance(trainer, Trainer) and trainer.job_samples == 60
 
 
 def test_seed_skills_must_name_an_existing_directory(example, tmp_path) -> None:
@@ -435,8 +435,8 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
     processor.push(_inference("inf-3"))
     processor.push(_report("rep-3", 1.0, "inf-3"))
     assert processor.ready(3)
-    batch = processor.build_batch(3)
-    assert sorted(sample.metadata.get("reward") for sample in batch.items) == [0.0, 1.0, 1.0]
+    batch = processor.build_job_data(3)
+    assert sorted(sample.metadata.get("reward") for sample in batch.samples) == [0.0, 1.0, 1.0]
 
 
 # -- the campaign driver, dry: embedded service, faked docker day -----------
@@ -457,7 +457,7 @@ def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int)
     skillclaw = example["skillclaw"]
     return example["skillclaw_recipe"].SkillClawRecipe(
         resolve_proposer(skillclaw.propose),
-        resolve_episode_scorer(skillclaw.evaluate),
+        resolve_rollout_scorer(skillclaw.evaluate),
         ("[sieve] probe",),
         binary=str(make_binary(tmp_path)),
         seed=SEED,
@@ -596,7 +596,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         service.stop()
 
 
-def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
+def test_poke_night_recovers_a_pending_job_data(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
     night_llm(example, monkeypatch)  # every decision skips: the night commits without an artifact
     run_dir = tmp_path / "run"
     recipe = _dry_recipe(example, tmp_path, batch_size=1)
@@ -711,7 +711,7 @@ def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> Non
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:
     """The ported retry loop now drives reef's binding: temperature dropped
     on the provider's 400, stream-only fallback folded, model never named."""
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
 
     evolver = example["evolver"]
     seen: list[dict[str, Any]] = []

@@ -248,7 +248,7 @@ class ToolOutcome(NamedTuple):
 
 
 class ContainerTools(Workspace):
-    """The agent's tools and workspace in the task container, from the episode thread."""
+    """The agent's tools and workspace in the task container, from the rollout thread."""
 
     def __init__(
         self,

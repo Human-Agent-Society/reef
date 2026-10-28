@@ -15,15 +15,15 @@ from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
-from reef.record2task import ReportTasks
+from reef.record2sample import ReportSamples
 from reef.runtime.interfaces import InferenceHandler
+from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2batch import Task2Batch
-from reef.train import PreparedStep, Trainer, TrainingBatch
+from reef.train import JobData, PreparedStep, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem
+from reef.train.types import TaskSample
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -45,22 +45,22 @@ def imported(record_id, payload=None, request_type="inference"):
     }
 
 
-class FeedbackTasks(ReportTasks):
+class FeedbackSamples(ReportSamples):
     def make_sample(self, context):
-        return TaskItem(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
+        return TaskSample(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
 
 
-class FeedbackBatches(Task2Batch):
-    def make_batch(self, tasks, batch_id):
-        return TrainingBatch(batch_id, tasks)
+class FeedbackJobData(Sample2Job):
+    def make_job_data(self, samples, data_id):
+        return JobData(data_id, samples)
 
 
 def feedback_pipeline(context):
     return TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2task=FeedbackTasks(),
-        task2batch=FeedbackBatches(context, None),
+        record2sample=FeedbackSamples(),
+        sample2job=FeedbackJobData(context, None, None),
     )
 
 
@@ -71,12 +71,12 @@ class LearningBackend(ExampleBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": state.get("trained", 0) + len(batch.items)})
+        return PreparedStep.skipped(state={"trained": state.get("trained", 0) + len(batch.samples)})
 
 
 @dataclass(frozen=True, kw_only=True)
 class LearningRecipe(Recipe):
-    batches: list[TrainingBatch] = field(default_factory=list)
+    batches: list[JobData] = field(default_factory=list)
 
     @property
     def report_type(self):
@@ -92,7 +92,7 @@ class LearningRecipe(Recipe):
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
-            batch_size=2,
+            default_job_samples=2,
         )
 
 
@@ -230,7 +230,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
             assert handler.calls == 2
             assert scenario.trainer.pipeline is processor
             assert len(scenario.store.history()) == len(recipe.batches) == 4
-            samples = [sample for batch in recipe.batches for sample in batch.items]
+            samples = [sample for batch in recipe.batches for sample in batch.samples]
             assert [sample.metadata["messages"][0]["content"] for sample in samples] == [
                 *(f"offline-{index}" for index in range(6)),
                 "online-0",

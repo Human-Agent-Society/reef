@@ -15,6 +15,7 @@ from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.storage.commits import CommitRecord
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -49,6 +50,10 @@ class OpaqueStore(ScenarioStore):
     @property
     def trajectories(self) -> TrajectoryStore:
         return self._inner.trajectories
+
+    @property
+    def evaluations(self) -> EvaluationStore:
+        return self._inner.evaluations
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()

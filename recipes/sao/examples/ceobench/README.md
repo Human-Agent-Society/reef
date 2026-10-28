@@ -15,13 +15,13 @@ and attributable. The two simulator roles (social posts and enterprise
 customers) stay outside Reef.
 
 ```text
-harbor/                one CEO-Bench episode as a Harbor task, the world and the verifier
+harbor/                one CEO-Bench rollout as a Harbor task, the world and the verifier
   task.toml              48h agent window and resource limits
   instruction.md         the task for Harbor (the model never sees it, CEO-Bench owns its prompt)
   environment/
     Dockerfile           python:3.13 + uv + the pinned CEO-Bench checkout, patched and rebuilt
     reef.patch           the changes the engine needs (described below)
-    engine.py            starts the episode's session and engine and stops it for the verifier
+    engine.py            starts the rollout's session and engine and stops it for the verifier
   tests/
     test.sh              runs the verifier inside the task container
     score.py             decrypts the run's world.nmdb and writes reward, final cash, survival days, bankrupt
@@ -31,12 +31,12 @@ harness/               the benchmark's bash agent (imports reef_client, not reef
   tools.py               its six tools, run in the agent's workspace inside the task container
   harbor_agent.py        plays one trial with the agent served by Reef and its weeks credited
   report.py              the reward, from weeks and valuation to scaled scores, posting, and the pacer
-serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic colocated
+serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic on the actor GPUs
 docker-compose.yaml    the stack in the reef image with host networking and six GPUs
-run.py                 one episode, trained while it is played
+run.py                 one rollout, trained while it is played
 run.sh                 brings the stack up and runs run.py through reef-eval
 pyproject.toml         makes the harness importable
-results/               the untrained baseline and the trained episode (weeks.csv, holds.csv, manifest.json)
+results/               the untrained baseline and the trained rollout (weeks.csv, holds.csv, manifest.json)
 ```
 
 ## The harness
@@ -56,7 +56,7 @@ credited, and how long the game waits for the trainer.
   for a response without a tool call or with arguments that are not JSON are
   kept, and so are its retry rules for API errors. Internal programming errors
   propagate to Harbor instead of being retried as model failures. The prompt and the tool
-  definitions are not copied into this repository. When an episode starts
+  definitions are not copied into this repository. When a rollout starts
   the harness reads them from the pinned checkout in the task image, built
   by the benchmark's own classes, so they are the benchmark's byte for byte.
 - **`tools.py`** is the benchmark's tool executor with `bash`, `read_file`,
@@ -69,7 +69,7 @@ credited, and how long the game waits for the trainer.
   benchmark sandboxes the same shell with `bwrap` where it can, and here the
   container and the user boundary serve as the sandbox.
 - **`harbor_agent.py`** plays one Harbor trial. It has the task start the
-  episode's engine session through `harbor/environment/engine.py`, reads the
+  rollout's engine session through `harbor/environment/engine.py`, reads the
   engine's status, dashboard, and books over its HTTP API, and serves every
   model call through a reef-client proxy on the host's loopback.
   `reef_client.serve` replaces the `Authorization` header with the Reef
@@ -79,11 +79,11 @@ credited, and how long the game waits for the trainer.
 - **`report.py`** is the reward. Every captured turn is filed under the
   simulated week it was played in, since the harness knows the engine's day
   at every call. A finished week is credited as described under "Reward
-  shaping" and its decision turns are posted to Reef while the episode runs.
+  shaping" and its decision turns are posted to Reef while the rollout runs.
   The last weeks close with the final cash the engine reports when the
-  episode ends.
+  rollout ends.
 
-When the episode ends the run directory (`world.nmdb`, `config.json`,
+When the rollout ends the run directory (`world.nmdb`, `config.json`,
 `logs/`, and `agent_workspace/`) is downloaded next to the trial's agent
 logs. `turns.jsonl` there lists every tool call with its output, and the
 receipts go into the agent context in call order with their week, token
@@ -119,7 +119,7 @@ late-game `next-week` calls need.
 
 The two simulator roles, the customers who post on social media and the
 enterprise buyers, are LLM calls made inside the engine and outside Reef.
-The episodes recorded below run both on `Qwen3-4B-Instruct-2507`, served by
+The rollouts recorded below run both on `Qwen3-4B-Instruct-2507`, served by
 SGLang on a spare GPU of the same node as an OpenAI-compatible endpoint, so
 no paid API is involved.
 
@@ -167,15 +167,15 @@ decision turn of week N is reported with the week's credit as its score.
 - `score_N` clips the credit at `C` = 0.05 (`CEOBENCH_SCORE_CLIP`) and
   divides by the running median magnitude with a floor of `F` = 0.003
   (`CEOBENCH_SCORE_FLOOR`), so one six-figure R&D purchase cannot set the
-  scale for the whole episode.
+  scale for the whole rollout.
 - Only decision turns are reported, meaning tool calls that change the
   company (`DECISION_CALLS` in `harness/report.py`). Turns that only read
   are recorded but not trained on, and the same goes for turns over
   `CEOBENCH_TRAIN_MAX_TOKENS` (24k, the trainer's window).
 
 The game is paced to the trainer through `CEOBENCH_PACE_BATCH`, which is the
-recipe's batch size of 8. Before each model call the harness reports the
-weeks whose credit window has closed and then waits until every filled batch
+deployment's `job_samples` of 8. Before each model call the harness reports the
+weeks whose credit window has closed and then waits until every filled job
 has committed a release, so a week is played by a policy trained on every
 week reported so far. A wait longer than `CEOBENCH_PACE_TIMEOUT_S` (20
 minutes) is forgiven. `CEOBENCH_REPORTS=0` turns reporting and pacing off,
@@ -197,48 +197,48 @@ CEOBENCH_SEED=42 CEOBENCH_DAYS=500 ./run.sh
 
 `run.sh` reads `REEF_IMAGE` (default `reef`), `MODEL_DIR` (`~/models`),
 `RUN_DIR` (`./work`), and `REEF_GPU_0..5`. Those are the six devices the
-stack uses, four actor GPUs at TP4 with the critic colocated and a two-GPU
-rollout engine. The policy is `Qwen3.6-27B` trained through Megatron Bridge
+stack uses, four actor GPUs at TP4 with the critic on the same GPUs and a two-GPU
+serving engine. The policy is `Qwen3.6-27B` trained through Megatron Bridge
 LoRA. The base stays frozen in the actor and in the SAO critic, the adapters
-and the critic's value head train, and the rollout engine serves the
+and the critic's value head train, and the serving engine serves the
 published adapter. Turns longer than `CEOBENCH_TRAIN_MAX_TOKENS` (24k
 tokens, the largest a step fits beside the two resident bases, with the
 budget worked out in the header of `serve.yaml`) are served and recorded but
 not trained on. `run.sh` mints a token into `$RUN_DIR/token`, brings the
 stack up with `docker compose up --wait`, and runs `run.py` in an ephemeral
-`uv` environment with `reef-eval[harbor]` and this harness. The episode row
+`uv` environment with `reef-eval[harbor]` and this harness. The rollout row
 lands in `work/lab` and the trial's run directory under the trial's
 `agent/ceobench/`.
 
-This is test-time training. The policy adapts inside the episode it is
-scored on, and the number to compare is that episode's final cash against
+This is test-time training. The policy adapts inside the rollout it is
+scored on, and the number to compare is that rollout's final cash against
 the same seed played by the untrained model. The value model need not start
-cold. `serve.yaml` points `--critic-init` at `$RUN_DIR/critic-init`, and a
-copy of an earlier run's latest critic checkpoint placed there
-(`checkpoints/megatron-critic/iter_N` together with its
-`latest_checkpointed_iteration.txt`) is loaded with its weights and
-optimizer at the first start. The critic then trains on its own for two
+cold. To reuse an earlier critic, copy its `checkpoints/megatron-critic/iter_N`
+and `latest_checkpointed_iteration.txt` into `$RUN_DIR/critic-init`.
+Then uncomment `critic-init` in `serve.yaml`. Both weights and optimizer
+load at the first start. The critic then trains on its own for two
 commits before the actor's first update (`num-critic-only-steps`). An empty
-directory leaves it cold. Replicates are independent runs from the base
+directory now fails startup when `critic-init` is set. Leave the option
+commented out for a cold start. Replicates are independent runs from the base
 model with one stack each, so run `docker compose down` between them or use
-a fresh `RUN_DIR`. A Reef process trains one scenario for its lifetime, and
+a fresh `RUN_DIR`. A Slime deployment trains one scenario for its lifetime, and
 a second seed on the same stack would start from the first seed's adapter.
-After the episode `run.py` waits until the scenario's training releases
-have stopped growing for fifteen quiet minutes, which is longer than one
-step, so the adapter on disk is the one the episode ended with:
+After the rollout, `run.py` waits until the scenario's training releases
+have stopped growing for fifteen quiet minutes. This is longer than one step,
+so the adapter on disk is the one the rollout ended with:
 
 ```bash
 curl -sS -H "Authorization: Bearer $(cat work/token)" \
-  http://$(hostname -I | awk '{print $1}'):28900/reef/scenarios/ceobench-sao/releases
+  http://$(hostname -I | awk '{print $1}'):28900/reef/scenarios/ceobench-sao/artifacts
 ```
 
 ## Results
 
 Seed 42 and 500 days, which the benchmark rounds down to 71 whole weeks or
-497 days, with the simulator roles as above and one episode each. Neither
+497 days, with the simulator roles as above and one rollout each. Neither
 number is comparable with the leaderboard, because both simulator roles are
 a local `Qwen3-4B-Instruct-2507` (see "Simulator roles") and each row is one
-episode at temperature 1.0. Both episodes were played by the previous form
+rollout at temperature 1.0. Both rollouts were played by the previous form
 of this harness, which ran the benchmark's own runner inside the task
 container with its agent role redirected to Reef. The harness above plays
 the same agent from the host and is to be re-run.
@@ -246,7 +246,7 @@ the same agent from the host and is to be re-run.
 | Policy | Reward | Outcome | Final cash | `reward` |
 | --- | --- | --- | ---: | ---: |
 | `Qwen3.6-27B`, untrained (`CEOBENCH_REPORTS=0`) | none | bankrupt on day 255 (week 37) | -$66 | -0.00007 |
-| `Qwen3.6-27B`, trained in the episode (`serve.yaml`) | the weekly credit above | completed, day 497 | $257,682 | 0.258 |
+| `Qwen3.6-27B`, trained in the rollout (`serve.yaml`) | the weekly credit above | completed, day 497 | $257,682 | 0.258 |
 
 | Week | Day | Untrained cash | Subscribers | Trained cash | Subscribers | Engine MRR / month |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -267,7 +267,7 @@ the same agent from the host and is to be re-run.
 
 ### Untrained baseline
 
-The same episode with reporting off. `CEOBENCH_REPORTS=0` records the weeks
+The same rollout with reporting off. `CEOBENCH_REPORTS=0` records the weeks
 without posting them, so nothing trains and the engine serves the base
 model. It gets its own scenario and run directory:
 
@@ -278,7 +278,7 @@ RUN_DIR=$PWD/work-baseline REEF_SCENARIO=ceobench-baseline CEOBENCH_REPORTS=0 \
 ```
 
 `results/2026-09-13-baseline-qwen3.6-27b-seed42/` holds the manifest, the
-run configuration, and `weeks.csv`. This episode was served by a standalone
+run configuration, and `weeks.csv`. This rollout was served by a standalone
 SGLang engine at TP4 with the model's 262k window.
 
 | | |
@@ -291,13 +291,13 @@ grew to 671 subscribers by week 11 while losing $4,000 to $7,000 a week,
 bought five R&D tiers for $844,000 in all as subscribers churned, and went
 bankrupt on day 255.
 
-### Trained episode
+### Trained rollout
 
 `results/2026-09-14-trained-qwen3.6-27b-seed42/` holds the same files plus
 `holds.csv` with the pacer's holds, and its `weeks.csv` also records the
 engine's MRR, the values, the credit and score, and the decision counts. The
 run used `serve.yaml` as shipped, with batch 8, the critic warm-started from
-an earlier episode, and the pacer on.
+an earlier rollout, and the pacer on.
 
 | | |
 | --- | --- |
@@ -319,8 +319,8 @@ cost-cutting at $595 a week.
 
 ### What the comparison shows
 
-The trained episode ends with cash and the untrained one does not, which is
-what the benchmark scores. Both episodes still take the same shape of growth
+The trained rollout ends with cash and the untrained one does not, which is
+what the benchmark scores. Both rollouts still take the same shape of growth
 at a loss, one large purchase, and an empty company. The scheme did what it
 was built to do. Only decision turns were reported, the engine's MRR was
 read, scores stayed inside +-3, and the actor was updated from week 9. Yet

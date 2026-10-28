@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import time
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
 from tests.support._grouped_pg import grouped_policy_pipeline
-from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks, threshold_pipeline
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, candidate_backend, runtime_bindings
+from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
-import reef.record2task.assembly as reported_module
-from recipes.sao import SAOBatches, SAOTasks
-from recipes.tttd import TTTDBatches, TTTDGridSettings, TTTDGroupedRolloutReport, TTTDRecord2Record, TTTDTasks
+import reef.record2sample.assembly as reported_module
+from recipes.sao import SAOJobData, SAOSamples
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
@@ -25,16 +26,18 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.recipe import WeightTrainingRecipe
-from reef.record2record import ExclusiveReportRecord2Record, ReportGrouping, ReportRecord2Record
-from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingMethod
+from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
+from reef.record2record import ExclusiveReportRecord2Record
+from reef.record2sample.assembly import SampleAssemblySettings
+from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
-from reef.train.algos import StepScheduling
+from reef.train.algos.schedule import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectory_groups
+from reef.train.jobs import JobLoop
+from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.types import JobData, TrainStepResult, TrajectorySample
 
 NUM_GPUS = 0
 
@@ -43,8 +46,8 @@ def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
-        task2batch=SAOBatches(context, None),
+        record2sample=SAOSamples(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        sample2job=SAOJobData(context, None, None),
     )
 
 
@@ -60,21 +63,17 @@ def policy_plugin(backend: object, policy: type) -> CandidateEvaluationPlugin:
 
 
 class _PreparingBackend(CandidateBackend):
-    """Dispatched test backend that commits only the objective's state transition."""
+    """Test backend that commits only the objective's state transition."""
 
     def __init__(self, objective: str = "sft") -> None:
         self._objective = objective
-
-    @property
-    def dispatched(self) -> bool:
-        return True
 
     def initial_state(self):
         return {}
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, TrainingMethod(self._objective), state, StepScheduling(), step_size=1)
+        prepared = prepare_slime_job(batch, TrainingMethod(self._objective), state, StepScheduling(), step_size=1)
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -85,28 +84,6 @@ class _PreparingBackend(CandidateBackend):
 
     def abort_step(self, prepared):
         del prepared
-
-
-@pytest.mark.unit
-def test_training_backend_names_both_sides_of_the_durable_commit_handshake() -> None:
-    calls = []
-
-    class Receiver(StubInferenceRuntime):
-        def acknowledge_publication(self, training_job_id):
-            calls.append(training_job_id)
-
-    runtime = StubTrainingRuntime()
-    runtime.inference = Receiver(runtime, base_url="http://inference")
-    backend = candidate_backend(runtime, "sft", StepScheduling())
-
-    assert not hasattr(CandidateBackend, "reconcile")
-    assert hasattr(CandidateBackend, "recover_pending_step")
-    assert hasattr(CandidateBackend, "acknowledge_commit")
-    backend.recover_pending_step(4)
-    assert calls == []
-    backend.acknowledge_commit(5, "job-4")
-    assert calls == ["job-4"]
-    assert runtime.inference.inference_admission_status["open"]
 
 
 def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRecord:
@@ -190,7 +167,7 @@ def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
     processor.push(inference("good"))
     processor.push(report("bad-r", "bad", 0.1))
     processor.push(report("good-r", "good", 1.0))
-    assert [trajectory_reward(sample) for sample in processor.build_batch(2).items] == [0.1, 1.0]
+    assert [trajectory_reward(sample) for sample in processor.build_job_data(2).samples] == [0.1, 1.0]
 
 
 @pytest.mark.unit
@@ -199,10 +176,10 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     processor.push(inference("i1"))
     processor.push(report("r1", "i1", 0.8))
 
-    batch = processor.build_batch(1)
-    assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "math:batch:1"
-    (item,) = batch.items
+    batch = processor.build_job_data(1)
+    assert isinstance(batch, JobData)
+    assert batch.data_id == "math:data:1"
+    (item,) = batch.samples
     assert source_record_id(item) == "i1"
     assert trajectory_reward(item) == 0.8
     assert item.training["tokens"] == [1, 2]
@@ -234,8 +211,8 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     assert not processor.ready(1)
     processor.push(final_report)
 
-    batch = processor.build_batch(1)
-    (item,) = batch.items
+    batch = processor.build_job_data(1)
+    (item,) = batch.samples
     assert source_record_id(item) == "r1"
     assert trajectory_reward(item) == 0.75
     assert item.training["tokens"] == [10, 20, 11, 21]
@@ -244,7 +221,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     assert item.training["runtime_load_id"] == "wv-1"
     assert item.training["turn_count"] == 2
     assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
-    processor.acknowledge(batch.batch_id)
+    processor.acknowledge(batch.data_id)
     assert processor.releasable_record_ids() == frozenset({"i1", "i2", "r1"})
 
 
@@ -252,17 +229,17 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
 @pytest.mark.parametrize(
     "processor_type",
     [
-        pytest.param(SAOBatches, id="sao"),
+        pytest.param(SAOJobData, id="sao"),
         # openclawrl is absent: it consumes no reports, so multi-reference
         # assembly never happens there by construction.
-        pytest.param(TTTDBatches, id="tttd"),
+        pytest.param(TTTDJobData, id="tttd"),
     ],
 )
 def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
     processor_type,
     monkeypatch,
 ) -> None:
-    assembled_samples: list[TrajectoryItem] = []
+    assembled_samples: list[TrajectorySample] = []
     assembler = reported_module.make_multi_turn_policy_trajectory
 
     def record_assembly(*args, **kwargs):
@@ -274,7 +251,7 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
     monkeypatch.setattr(reported_module, "make_multi_turn_policy_trajectory", record_assembly)
 
     metadata = {}
-    if processor_type is TTTDBatches:
+    if processor_type is TTTDJobData:
         metadata = {
             "algorithm": "tttd",
             "step": 0,
@@ -285,22 +262,22 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
             "comparison_set": "tttd-step-0-group-0",
         }
 
-    if processor_type is TTTDBatches:
+    if processor_type is TTTDJobData:
         context = PipelineContext("math", TTTDGroupedRolloutReport)
         tttd_record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=1, rollouts_per_group=2))
         processor = TrainingPipeline(
             context,
             record2record=tttd_record2record,
-            record2task=TTTDTasks(SampleAssemblySettings(), tttd_record2record),
-            task2batch=TTTDBatches(context, tttd_record2record, None),
+            record2sample=TTTDSamples(SampleAssemblySettings(), tttd_record2record),
+            sample2job=TTTDJobData(context, tttd_record2record, None, None),
         )
     else:
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
             record2record=ExclusiveReportRecord2Record(context),
-            record2task=SAOTasks(SampleAssemblySettings()),
-            task2batch=SAOBatches(context, None),
+            record2sample=SAOSamples(SampleAssemblySettings()),
+            sample2job=SAOJobData(context, None, None),
         )
     processor.push(training_inference("i1", [10, 20], [1], [-0.1]))
     multi_turn_report = report("r1", ("i1", "i2"), 1.0, **metadata)
@@ -328,12 +305,12 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     with pytest.raises(ValueError, match="accept_multi_turn"):
         processor.push(report("multi", ("i2", "i3"), 1.0))
     assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "i3", "single", "multi"})
-    processor.acknowledge(processor.build_batch(1).batch_id)
+    processor.acknowledge(processor.build_job_data(1).data_id)
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
 
 
 @pytest.mark.unit
-def test_pairing_processor_raises_for_forked_multi_turn_episode() -> None:
+def test_pairing_processor_raises_for_forked_multi_turn_rollout() -> None:
     processor = threshold_pipeline(PipelineContext("math"), accept_multi_turn=True)
     processor.push(training_inference("i1", [1, 2, 3], [1], [-0.1]))
     processor.push(training_inference("i2", [1, 9, 3, 4], [1], [-0.2]))
@@ -362,9 +339,9 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
     processor.push(report("r2", "i1", 0.5))
     assert processor.releasable_record_ids() == frozenset({"r2"})
 
-    batch = processor.build_batch(1)
-    assert trajectory_reward(batch.items[0]) == 1.0
-    processor.acknowledge(batch.batch_id)
+    batch = processor.build_job_data(1)
+    assert trajectory_reward(batch.samples[0]) == 1.0
+    processor.acknowledge(batch.data_id)
     assert not processor.ready(1)
     assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
@@ -379,7 +356,7 @@ def test_pairing_retention_protects_low_score_feedback_until_consumed() -> None:
     processor.push(inference("i1"))
     processor.push(report("low", "i1", 0.1))
     assert processor.releasable_record_ids().isdisjoint({"i1", "low"})
-    processor.acknowledge(processor.build_batch(1).batch_id)
+    processor.acknowledge(processor.build_job_data(1).data_id)
     assert processor.releasable_record_ids() == {"i1", "low"}
 
 
@@ -388,8 +365,8 @@ def test_pairing_retention_does_not_protect_consumed_inferences() -> None:
     first = threshold_pipeline(PipelineContext("math"))
     first.push(inference("i1"))
     first.push(report("r1", "i1", 1.0))
-    batch = first.build_batch(1)
-    first.acknowledge(batch.batch_id)
+    batch = first.build_job_data(1)
+    first.acknowledge(batch.data_id)
 
     # Consumed inferences are released and may be compacted; the processor does
     # not require them to be retained across restart.
@@ -404,8 +381,8 @@ def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement()
         processor.push(inference(agent_record_id))
         processor.push(report("r" + agent_record_id, agent_record_id, score, comparison_set="set-a"))
 
-    batch = processor.build_batch(1)
-    processor.acknowledge(batch.batch_id)
+    batch = processor.build_job_data(1)
+    processor.acknowledge(batch.data_id)
     decision = processor.releasable_record_ids()
     assert decision == frozenset({"i1", "i2", "ri1", "ri2"})
 
@@ -415,8 +392,8 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor = threshold_pipeline(PipelineContext("math"))
     sft_processor.push(inference("i1"))
     sft_processor.push(report("r1", "i1", 1.0))
-    sft_result = prepare_slime_step(
-        sft_processor.build_batch(1), TrainingMethod("sft"), {}, StepScheduling(), step_size=1
+    sft_result = prepare_slime_job(
+        sft_processor.build_job_data(1), TrainingMethod("sft"), {}, StepScheduling(), step_size=1
     )
     assert sft_result.next_algorithm_state == {"steps": 1}
 
@@ -424,8 +401,8 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
         grpo_processor.push(inference(rid))
         grpo_processor.push(report("r" + rid, rid, score, comparison_set="x"))
-    result = prepare_slime_step(
-        grpo_processor.build_batch(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
+    result = prepare_slime_job(
+        grpo_processor.build_job_data(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
     )
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
@@ -436,20 +413,21 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     records.append(inference("i1"))
     records.append(report("r1", "i1", 1.0))
     trainer = Trainer.build(
-        "math", records, pipeline_factory=threshold_pipeline, candidate_backend=_PreparingBackend()
+        "math",
+        records,
+        pipeline_factory=threshold_pipeline,
+        candidate_backend=_PreparingBackend(),
+        default_job_samples=1,
     )
 
-    batch = trainer.reserve_training_batch()
-    assert batch is not None
-    # The reserved batch has not been consumed yet, so its sample is still counted as held.
-    assert trainer.pipeline_status() == {"ready_samples": 1, "buffer_size": 4, "batch_size": 1}
-    execution = trainer.execute_reserved_step(0)
-    result = execution.result
+    result = trainer.run_once(0)
 
     assert result is not None
+    assert trainer.pending_job_data is not None
+    # The reserved batch has not been consumed yet, so its sample is still counted as held.
+    assert trainer.pipeline_status() == {"ready_samples": 1, "buffer_size": 4, "job_samples": 1}
     assert result.metrics["samples"] == 1
     assert result.artifact is None
-    assert result.runtime_load_id is None
     assert trainer.state == {}
     prepared = trainer.prepare_commit(result)
     trainer.commit(prepared)
@@ -457,78 +435,79 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
 
 @pytest.mark.unit
-def test_trainer_batches_its_batch_size_and_buffers_four_batches_only_with_a_backend() -> None:
+def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -> None:
     records = SQLiteRecordStore()
     for sequence in range(3):
         records.append(inference(f"i{sequence}"))
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
     trainer = Trainer.build(
-        "math", records, pipeline_factory=threshold_pipeline, candidate_backend=_PreparingBackend(), batch_size=2
+        "math",
+        records,
+        pipeline_factory=threshold_pipeline,
+        candidate_backend=_PreparingBackend(),
+        default_job_samples=2,
     )
-    assert trainer.pipeline.context.default_buffer_size == 8
-    batch = trainer.reserve_training_batch()
-    assert batch is not None and len(batch.items) == 2
-    # The trainer stops reading records once it holds one batch.
-    assert trainer.pipeline_status() == {"ready_samples": 2, "buffer_size": 8, "batch_size": 2}
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 8)
+    assert trainer.run_once() is not None
+    data = trainer.pending_job_data
+    assert data is not None and len(data.samples) == 2
+    # The trainer stops reading records once it holds one job's data.
+    assert trainer.pipeline_status() == {"ready_samples": 2, "buffer_size": 8, "job_samples": 2}
 
-    observer = Trainer.build("math", records, pipeline_factory=threshold_pipeline, batch_size=2)
-    assert observer.pipeline.context.default_buffer_size is None
+    observer = Trainer.build("math", records, pipeline_factory=threshold_pipeline, default_job_samples=2)
+    assert observer.pipeline.context.default_job_samples is None
+    assert observer.job_samples is None
     assert observer.pipeline_status()["buffer_size"] is None
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    ("buffer_size", "max_batch_samples", "message"),
-    [
-        (2, None, "ThresholdBatches buffer_size 2 is smaller than the batch size 3"),
-        (None, 2, "ThresholdBatches holds at most 2 samples in one batch, not the batch size 3"),
-    ],
-)
-def test_trainer_refuses_a_batch_size_that_its_batch_stage_cannot_hold(
-    buffer_size, max_batch_samples, message
-) -> None:
+def test_the_stage_config_sets_job_samples_over_the_default() -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        built = threshold_pipeline(context, buffer_size=buffer_size)
-        built.task2batch.max_batch_samples = max_batch_samples
-        return built
+        return PipelineConfig.from_setting(
+            {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
+        ).build(context)
 
-    with pytest.raises(PluginConfigError, match=message):
+    trainer = Trainer.build(
+        "math",
+        SQLiteRecordStore(),
+        pipeline_factory=pipeline,
+        candidate_backend=_PreparingBackend(),
+        default_job_samples=2,
+    )
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (3, 12)
+
+
+@pytest.mark.unit
+def test_a_training_trainer_without_job_samples_is_refused() -> None:
+    with pytest.raises(PluginConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
         Trainer.build(
-            "math", SQLiteRecordStore(), pipeline_factory=pipeline, candidate_backend=_PreparingBackend(), batch_size=3
+            "math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline, candidate_backend=_PreparingBackend()
         )
 
 
 @pytest.mark.unit
-def test_trainer_acknowledges_a_dropped_batch_as_not_trained() -> None:
-    events: list[str] = []
+@pytest.mark.parametrize(
+    ("buffer_size", "max_job_samples", "message"),
+    [
+        (2, None, "ThresholdJobData buffer_size 2 is smaller than job_samples 3"),
+        (None, 2, "ThresholdJobData holds at most 2 samples in one job's data, not job_samples 3"),
+    ],
+)
+def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
+    buffer_size, max_job_samples, message
+) -> None:
+    def pipeline(context: PipelineContext) -> TrainingPipeline:
+        stage = ThresholdJobData(context, buffer_size, None, max_job_samples=max_job_samples)
+        return threshold_pipeline(context, sample2job=stage)
 
-    class NotingPipeline(TrainingPipeline):
-        def acknowledge(self, batch_id: str, *, trained: bool = True) -> frozenset[str]:
-            events.append(f"acknowledged {batch_id} trained={trained}")
-            return super().acknowledge(batch_id, trained=trained)
-
-    def noting_pipeline(context: PipelineContext) -> NotingPipeline:
-        return NotingPipeline(
-            context,
-            record2record=ReportRecord2Record(context, ReportGrouping()),
-            record2task=ThresholdTasks(),
-            task2batch=ThresholdBatches(context, None),
+    with pytest.raises(PluginConfigError, match=message):
+        Trainer.build(
+            "math",
+            SQLiteRecordStore(),
+            pipeline_factory=pipeline,
+            candidate_backend=_PreparingBackend(),
+            default_job_samples=3,
         )
-
-    records = SQLiteRecordStore()
-    records.append(inference("i1"))
-    records.append(report("r1", "i1", 1.0))
-    trainer = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=noting_pipeline,
-        candidate_backend=_PreparingBackend(),
-    )
-    batch = trainer.reserve_training_batch()
-    assert batch is not None
-    trainer.reject_pending({"reason": "stale"})
-    assert events == [f"acknowledged {batch.batch_id} trained=False"]
-    assert trainer.reserve_training_batch() is None, "the dropped batch is consumed"
 
 
 @pytest.mark.unit
@@ -542,7 +521,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
         def prepare_step(self, batch, state, scenario_step):
             del scenario_step
             calls.append("prepare")
-            return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state=state)
+            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
 
         def evaluate(self, candidate):
             calls.append("evaluate")
@@ -570,6 +549,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
         pipeline_factory=threshold_pipeline,
         candidate_backend=backend,
         candidate_evaluator=policy_plugin(backend, Policy),
+        default_job_samples=1,
     )
 
     result = trainer.run_once()
@@ -581,7 +561,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
 
 @pytest.mark.unit
 def test_trainer_rejects_structural_plugin_before_constructing_processor() -> None:
-    from tests.support._candidate_evaluation_plugin import DuckPlugin
+    from tests.support._activation_rule_plugin import DuckPlugin
 
     def pipeline_factory(context):
         raise AssertionError("an invalid plugin must fail before processor construction")
@@ -593,6 +573,7 @@ def test_trainer_rejects_structural_plugin_before_constructing_processor() -> No
             pipeline_factory=pipeline_factory,
             candidate_backend=_PreparingBackend(),
             candidate_evaluator=DuckPlugin(),
+            default_job_samples=1,
         )
 
 
@@ -605,7 +586,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
 
         def prepare_step(self, batch, state, scenario_step):
             del scenario_step
-            return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state=state)
+            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
 
         def evaluate(self, candidate):
             raise AssertionError("the backend evaluator must be replaced by the plugin")
@@ -637,6 +618,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
         pipeline_factory=threshold_pipeline,
         candidate_backend=Backend(),
         candidate_evaluator=candidate_evaluator,
+        default_job_samples=1,
     )
 
     result = trainer.run_once()
@@ -644,7 +626,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
     assert result is not None
     assert trainer.candidate_evaluator is candidate_evaluator
     assert calls == [
-        ("evaluate", "math:batch:1"),
+        ("evaluate", "math:data:1"),
         ("decide", "external"),
         ("settle", "external"),
     ]
@@ -660,7 +642,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
 
         def prepare_step(self, batch, state, scenario_step):
             del scenario_step
-            return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state=state)
+            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
 
         def evaluate(self, candidate):
             return EvaluationResult("test", "1", {})
@@ -686,11 +668,12 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
         pipeline_factory=threshold_pipeline,
         candidate_backend=backend,
         candidate_evaluator=policy_plugin(backend, BrokenPolicy),
+        default_job_samples=1,
     )
 
     with pytest.raises(RuntimeError, match="policy failed"):
         trainer.run_once()
-    assert calls == [("abort", "math:batch:1")]
+    assert calls == [("abort", "math:data:1")]
 
 
 @pytest.mark.unit
@@ -703,7 +686,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
 
         def prepare_step(self, batch, state, scenario_step):
             del scenario_step
-            return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state=state)
+            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
 
         def evaluate(self, candidate):
             raise AssertionError("the explicit evaluator must replace the backend evaluator")
@@ -734,11 +717,12 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
         pipeline_factory=threshold_pipeline,
         candidate_backend=Backend(),
         candidate_evaluator=ReplacingEvaluator(),
+        default_job_samples=1,
     )
 
     with pytest.raises(ValueError, match="retain the evaluation result"):
         trainer.run_once()
-    assert calls == [("abort", "math:batch:1")]
+    assert calls == [("abort", "math:data:1")]
 
 
 @pytest.mark.unit
@@ -754,15 +738,16 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     first = Trainer.build(
         "math",
         records,
-        pipeline_factory=lambda context: threshold_pipeline(PipelineContext(context.scenario)),
+        pipeline_factory=lambda context: threshold_pipeline(
+            PipelineContext(context.scenario, default_job_samples=context.default_job_samples)
+        ),
         candidate_backend=_PreparingBackend(),
+        default_job_samples=1,
     )
 
-    first_batch = first.reserve_training_batch()
-    assert first_batch is not None
-    first_result = first.execute_reserved_step(0).result
+    first_result = first.run_once(0)
     assert first_result is not None
-    assert source_record_id(first.pending_batch.items[0]) == "i1"
+    assert source_record_id(first.pending_job_data.samples[0]) == "i1"
     prepared = first.prepare_commit(first_result)
     first.commit(prepared)
     assert first.state == {"steps": 1}
@@ -773,22 +758,23 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     second = Trainer.build(
         "math",
         records,
-        pipeline_factory=lambda context: threshold_pipeline(PipelineContext(context.scenario)),
+        pipeline_factory=lambda context: threshold_pipeline(
+            PipelineContext(context.scenario, default_job_samples=context.default_job_samples)
+        ),
         candidate_backend=_PreparingBackend(),
         algorithm_state=recovered_state,
+        default_job_samples=1,
     )
 
     second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
     second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     assert second.state == {"steps": 1}
-    second_batch = second.reserve_training_batch()
-    assert second_batch is not None
-    second_result = second.execute_reserved_step(1).result
+    second_result = second.run_once(1)
     assert second_result is not None
-    assert source_record_id(second.pending_batch.items[0]) == "i2"
+    assert source_record_id(second.pending_job_data.samples[0]) == "i2"
     prepared = second.prepare_commit(second_result)
     second.commit(prepared)
-    assert second.reserve_training_batch() is None
+    assert second.run_once(2) is None
 
 
 @pytest.mark.unit
@@ -807,10 +793,9 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
             first_store,
             pipeline_factory=threshold_pipeline,
             candidate_backend=_PreparingBackend(),
+            default_job_samples=1,
         )
-        batch = first.reserve_training_batch()
-        assert batch is not None
-        first_result = first.execute_reserved_step(0).result
+        first_result = first.run_once(0)
         assert first_result is not None
         prepared = first.prepare_commit(first_result)
         first.commit(prepared)
@@ -833,120 +818,75 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
             pipeline_factory=threshold_pipeline,
             candidate_backend=_PreparingBackend(),
             algorithm_state={"steps": 1},
+            default_job_samples=1,
         )
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
-        batch = second.reserve_training_batch()
-        assert batch is not None
-        second_result = second.execute_reserved_step(1).result
+        second_result = second.run_once(1)
         assert second_result is not None
-        assert source_record_id(second.pending_batch.items[0]) == second_inference.agent_record_id
+        assert source_record_id(second.pending_job_data.samples[0]) == second_inference.agent_record_id
         prepared = second.prepare_commit(second_result)
         second.commit(prepared)
         assert second_store.count("math") == 4
         archived = second_store.audit_page("math")
         assert [entry.item for entry in archived] == [first_inference, first_report, second_inference, second_report]
-        assert second.reserve_training_batch() is None
+        assert second.run_once(2) is None
 
 
 @pytest.mark.integration
-def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> None:
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
-    (checkpoint / "adapter.safetensors").write_text("trained")
-
-    class FakeTrainingRuntime(StubTrainingRuntime):
-        def __init__(self):
-            super().__init__(base_url="http://trainer")
-            self.calls = []
-
-        @property
-        def inference_handler(self):
-            return None
-
-        def prepare_training_step(
-            self,
-            batch,
-            objective,
-            algorithm_state,
-            scheduling,
-            scenario_step,
-            *,
-            parent_runtime_load_id=None,
-            scenario=None,
-        ):
-            prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling, step_size=self.batch_size)
-            assert prepared.payload is not None
-            self.calls.append(("prepare", batch, objective))
-            return PreparedTrainingStep(
-                action="train",
-                payload={**prepared.payload, "scenario_step": scenario_step},
-                next_algorithm_state=prepared.next_algorithm_state,
-                metrics=prepared.metrics,
-            )
-
-        def train_candidate(self, payload):
-            self.calls.append(("execute", payload))
-            job_id = f"job-{payload['scenario_step']}"
-            return ModelCandidate(
-                candidate_id=job_id,
-                training_job_id=job_id,
-                checkpoint_path=str(checkpoint),
-                current_runtime_load_id=None,
-            )
-
-        def activate_candidate(self, candidate):
-            return ActivatedModel(candidate.candidate_id, "slime-v1")
-
-        def reject_candidate(self, candidate):
-            raise AssertionError("candidate should be selected")
-
-    training_runtime = FakeTrainingRuntime()
+def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    inference_runtime = StubInferenceRuntime()
 
-    # The minimal grouped pg recipe — the cookbook grouped-method shape the
+    # The minimal grouped pg recipe: the cookbook grouped-method shape the
     # define-a-recipe guide describes, kept local to this suite.
     class GroupedPgRecipe(WeightTrainingRecipe):
-        objective = _GROUPED_PG_OBJECTIVE
-        loss_family = "pg"
+        @classmethod
+        def training_spec(cls) -> WeightTrainingSpec:
+            return WeightTrainingSpec(objective=_GROUPED_PG_OBJECTIVE)
 
         def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
             return Trainer.build(
                 scenario,
                 records,
                 pipeline_factory=grouped_policy_pipeline,
-                candidate_backend=candidate_backend(self.training_runtime, self.objective, StepScheduling()),
+                job_loop=JobLoop(component, self.job_plan(), scenario=scenario),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
+                default_job_samples=1,
             )
 
     dispatcher = Dispatcher(
-        GroupedPgRecipe(**runtime_bindings(training_runtime), name="grouped_pg"),
+        GroupedPgRecipe(**runtime_bindings(component, inference_runtime), name="grouped_pg"),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
     )
+    scenario = dispatcher.get_or_create_scenario("math")
+    serving = scenario.serving_runtime_load_id()
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
-        dispatcher.accept_record(inference(rid))
+        record = inference(rid)
+        dispatcher.accept_record(replace(record, payload={**record.payload, "runtime_load_id": serving}))
         dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 
-    runtime = dispatcher.get_or_create_scenario("math")
     for _ in range(1000):
-        if runtime.scenario_step == 1:
+        if scenario.trainer.state["finished_jobs"] == 1:
             break
         time.sleep(0.001)
     else:
-        raise AssertionError("async training did not commit")
-    assert runtime.trainer.state == {"steps": 1}
-    assert runtime.scenario_step == 1
-    assert runtime.repository.current_artifact == runtime.repository.checkpoint_artifact
-    prepare = training_runtime.calls[0]
-    assert prepare[2] == TrainingMethod(_GROUPED_PG_OBJECTIVE)
-    assert trajectory_reward(trajectory_groups(prepare[1])[0][1]) == 0.8
-    assert training_runtime.calls[1][1]["advantages"] == pytest.approx([-1.0, 1.0])
-    assert [call[0] for call in training_runtime.calls] == ["prepare", "execute"]
+        raise AssertionError("the training job did not finish")
+    [job] = component.submitted
+    assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
+    # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
+    assert [trajectory_reward(item) for item in job.data.samples] == [0.2, 0.8]
+    prepared = prepare_slime_job(job.data, TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1)
+    assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
+    assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
+    # After the base release, the job's checkpoint is what the scenario serves.
+    assert inference_runtime.activated[1:] == ["w1"]
 
 
 if __name__ == "__main__":
@@ -954,8 +894,8 @@ if __name__ == "__main__":
 
 
 @pytest.mark.unit
-def test_sao_processor_defaults_action_mask_for_assembled_episodes() -> None:
-    """A multi-turn episode reaches SAO through the shared assembly path,
+def test_sao_processor_defaults_action_mask_for_assembled_rollouts() -> None:
+    """A multi-turn rollout reaches SAO through the shared assembly path,
     which fills no SAO-only fields; the processor must apply its documented
     single-turn default (action mask = loss mask) instead of rejecting the
     assembled sample on an empty action mask."""
@@ -965,8 +905,8 @@ def test_sao_processor_defaults_action_mask_for_assembled_episodes() -> None:
     processor.push(report("r1", ("i1", "i2"), 1.0))
 
     assert processor.ready(1)
-    batch = processor.build_batch(1)
-    (sample,) = batch.items
+    batch = processor.build_job_data(1)
+    (sample,) = batch.samples
     assert sample.training.get("turn_count", 1) > 1
     assert tuple(sample.training.get("action_mask", [])) == tuple(sample.training.get("loss_mask", []))
     assert any(tuple(sample.training.get("action_mask", [])))
@@ -988,13 +928,13 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
         )
     )
     processor.push(report("r1", "i1", 1.0))
-    batch = processor.build_batch(1)
-    assert len(batch.items) == 1
-    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
+    batch = processor.build_job_data(1)
+    assert len(batch.samples) == 1
+    prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.build_batch(1) is batch
+    assert processor.build_job_data(1) is batch
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
@@ -1017,18 +957,17 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
             records,
             pipeline_factory=threshold_pipeline,
             candidate_backend=_PreparingBackend(),
+            default_job_samples=1,
         )
         assert trainer.pipeline_status()["record_data_incomplete"] is True
-        batch = trainer.reserve_training_batch()
-        assert batch is not None
-        assert source_record_id(batch.items[0]) == "i3"
-        result = trainer.execute_reserved_step(0).result
+        result = trainer.run_once(0)
         assert result is not None
+        assert source_record_id(trainer.pending_job_data.samples[0]) == "i3"
         prepared = trainer.prepare_commit(result)
         assert "r2" in prepared.consumed_ids
         assert prepared.metrics["records/data_incomplete"] == 1
         trainer.commit(prepared)
-        assert trainer.reserve_training_batch() is None
+        assert trainer.run_once(1) is None
         assert "Skipping report r2" in caplog.text
     with SQLiteRecordStore(database) as records:
         resumed = Trainer.build(
@@ -1037,45 +976,10 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
             pipeline_factory=threshold_pipeline,
             candidate_backend=_PreparingBackend(),
             algorithm_state=prepared.algorithm_state,
+            default_job_samples=1,
         )
         resumed.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         resumed.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
-        assert resumed.reserve_training_batch() is None
+        assert resumed.run_once(1) is None
         assert resumed.pipeline_status()["evicted_record_count"] == 1
         assert records.get("math", "i3") is not None
-
-
-def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
-    from reef.core.components import RECORDS_COMPONENT
-    from reef.scenario.factory import recovered_trainer_states
-    from reef.storage.commit_history import CommitHistoryScenarioStore
-    from reef.storage.tasks import LocalTaskFileStore
-    from reef.surface.base import Surface
-
-    database = tmp_path / "records.sqlite3"
-    for index in (1, 2):
-        with SQLiteRecordStore(database) as records:
-            records.append(inference(f"i{index}"))
-            records.append(report(f"r{index}", f"i{index}", 1.0))
-            trainer = Trainer.build(
-                "math",
-                records,
-                pipeline_factory=threshold_pipeline,
-                candidate_backend=_PreparingBackend(),
-            )
-            tasks = records.task_storage(LocalTaskFileStore(tmp_path / "task-files"), "math")
-            trajectories = records.trajectory_store()
-            with closing(
-                CommitHistoryScenarioStore(
-                    "math", records, records.commit_history(), tasks=tasks, trajectories=trajectories
-                )
-            ) as session:
-                consumed = recovered_trainer_states(session, "math", None, Surface())[RECORDS_COMPONENT].consumed_ids
-                trainer.replay_retained(up_to_sequence=0, consumed_ids=consumed)
-                batch = trainer.reserve_training_batch()
-                assert batch is not None
-                assert source_record_id(batch.items[0]) == f"i{index}"
-                trainer.reject_pending({"reason": "stale"})
-                assert trainer.reserve_training_batch() is None
-                assert records.get("math", f"i{index}") is not None
-                assert len(records.consumption_receipts("math")) == index

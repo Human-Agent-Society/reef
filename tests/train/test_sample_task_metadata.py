@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.record2task.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
-from reef.train.types import TrajectoryItem
+from reef.record2sample.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
+from reef.train.types import TrajectorySample
 
 TASK = {"name": "openenv-00012-003-deduction", "path": "/tasks/openenv-00012-003-deduction", "digest": "ab" * 32}
 
@@ -28,11 +28,11 @@ def report(*references: str, metadata: dict[str, object] | None = None) -> Agent
 class PlainAssembly(SampleAssembly):
     """An assembly whose single sample reads no tensors, so the test records can stay empty."""
 
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:
         return make_trajectory((record,), score)
 
 
-def assembled(metadata: dict[str, object] | None) -> TrajectoryItem:
+def assembled(metadata: dict[str, object] | None) -> TrajectorySample:
     assembly = PlainAssembly(SampleAssemblySettings())
     record = inference("rec-1")
     context = ReportContext(report=report("rec-1", metadata=metadata), score=1.0, inferences=(record,))
@@ -40,7 +40,7 @@ def assembled(metadata: dict[str, object] | None) -> TrajectoryItem:
 
 
 def test_a_report_that_names_its_task_puts_it_on_the_sample() -> None:
-    sample = assembled({"task": TASK, "episode": {"id": "e1", "labels": {"arm": "hint"}}})
+    sample = assembled({"task": TASK, "rollout": {"id": "e1", "labels": {"arm": "hint"}}})
     assert sample.metadata["task"] == TASK
     assert sample.metadata["report_agent_record_id"] == "rep-1" and sample.metadata["references"] == ["rec-1"]
 
@@ -53,7 +53,7 @@ def test_a_report_without_a_task_leaves_the_sample_as_before() -> None:
         {"task": {}},
         {"task": {"name": ""}},
         {"task": {"path": "/tasks/x"}},
-        {"episode": {"id": "e1"}},
+        {"rollout": {"id": "e1"}},
         {"harbor": {"trial_id": "t1"}},
     ):
         sample = assembled(metadata)

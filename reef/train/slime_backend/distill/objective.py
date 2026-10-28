@@ -513,7 +513,7 @@ def distill_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
         if any(
             len(rollout_data.get(key, ())) != len(rollout_data["teacher_tokens"]) for key in ENGINE_TEACHER_BATCH_KEYS
         ):
-            raise ValueError("the teacher engine's columns must be filled by the bridge before training")
+            raise ValueError("the teacher engine's columns must be filled by the training component before training")
         return
     from slime.utils.timer import timer
 
