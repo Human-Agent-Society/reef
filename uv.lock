@@ -1582,6 +1582,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl", hash = "sha256:4b7e48223aea2384cdb8c9eff35eaebd482fc9b1ec09f8193a121c47356ff19a", size = 1792416, upload-time = "2026-07-18T21:25:19.206Z" },
 ]
 
+[package.optional-dependencies]
+e2b = [
+    { name = "dockerfile-parse" },
+    { name = "e2b" },
+]
+modal = [
+    { name = "dockerfile-parse" },
+    { name = "modal" },
+]
+
 [[package]]
 name = "hf-xet"
 version = "1.6.0"
@@ -4273,8 +4283,10 @@ dev = [
 e2b = [
     { name = "connectrpc" },
     { name = "e2b" },
+    { name = "harbor", extra = ["e2b"] },
 ]
 modal = [
+    { name = "harbor", extra = ["modal"] },
     { name = "modal" },
 ]
 opentelemetry = [
@@ -4337,6 +4349,8 @@ requires-dist = [
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
     { name = "e2b", marker = "extra == 'slime'" },
     { name = "harbor", specifier = ">=0.20,<0.25" },
+    { name = "harbor", extras = ["e2b"], marker = "extra == 'e2b'" },
+    { name = "harbor", extras = ["modal"], marker = "extra == 'modal'" },
     { name = "httpx", marker = "extra == 'sglang'" },
     { name = "httpx", marker = "extra == 'vllm'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'slime'" },
