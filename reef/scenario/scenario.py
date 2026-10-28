@@ -279,6 +279,10 @@ class Scenario:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
 
+    def import_target(self, component: str | None) -> str:
+        """The component an import into ``component`` lands in; see :meth:`ScenarioCommitter.import_target`."""
+        return self._committer.import_target(component)[0]
+
     def import_artifact(
         self, directory: Path, component: str | None, *, source: Mapping[str, str]
     ) -> ComponentArtifact:

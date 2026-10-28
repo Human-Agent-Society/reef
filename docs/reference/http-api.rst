@@ -1310,8 +1310,8 @@ give a large import a long client timeout.
 | 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
 |        | to read; an unknown ``component``, or ``component`` is missing in  |
 |        | a scenario with several components; the component takes no         |
-|        | import; the directory does not have the component's layout, or its |
-|        | admission check refuses it                                         |
+|        | import (Reef reads nothing for these three); the directory does    |
+|        | not have the component's layout, or its admission check refuses it |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario; Reef reads nothing then                          |
 +--------+--------------------------------------------------------------------+

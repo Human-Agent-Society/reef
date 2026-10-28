@@ -347,6 +347,15 @@ class Dispatcher(ScenarioLifecycle):
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).train_from(artifact_id, component)
 
+    def import_target(self, scenario: str, component: str | None) -> str:
+        """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
+
+        Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an unknown component or one that
+        takes no import.
+        """
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_target(component)
+
     def import_artifact(
         self, scenario: str, directory: Path, component: str | None, *, source: Mapping[str, str]
     ) -> ComponentArtifact:

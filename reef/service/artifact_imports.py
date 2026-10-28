@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.sources import ArtifactSources
-from reef.core.errors import UnknownScenario
 from reef.dispatcher import Dispatcher
 
 
@@ -35,12 +34,12 @@ class ArtifactImports:
     def import_source(self, dispatcher: Dispatcher, scenario: str, component: str | None, uri: str) -> dict[str, Any]:
         """Copy the directory ``uri`` names with ``sources`` and import it into ``component`` of ``scenario``.
 
-        Return ``{scenario, component, artifact_id, release_id, content_id}``. Raise ``UnknownScenario`` before the
-        copy, which can download many gigabytes, for an unknown scenario; otherwise raise as
-        ``ArtifactSources.fetch`` and ``Dispatcher.import_artifact`` do.
+        Return ``{scenario, component, artifact_id, release_id, content_id}``. Before the copy, which can download
+        many gigabytes, raise ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that
+        cannot take the import (``Dispatcher.import_target``); otherwise raise as ``ArtifactSources.fetch`` and
+        ``Dispatcher.import_artifact`` do.
         """
-        if not dispatcher.has_scenario(scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        component = dispatcher.import_target(scenario, component)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="import-", dir=self.work_dir) as work:
             directory = Path(work)

@@ -11,8 +11,8 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.runtime_stubs import runtime_bindings
 
-from reef.artifact import ArtifactSources, directory_content_id
-from reef.core.errors import CommitPending
+from reef.artifact import ArtifactSourceReader, ArtifactSources, directory_content_id
+from reef.core.errors import CommitPending, UnknownScenario
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
@@ -127,6 +127,41 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
             value.import_artifact("math", tmp_path / "good", None, source=source(tmp_path / "good"))
         assert len(scenario.store.history()) == steps
         assert value.list_artifacts("math") == rows
+    finally:
+        value.close()
+
+
+class CountingReader(ArtifactSourceReader):
+    """Reads ``mem://`` URIs into a full-weight release and keeps each URI it read."""
+
+    def __init__(self) -> None:
+        self.read: list[str] = []
+
+    @property
+    def schemes(self) -> tuple[str, ...]:
+        return ("mem",)
+
+    def fetch(self, uri: str, directory: Path) -> str:
+        self.read.append(uri)
+        (directory / "config.json").write_text("{}")
+        (directory / "model.safetensors").write_bytes(b"w9")
+        return "v1"
+
+
+@pytest.mark.unit
+def test_an_import_the_scenario_cannot_take_reads_nothing(tmp_path) -> None:
+    value, _, _ = dispatcher(tmp_path)
+    value.get_or_create_scenario("math")
+    reader = CountingReader()
+    imports = ArtifactImports(ArtifactSources((reader,)), tmp_path / "imports")
+    try:
+        with pytest.raises(ValueError, match="has no component 'wieghts'"):
+            imports.import_source(value, "math", "wieghts", "mem://model")
+        with pytest.raises(UnknownScenario):
+            imports.import_source(value, "other", None, "mem://model")
+        assert reader.read == []
+        assert imports.import_source(value, "math", None, "mem://model")["scenario"] == "math"
+        assert reader.read == ["mem://model"]
     finally:
         value.close()
 

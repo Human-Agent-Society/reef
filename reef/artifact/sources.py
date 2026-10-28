@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Self, cast
+from urllib.parse import unquote
 
 from reef.artifact.artifact import ArtifactSourceError
 from reef.artifact.composite import link_or_copy
@@ -102,7 +104,8 @@ class HuggingFaceReader(ArtifactSourceReader):
 
     def fetch(self, uri: str, directory: Path) -> str:
         snapshot = download_huggingface_snapshot(parse_huggingface_source(uri))
-        copy_tree(snapshot.local_path, directory)
+        # The Hugging Face cache writes each file once, under its hash, and never rewrites it: a link is safe.
+        copy_tree(snapshot.local_path, directory, link=True)
         return snapshot.version
 
 
@@ -114,10 +117,11 @@ class FileReader(ArtifactSourceReader):
         return ("file",)
 
     def fetch(self, uri: str, directory: Path) -> str:
-        source = Path(uri.removeprefix("file://"))
+        source = Path(unquote(uri.removeprefix("file://")))
         if not source.is_absolute() or not source.is_dir():
             raise ValueError(f"{uri} does not name an absolute directory path")
-        copy_tree(source, directory)
+        # Files on the service can change after the import, and a hard link would carry the change into the store.
+        copy_tree(source, directory, link=False)
         return ""
 
 
@@ -161,6 +165,9 @@ class S3Reader(ArtifactSourceReader):
         try:
             for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
                 for item in page.get("Contents", ()):
+                    if item["Key"].endswith("/"):
+                        # A folder marker, such as the S3 console's "Create folder" writes, names no file.
+                        continue
                     relative = PurePosixPath(item["Key"][len(prefix) :])
                     if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                         raise ArtifactSourceError(f"{uri} holds an object outside its prefix: {item['Key']}")
@@ -218,13 +225,18 @@ class ArtifactSources:
         return cls((*built_in, *configured))
 
 
-def copy_tree(source: Path, directory: Path) -> None:
-    """Link or copy every file under ``source`` into ``directory`` at the same path; a source file is never changed."""
+def copy_tree(source: Path, directory: Path, *, link: bool) -> None:
+    """Put every file under ``source`` into ``directory`` at the same path; a source file is never changed.
+
+    ``link`` hard links each file where the file system allows, for a source whose files are never rewritten.
+    Otherwise each file is copied, so a later edit of the source changes nothing in ``directory``.
+    """
+    place = link_or_copy if link else shutil.copy2
     for path in sorted(source.rglob("*")):
         if path.is_file():
             target = directory / path.relative_to(source)
             target.parent.mkdir(parents=True, exist_ok=True)
-            link_or_copy(str(path), str(target))
+            place(str(path), str(target))
 
 
 def directory_content_id(directory: Path) -> str:

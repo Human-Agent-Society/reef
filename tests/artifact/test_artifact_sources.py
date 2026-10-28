@@ -61,6 +61,18 @@ def test_a_file_uri_copies_an_absolute_directory_without_a_version(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_a_file_uri_copies_so_a_later_edit_of_the_source_changes_nothing(tmp_path: Path) -> None:
+    source = write_tree(tmp_path / "my source", {"harness.txt": b"harness v1\n"})
+    target = tmp_path / "target"
+    target.mkdir()
+    assert "%20" in source.as_uri()
+    FileReader().fetch(source.as_uri(), target)
+    with (source / "harness.txt").open("r+b") as file:
+        file.write(b"changed v2\n")
+    assert (target / "harness.txt").read_bytes() == b"harness v1\n"
+
+
+@pytest.mark.unit
 def test_a_uri_goes_to_the_reader_of_its_scheme(tmp_path: Path) -> None:
     sources = ArtifactSources.from_setting([f"{__name__}:MemoryReader"])
     # A configured reader replaces the built-in reader of a scheme it reads.
@@ -138,3 +150,22 @@ def test_an_s3_uri_reads_every_object_under_its_prefix(tmp_path: Path, monkeypat
     client.fail = True
     with pytest.raises(ArtifactSourceError, match="access denied"):
         reader.fetch("s3://bucket/models/a", tmp_path)
+
+
+@pytest.mark.unit
+def test_an_s3_uri_skips_folder_markers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class ClientError(Exception):
+        pass
+
+    # The S3 console's "Create folder" writes an empty object whose key ends in "/".
+    objects = {"models/a/": b"", "models/a/config.json": b"{}", "models/a/sub/": b"", "models/a/sub/w.bin": b"w"}
+    client = FakeS3Client(objects, ClientError)
+    exceptions = types.SimpleNamespace(BotoCoreError=OSError, ClientError=ClientError)
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda service, endpoint_url: client))
+    monkeypatch.setitem(sys.modules, "botocore", types.SimpleNamespace(exceptions=exceptions))
+    monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions)
+    S3Reader.from_config({}).fetch("s3://bucket/models/a", tmp_path)
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()) == [
+        "config.json",
+        "sub/w.bin",
+    ]
