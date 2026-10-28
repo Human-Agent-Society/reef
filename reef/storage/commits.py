@@ -123,8 +123,8 @@ class CommitRecord:
       ``components`` are as for an ``"activate"`` record: ``None`` in a
       scenario of one component, else the imported component and the
       release's manifest. ``metrics`` is ``{"source": {"uri", "version"}}``,
-      where the content was read from, or ``None`` for an uploaded archive;
-      it is no part of the artifact's identity.
+      where the content was read from; it is no part of the artifact's
+      identity.
 
     An ``"activate"``, ``"train_from"`` or ``"import"`` record carries no
     trainer state and is not ``activated``: ``algorithm_state`` and
@@ -223,16 +223,17 @@ class CommitRecord:
                 raise CommitHistoryError(
                     f"a {self.operation} commit carries no trainer state and must not carry {carried}"
                 )
-        if self.operation == "import" and self.metrics is not None:
-            source = self.metrics.get("source")
+        if self.operation == "import":
+            source = None if self.metrics is None else self.metrics.get("source")
             if (
-                set(self.metrics) != {"source"}
+                self.metrics is None
+                or set(self.metrics) != {"source"}
                 or not isinstance(source, Mapping)
                 or set(source) != {"uri", "version"}
                 or not all(isinstance(value, str) for value in source.values())
                 or not source["uri"]
             ):
-                raise CommitHistoryError('an import commit\'s metrics are {"source": {"uri", "version"}} or null')
+                raise CommitHistoryError('an import commit\'s metrics are {"source": {"uri", "version"}}')
         if self.operation == "train_from" and self.components is not None:
             raise CommitHistoryError("a train_from commit publishes no release and carries no components")
         if self.operation in ("activate", "import") and (

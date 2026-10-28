@@ -27,15 +27,18 @@ class DownloadedSnapshot:
 
 
 def parse_huggingface_source(value: str) -> HuggingFaceSource:
-    """The Hugging Face model ``value`` names: ``org/model``, optionally after ``hf://`` and before ``@<version>``."""
+    """The Hugging Face model ``value`` names: ``org/model``, optionally after ``hf://`` and before ``@<version>``.
+
+    Raise ``ValueError`` for a value of another form.
+    """
     model = value.strip().removeprefix("hf://")
     version: str | None = None
     if "@" in model:
         model, version = model.rsplit("@", 1)
         if not version:
-            raise ArtifactSourceError("Hugging Face version must be non-empty")
+            raise ValueError("Hugging Face version must be non-empty")
     if not model or "/" not in model:
-        raise ArtifactSourceError("Hugging Face source must use org/model syntax")
+        raise ValueError("Hugging Face source must use org/model syntax")
     return HuggingFaceSource(model, version)
 
 

@@ -281,7 +281,8 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
         served = scenario.current_artifact_ref()
         tip = scenario.repository.checkpoint_artifact
 
-        imported = scenario.import_artifact(imported_dir, HARNESS)
+        source = {"uri": imported_dir.as_uri(), "version": ""}
+        imported = scenario.import_artifact(imported_dir, HARNESS, source=source)
 
         assert imported.artifact_id == f"{imported.release_id}:{HARNESS}"
         assert scenario.current_artifact_ref() == served
@@ -295,12 +296,12 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
             (imported.artifact_id, HARNESS, False)
         ]
         with pytest.raises(ValueError, match="name the component"):
-            scenario.import_artifact(imported_dir)
+            scenario.import_artifact(imported_dir, None, source=source)
         with pytest.raises(ValueError, match="takes no imported artifact"):
-            scenario.import_artifact(imported_dir, WEIGHTS)
+            scenario.import_artifact(imported_dir, WEIGHTS, source=source)
         (imported_dir / "extra.txt").write_text("x", encoding="utf-8")
         with pytest.raises(ValueError, match="holds only"):
-            scenario.import_artifact(imported_dir, HARNESS)
+            scenario.import_artifact(imported_dir, HARNESS, source=source)
 
         # Activating it binds the imported harness to the weights that serve now.
         scenario.activate(imported.artifact_id, HARNESS)

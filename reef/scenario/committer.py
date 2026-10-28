@@ -416,7 +416,7 @@ class ScenarioCommitter:
             return selected
 
     def import_artifact(
-        self, directory: Path, component: str | None = None, *, source: Mapping[str, str] | None = None
+        self, directory: Path, component: str | None, *, source: Mapping[str, str]
     ) -> ComponentArtifact:
         """Publish the files in ``directory`` as a new artifact of ``component``; return it (RFC #980).
 
@@ -428,8 +428,8 @@ class ScenarioCommitter:
         The release binds the artifact as ``component`` and every other
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
-        the next step with ``source`` (``{"uri", "version"}``, ``None`` for an
-        uploaded archive) as its metrics. The active release, the chain tip,
+        the next step with ``source``, the ``{"uri", "version"}`` that the
+        directory was read from, as its metrics. The active release, the chain tip,
         every training start and the activation rule are left alone. Raise
         ``ValueError`` for an unknown component, a component that takes no
         import, or a directory that the layout or the admission check refuses;
@@ -472,7 +472,7 @@ class ScenarioCommitter:
                 published_ref,
                 component=None if surface.single else component,
                 components=self.recorded_components(published, published_ref.release_id),
-                metrics=None if source is None else {"source": dict(source)},
+                metrics={"source": dict(source)},
             )
             self.advance_to(record.step)
             return ComponentArtifact(

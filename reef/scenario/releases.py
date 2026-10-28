@@ -171,8 +171,7 @@ class ScenarioReleases:
           artifact of the component that the release's trainer named.
 
         ``activated`` marks an artifact that has been active at some time. An
-        import's row has ``source``: where its content was read from, or
-        ``None`` for an uploaded archive.
+        import's row has ``source``: where its content was read from.
         """
         with self.publication_lock:
             made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
@@ -252,8 +251,8 @@ class ScenarioReleases:
         if row["operation"] == "training":
             listed["record_progress"] = dict(row["record_progress"])
         if row["operation"] == "import":
-            # An import's metrics hold only where its content was read from; an uploaded archive has no source.
-            listed["source"] = row["metrics"]["source"] if "metrics" in row else None
+            # An import's metrics hold only where its content was read from.
+            listed["source"] = row["metrics"]["source"]
         elif "metrics" in row:
             listed["metrics"] = dict(row["metrics"])
         return listed

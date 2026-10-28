@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import tarfile
 from pathlib import Path
 
 import pytest
@@ -31,13 +29,9 @@ def weights(directory: Path, content: bytes = b"w9") -> Path:
     return directory
 
 
-def archive(directory: Path) -> bytes:
-    """``directory`` as a tar.gz archive whose root is the directory's."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for path in sorted(directory.rglob("*")):
-            tar.add(path, arcname=path.relative_to(directory).as_posix(), recursive=False)
-    return buffer.getvalue()
+def source(directory: Path) -> dict[str, str]:
+    """The source of an import read from ``directory`` by the ``file`` reader."""
+    return {"uri": directory.as_uri(), "version": ""}
 
 
 @pytest.mark.unit
@@ -51,9 +45,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     status = value.build_training_status()["scenarios"]["math"]["artifacts"]
     served_before = len(runtime.activated)
     runtime.restore_order.clear()
-    source = {"uri": "file:///srv/weights", "version": ""}
-
-    imported = value.import_artifact("math", weights(tmp_path / "w9"), source=source)
+    imported = value.import_artifact("math", weights(tmp_path / "w9"), None, source=source(tmp_path / "w9"))
 
     # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
     assert scenario.current_artifact_ref() == served
@@ -66,7 +58,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         "import",
         True,
         None,
-        {"source": source},
+        {"source": source(tmp_path / "w9")},
     )
     assert record.artifact_ref.release_id == imported.release_id
     assert record.artifact_ref.parent_release_id == checkpoint.release_id
@@ -79,12 +71,11 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     )
     assert imported.artifact_id == imported.release_id
     assert imported.content_id == directory_content_id(tmp_path / "w9")
-    assert (row["source"], row["active"], row["activated"]) == (source, False, False)
+    assert (row["source"], row["active"], row["activated"]) == (source(tmp_path / "w9"), False, False)
 
     # The same bytes again are another artifact with the same content id.
-    again = value.import_artifact("math", weights(tmp_path / "again"))
+    again = value.import_artifact("math", weights(tmp_path / "again"), None, source=source(tmp_path / "again"))
     assert again.artifact_id != imported.artifact_id and again.content_id == imported.content_id
-    assert value.list_artifacts("math")[0]["source"] is None
 
     # The artifact is then an ordinary row: it serves and trains as any other.
     activated = value.activate("math", imported.artifact_id)
@@ -128,12 +119,12 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
     (missing_config / "config.json").unlink()
     try:
         with pytest.raises(ValueError, match=r"config\.json and weight files"):
-            value.import_artifact("math", missing_config)
+            value.import_artifact("math", missing_config, None, source=source(missing_config))
         with pytest.raises(ValueError, match="has no component 'other'"):
-            value.import_artifact("math", weights(tmp_path / "good"), "other")
+            value.import_artifact("math", weights(tmp_path / "good"), "other", source=source(tmp_path / "good"))
         monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
         with pytest.raises(CommitPending, match="cannot import an artifact"):
-            value.import_artifact("math", tmp_path / "good")
+            value.import_artifact("math", tmp_path / "good", None, source=source(tmp_path / "good"))
         assert len(scenario.store.history()) == steps
         assert value.list_artifacts("math") == rows
     finally:
@@ -141,7 +132,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_the_import_http_api_takes_an_archive_or_a_uri(tmp_path) -> None:
+def test_the_import_http_api_takes_a_uri(tmp_path) -> None:
     async def run() -> None:
         value, _, _ = dispatcher(tmp_path)
         value.get_or_create_scenario("math")
@@ -149,53 +140,41 @@ def test_the_import_http_api_takes_an_archive_or_a_uri(tmp_path) -> None:
         client = TestClient(TestServer(create_app(value, artifact_imports=imports)))
         await client.start_server()
         try:
-            uploaded = await client.post(
-                "/reef/scenarios/math/artifacts",
-                data=archive(weights(tmp_path / "uploaded")),
-                headers={"Content-Type": "application/gzip"},
-            )
-            assert uploaded.status == 201
-            receipt = await uploaded.json()
-            component = receipt["component"]
+            uri = weights(tmp_path / "source").as_uri()
+            imported = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
+            assert imported.status == 201
+            receipt = await imported.json()
             assert receipt == {
                 "scenario": "math",
-                "component": component,
+                "component": receipt["component"],
                 "artifact_id": receipt["release_id"],
                 "release_id": receipt["release_id"],
-                "content_id": directory_content_id(tmp_path / "uploaded"),
+                "content_id": directory_content_id(tmp_path / "source"),
             }
-            source = weights(tmp_path / "source", b"w10").as_uri()
-            fetched = await client.post(
-                f"/reef/scenarios/math/artifacts?component={component}", json={"source": source}
-            )
-            assert fetched.status == 201
             listed = (await (await client.get("/reef/scenarios/math/artifacts")).json())["artifacts"]
-            assert [(row["operation"], row["source"]) for row in listed[:2]] == [
-                ("import", {"uri": source, "version": ""}),
-                ("import", None),
-            ]
+            assert (listed[0]["operation"], listed[0]["source"]) == ("import", {"uri": uri, "version": ""})
+            named = await client.post(
+                f"/reef/scenarios/math/artifacts?component={receipt['component']}", json={"source": uri}
+            )
+            assert named.status == 201
             # Each import's temporary directory is gone once it answers.
             assert list((tmp_path / "imports").iterdir()) == []
 
-            for body, headers, status in (
-                (b"plain", {"Content-Type": "text/plain"}, 415),
-                (b"not gzip", {"Content-Type": "application/gzip"}, 400),
-                (b'{"uri": "file:///x"}', {"Content-Type": "application/json"}, 400),
-                (b'{"source": "ftp://host/w"}', {"Content-Type": "application/json"}, 400),
+            missing_config = weights(tmp_path / "bad")
+            (missing_config / "config.json").unlink()
+            for body, message in (
+                (b"not json", "Expecting value"),
+                (b'{"uri": "file:///x"}', "an import is the object"),
+                (b'{"source": "ftp://host/w"}', "no URI of a known scheme"),
+                (b'{"source": "hf://model"}', "org/model syntax"),
+                (b'{"source": "file:///missing"}', "absolute directory"),
+                (f'{{"source": "{missing_config.as_uri()}"}}'.encode(), "config.json and weight files"),
             ):
-                refused = await client.post("/reef/scenarios/math/artifacts", data=body, headers=headers)
-                assert refused.status == status, await refused.text()
-            escaping = io.BytesIO()
-            with tarfile.open(fileobj=escaping, mode="w:gz") as tar:
-                tar.add(tmp_path / "uploaded" / "config.json", arcname="../config.json")
-            refused = await client.post(
-                "/reef/scenarios/math/artifacts",
-                data=escaping.getvalue(),
-                headers={"Content-Type": "application/gzip"},
-            )
-            assert refused.status == 400 and "not a relative path" in await refused.text()
-            missing = await client.post("/reef/scenarios/other/artifacts", json={"source": source})
-            assert missing.status == 404
+                refused = await client.post("/reef/scenarios/math/artifacts", data=body)
+                assert refused.status == 400 and message in await refused.text()
+            # An unknown scenario is refused before the source is read.
+            unknown = await client.post("/reef/scenarios/other/artifacts", json={"source": "file:///missing"})
+            assert unknown.status == 404
         finally:
             await client.close()
             value.close()

@@ -124,16 +124,7 @@ To install a specific harness release, add ``?release_id=<id>`` to the harness m
 Import an artifact
 ------------------
 
-To serve or train an artifact that was made outside Reef, such as an adapter that you fine-tuned elsewhere, a checkpoint on S3, or a harness that you wrote, import it. Send its directory as a gzip archive:
-
-.. code:: bash
-
-   tar -czf adapter.tar.gz -C ./my-release .
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/gzip" --data-binary @adapter.tar.gz \
-     "$REEF_URL/reef/scenarios/code-repair/artifacts"
-
-Or name it by a URI that Reef reads. Send full model weights this way:
+To serve or train an artifact that was made outside Reef, such as an adapter that you fine-tuned elsewhere, a checkpoint on S3, or a harness that you wrote, import it by a URI that Reef reads:
 
 .. code:: bash
 
@@ -142,11 +133,11 @@ Or name it by a URI that Reef reads. Send full model weights this way:
      -d '{"source": "s3://my-bucket/checkpoints/step-400/"}' \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-Reef reads ``hf://org/model@revision``, ``file:///absolute/path`` and ``s3://bucket/prefix/``. S3 needs the ``s3`` extra (``uv pip install 'reef-infra[s3]'``) and reads with boto3's standard credentials: the environment, a profile or an instance role. Reef stores no credential. A reader can read whatever the service can read, so only give import access to callers that may train the scenario. ``storage.artifact-sources`` adds readers for other schemes (`Python API <../reference/python-api.rst#artifact-imports>`__).
+Reef reads ``hf://org/model@revision``, ``s3://bucket/prefix/`` and ``file:///absolute/path``, a directory on the service's machine. To import a directory from your own machine, upload it to one of these places first. S3 needs the ``s3`` extra (``uv pip install 'reef-infra[s3]'``) and reads with boto3's standard credentials: the environment, a profile or an instance role. Reef stores no credential. A reader can read whatever the service can read, so only give import access to callers that may train the scenario. ``storage.artifact-sources`` adds readers for other schemes (`Python API <../reference/python-api.rst#artifact-imports>`__).
 
 The directory must have the layout of the scenario's releases: the training component's weight files, a Tinker manifest whose paths resolve on the configured service, or a harness tree that the adapter renders from its ``reef-entries.json``. Otherwise Reef answers HTTP 400 and changes nothing. `Import an artifact <../reference/http-api.rst#import-an-artifact>`__ in the HTTP API lists each layout and status.
 
-The import adds an ``import`` row to the artifact list, with the URI and the version that Reef read in ``source``. It does not serve the artifact and does not change a training start, and the activation rule does not run. Activate it, or train from it, as any other artifact. Reef copies the files into the artifact store, so a later change at the source does not change the artifact. A URI import needs the model's size in disk space twice while it runs: once under ``storage.artifact-cache-dir`` and once in the artifact store.
+The import adds an ``import`` row to the artifact list, with the URI and the version that Reef read in ``source``. It does not serve the artifact and does not change a training start, and the activation rule does not run. Activate it, or train from it, as any other artifact. Reef copies the files into the artifact store, so a later change at the source does not change the artifact. An import needs the model's size in disk space twice while it runs: once under ``storage.artifact-cache-dir`` and once in the artifact store.
 
 Activate an artifact
 --------------------

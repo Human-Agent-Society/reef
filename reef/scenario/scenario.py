@@ -280,7 +280,7 @@ class Scenario:
         return self._committer.train_from(artifact_id, component)
 
     def import_artifact(
-        self, directory: Path, component: str | None = None, *, source: Mapping[str, str] | None = None
+        self, directory: Path, component: str | None, *, source: Mapping[str, str]
     ) -> ComponentArtifact:
         """Publish ``directory`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
         return self._committer.import_artifact(directory, component, source=source)

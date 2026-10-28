@@ -1228,7 +1228,7 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 | ``record_progress``   | record high-water mark that the step consumed        |
 +-----------------------+------------------------------------------------------+
 | ``source``            | import rows only: ``{uri, version}`` that the import |
-|                       | read, ``null`` for an uploaded archive               |
+|                       | read                                                 |
 +-----------------------+------------------------------------------------------+
 
 The list holds artifacts only. A training step that made no artifact, such
@@ -1240,23 +1240,23 @@ Import an artifact
 ~~~~~~~~~~~~~~~~~~
 
 ``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
-artifact from a directory. Leave out ``component`` when the scenario has one
-component. The body is one of:
+artifact from the directory that a URI names. Leave out ``component`` when
+the scenario has one component. The body is ``{"source": "<uri>"}``. A source
+reader copies the directory from one of these URIs:
 
-- A gzip-compressed tar archive of the directory, with ``Content-Type:
-  application/gzip``. The archive's root is the directory. Every entry is a
-  file or a directory at a relative path. The archive unpacks to at most
-  4 GiB.
-- ``{"source": "<uri>"}`` with ``Content-Type: application/json``. A source
-  reader copies the directory: ``hf://org/model@revision``,
-  ``file:///absolute/path``, ``s3://bucket/prefix/``, or a scheme that
-  ``storage.artifact-sources`` adds. Send full model weights this way.
+- ``hf://org/model@revision``: a Hugging Face snapshot.
+- ``s3://bucket/prefix/``: every object under the prefix.
+- ``file:///absolute/path``: a directory on the service's file system.
+- A scheme that ``storage.artifact-sources`` adds.
+
+To import a directory from your own machine, put it in one of these places
+first, for example an S3 prefix.
 
 .. code:: bash
 
-   tar -czf adapter.tar.gz -C ./my-release .
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/gzip" --data-binary @adapter.tar.gz \
+     -H "Content-Type: application/json" \
+     -d '{"source": "s3://my-bucket/adapters/run-7/"}' \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
 The answer is HTTP 201 with ``{scenario, component, artifact_id, release_id,
@@ -1264,16 +1264,36 @@ content_id}``. ``content_id`` comes from the files: the SHA-256 of each file's
 path and SHA-256. The same files from two sources have the same
 ``content_id``, and each import is a new artifact.
 
-The directory must have the layout of the component's releases:
+The directory must have the layout of the releases that the scenario's
+component makes. The training backend and its configuration decide it:
 
-- Full weights: ``config.json`` and weight files at the root.
-- A PEFT adapter: ``adapter/`` with ``adapter_config.json`` and the adapter
-  weights. The rank is at most the configured rank, and the target modules
-  are within the configured modules.
-- Tinker: ``tinker-checkpoint.json`` of the configured model, rank and
-  service. Each ``tinker://`` path in it must resolve on that service.
-- A harness: ``reef-entries.json`` with entries that a seed may hold, and the
-  other files exactly as the adapter renders those entries.
++-----------------------------+------------------------------------------------+------------------+
+| Component                   | The directory holds                            | Other files      |
++=============================+================================================+==================+
+| Full weights (Slime)        | ``config.json`` and ``*.safetensors`` or       | allowed          |
+|                             | ``*.bin`` at the root                          |                  |
++-----------------------------+------------------------------------------------+------------------+
+| LoRA adapter (Slime)        | ``adapter/adapter_config.json`` and            | allowed          |
+|                             | ``adapter/adapter_model.safetensors`` or       |                  |
+|                             | ``.bin``; ``r`` is at most the configured      |                  |
+|                             | rank, and ``target_modules`` is a list within  |                  |
+|                             | the configured modules                         |                  |
++-----------------------------+------------------------------------------------+------------------+
+| Tinker                      | ``tinker-checkpoint.json`` of the configured   | allowed          |
+|                             | model, rank and service; each ``tinker://``    |                  |
+|                             | path in it resolves on that service. With      |                  |
+|                             | ``export_adapter``, also the LoRA adapter      |                  |
+|                             | above                                          |                  |
++-----------------------------+------------------------------------------------+------------------+
+| Harness                     | ``reef-entries.json`` with entries that a seed | refused: the     |
+|                             | may hold                                       | other files are  |
+|                             |                                                | exactly the      |
+|                             |                                                | render of the    |
+|                             |                                                | entries          |
++-----------------------------+------------------------------------------------+------------------+
+
+A component without a layout, such as the records of a trainer that serves
+nothing, takes no import.
 
 Reef publishes a release beside the chain. It binds the new artifact and the
 other components as the active release binds them. It appends an ``import``
@@ -1287,19 +1307,15 @@ give a large import a long client timeout.
 +========+====================================================================+
 | 201    | the artifact is imported                                           |
 +--------+--------------------------------------------------------------------+
-| 400    | a malformed body or archive; a URI of an unknown scheme or of      |
-|        | nothing to read; an unknown ``component``, or ``component`` is     |
-|        | missing in a scenario with several components; the component takes |
-|        | no import; the directory does not have the component's layout, or  |
-|        | its admission check refuses it                                     |
+| 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
+|        | to read; an unknown ``component``, or ``component`` is missing in  |
+|        | a scenario with several components; the component takes no         |
+|        | import; the directory does not have the component's layout, or its |
+|        | admission check refuses it                                         |
 +--------+--------------------------------------------------------------------+
-| 404    | unknown scenario                                                   |
+| 404    | unknown scenario; Reef reads nothing then                          |
 +--------+--------------------------------------------------------------------+
 | 409    | a training result waits for its commit; send the request again     |
-+--------+--------------------------------------------------------------------+
-| 413    | the archive is larger than 4 GiB                                   |
-+--------+--------------------------------------------------------------------+
-| 415    | the body is neither an archive nor JSON                            |
 +--------+--------------------------------------------------------------------+
 | 503    | the source failed, for example S3 refused the read                 |
 +--------+--------------------------------------------------------------------+
