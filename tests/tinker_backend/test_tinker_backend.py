@@ -19,6 +19,7 @@ from reef.artifact.artifact import Artifact
 from reef.cli import main
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.tinker import TinkerInferenceRuntime
 from reef.recipe.sft import SftObjective
 from reef.runtime.deployment import RuntimeConfigError
@@ -29,7 +30,6 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
 )
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.serving import ADAPTER_DIR
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
@@ -63,6 +63,8 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.training_options = []
         self.closed = False
         self.fail = False
+        #: The paths that resolve on no service.
+        self.missing = set()
 
     def initialize(self):
         self.initializations += 1
@@ -96,6 +98,10 @@ class RemoteClient(TinkerClient, TinkerSampler):
             (release / name).mkdir(parents=True)
             (release / name / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 32}))
             (release / name / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
+
+    def check_remote(self, checkpoint):
+        if checkpoint.state_path in self.missing:
+            raise ValueError(f"the Tinker path {checkpoint.state_path} does not resolve on the configured service")
 
     def close(self):
         self.closed = True
@@ -404,6 +410,23 @@ def test_the_base_artifact_is_the_untrained_adapter_and_imports_as_any_release(c
     assert Path(start).parent == component.state_dir / "imported"
     assert TinkerCheckpoint.read(Path(start)) == TinkerCheckpoint.read(release)
     assert component.import_start(release) == start
+
+
+def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(component, client, tmp_path):
+    release = tmp_path / "release"
+    with pytest.raises(ValueError, match=r"holds tinker-checkpoint\.json"):
+        component.check_release(release)
+    UNTRAINED.write(release)
+    component.check_release(release)
+    client.missing = {UNTRAINED.state_path}
+    with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
+        component.check_release(release)
+    TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
+    with pytest.raises(ValueError, match="rank 8 LoRA"):
+        component.check_release(release)
+    (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
+    with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
+        component.check_release(release)
 
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):

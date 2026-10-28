@@ -28,10 +28,10 @@ from typing import Any
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
@@ -184,6 +184,22 @@ class TinkerTrainingComponent(LocalJobComponent):
     @property
     def base_start(self) -> str:
         return str(self._base)
+
+    def check_release(self, directory: Path) -> None:
+        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there.
+
+        With ``export_adapter``, the release also holds the PEFT adapter that ``release_format`` names.
+        """
+        if not (directory / MANIFEST).is_file():
+            raise ValueError(f"a Tinker release holds {MANIFEST}")
+        if self.release_format is not None:
+            super().check_release(directory)
+        try:
+            checkpoint = TinkerCheckpoint.read(directory)
+        except (TypeError, ValueError) as exc:
+            # A manifest from outside Reef may have any shape; ``from_dict`` refuses unknown fields with TypeError.
+            raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
+        self._client.check_remote(self._validated(checkpoint))
 
     def import_start(self, release: Path) -> str:
         if not (release / MANIFEST).exists():

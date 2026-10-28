@@ -32,6 +32,7 @@ from typing import Any
 
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.job_data import TaskSample
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.executor import resolve
 from reef.runtime.interfaces import (
@@ -40,7 +41,6 @@ from reef.runtime.interfaces import (
     resolve_learning_rate_schedule_state,
 )
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.serving import ADAPTER_DIR
 from reef.train.algos.registry import job_training
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.slime_backend.algorithm import SlimeAlgorithm

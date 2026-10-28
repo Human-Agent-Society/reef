@@ -136,11 +136,18 @@ class ConfigArgument:
                 return value
             if self.kind == "strings" and isinstance(value, list) and all(isinstance(item, str) for item in value):
                 return tuple(value)
+            if (
+                self.kind == "plugins"
+                and isinstance(value, list)
+                and all(isinstance(item, (str, dict)) for item in value)
+            ):
+                return tuple(value)
         except (ValueError, TypeError, yaml.YAMLError):
             pass
         expected = {
             "object": "an object",
             "strings": "a list of strings",
+            "plugins": "a list of plugin references",
             "plugin": "a name, a 'package.module:ClassName' reference, or an object with module and config",
         }.get(self.kind, f"a valid {self.kind}")
         raise argparse.ArgumentTypeError(f"{'.'.join(self.path)} must be {expected}")
@@ -175,7 +182,7 @@ class ConfigArgument:
             return value
         if self.kind == "str":
             raise ValueError(f"{'.'.join(self.path)} must be a string")
-        if self.kind in {"strings", "object", "plugin"}:
+        if self.kind in {"strings", "plugins", "object", "plugin"}:
             try:
                 return json.dumps(value)
             except (ValueError, TypeError) as exc:
@@ -221,7 +228,10 @@ def config_arguments(settings_type: type, *, prefix: tuple[str, ...] = ("reef",)
             dict: "object",
         }
         kind = "plugin" if plugin else kinds.get(get_origin(annotation) or annotation)
-        if kind == "strings" and get_args(annotation) != (str, Ellipsis):
+        if kind == "strings" and get_args(annotation) == (str | Mapping[str, Any], Ellipsis):
+            # ``tuple[str | Mapping[str, Any], ...]`` is a list of plugin settings.
+            kind = "plugins"
+        elif kind == "strings" and get_args(annotation) != (str, Ellipsis):
             kind = None
         if kind == "object" and get_args(annotation) not in ((), (str, Any)):
             kind = None
