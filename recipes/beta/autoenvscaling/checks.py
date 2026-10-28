@@ -11,6 +11,8 @@
 - :class:`CalibrationCheck`: rollouts of the current solver on the task. Their mean reward must lie inside the
   pass-rate band, and their rewards must vary.
 
+A seed task runs :class:`SeedCheck` in place of the oracle check, then the contamination check alone.
+
 A refusing check keeps a task out when it finds a defect or cannot run; the two are recorded apart. A check that
 only measures records what it found and never keeps a task out. :func:`band_place` places a pass rate against the
 band, for the calibration and for the training pass rates in the generation report.
@@ -164,6 +166,38 @@ class OracleCheck(TaskCheck):
         oracle = await self.service.check(written.path)
         details = {"oracle_reward": oracle.oracle_reward, "nop_reward": oracle.nop_reward}
         errors = () if oracle.is_solvable else (f"oracle check refused: {oracle.reason}",)
+        return CheckResult(self.name, errors, details=details)
+
+
+class SeedCheck(TaskCheck):
+    """Harbor's oracle trial on a seed task: its environment builds and its verifier scores, and doing nothing does
+    not pass.
+
+    Values: ``service`` is the generator service that runs the trials. The check refuses a seed whose oracle
+    reward is None: the environment did not build, or the verifier wrote no reward. It passes a seed whose oracle
+    and nop check passes, or whose oracle reward is below 1: the service stops after a failed oracle trial, so for a
+    seed whose solution does nothing, as a converted TMax task's does, that trial is the nop measurement. A seed
+    whose solution scores 1 while doing nothing also scores 1, or gives no reward, is refused. Its details hold
+    ``oracle_reward`` and ``nop_reward``.
+    Purpose: ``validate`` runs it in place of :class:`OracleCheck` on a seed task, which comes with no reference
+    solution to hold to a score of 1. A check that cannot run raises ``GeneratorError``, as the oracle check does.
+    """
+
+    def __init__(self, service: Generator) -> None:
+        super().__init__("seed")
+        self.service = service
+
+    async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
+        oracle = await self.service.check(written.path)
+        details = {"oracle_reward": oracle.oracle_reward, "nop_reward": oracle.nop_reward}
+        if oracle.oracle_reward is None:
+            errors: tuple[str, ...] = (
+                f"seed check refused: the environment did not build or its verifier wrote no reward: {oracle.reason}",
+            )
+        elif oracle.is_solvable or oracle.oracle_reward < 1:
+            errors = ()
+        else:
+            errors = (f"seed check refused: doing nothing passes the seed: {oracle.reason}",)
         return CheckResult(self.name, errors, details=details)
 
 

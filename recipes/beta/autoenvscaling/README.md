@@ -38,7 +38,9 @@ beta/autoenvscaling/
   claude_author.py  Claude Code as the agent, signed in with its owner's OAuth token, behind a gateway that serves only the checks
   task_check.py     Claude Code's task_check command
   checks.py         the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
-  generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band and the parents
+  generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band, the parents and the seeds
+  tmax.py           the command that converts extracted TMax tasks into seed tasks
+  tmax_verifier.sh  the verifier of a converted TMax task: the fraction of its tests that pass
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
@@ -100,7 +102,7 @@ The generator's `config` keys:
 | --- | --- | --- |
 | `generator_url` | required | the generator service, `${endpoints.generator}` |
 | `state_dir` | required | where each scenario keeps its cursor, reports, agent runs and repository snapshots |
-| `sources_path` | required | the sources file |
+| `sources_path` | required | the sources file; optional with `seed_tasks_path` ([seed tasks](#seed-tasks)) |
 | `author` | `agent` | `agent`, or `prompt` for the baseline |
 | `author_harness` | `pi` | the agent: `pi`, or `claude-code` ([Claude Code as the author](#claude-code-as-the-author)); `claude-code` needs `author: agent` |
 | `claude_model` | `opus` | with `claude-code`, the model Claude Code asks for (`--model`) |
@@ -207,6 +209,55 @@ No results with the calibration are published yet.
 With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator keeps its files under `state_dir/<scenario>/parents/` and its pass rate in `adaptive.json`. A later generation gives up to `variant_share` of its slots, rounded down, to the newest parents. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
 
 Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, and the generator keeps at most 256 parents, dropping the oldest. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. With `calibration: refuse`, a task outside the band is refused before it trains, so it never becomes a parent: the parents are then the admitted tasks that the solver outgrows, or falls behind on, during training. With `calibration: measure`, every task is admitted and trained, so a task the calibration placed outside the band can still become a parent. Proposer training and retiring tasks from the pool are not part of this mode.
+
+### Seed tasks
+
+With `seed_tasks_path`, an adaptive generator also starts from a directory of Harbor tasks, the seeds, such as tasks converted from TMax-15K ([below](#convert-tmax-tasks)). Seeds need no sessions, so `sources_path` is then optional:
+
+```yaml
+pipeline:
+  record2sample:
+    config:
+      generator:
+        module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
+        config:
+          # The rest as in examples/tinker/serve.yaml, without sources_path.
+          adaptive: true
+          seed_tasks_path: /data/tmax-seeds
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `seed_tasks_path` | null | a directory of seed tasks that reef wrote; needs `adaptive: true` |
+
+Each directory in `seed_tasks_path`, except one whose name starts with a dot, is a seed and must be a task that reef wrote, as the converter does. The generator reads every seed when it starts and checks its digest. A directory that is not such a task fails the config, and the error names it.
+
+- **The slots.** A generation fills its slots in this order: variants of the newest parents, then the seeds that no generation took yet, then the next sessions. A seed takes its slot as it is: the task is the seed under the generation's task name, and no author runs. Each seed is used once, in directory-name order. `cursor.json` keeps the next seed (`next_seed`), so a restart continues with it; keep the directory fixed for the life of a scenario. Without a sources file, a generation ends when its variants and seeds run out, so it can be empty. The recipe counts an empty generation as one of its `rounds` and starts the next round at once, so the rounds can run out before the seeds' pass rates make parents. Give enough seeds that each generation finds unused seeds until the first parents exist, or give a sources file too.
+- **The seed check.** `validate` runs the seed check, then the contamination check when it is on. A seed gets no test review and no calibration: a seed outside the band is the parent a variant starts from. The seed check runs Harbor's oracle trial. It refuses a seed whose environment does not build, or whose verifier writes no reward. A converted seed's solution does nothing, so its oracle trial scores the untouched environment, and the seed passes when that score is below 1. A seed whose solution scores 1 passes when doing nothing scores below 1. A refused seed gets stage `check`.
+- **Training and parents.** A seed in the train split rolls out like any training task. Inside the band it stays a training task, as in upstream's static TMax pool. Outside the band it becomes a parent. Its variant has no session: the agent reads only the parent and `variant.md` in its inputs, its workspace starts with a copy of the parent's `environment/`, and its rules ask for a real reference solution, since the seed's does nothing. A harder variant needs a longer horizon or one more skill; a simpler one has fewer compounding steps, a clearer starting state or more scaffolding. The variant's Dockerfile gets no history step, since it has no repository. Upstream varies its first TMax tasks with no rollout and a pass rate of 0.5; here the first rollout of each seed measures it first.
+- **The split.** A seed's one source record is `seed-` and the first 16 hex digits of its digest, so each seed is a split group of its own. A variant keeps the seed's source record, so it joins the seed's split. An eval seed is held out: it never rolls out, so it is never varied.
+- **The report.** A seed's proposal has `position` -1, `seed_task` (the seed's directory name) and the seed's source record as `source_record_id`. The proposal of a variant of a seed, and the variant's metadata, also name the seed in `seed_task`. The report keeps `next_seed`, and the `seed` check result keeps `oracle_reward` and `nop_reward`. `adaptive.json` keeps each parent's `seed_task`, empty for a parent from a session. Without `seed_tasks_path`, the reports and `cursor.json` have no seed fields.
+
+#### Convert TMax tasks
+
+TMax-15K (`allenai/TMax-15K`) is a `tasks.zip` with one directory per task. Download and unzip it yourself, then convert the tasks into a seed directory:
+
+```bash
+unzip tasks.zip -d tmax-tasks
+python -m recipes.beta.autoenvscaling.tmax --tasks tmax-tasks --out /data/tmax-seeds --select ids.json
+```
+
+`--select` names a JSON list of task ids; without it, every task directory with a `task.json` is converted. The command makes no network call. It exits with 1 when it refuses a task, and `conversion.json` in the output directory lists the converted tasks, with the `container.def` sections each leaves out, and each refused task with the reason. A second run keeps the tasks it wrote before. The conversion is reimplemented from upstream's `baselines/tmax.py`:
+
+- `container.def` becomes the Dockerfile: `From:` becomes `FROM`, each `%environment` export an `ENV` line, each `%files` entry a `COPY` of the file with the same name in the task directory, and `%post` the build script `tmax_build.sh`. The Dockerfile then installs tmux, which the solver's agent needs, and pytest, which the verifier needs, since neither has network.
+- `task.json`'s `description` becomes `instruction.md`, and `test_final_state.py` becomes `tests/test_outputs.py`. The verifier, `tmax_verifier.sh`, scores the fraction of those tests that pass with pytest's own JUnit report. It scores 0 when the report is missing or holds no test, never counts a skipped test as passed, removes reports and rewards left before it runs, and reads no pytest config file or `conftest.py` above the tests.
+- TMax ships no reference solution, so `solution/solve.sh` does nothing. Upstream's initial-state check is not used.
+
+Limits:
+
+- **Text fixtures only.** A reef task holds text files, so a task with a binary fixture is refused. So is a task with no `From:` image, no description or no final-state tests.
+- **No failure summary yet.** `variant.md` gives the parent's pass rate and the direction, not the solver's most common failure as upstream's assignment does. The generator receives only the rewards of a task's rollouts, so this needs a change to the shared generated-task results first.
+- **One rollout per seed.** Each seed in the train split costs one first rollout (`rollout.rollouts_per_task` rollouts) before its pass rate is known.
 
 ## The task checks
 
