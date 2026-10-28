@@ -29,8 +29,8 @@ from reef.service.deploy.routing.containers import (
     ContainerState,
 )
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError, document_etag
-from reef.service.deploy.routing.reef_lifecycle_client import ReefLifecycleClient, RoutingControlError
+from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime, document_etag
+from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
 from reef.service.deploy.routing.registry import DeploymentOwnership
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
@@ -306,12 +306,15 @@ class FakeRuntime(ContainerRuntime):
 class FakeControl(ReefLifecycleClient):
     """The REEF child's lifecycle: closed and unpublished until the controller publishes a runtime.
 
-    It keeps the client's ``request`` contract (status dict, ``RoutingControlError``) but answers in memory,
-    so an ``open`` never previews anything. With ``available`` False every request raises
+    It keeps the client's ``request`` contract (``LifecycleStatus``, ``RoutingControlError``) but answers in
+    memory, so an ``open`` never previews anything. With ``available`` False every request raises
     ``RoutingControlError``, as for a lost child, before it is logged. Otherwise ``actions`` and
     ``deadlines`` log it, and each command advances ``revision`` even if it then fails: an ``activate``
     raises ``activation_error`` if set, or a non-retryable 409 when its expected snapshot is not the current
     one; an ``open`` raises a retryable 409 before any runtime is published, then ``open_error`` if set.
+    A command that does not fail becomes ``control_revision``, and ``open``, ``close`` and ``stop`` set
+    ``accepting`` as the child does. As in the child, ``stopping`` closes admission, a forced close counts the
+    requests it cancels in ``forced_requests``, and the drain counts every pending write.
     """
 
     def __init__(self, actions: list[str]) -> None:
@@ -320,9 +323,12 @@ class FakeControl(ReefLifecycleClient):
         self.active_requests = 0
         self.pending_writes = 0
         self.failed_writes = 0
+        self.forced_requests = 0
         self.snapshot_version = "snapshot-one"
         self.router_config_hash = ""
+        self.accepting = False
         self.stopping = False
+        self.control_revision = -1
         self.available = True
         self.open_error: RoutingControlError | None = None
         self.activation_error: RoutingControlError | None = None
@@ -337,7 +343,7 @@ class FakeControl(ReefLifecycleClient):
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if not self.available:
             raise RoutingControlError("REEF child exited")
         self.actions.append("control:" + str(action))
@@ -357,28 +363,40 @@ class FakeControl(ReefLifecycleClient):
                 raise RoutingControlError("REEF lifecycle returned HTTP 409", status_code=409)
             if self.open_error is not None:
                 raise self.open_error
+        if action is not None:
+            self.control_revision = self.revision
+        if action in {"open", "close", "stop"}:
+            self.accepting = action == "open"
         if cancel_active:
+            self.forced_requests += self.active_requests
             self.active_requests = 0
         if action == "stop":
             self.stopping = True
-        return {
-            "deployment_id": self.deployment_id,
-            "generation": self.generation,
-            "snapshot_version": self.snapshot_version,
-            "router_config_hash": self.router_config_hash,
-            "stopping": self.stopping,
-            "active_requests": self.active_requests,
-            "pending_writes": self.pending_writes,
-            "drain_pending_writes": self.pending_writes,
-            "failed_writes": self.failed_writes,
-        }
+        return self.status()
+
+    def status(self) -> LifecycleStatus:
+        return LifecycleStatus(
+            deployment_id=self.deployment_id,
+            generation=self.generation,
+            snapshot_version=self.snapshot_version,
+            router_config_hash=self.router_config_hash,
+            accepting=self.accepting and not self.stopping,
+            stopping=self.stopping,
+            control_revision=self.control_revision,
+            active_requests=self.active_requests,
+            pending_writes=self.pending_writes,
+            drain_pending_writes=self.pending_writes,
+            failed_writes=self.failed_writes,
+            forced_requests=self.forced_requests,
+        )
 
 
 class FakeManagement(RouterManagementClient):
     """The router's management API serving one stored document and its runtime.
 
-    Only three reads are faked, in memory. ``config_etag`` returns ``etag`` and ``runtime_hashes`` the two
-    runtime hashes and ``activation_status``; with ``available`` False both raise ``RouterPolicyError``.
+    Only three reads are faked, in memory. ``config_etag`` returns ``etag``, and ``runtime_hashes`` reads the two
+    runtime hashes and ``activation_status`` the way the real client reads a reply that holds them; with
+    ``available`` False both raise ``RouterPolicyError``.
     ``ready`` logs ``router:ready``, requests the stop of ``stop_on_ready`` if set, and returns
     ``available and is_ready``, so an unavailable router is not ready rather than an error. All three accept
     and ignore ``deadline``. The inherited ``call``, ``plan`` and ``replace`` are the real client's, aimed at
@@ -401,14 +419,16 @@ class FakeManagement(RouterManagementClient):
             raise RouterPolicyError("router unavailable")
         return self.etag
 
-    def runtime_hashes(self, *, deadline: float | None = None) -> dict[str, object]:
+    def runtime_hashes(self, *, deadline: float | None = None) -> RouterRuntime:
         if not self.available:
             raise RouterPolicyError("router unavailable")
-        return {
-            "active_runtime_hash": self.active,
-            "generated_runtime_hash": self.generated,
-            "activation_status": self.activation_status,
-        }
+        return RouterRuntime.from_reply(
+            {
+                "active_runtime_hash": self.active,
+                "generated_runtime_hash": self.generated,
+                "activation_status": self.activation_status,
+            }
+        )
 
     def ready(self, *, deadline: float | None = None) -> bool:
         self.actions.append("router:ready")

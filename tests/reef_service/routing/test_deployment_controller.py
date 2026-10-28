@@ -40,7 +40,12 @@ from reef.service.deploy.routing.deployment_controller import (
     RoutingDeploymentError,
     RoutingReadinessTimeout,
 )
-from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError, RoutingControlTimeout
+from reef.service.deploy.routing.policy import PolicyState
+from reef.service.deploy.routing.reef_lifecycle_client import (
+    LifecycleStatus,
+    RoutingControlError,
+    RoutingControlTimeout,
+)
 from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
@@ -119,9 +124,9 @@ def test_bounded_recovery_closes_before_remove_and_opens_new_container_ids(case:
 def test_recovery_publishes_a_changed_runtime_hash_before_reopening(case: ControllerCase) -> None:
     opened(case)
     # The restarted router reports a new runtime for the same committed document and policy.
-    committed = case.controller.policy_store.load()["committed"]
+    committed = case.controller.committed_policy()
     case.management.active = case.management.generated = "8" * 64
-    case.controller.policy_store.write({"committed": {**committed, "runtime_hash": "8" * 64}})
+    case.controller.policy_store.write(PolicyState(replace(committed, runtime_hash="8" * 64)))
     case.controller.recover("router-failure")
     assert case.control.publications[-1]["router_config_hash"] == "8" * 64
     assert case.control.publications[-1]["snapshot_version"] == "snapshot-one"
@@ -138,6 +143,18 @@ def test_periodic_checks_detect_runtime_drift_without_selection_previews(case: C
     # Admission closed before the container was replaced, and it never reopened under the foreign runtime.
     assert case.actions.index("control:close") < case.actions.index("remove")
     assert "control:open" not in case.actions and "control:activate" not in case.actions
+
+
+def test_a_runtime_report_without_the_active_hash_is_drift_at_the_first_check(case: ControllerCase) -> None:
+    opened(case)
+    case.management.active = None
+    case.controller.next_probe = 0
+    # Unlike a failed readiness read, which counts only after three in a row, one report without the committed
+    # runtime starts recovery; a router that keeps reporting it never reopens.
+    with pytest.raises(RoutingDeploymentError, match="budget"):
+        case.controller.tick()
+    assert case.actions.index("control:close") < case.actions.index("remove")
+    assert "control:open" not in case.actions
 
 
 def test_a_pending_runtime_is_not_drift(case: ControllerCase) -> None:
@@ -235,7 +252,7 @@ def test_a_drain_read_that_outlasts_the_drain_phase_moves_on_to_the_forced_close
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if action is None and not timed_out:
             timed_out.append(deadline)
             if not phase_left and deadline is not None:
@@ -271,7 +288,7 @@ def test_a_recovery_status_read_cut_short_by_the_readiness_deadline_is_a_readine
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if action is None:
             deadlines.append(deadline)
             if not phase_left and deadline is not None:
@@ -441,7 +458,7 @@ def test_reconnect_readiness_keeps_the_configured_deadline(
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if action == "open":
             open_deadlines.append(deadline)
             if len(open_deadlines) == 1:
@@ -488,7 +505,7 @@ def test_a_late_open_reply_is_drained_again_before_the_next_recovery_removes_sr(
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if action is None and not late_open[0] and outcome != "unfinished_request":
             if case.control.active_requests:
                 # The request admitted after the late OPEN finishes; its record write starts and is pending.
@@ -551,7 +568,7 @@ def time_out_status_reads(case: ControllerCase, monkeypatch: pytest.MonkeyPatch,
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         nonlocal remaining
         if action is None and remaining:
             remaining -= 1

@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
@@ -33,13 +34,18 @@ from reef.service.deploy.routing.containers import (
     ContainerRuntime,
 )
 from reef.service.deploy.routing.policy import (
+    CommittedPolicy,
+    PendingPolicy,
+    PolicyState,
     PolicyStateStore,
     RouterManagementClient,
     RouterPolicyError,
+    RouterRuntime,
     document_etag,
 )
 from reef.service.deploy.routing.reef_lifecycle_client import (
     MAX_SOCKET_PATH_BYTES,
+    LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,
     RoutingControlTimeout,
@@ -294,15 +300,15 @@ class RoutingDeploymentController:
             self.start_future = None
             future.result()
 
-    def check_status(self, status: dict[str, object]) -> None:
+    def check_status(self, status: LifecycleStatus) -> None:
         ownership, _ = self.require_clients()
         if (
-            status.get("deployment_id") != ownership.deployment_id
-            or status.get("generation") != ownership.generation
-            or status.get("snapshot_version") != self.snapshot_version
+            status.deployment_id != ownership.deployment_id
+            or status.generation != ownership.generation
+            or status.snapshot_version != self.snapshot_version
         ):
             raise RoutingDeploymentError("REEF generation or routing snapshot mismatch")
-        if status.get("stopping"):
+        if status.stopping:
             raise RoutingDeploymentError("REEF is terminally stopping")
 
     def inspect_ready(self, inventory: ContainerInventory) -> None:
@@ -315,11 +321,11 @@ class RoutingDeploymentController:
             raise RoutingControlError("Semantic Router is not healthy")
         self.container_ids = {router.resource_id}
 
-    def committed_manifest(self) -> str:
-        committed = self.policy_store.load().get("committed")
-        if not isinstance(committed, dict):
+    def committed_policy(self) -> CommittedPolicy:
+        committed = self.policy_store.load().committed
+        if committed is None:
             raise RoutingDeploymentError("routing policy state has no committed pair")
-        return str(committed["manifest"])
+        return committed
 
     def wait_ready(self, *, initial: bool = True) -> None:
         """Verify the router, publish its runtime to the closed child when it changed, then open admission."""
@@ -339,15 +345,15 @@ class RoutingDeploymentController:
                 self.inspect_ready(self.runtime.inspect(ownership))
                 status = control.request(deadline=deadline)
                 self.check_status(status)
-                if status.get("drain_pending_writes") != 0:
+                if status.drain_pending_writes != 0:
                     raise RoutingControlError("request records are still finalizing")
                 # Every open, including startup, rollback and container recovery, checks the router runtime.
                 runtime_hash = self.check_router_policy(deadline)
-                if status.get("router_config_hash") != runtime_hash:
+                if status.router_config_hash != runtime_hash:
                     control.request(
                         "activate",
                         publication={
-                            "manifest_path": self.committed_manifest(),
+                            "manifest_path": self.committed_policy().manifest,
                             "snapshot_version": self.snapshot_version,
                             "router_config_hash": runtime_hash,
                             "expected_snapshot_version": self.snapshot_version,
@@ -447,17 +453,22 @@ class RoutingDeploymentController:
         management = self.management
         if management is None:
             return None
-        committed = self.policy_store.load().get("committed")
+        committed = self.policy_store.load().committed
+        runtime: RouterRuntime | None
         try:
-            hashes = management.runtime_hashes()
+            runtime = management.runtime_hashes()
             ready = management.ready()
         except RouterPolicyError:
-            ready, hashes = False, {}
-        if hashes and isinstance(committed, dict):
-            active = hashes.get("active_runtime_hash")
-            if hashes.get("activation_status") != ACTIVATION_ACTIVE or active != committed.get("runtime_hash"):
-                return "router_runtime_changed"
-        if ready and hashes:
+            runtime, ready = None, False
+        if (
+            runtime is not None
+            and committed is not None
+            and (
+                runtime.activation_status != ACTIVATION_ACTIVE or runtime.active_runtime_hash != committed.runtime_hash
+            )
+        ):
+            return "router_runtime_changed"
+        if ready and runtime is not None:
             self.probe_failures = 0
             return None
         self.probe_failures += 1
@@ -508,7 +519,7 @@ class RoutingDeploymentController:
             self.recover(failure)
 
     @staticmethod
-    def status_before(control: ReefLifecycleClient, deadline: float) -> dict[str, object] | None:
+    def status_before(control: ReefLifecycleClient, deadline: float) -> LifecycleStatus | None:
         """The child's status, or None when the phase ending at ``deadline`` ran out during the read.
 
         Raises:
@@ -521,11 +532,6 @@ class RoutingDeploymentController:
                 raise
             return None
 
-    @staticmethod
-    def reef_idle(status: dict[str, object]) -> bool:
-        """No admitted request, including an upload in progress, or pending record write remains in REEF."""
-        return status.get("active_requests") == 0 and status.get("drain_pending_writes") == 0
-
     def drain(self, *, recovery: bool) -> None:
         """Close REEF admission and wait for its work; cancel what remains after the drain deadline."""
         _, control = self.require_clients()
@@ -537,7 +543,7 @@ class RoutingDeploymentController:
             if status is None:
                 break
             self.check_status(status)
-            if self.reef_idle(status):
+            if status.idle:
                 return
             time.sleep(0.05)
         # The forced close and every status read after it share the finalization deadline.
@@ -549,7 +555,7 @@ class RoutingDeploymentController:
             if status is None:
                 break
             self.check_status(status)
-            if self.reef_idle(status):
+            if status.idle:
                 return
             time.sleep(0.05)
         raise RoutingDeploymentError("request or record finalization exceeded its deadline; recovery prohibited")
@@ -565,10 +571,9 @@ class RoutingDeploymentController:
         if settings.routing_manifest is None:
             raise ValueError("managed routing requires routing_manifest")
         state = self.policy_store.load()
-        if state.get("pending") is None:
+        if state.pending is None:
             return Path(settings.routing_manifest)
-        committed = state.get("committed")
-        source = Path(str(committed.get("source", ""))) if isinstance(committed, dict) else None
+        source = None if state.committed is None else Path(state.committed.source)
         if source is None or not source.is_file():
             raise RoutingDeploymentError(
                 "an interrupted policy update has no committed manifest copy; recover the deployment explicitly"
@@ -594,47 +599,45 @@ class RoutingDeploymentController:
         ownership, _ = self.require_clients()
         try:
             router_etag = management.config_etag(deadline=deadline)
-            hashes = management.runtime_hashes(deadline=deadline)
+            runtime = management.runtime_hashes(deadline=deadline)
             ready = management.ready(deadline=deadline)
         except RouterPolicyError as exc:
             raise RoutingControlError("router management API is not ready") from exc
-        generated, active = hashes.get("generated_runtime_hash"), hashes.get("active_runtime_hash")
+        active = runtime.active_runtime_hash
         if (
-            hashes.get("activation_status") != ACTIVATION_ACTIVE
-            or not isinstance(active, str)
-            or not active
-            or active != generated
+            runtime.activation_status != ACTIVATION_ACTIVE
+            or active is None
+            or active != runtime.generated_runtime_hash
             or not ready
         ):
             raise RoutingControlError("router runtime is not active and ready")
         state = self.policy_store.load()
-        committed = state.get("committed")
-        if not isinstance(committed, dict) or committed.get("generation") != ownership.generation:
-            document = self.directory / "router.yaml"
+        committed = state.committed
+        if committed is None or committed.generation != ownership.generation:
+            manifest, document = self.directory / "manifest.yaml", self.directory / "router.yaml"
             if router_etag != document_etag(document.read_bytes()):
                 raise RoutingControlError("router does not run this generation's configuration", retryable=False)
+            source = self.policy_store.keep_source(manifest, self.snapshot_version)
             self.policy_store.write(
-                {
-                    "committed": {
-                        "generation": ownership.generation,
-                        "snapshot_version": self.snapshot_version,
-                        "source": str(
-                            self.policy_store.keep_source(self.directory / "manifest.yaml", self.snapshot_version)
-                        ),
-                        "manifest": str(self.directory / "manifest.yaml"),
-                        "router_document": str(document),
-                        "router_etag": router_etag,
-                        "runtime_hash": active,
-                    }
-                }
+                PolicyState(
+                    CommittedPolicy(
+                        ownership.generation,
+                        self.snapshot_version,
+                        str(source),
+                        str(manifest),
+                        str(document),
+                        router_etag,
+                        active,
+                    )
+                )
             )
-            if state.get("pending") is not None:
+            if state.pending is not None:
                 self.event("pending_policy_recovered", snapshot_version=self.snapshot_version)
             return active
-        if router_etag != committed["router_etag"] or active != committed["runtime_hash"]:
+        if router_etag != committed.router_etag or active != committed.runtime_hash:
             raise RoutingControlError("router does not run the committed policy", retryable=False)
-        if state.get("pending") is not None:
-            self.policy_store.write({"committed": committed})
+        if state.pending is not None:
+            self.policy_store.write(PolicyState(committed))
             self.event("policy_rolled_back")
         return active
 
@@ -644,7 +647,7 @@ class RoutingDeploymentController:
         settings = self.service_settings
         if settings.routing_manifest is None:
             raise ValueError("managed routing has no source manifest")
-        current_manifest = Path(self.committed_manifest())
+        current_manifest = Path(self.committed_policy().manifest)
         self.policy_count += 1
         directory = self.directory / "policies" / f"{self.policy_count:04d}"
         directory.parent.mkdir(mode=0o700, exist_ok=True)
@@ -671,59 +674,57 @@ class RoutingDeploymentController:
             # Nothing has closed or changed: the serving snapshot stays in place.
             self.event("policy_rejected", reason=str(exc)[:300])
             return
-        state = self.policy_store.load()
-        committed = state["committed"]
-        if not isinstance(committed, dict):
-            raise RoutingDeploymentError("routing policy state has no committed pair")
+        committed = self.committed_policy()
         if candidate.version == self.snapshot_version:
             self.event("policy_unchanged")
             return
-        if current_etag != committed["router_etag"]:
+        if current_etag != committed.router_etag:
             raise RoutingDeploymentError("another writer changed the router configuration; update refused")
         self.event("policy_updating", snapshot_version=candidate.version)
         self.drain(recovery=False)
         if self.stop_requested:
             return
-        pending = {
-            "phase": "replacing",
-            "from_etag": current_etag,
-            "to_etag": candidate_etag,
-            "snapshot_version": candidate.version,
-            "manifest": str(directory / "manifest.yaml"),
-            "router_document": str(directory / "router.yaml"),
-        }
+        manifest, router_document = directory / "manifest.yaml", directory / "router.yaml"
+        pending = PendingPolicy(
+            phase="replacing",
+            from_etag=current_etag,
+            to_etag=candidate_etag,
+            snapshot_version=candidate.version,
+            manifest=str(manifest),
+            router_document=str(router_document),
+        )
         try:
             # Journal before the router mutation, so a crash at any point finds the committed pair.
-            self.policy_store.write({"committed": committed, "pending": pending})
+            self.policy_store.write(PolicyState(committed, pending))
             outcome = self.replace_router_document(management, document, current_etag, candidate_etag)
             if self.stop_requested:
                 # Stop came during the last call. The pending journal stays, so the next start inspects the update.
                 raise InterruptedError("routing stop arrived during the policy update")
             if outcome == "active":
-                runtime_hash = management.runtime_hashes().get("active_runtime_hash")
-                if not isinstance(runtime_hash, str) or not runtime_hash:
+                runtime_hash = management.runtime_hashes().active_runtime_hash
+                if runtime_hash is None:
                     raise RoutingDeploymentError("router runtime hash is unavailable after activation")
-                activated = {
-                    "generation": committed["generation"],
-                    "snapshot_version": candidate.version,
-                    "source": str(self.policy_store.keep_source(directory / "manifest.yaml", candidate.version)),
-                    "manifest": str(directory / "manifest.yaml"),
-                    "router_document": str(directory / "router.yaml"),
-                    "router_etag": candidate_etag,
-                    "runtime_hash": runtime_hash,
-                }
+                activated = CommittedPolicy(
+                    committed.generation,
+                    candidate.version,
+                    str(self.policy_store.keep_source(manifest, candidate.version)),
+                    str(manifest),
+                    str(router_document),
+                    candidate_etag,
+                    runtime_hash,
+                )
                 # The router runs the candidate: it is the committed pair before the child publishes it.
-                self.policy_store.write({"committed": activated, "pending": {**pending, "phase": "publishing"}})
+                self.policy_store.write(PolicyState(activated, replace(pending, phase="publishing")))
                 control.request(
                     "activate",
                     publication={
-                        "manifest_path": str(directory / "manifest.yaml"),
+                        "manifest_path": str(manifest),
                         "snapshot_version": candidate.version,
                         "router_config_hash": runtime_hash,
                         "expected_snapshot_version": self.snapshot_version,
                     },
                 )
-                self.policy_store.write({"committed": activated})
+                self.policy_store.write(PolicyState(activated))
                 self.snapshot_version = candidate.version
                 self.event("policy_committed", snapshot_version=candidate.version)
             else:
@@ -764,7 +765,7 @@ class RoutingDeploymentController:
                 raise InterruptedError("routing stop arrived during the policy update")
             try:
                 etag = management.config_etag(deadline=deadline)
-                hashes = management.runtime_hashes(deadline=deadline)
+                runtime = management.runtime_hashes(deadline=deadline)
             except RouterPolicyError:
                 time.sleep(0.1)
                 continue
@@ -773,16 +774,11 @@ class RoutingDeploymentController:
             if etag == current_etag and status is not None and 400 <= status < 500:
                 return "rejected"
             if etag == candidate_etag:
-                generated, active = hashes.get("generated_runtime_hash"), hashes.get("active_runtime_hash")
-                activation_status = hashes.get("activation_status")
+                generated, active = runtime.generated_runtime_hash, runtime.active_runtime_hash
+                activation_status = runtime.activation_status
                 if expected_hash is not None and generated != expected_hash:
                     return "failed"
-                if (
-                    activation_status == ACTIVATION_ACTIVE
-                    and isinstance(active, str)
-                    and active
-                    and active == generated
-                ):
+                if activation_status == ACTIVATION_ACTIVE and active is not None and active == generated:
                     try:
                         ready = management.ready(deadline=deadline)
                     except RouterPolicyError:
@@ -798,7 +794,7 @@ class RoutingDeploymentController:
         return "timeout"
 
     def restore_committed(
-        self, management: RouterManagementClient, committed: dict[str, object], outcome: str, candidate_etag: str
+        self, management: RouterManagementClient, committed: CommittedPolicy, outcome: str, candidate_etag: str
     ) -> None:
         """Return the router to the committed document, which only this owner's candidate may replace.
 
@@ -814,37 +810,32 @@ class RoutingDeploymentController:
             RoutingDeploymentError: Another writer changed the document, or the
                 rollback could not be confirmed; the journal is kept for recovery.
         """
-        committed_etag = str(committed["router_etag"])
         self.event("policy_restoring", reason=outcome)
         if outcome == "rejected":
             return
         etag = management.config_etag()
-        if etag == committed_etag:
+        if etag == committed.router_etag:
             # The candidate was never stored; the committed document is unchanged.
             return
         if etag != candidate_etag:
             raise RoutingDeploymentError("an unknown writer changed the router configuration")
-        document = Path(str(committed["router_document"])).read_text(encoding="utf-8")
+        document = Path(committed.router_document).read_text(encoding="utf-8")
         try:
             planned_from, restore_etag = management.plan(document)
         except RouterPolicyError as exc:
             raise RoutingDeploymentError("routing policy rollback could not be planned; staying closed") from exc
         if planned_from != candidate_etag:
             raise RoutingDeploymentError("an unknown writer changed the router configuration")
-        state = self.policy_store.load()
-        pending = state.get("pending")
-        journal = {**pending} if isinstance(pending, dict) else {}
+        pending = self.policy_store.load().pending or PendingPolicy()
         # Journal the rollback target first: a lost reply or a crash is inspected against it.
-        self.policy_store.write(
-            {"committed": committed, "pending": {**journal, "phase": "restoring", "restore_etag": restore_etag}}
-        )
+        self.policy_store.write(PolicyState(committed, replace(pending, phase="restoring", restore_etag=restore_etag)))
         if self.replace_router_document(management, document, candidate_etag, restore_etag) != "active":
             raise RoutingDeploymentError("routing policy rollback could not be confirmed; staying closed")
-        runtime_hash = management.runtime_hashes().get("active_runtime_hash")
-        if not isinstance(runtime_hash, str) or not runtime_hash:
+        runtime_hash = management.runtime_hashes().active_runtime_hash
+        if runtime_hash is None:
             raise RoutingDeploymentError("router runtime hash is unavailable after rollback")
-        restored = {**committed, "router_etag": restore_etag, "runtime_hash": runtime_hash}
-        self.policy_store.write({"committed": restored, "pending": {**journal, "phase": "restored"}})
+        restored = replace(committed, router_etag=restore_etag, runtime_hash=runtime_hash)
+        self.policy_store.write(PolicyState(restored, replace(pending, phase="restored")))
 
     def recover(self, reason: str) -> None:
         ownership, control = self.require_clients()

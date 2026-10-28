@@ -6,6 +6,7 @@ directory; the public TCP listener has no lifecycle route.
 
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import json
 import math
@@ -13,6 +14,8 @@ import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from reef.service.routing import is_router_config_hash
 
 #: AF_UNIX paths are limited to 108 bytes on Linux, including the terminating NUL; keep a margin.
 MAX_SOCKET_PATH_BYTES = 103
@@ -43,14 +46,85 @@ class RoutingControlTimeout(RoutingControlError):
     """
 
 
-def json_object(body: bytes) -> dict[str, object]:
+@dataclass(frozen=True)
+class LifecycleStatus:
+    """The admission state and outstanding work of one managed REEF child, as its lifecycle status reports them.
+
+    Values: ``deployment_id`` and ``generation`` are non-empty strings. ``snapshot_version`` is a string, empty
+    only before the child names a manifest. ``router_config_hash`` is empty before the owner publishes a runtime,
+    otherwise a router runtime hash. ``accepting`` and ``stopping`` are bools, and ``stopping`` implies not
+    ``accepting``. ``control_revision`` is an int ≥ -1, and -1 exactly before the child applies a command.
+    ``active_requests``, ``pending_writes``, ``drain_pending_writes``, ``failed_writes`` and ``forced_requests`` are
+    ints ≥ 0, and ``drain_pending_writes ≤ pending_writes``: the drain counts a subset of the pending writes.
+    Purpose: ``RequestAcceptance.status`` makes it, and ``to_json`` gives its wire form. ``from_json`` reads that
+    form for ``ReefLifecycleClient.request``, whose deployment controller checks the identity and waits for
+    ``idle``: no admitted request, including an upload in progress, and no pending write the drain waits for.
+    """
+
+    deployment_id: str
+    generation: str
+    snapshot_version: str
+    router_config_hash: str
+    accepting: bool
+    stopping: bool
+    control_revision: int
+    active_requests: int
+    pending_writes: int
+    drain_pending_writes: int
+    failed_writes: int
+    forced_requests: int
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(text, str) or not text for text in (self.deployment_id, self.generation)):
+            raise ValueError("a lifecycle status needs a deployment ID and a generation")
+        if not isinstance(self.snapshot_version, str):
+            raise ValueError("a lifecycle status snapshot_version must be a string")
+        if self.router_config_hash != "" and not is_router_config_hash(self.router_config_hash):
+            raise ValueError("a lifecycle status router_config_hash must be empty or a router runtime hash")
+        if type(self.accepting) is not bool or type(self.stopping) is not bool:
+            raise ValueError("lifecycle status accepting and stopping must be booleans")
+        if self.stopping and self.accepting:
+            raise ValueError("a stopping lifecycle cannot accept requests")
+        if type(self.control_revision) is not int or self.control_revision < -1:
+            raise ValueError("a lifecycle status control_revision must be an integer of at least -1")
+        counts = (
+            self.active_requests,
+            self.pending_writes,
+            self.drain_pending_writes,
+            self.failed_writes,
+            self.forced_requests,
+        )
+        if any(type(count) is not int or count < 0 for count in counts):
+            raise ValueError("lifecycle status counts must be nonnegative integers")
+        if self.drain_pending_writes > self.pending_writes:
+            raise ValueError("a lifecycle status cannot drain more writes than are pending")
+
+    @property
+    def idle(self) -> bool:
+        return self.active_requests == 0 and self.drain_pending_writes == 0
+
+    def to_json(self) -> dict[str, object]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_json(cls, value: object) -> LifecycleStatus:
+        """Read the wire form: a JSON object with exactly this type's fields.
+
+        Raises:
+            ValueError: ``value`` has another shape, or a field is outside its domain.
+        """
+        if not isinstance(value, dict) or value.keys() != {item.name for item in dataclasses.fields(cls)}:
+            raise ValueError("a lifecycle status must be an object with exactly its fields")
+        return cls(**value)
+
+
+def lifecycle_status(body: bytes) -> LifecycleStatus:
+    """The child's status reply. Another body cannot become valid by waiting, so its error is not retryable."""
     try:
-        value = json.loads(body)
-    except (ValueError, UnicodeError) as exc:
-        raise RoutingControlError("control response is not valid JSON") from exc
-    if not isinstance(value, dict):
-        raise RoutingControlError("control response must be an object")
-    return value
+        return LifecycleStatus.from_json(json.loads(body))
+    except ValueError as exc:
+        # JSON and UTF-8 decoding errors are ValueErrors too.
+        raise RoutingControlError("control response is not a lifecycle status", retryable=False) from exc
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -141,7 +215,7 @@ class ReefLifecycleClient:
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         """Send one command, or read the status when ``action`` is None, and return the child's status.
 
         Only a transport timeout is tried again, on a new connection, at most ``CONTROL_ATTEMPTS`` times in
@@ -159,7 +233,8 @@ class ReefLifecycleClient:
 
         Raises:
             RoutingControlTimeout: No reply arrived in time.
-            RoutingControlError: The request failed, or the child refused it.
+            RoutingControlError: The request failed, the child refused it, or its reply is not a lifecycle
+                status; that last error is not retryable.
         """
         phase_end = math.inf if deadline is None else deadline
         first_attempt_seconds = self.open_timeout_seconds if action == "open" else self.timeout_seconds
@@ -210,7 +285,7 @@ class ReefLifecycleClient:
             else:
                 if time.monotonic() > phase_end:
                     raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
-                return json_object(reply)
+                return lifecycle_status(reply)
             finally:
                 if response is not None:
                     response.close()

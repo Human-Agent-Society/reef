@@ -41,7 +41,7 @@ from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.reef_lifecycle_client import ReefLifecycleClient, RoutingControlError
+from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import (
@@ -125,6 +125,20 @@ def command(action: str, revision: int = 0, **overrides: object) -> dict[str, ob
         **({"open_deadline_monotonic": OPEN_DEADLINE} if action == "open" else {}),
         **overrides,
     }
+
+
+def test_every_child_status_is_a_lifecycle_status_the_owner_reads_back_unchanged() -> None:
+    # An in-process child may not name a manifest yet, so its first status has an empty snapshot and hash.
+    acceptance = RequestAcceptance(LifecycleSettings("deployment", "generation", "control"), PendingWrites())
+    statuses = [acceptance.status()]
+    statuses += [acceptance.control(command(action, revision)) for revision, action in enumerate(["open", "stop"])]
+    parsed = [LifecycleStatus.from_json(json.loads(json.dumps(status))) for status in statuses]
+    assert [status.to_json() for status in parsed] == statuses
+    initial, opened_status, stopped = parsed
+    assert (initial.control_revision, initial.snapshot_version, initial.router_config_hash) == (-1, "", "")
+    assert initial.idle and not initial.accepting
+    assert (opened_status.accepting, opened_status.control_revision) == (True, 0)
+    assert stopped.stopping and not stopped.accepting
 
 
 def test_control_is_exclusive_and_terminal_with_monotonic_revisions() -> None:
@@ -1036,12 +1050,11 @@ class ScriptedReadiness(RoutingPublisher):
 
 
 def routed_acceptance(readiness: ScriptedReadiness) -> RequestAcceptance:
-    acceptance = RequestAcceptance(
+    return RequestAcceptance(
         LifecycleSettings("deployment", "generation", "control", "snapshot", router_config_hash=ROUTER_HASH),
         PendingWrites(),
+        publisher=readiness,
     )
-    acceptance.publisher = readiness
-    return acceptance
 
 
 def test_readiness_that_holds_the_event_loop_past_the_deadline_cannot_open() -> None:
@@ -1176,7 +1189,9 @@ def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_
             started = time.monotonic()
             status = await asyncio.to_thread(client.request, "open")
             elapsed = time.monotonic() - started
-            assert (status["accepting"], status["control_revision"]) == (True, 1)
+            # The child's own status, read back through the owner's typed wire parser.
+            assert (status.accepting, status.control_revision) == (True, 1)
+            assert status.to_json() == child.acceptance.status()
             # One attempt and one check per provider: a retry that read an applied open would hide a short budget.
             assert child.posts == ["/reef/lifecycle"]
             assert child.checks == ["student", "teacher"]

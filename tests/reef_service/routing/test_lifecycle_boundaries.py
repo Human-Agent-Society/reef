@@ -26,7 +26,7 @@ from reef.service.app import create_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.containers import ContainerEvent
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
+from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError
 from reef.service.deploy.routing.registry import DeploymentOwnership
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
@@ -227,7 +227,7 @@ def test_event_reconnect_waits_for_write_completion_and_rechecks_open_conflict(
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if action is None:
             if attempts:
                 status_after_conflict.append(True)
@@ -267,7 +267,7 @@ def test_reconnect_open_conflict_never_retries_a_changed_generation(
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, object]:
+    ) -> LifecycleStatus:
         if action == "open":
             attempts.append(True)
             case.control.generation = "different-generation"

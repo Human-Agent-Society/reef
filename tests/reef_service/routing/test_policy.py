@@ -42,9 +42,11 @@ from reef.service.deploy.routing.deployment_controller import (
     RoutingReadinessTimeout,
 )
 from reef.service.deploy.routing.policy import (
+    PolicyState,
     PolicyStateStore,
     RouterManagementClient,
     RouterPolicyError,
+    RouterRuntime,
     document_etag,
 )
 from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
@@ -294,7 +296,9 @@ class PolicyCase:
         return [json.loads(line)["state"] for line in path.read_text().splitlines()]
 
     def state(self) -> dict[str, object]:
-        return PolicyStateStore(self.controller.registry.directory / "policy-state.json").load()
+        """The journal file's raw JSON, so the assertions also check its unchanged wire form."""
+        path = self.controller.registry.directory / "policy-state.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 @pytest.fixture
@@ -586,7 +590,7 @@ def test_rollback_journal_failures_stay_closed_and_keep_recovery(
     writes = []
     original = PolicyStateStore.write
 
-    def fail_once(store: PolicyStateStore, state: dict[str, object]) -> None:
+    def fail_once(store: PolicyStateStore, state: PolicyState) -> None:
         writes.append(state)
         if len(writes) == failing_write:
             raise OSError("disk full")
@@ -637,7 +641,7 @@ def test_journal_write_failures_never_reopen(
     writes = []
     original = PolicyStateStore.write
 
-    def fail_once(store: PolicyStateStore, state: dict[str, object]) -> None:
+    def fail_once(store: PolicyStateStore, state: PolicyState) -> None:
         writes.append(state)
         if len(writes) == failing_write:
             raise OSError("disk full")
@@ -693,14 +697,17 @@ def test_stop_during_the_last_activation_call_ends_the_update_without_more_route
 def test_owner_restart_after_an_interrupted_update_recovers_the_committed_policy(
     case: PolicyCase, source: str
 ) -> None:
-    store = PolicyStateStore(case.controller.registry.directory / "policy-state.json")
+    journal = case.controller.registry.directory / "policy-state.json"
     committed = case.state()["committed"]
     # The previous owner died while candidate B was pending; the source file now holds B (or garbage).
     if source == "candidate":
         write_source(case.source, keyword="escalate", rule="escalated")
     else:
         case.source.write_text("not: [a manifest", encoding="utf-8")
-    store.write({"committed": {**committed, "generation": "old-generation"}, "pending": {"to_etag": '"b"'}})
+    # An older owner's journal: its pending record names only the candidate ETag.
+    journal.write_text(
+        json.dumps({"committed": {**committed, "generation": "old-generation"}, "pending": {"to_etag": '"b"'}})
+    )
 
     recovered = case.controller.startup_source()
     assert RoutingSnapshot.load(recovered).version == case.startup_version
@@ -709,26 +716,35 @@ def test_owner_restart_after_an_interrupted_update_recovers_the_committed_policy
     case.router.activation_status, case.router.active = "pending", "loading"
     with pytest.raises(RoutingControlError):
         case.controller.check_router_policy()
-    assert store.load()["pending"] == {"to_etag": '"b"'}
+    assert case.state()["pending"] == {"to_etag": '"b"'}
     case.router.active = case.router.generated
     case.controller.check_router_policy()
-    assert "pending" not in store.load()
-    assert store.load()["committed"]["generation"] == "generation-one"
+    assert "pending" not in case.state()
+    assert case.state()["committed"]["generation"] == "generation-one"
     assert case.events()[-1] == "pending_policy_recovered"
 
 
-def test_interrupted_update_without_a_committed_copy_stays_closed(case: PolicyCase) -> None:
-    store = PolicyStateStore(case.controller.registry.directory / "policy-state.json")
+@pytest.mark.parametrize(
+    "journal", [{"pending": {"to_etag": '"b"'}}, {"pending": {}}], ids=["partial_pending", "empty_pending"]
+)
+def test_interrupted_update_without_a_committed_copy_stays_closed(
+    case: PolicyCase, journal: dict[str, object]
+) -> None:
     committed = case.state()["committed"]
+    path = case.controller.registry.directory / "policy-state.json"
+    path.write_text(json.dumps({"committed": committed, **journal}))
     Path(committed["source"]).unlink()
-    store.write({"committed": committed, "pending": {"to_etag": '"b"'}})
+    with pytest.raises(RoutingDeploymentError, match="recover the deployment explicitly"):
+        case.controller.startup_source()
+    # A pending update whose committed pair is gone is the same interrupted update, not a schema error.
+    path.write_text(json.dumps(journal))
     with pytest.raises(RoutingDeploymentError, match="recover the deployment explicitly"):
         case.controller.startup_source()
 
 
 @pytest.mark.parametrize("fault", ["pending_runtime", "not_ready", "other_document"])
 def test_reopening_requires_the_committed_runtime_active_and_ready(case: PolicyCase, fault: str) -> None:
-    committed = case.state()["committed"]
+    committed = case.controller.committed_policy()
     if fault == "pending_runtime":
         case.router.active, case.router.activation_status = "different-runtime", "pending"
     elif fault == "not_ready":
@@ -931,6 +947,91 @@ def test_diagnostic_policy_outcome_keeps_dependency_monitoring_live(case: Policy
     case.controller.next_probe = 0
     with pytest.raises(RoutingDeploymentError, match="fail_stop"):
         case.controller.tick()
+
+
+COMMITTED = {
+    "generation": "generation-one",
+    "snapshot_version": "sha256:" + "2" * 64,
+    "source": "/private/committed/source.yaml",
+    "manifest": "/private/generation/manifest.yaml",
+    "router_document": "/private/generation/router.yaml",
+    "router_etag": '"a"',
+    "runtime_hash": "6" * 64,
+}
+FULL_PENDING = {
+    "phase": "restoring",
+    "from_etag": '"a"',
+    "to_etag": '"b"',
+    "snapshot_version": "sha256:" + "3" * 64,
+    "manifest": "/private/generation/policies/0001/manifest.yaml",
+    "router_document": "/private/generation/policies/0001/router.yaml",
+    "restore_etag": '"c"',
+}
+
+
+@pytest.mark.parametrize(
+    "journal",
+    [
+        {},
+        {"committed": COMMITTED},
+        {"committed": COMMITTED, "pending": FULL_PENDING},
+        {"committed": COMMITTED, "pending": {"to_etag": '"b"'}},
+        {"committed": COMMITTED, "pending": {}},
+        {"pending": {"phase": "replacing"}},
+    ],
+    ids=["empty", "committed", "full_pending", "older_partial_pending", "empty_pending", "pending_without_committed"],
+)
+def test_the_policy_journal_reads_and_rewrites_its_wire_form_unchanged(
+    tmp_path: Path, journal: dict[str, object]
+) -> None:
+    store = PolicyStateStore(tmp_path / "policy-state.json")
+    store.path.write_text(json.dumps(journal))
+    state = store.load()
+    store.write(state)
+    assert json.loads(store.path.read_text()) == journal
+    assert store.load() == state
+    assert (state.committed is None) is ("committed" not in journal)
+    assert (state.pending is None) is ("pending" not in journal)
+
+
+def test_a_missing_journal_and_null_entries_hold_nothing(tmp_path: Path) -> None:
+    store = PolicyStateStore(tmp_path / "policy-state.json")
+    assert store.load() == PolicyState()
+    store.path.write_text(json.dumps({"committed": COMMITTED, "pending": None}))
+    assert store.load().pending is None and store.load().committed is not None
+    store.path.write_text(json.dumps({"committed": None, "pending": None}))
+    assert store.load() == PolicyState()
+
+
+@pytest.mark.parametrize(
+    "journal",
+    [
+        [],
+        {"other": {}},
+        {"committed": []},
+        {"committed": {**COMMITTED, "runtime_hash": ""}},
+        {"committed": {name: value for name, value in COMMITTED.items() if name != "source"}},
+        {"committed": {**COMMITTED, "extra": "x"}},
+        {"committed": {**COMMITTED, "generation": 1}},
+        {"pending": []},
+        {"pending": {"phase": 1}},
+        {"pending": {"unknown": "x"}},
+    ],
+)
+def test_a_malformed_policy_journal_is_refused(tmp_path: Path, journal: object) -> None:
+    store = PolicyStateStore(tmp_path / "policy-state.json")
+    store.path.write_text(json.dumps(journal))
+    with pytest.raises(ValueError):
+        store.load()
+
+
+def test_a_runtime_report_keeps_only_non_empty_string_fields() -> None:
+    reply = {"activation_status": "pending", "generated_runtime_hash": 7, "active_runtime_hash": ""}
+    assert RouterRuntime.from_reply(reply) == RouterRuntime("pending", None, None)
+    # Fields the report lacks stay missing; the controller does not mistake that for any hash.
+    assert RouterRuntime.from_reply({"source_config_hash": '"a"'}) == RouterRuntime(None, None, None)
+    with pytest.raises(ValueError):
+        RouterRuntime("", None, None)
 
 
 @pytest.mark.parametrize(

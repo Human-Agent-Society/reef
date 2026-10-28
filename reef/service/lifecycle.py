@@ -37,7 +37,7 @@ from typing import TypeVar, cast
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
-from reef.service.deploy.routing.reef_lifecycle_client import MAX_SOCKET_PATH_BYTES
+from reef.service.deploy.routing.reef_lifecycle_client import MAX_SOCKET_PATH_BYTES, LifecycleStatus
 from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
 
 WriteResult = TypeVar("WriteResult")
@@ -272,24 +272,27 @@ class RequestAcceptance:
     it, so ``accepting`` implies it is None. The drain waits for every inference write and for other writes
     up to the cutoff, so a report that starts while admission is closed does not extend it. Once
     ``stopping``, the status counts every write. ``active`` holds the root task of each
-    admitted request. Middleware removes it when response handling ends. A finished task may remain until
-    removal. ``forced_requests`` (≥ 0) counts cancellation requests from commands with ``cancel_active=True``
-    or from owner loss.
+    admitted request: ``register`` adds it, and ``finish`` removes it when response handling ends. A finished
+    task may remain until removal. ``forced_requests`` (≥ 0) counts cancellation requests from commands with
+    ``cancel_active=True`` or from owner loss. ``publisher`` is given at construction and never replaced; it is
+    None without routing.
     Operations: ``control`` applies one validated command. ``open`` opens admission. ``close`` and ``stop``
     close it, and ``stop`` also sets ``stopping``. ``activate`` replaces ``settings`` through ``publisher``
     while closed and drained. Repeating the last revision with the same command returns the status and
-    changes nothing. An older or conflicting revision is refused. ``writes`` is shared with the service.
-    The app that creates this object sets ``publisher`` once, and it stays None without routing.
+    changes nothing. An older or conflicting revision is refused. ``status`` returns the wire form of a
+    ``LifecycleStatus``. ``writes`` is shared with the service.
     """
 
-    def __init__(self, settings: LifecycleSettings, writes: PendingWrites) -> None:
+    def __init__(
+        self, settings: LifecycleSettings, writes: PendingWrites, *, publisher: RoutingPublisher | None = None
+    ) -> None:
         self.settings = settings
         self.writes = writes
         self.accepting = False
         self.stopping = False
         self.control_revision = -1
         self.last_action: tuple[str, bool, str, str, float] | None = None
-        self.publisher: RoutingPublisher | None = None
+        self.publisher = publisher
         self.active: set[asyncio.Task[object]] = set()
         self.forced_requests = 0
         # A new child is closed: its drain boundary is set now, not at its first close command.
@@ -308,6 +311,10 @@ class RequestAcceptance:
             raise RuntimeError("request admission requires an asyncio task")
         self.active.add(task)
         return task
+
+    def finish(self, task: asyncio.Task[object]) -> None:
+        """Release the root task of an admitted request whose response handling has ended."""
+        self.active.discard(task)
 
     def activate(
         self, manifest_path: str, snapshot_version: str, router_config_hash: str, expected_snapshot_version: str
@@ -346,20 +353,20 @@ class RequestAcceptance:
         self.cancel_active()
 
     def status(self) -> dict[str, object]:
-        return {
-            "deployment_id": self.settings.deployment_id,
-            "generation": self.settings.generation,
-            "snapshot_version": self.settings.snapshot_version,
-            "router_config_hash": self.settings.router_config_hash,
-            "accepting": self.accepting,
-            "stopping": self.stopping,
-            "control_revision": self.control_revision,
-            "active_requests": len(self.active),
-            "pending_writes": len(self.writes.tasks),
-            "drain_pending_writes": self.writes.count_before(None if self.stopping else self.drain_sequence),
-            "failed_writes": self.writes.failed_count,
-            "forced_requests": self.forced_requests,
-        }
+        return LifecycleStatus(
+            deployment_id=self.settings.deployment_id,
+            generation=self.settings.generation,
+            snapshot_version=self.settings.snapshot_version,
+            router_config_hash=self.settings.router_config_hash,
+            accepting=self.accepting,
+            stopping=self.stopping,
+            control_revision=self.control_revision,
+            active_requests=len(self.active),
+            pending_writes=self.writes.count_before(None),
+            drain_pending_writes=self.writes.count_before(None if self.stopping else self.drain_sequence),
+            failed_writes=self.writes.failed_count,
+            forced_requests=self.forced_requests,
+        ).to_json()
 
     def readiness_deadline(self, body: Mapping[str, object]) -> float | None:
         """The deadline of ``body`` if it is a valid new ``open`` of a routed deployment, which needs a readiness
@@ -528,7 +535,7 @@ def create_acceptance_middleware(acceptance: RequestAcceptance) -> Middleware:
                 request.transport.close()
             raise
         finally:
-            acceptance.active.discard(task)
+            acceptance.finish(task)
             INFERENCE_FINALIZATION.reset(scope)
 
     return manage_request

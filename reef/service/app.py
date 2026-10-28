@@ -183,8 +183,7 @@ def create_app(
     if routing is not None:
         app.middlewares.insert(1, routed_routes_only)
     if lifecycle is not None and writes is not None:
-        managed = RequestAcceptance(lifecycle, writes)
-        managed.publisher = RoutingPublication(request_service)
+        managed = RequestAcceptance(lifecycle, writes, publisher=RoutingPublication(request_service))
         # Inside authentication, outside error translation, so generated error
         # responses for admitted requests also complete within their root lease.
         app.middlewares.insert(len(app.middlewares) - 1, create_acceptance_middleware(managed))

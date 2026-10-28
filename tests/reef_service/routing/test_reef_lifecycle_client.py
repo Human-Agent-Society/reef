@@ -15,14 +15,21 @@ from socketserver import ThreadingUnixStreamServer
 import pytest
 
 from reef.service.deploy.routing.reef_lifecycle_client import (
+    LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,
     RoutingControlTimeout,
     UnixHTTPConnection,
-    json_object,
+    lifecycle_status,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def status_json(revision: int = -1, **changes: object) -> dict[str, object]:
+    """A closed child's status in its wire form, with ``changes`` applied unchecked."""
+    status = LifecycleStatus("test", "generation", "snapshot", "", False, False, revision, 0, 0, 0, 0, 0)
+    return {**status.to_json(), **changes}
 
 
 class UnixHTTPServer(ThreadingUnixStreamServer):
@@ -34,11 +41,11 @@ class UnixHTTPServer(ThreadingUnixStreamServer):
 class SlowChild:
     """A lifecycle endpoint that applies each revision once and answers request ``n`` after ``delays[n]`` seconds.
 
-    A request after the last delay is answered at once. ``bodies`` lists every request body in arrival
-    order, repeats included, and ``applied`` each revision when it was first seen. ``reply`` is False to close
-    each connection without any answer; ``reply_body`` replaces the JSON status, so malformed replies stay
-    possible. With ``headers_first`` the status line and headers go out at once and only the body waits;
-    ``closed`` then records, for each waiting request, whether the client closed its connection meanwhile.
+    A request after the last delay is answered at once, with a closed child's status at its last applied
+    revision. ``bodies`` lists every request body in arrival order, repeats included, and ``applied`` each
+    revision when it was first seen. ``reply`` is False to close each connection without any answer;
+    ``reply_body`` replaces the status, so malformed replies stay possible. With ``headers_first`` the status
+    line and headers go out at once and only the body waits; ``closed`` then records, for each waiting request, whether the client closed its connection meanwhile.
     ``protocol`` is the HTTP version it answers with. ``handler`` makes a request handler class bound to
     this child; ``serving`` serves it on a temporary Unix socket and shuts it down.
     """
@@ -85,7 +92,7 @@ class SlowChild:
                     if revision > child.revision:
                         child.revision = revision
                         child.applied.append(revision)
-                    reply = child.reply_body or json.dumps({"control_revision": child.revision}).encode()
+                    reply = child.reply_body or json.dumps(status_json(child.revision)).encode()
                 delay = child.delays[index] if index < len(child.delays) else 0
                 if not child.headers_first:
                     time.sleep(delay)
@@ -151,7 +158,7 @@ def test_a_reply_that_times_out_is_requested_again_with_the_same_bytes_and_appli
         status = client.request(action)
     # The first attempt's reply came too late; the second, on a new connection, read the same revision.
     expected_revision = -1 if action is None else 1
-    assert status == {"control_revision": expected_revision}
+    assert status == LifecycleStatus.from_json(status_json(expected_revision))
     assert len(child.bodies) == 2 and child.bodies[0] == child.bodies[1]
     assert child.applied == ([] if action is None else [1])
 
@@ -170,16 +177,38 @@ def test_persistent_timeouts_end_after_three_attempts_of_the_ordinary_allowance(
 
 
 @pytest.mark.parametrize(
-    ("reply", "failure"),
-    [({"reply": False}, "request failed"), ({"reply_body": b"not json"}, "not valid JSON")],
+    ("reply", "failure", "retryable"),
+    [({"reply": False}, "request failed", True), ({"reply_body": b"not json"}, "not a lifecycle status", False)],
     ids=["no_reply", "invalid_json"],
 )
-def test_only_a_timeout_is_requested_again(reply: dict[str, bool | bytes], failure: str) -> None:
+def test_only_a_timeout_is_requested_again(reply: dict[str, bool | bytes], failure: str, retryable: bool) -> None:
     """HTTP statuses other than 200 are checked, also with a single request, in the socket test below."""
     child = SlowChild([], **reply)
     with serving(child) as path, pytest.raises(RoutingControlError, match=failure) as error:
         client_for(path).request("close")
     assert not isinstance(error.value, RoutingControlTimeout)
+    assert error.value.retryable is retryable
+    assert len(child.bodies) == 1
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"control_revision": 1},
+        status_json(1, unexpected=True),
+        status_json(1, accepting=1),
+        status_json(1, control_revision=True),
+        status_json(1, stopping=True, accepting=True),
+        status_json(1, pending_writes=0, drain_pending_writes=1),
+        status_json(1, router_config_hash="not-a-runtime-hash"),
+    ],
+    ids=["partial", "extra_field", "int_as_bool", "bool_as_int", "stopping_open", "drain_over_pending", "bad_hash"],
+)
+def test_a_reply_that_is_not_a_lifecycle_status_is_refused_once_and_not_retryable(reply: dict[str, object]) -> None:
+    child = SlowChild([], reply_body=json.dumps(reply).encode())
+    with serving(child) as path, pytest.raises(RoutingControlError, match="not a lifecycle status") as error:
+        client_for(path).request("close")
+    assert not isinstance(error.value, RoutingControlTimeout) and error.value.retryable is False
     assert len(child.bodies) == 1
 
 
@@ -225,7 +254,7 @@ def test_a_callers_deadline_ends_the_attempts_and_is_the_opens_deadline() -> Non
 def test_a_reply_within_the_callers_deadline_is_accepted() -> None:
     child = SlowChild([0.05])
     with serving(child) as path:
-        assert client_for(path).request("close", deadline=time.monotonic() + 1) == {"control_revision": 1}
+        assert client_for(path).request("close", deadline=time.monotonic() + 1).control_revision == 1
 
 
 def test_an_open_carries_the_end_of_its_first_attempt_and_every_retry_reuses_it() -> None:
@@ -233,7 +262,7 @@ def test_an_open_carries_the_end_of_its_first_attempt_and_every_retry_reuses_it(
     with serving(child) as path:
         client = client_for(path, open_timeout_seconds=0.3)
         started = time.monotonic()
-        assert client.request("open") == {"control_revision": 1}
+        assert client.request("open").control_revision == 1
     first, retry = child.bodies
     assert first == retry
     deadline = json.loads(first)["open_deadline_monotonic"]
@@ -247,6 +276,7 @@ def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(
     monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool | None
 ) -> None:
     requests = []
+    reply = json.dumps(status_json()).encode()
 
     class Handler(BaseHTTPRequestHandler):
         """Records each POST in ``requests`` and answers with the parametrized ``status``, maybe a redirect."""
@@ -257,9 +287,9 @@ def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(
             self.send_response(status)
             if status == 302:
                 self.send_header("Location", "/credential-sink")
-            self.send_header("Content-Length", "19")
+            self.send_header("Content-Length", str(len(reply)))
             self.end_headers()
-            self.wfile.write(b'{"accepting":false}')
+            self.wfile.write(reply)
 
         def address_string(self) -> str:
             return "control-socket"
@@ -277,7 +307,7 @@ def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(
         client = ReefLifecycleClient(path, "test", "generation", "private-test-token")
         try:
             if status == 200:
-                assert client.request("close") == {"accepting": False}
+                assert client.request("close") == LifecycleStatus.from_json(status_json())
             else:
                 with pytest.raises(RoutingControlError, match=str(status)) as error:
                     client.request("close")
@@ -315,10 +345,41 @@ def test_the_client_never_connects_over_tcp(tmp_path: Path) -> None:
         listener.close()
 
 
-@pytest.mark.parametrize("body", [b"invalid", b"\xff", b"[]"])
+@pytest.mark.parametrize("body", [b"invalid", b"\xff", b"[]", b"null"])
 def test_invalid_control_json_is_a_typed_error(body: bytes) -> None:
-    with pytest.raises(RoutingControlError):
-        json_object(body)
+    with pytest.raises(RoutingControlError) as error:
+        lifecycle_status(body)
+    assert error.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"deployment_id": ""},
+        {"generation": None},
+        {"snapshot_version": None},
+        {"stopping": "no"},
+        {"control_revision": -2},
+        {"control_revision": 1.0},
+        {"active_requests": -1},
+        {"failed_writes": False},
+        {"forced_requests": None},
+    ],
+)
+def test_a_lifecycle_status_refuses_values_outside_its_domains(changes: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        LifecycleStatus.from_json(status_json(**changes))
+
+
+def test_a_lifecycle_status_keeps_the_initial_and_published_values_of_a_child() -> None:
+    initial = LifecycleStatus.from_json(status_json(snapshot_version=""))
+    assert (initial.control_revision, initial.snapshot_version, initial.router_config_hash) == (-1, "", "")
+    assert initial.idle
+    published = LifecycleStatus.from_json(
+        status_json(4, router_config_hash="a" * 64, accepting=True, pending_writes=2, drain_pending_writes=1)
+    )
+    assert published.accepting and not published.idle
+    assert LifecycleStatus.from_json(json.loads(json.dumps(published.to_json()))) == published
 
 
 @pytest.mark.parametrize(
