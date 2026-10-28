@@ -45,6 +45,7 @@ from aiohttp import web
 from reef_client.client import ReefClientError
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.core.evaluation import RolloutRequest
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskRollout, TaskRolloutError, TaskRolloutRunner, checked_labels
@@ -252,7 +253,8 @@ class ReefGeneratorRollouts(GeneratorRollouts):
             # The task's verifier finished for its oracle, so a verifier still running at its timeout is the agent's.
             verifier_timeout_reward=0.0,
         )
-        return tuple(await runner.run_rollouts_async([task_path] * count, self.rollout_slots))
+        request = RolloutRequest(runner.harness, runner.served_model, str(task_path))
+        return tuple(await runner.run_rollouts_async([request] * count, self.rollout_slots))
 
 
 # ------------------------------------------------------------------ the jobs

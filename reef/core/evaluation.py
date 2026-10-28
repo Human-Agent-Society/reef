@@ -10,6 +10,8 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 #: The kind of a rollout's score: it ran and was scored, it ran but the policy gave no answer, or the
@@ -150,20 +152,108 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
 
-class RolloutRunner[RequestT, RolloutT](ABC):
-    """Runs rollouts: each request names a task, and the policy and environment that run it.
+#: The kind of an artifact. A ``harness`` is a whole agent harness that Reef runs as it is, such as a Harbor agent
+#: or an adapter's binary. A ``harness_plugin`` installs into a base harness, such as an evolved tree or a skill
+#: tree. A ``model`` is a whole model, such as a provider's model or full weights. A ``model_adapter`` is a LoRA
+#: adapter on a base model.
+ArtifactKind = Literal["harness", "harness_plugin", "model", "model_adapter"]
+ARTIFACT_KINDS: tuple[ArtifactKind, ...] = ("harness", "harness_plugin", "model", "model_adapter")
 
-    Values: an implementation holds what all its rollouts share, such as the model endpoint and the
-    environment. ``RequestT`` is what one rollout needs beyond that: a task directory for the Harbor agent
-    runner (``TaskRolloutRunner``), and a harness tree with its task for the harness tree runner
-    (``HarnessRolloutEvaluator``). ``RolloutT`` is the result of one rollout, with its trajectory.
+
+@dataclass(frozen=True)
+class PolicyHarness:
+    """The harness side of a policy: a base harness, with the plugin that installs into it.
+
+    Values: ``base`` is the non-empty name of the base harness: an adapter name, such as ``pi`` or ``native``, or a
+    Harbor agent name, such as ``terminus-2``. ``plugin`` maps each relative path of the plugin's files to the
+    file's text. An empty ``plugin`` runs the base harness as it is.
+    Purpose: a ``RolloutRequest`` names the harness of its rollout, and a ``RolloutRunner`` runs it.
+    ``kind`` is ``harness_plugin`` when ``plugin`` has files, else ``harness``.
+    """
+
+    base: str
+    plugin: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base, str) or not self.base:
+            raise ValueError("a policy harness names its base harness")
+        if not isinstance(self.plugin, Mapping) or any(
+            not isinstance(path, str) or not path or not isinstance(text, str) for path, text in self.plugin.items()
+        ):
+            raise ValueError("a policy harness plugin maps non-empty file paths to text")
+        object.__setattr__(self, "plugin", MappingProxyType(dict(self.plugin)))
+
+    @property
+    def kind(self) -> ArtifactKind:
+        return "harness_plugin" if self.plugin else "harness"
+
+
+@dataclass(frozen=True)
+class PolicyModel:
+    """The model side of a policy: a model, with at most one LoRA adapter on it.
+
+    Values: ``name`` is the non-empty name that an endpoint serves the model under: a provider's model name, or the
+    name that a deployment serves its weights under. ``adapter`` is None, or the non-empty location of a LoRA
+    adapter on that model, such as a Tinker sampler path.
+    Purpose: a ``RolloutRequest`` names the model of its rollout, and a ``RolloutRunner`` serves it.
+    ``kind`` is ``model_adapter`` when ``adapter`` is set, else ``model``.
+    """
+
+    name: str
+    adapter: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("a policy model names the model")
+        if self.adapter is not None and (not isinstance(self.adapter, str) or not self.adapter):
+            raise ValueError("a policy model adapter is None or a non-empty location")
+
+    @property
+    def kind(self) -> ArtifactKind:
+        return "model" if self.adapter is None else "model_adapter"
+
+
+@dataclass(frozen=True)
+class RolloutRequest:
+    """One rollout to run: a task, under a harness and a model.
+
+    Values: ``harness`` and ``model`` are the policy of the rollout. ``task`` is a non-empty task: a task prompt,
+    or the path of a Harbor task directory. ``record_dir`` is None, or a directory that does not exist yet, where
+    the runner keeps the rollout's trajectory.
+    Purpose: a caller gives requests to ``RolloutRunner.run_rollouts``, which runs one rollout for each.
+    """
+
+    harness: PolicyHarness
+    model: PolicyModel
+    task: str
+    record_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.harness, PolicyHarness) or not isinstance(self.model, PolicyModel):
+            raise TypeError("a rollout request holds a PolicyHarness and a PolicyModel")
+        if not isinstance(self.task, str) or not self.task:
+            raise ValueError("a rollout request names a non-empty task")
+        if self.record_dir is not None and not isinstance(self.record_dir, Path):
+            raise TypeError("a rollout request's record_dir is None or a Path")
+
+
+class RolloutRunner[RolloutT](ABC):
+    """Runs rollouts in one environment: one rollout for each ``RolloutRequest``.
+
+    Values: an implementation holds what all its rollouts share, such as the environment and the model endpoint.
+    ``RolloutT`` is the result of one rollout, with its trajectory. The Harbor agent runner
+    (``TaskRolloutRunner``) and the harness tree runner (``HarnessRolloutEvaluator``) implement it.
     Purpose: a harness evaluation, a checkpoint evaluation and training on tasks run their rollouts through it.
     To run a task ``count`` times, a caller repeats its request ``count`` times.
     """
 
     @abstractmethod
-    def run_rollouts(self, requests: Sequence[RequestT]) -> list[RolloutT]:
-        """Run one rollout of each request: the result has one rollout per request, in request order."""
+    def run_rollouts(self, requests: Sequence[RolloutRequest]) -> list[RolloutT]:
+        """Run one rollout of each request, and give one rollout per request, in request order.
+
+        Raise ``ValueError`` before any rollout runs when a request names a harness, a model or a record
+        directory that this runner cannot use.
+        """
 
     @abstractmethod
     def rollout_score(self, rollout: RolloutT) -> RolloutScore:
@@ -302,13 +392,18 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
 
 
 __all__ = [
+    "ARTIFACT_KINDS",
     "ROLLOUT_KINDS",
+    "ArtifactKind",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
     "CheckpointCandidate",
     "EvaluationResult",
+    "PolicyHarness",
+    "PolicyModel",
     "RolloutKind",
+    "RolloutRequest",
     "RolloutRunner",
     "RolloutScore",
     "RolloutScores",

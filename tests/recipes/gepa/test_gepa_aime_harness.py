@@ -19,9 +19,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.core.evaluation import PolicyHarness, RolloutRequest
+
 from reef.harness import RolloutResult
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
+
+
+def rollout_requests(evaluator, *pairings):
+    """One rollout request for each ``(files, task)``, on the evaluator's adapter and served model."""
+    return [
+        RolloutRequest(PolicyHarness(evaluator._descriptor.name, files), evaluator.served_model, task)
+        for files, task in pairings
+    ]
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"
@@ -127,10 +138,17 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
             assert backend._rollout_evaluator.worker_selection.settings.backend == "uni"
             assert [
                 row.score.value
-                for row in backend._rollout_evaluator.run_rollouts([({}, "problem", None), ({}, "problem", None)])
+                for row in backend._rollout_evaluator.run_rollouts(
+                    rollout_requests(backend._rollout_evaluator, ({}, "problem"), ({}, "problem"))
+                )
             ] == [1.0, 1.0]
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert backend._rollout_evaluator.run_rollouts([({}, "problem", None)])[0].score.value == 1.0
+            assert (
+                backend._rollout_evaluator.run_rollouts(rollout_requests(backend._rollout_evaluator, ({}, "problem")))[
+                    0
+                ].score.value
+                == 1.0
+            )
         finally:
             trainer.close()
 
@@ -181,10 +199,12 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
             assert backend._rollout_evaluator.worker_selection.settings.backend == (
                 "mp" if executor == "auto" else executor
             )
-            rows = backend._rollout_evaluator.run_rollouts([({}, "problem", None), ({}, "problem", None)])
+            rows = backend._rollout_evaluator.run_rollouts(
+                rollout_requests(backend._rollout_evaluator, ({}, "problem"), ({}, "problem"))
+            )
             assert [row.score.value for row in rows] == [1.0, 1.0]
             with pytest.raises(Exception, match="no AIME answer is registered"):
-                backend._rollout_evaluator.run_rollouts([({}, "unknown", None)])
+                backend._rollout_evaluator.run_rollouts(rollout_requests(backend._rollout_evaluator, ({}, "unknown")))
         finally:
             trainer.close()
 

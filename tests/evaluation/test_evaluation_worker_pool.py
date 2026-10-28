@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from tests.support._strategies import resolve_proposer
 
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, RolloutScorer, evaluation_selection
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
@@ -17,6 +18,14 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, TrainingPipeline
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.trainer import Trainer
+
+
+def rollout_requests(evaluator, *pairings):
+    """One rollout request for each ``(files, task)``, on the evaluator's adapter and served model."""
+    return [
+        RolloutRequest(PolicyHarness(evaluator._descriptor.name, files), evaluator.served_model, task)
+        for files, task in pairings
+    ]
 
 
 class StatefulWorker:
@@ -134,10 +143,21 @@ def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, execut
     )
     try:
         for cycle in range(2):
-            pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate", None), ({}, "", None)]
-            scores = backend._rollout_evaluator.run_rollouts(pairings)
+            requests = rollout_requests(
+                backend._rollout_evaluator,
+                ({"pi-agent/AGENTS.md": "candidate"}, "candidate"),
+                ({"pi-agent/AGENTS.md": "current"}, "current"),
+            )
+            scores = backend._rollout_evaluator.run_rollouts(requests)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
             assert [row.score.value for row in scores] == expected
+        evaluator = backend._rollout_evaluator
+        for request, message in (
+            (RolloutRequest(PolicyHarness("claude"), evaluator.served_model, "task"), "adapter"),
+            (RolloutRequest(PolicyHarness("pi"), PolicyModel("another-model"), "task"), "serves"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                evaluator.run_rollouts([request])
         paths = roots.read_text().splitlines()
         assert len(paths) == len(set(paths)) == 4
         assert all(not Path(path).exists() for path in paths)
@@ -147,4 +167,4 @@ def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, execut
     trainer.close()
     assert backend._rollout_evaluator._worker_pool._closed
     with pytest.raises(RuntimeError, match="closed"):
-        backend._rollout_evaluator.run_rollouts([({}, "", None)])
+        backend._rollout_evaluator.run_rollouts(rollout_requests(backend._rollout_evaluator, ({}, "current")))

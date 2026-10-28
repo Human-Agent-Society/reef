@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.evaluation import RolloutScore
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
 from reef.harness.client.tasks import (
@@ -354,7 +354,10 @@ def test_a_measurement_run_keeps_its_rollouts_out_of_the_training_data(reef: Sta
 def test_concurrent_rollouts_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2", "t3")]
     lab = StandInLab({"reward": 1.0})
-    rollouts = runner(reef, tmp_path, lab, concurrency=3).run_rollouts(paths)
+    running = runner(reef, tmp_path, lab, concurrency=3)
+    rollouts = running.run_rollouts(
+        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths]
+    )
     assert [rollout.name for rollout in rollouts] == ["t1", "t2", "t3"] and all(
         rollout.is_reported for rollout in rollouts
     )
@@ -614,3 +617,24 @@ def test_a_rollout_that_could_not_run_scores_not_run_and_one_without_a_reward_sc
     assert scorer.rollout_score(rollout(0.5, "a late error")) == RolloutScore.scored(0.5)
     with pytest.raises(TaskRolloutError, match="concurrency"):
         runner(reef, tmp_path, StandInLab({}), concurrency=0)
+
+
+def test_run_rollouts_refuses_a_harness_a_model_or_a_record_dir_it_cannot_use(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    task = str(written_task(tmp_path / "tasks", "t1"))
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab, model_adapter="tinker://start/sampler")
+    assert running.served_model.kind == "model_adapter" and running.harness.kind == "harness"
+    refused = (
+        (
+            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.served_model, task),
+            "agent",
+        ),
+        (RolloutRequest(running.harness, PolicyModel(running.model), task), "serves"),
+        (RolloutRequest(running.harness, running.served_model, task, tmp_path / "keep"), "work_dir"),
+    )
+    for request, message in refused:
+        with pytest.raises(ValueError, match=message):
+            running.run_rollouts([RolloutRequest(running.harness, running.served_model, task), request])
+    assert lab.calls == [], "a refused request runs no rollout"

@@ -67,7 +67,15 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The selected content: a model checkpoint or a harness tree.
+The selected content. An artifact is of exactly one of four kinds:
+
+- ``harness``: a whole agent harness that Reef runs as it is, such as a Harbor
+  agent or an adapter's binary.
+- ``harness_plugin``: a part that installs into a base harness, such as a
+  harness tree that Reef evolves, or a skill tree.
+- ``model``: a whole model, such as a provider's model or full weights.
+- ``model_adapter``: a LoRA adapter on a base model.
+
 ``content_id`` identifies those contents independently of when or why Reef
 published them.
 
@@ -301,9 +309,13 @@ serving, a LoRA/PEFT adapter layered on a frozen base model.
 Rollout
 -------
 
-One headless run of the agent under test against one task, in a throwaway root
-holding nothing but the rendered tree. Harness evolution scores every task twice
-per step, once per side.
+One run of one task by an agent, a harness and a model, in one environment. It
+goes from the task's first step to its scored end, and gives one trajectory and
+one score. The score is ``scored`` (with a value), ``no_answer`` (the agent gave
+no answer) or ``not_run`` (the environment could not run the rollout). In each
+step, harness evolution runs each evaluation task ``rollout_repeats`` times on
+each side. A Tinker task job runs each task ``rollouts_per_task`` times on the
+job's start weights.
 
 Mutation
 --------
