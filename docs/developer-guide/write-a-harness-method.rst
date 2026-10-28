@@ -487,14 +487,14 @@ example by raising an error (see `Scenario model configuration
 ``VerifierRewardScorer`` scores a Harbor task episode by its verifier's
 reward.
 
-Promote traffic prompts
+Collect traffic prompts
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-With ``evolution.evaluation.promote_failures: true``, prompts of the step's
-traces become permanent evaluation tasks. ``evolution.evaluation.promote``
-names a ``Promoter`` (``reef.evaluation.harness``). Its ``promote(samples)``
-receives the step's trace samples and returns the prompts to promote. Without
-a promoter, Reef promotes the user prompt of every trace. Either way, Reef
+With ``evolution.evaluation.collect_failures: true``, prompts of the step's
+traces become permanent evaluation tasks. ``evolution.evaluation.collector``
+names a ``TaskCollector`` (``reef.evaluation.harness``). Its ``collect(samples)``
+receives the step's trace samples and returns the prompts to collect. Without
+a collector, Reef collects the user prompt of every trace. Either way, Reef
 removes duplicates, screens the prompts, and limits how many it adds.
 
 Configure a deployment
@@ -622,7 +622,7 @@ Untrusted input
 ---------------
 
 Treat traces and request text as client-controlled data. If a method puts
-their text in a model prompt, fence it first. With ``promote_failures``, a
+their text in a model prompt, fence it first. With ``collect_failures``, a
 trace's user prompt can also become an evaluation task. Read ``trace.client``
 when a decision depends on who supplied a trace:
 
@@ -643,9 +643,9 @@ Reef screens prompts before it adds them as evaluation tasks. It skips
 prompts that carry credentials or instruction overrides, such as ``ignore
 the previous instructions``, a forged ``new system prompt:``, or a
 chat-template control token. The step counts these under
-``screened_tasks``. ``evolution.evaluation.max_promoted_per_client`` limits
-the promoted prompts of each tagged client, and
-``evolution.evaluation.max_promoted_tasks`` limits all of them.
+``screened_tasks``. ``evolution.evaluation.max_collected_per_client`` limits
+the collected prompts of each tagged client, and
+``evolution.evaluation.max_collected_tasks`` limits all of them.
 
 Put code-bearing kinds that client text can shape (``code_extension``,
 ``native_tool`` and ``native_hook``) in ``evolution.review_kinds``, so that a

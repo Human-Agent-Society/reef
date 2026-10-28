@@ -43,7 +43,7 @@ from reef.evaluation.harness import (
     HarnessEpisodeEvaluator,
     History,
     NoEvaluationPolicy,
-    Promoter,
+    TaskCollector,
     evaluation_selection,
 )
 from reef.harness.adapters import get_adapter
@@ -52,7 +52,6 @@ from reef.harness.delivery import create_harness_surface
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, TreeKind, validate_tree
-from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint
@@ -118,7 +117,6 @@ class EvolutionSettings(Settings):
     max_pending_proposals: int = config_option(8, help="The most client proposals that wait for a step.")
     publish: str = config_option("auto", help="auto serves a selected tree at once; review holds it for a person.")
     review_kinds: tuple[str, ...] = config_option((), help="Tree kinds whose change always waits for a person.")
-    client_models: tuple[str, ...] = config_option((), help="Models an installed client may switch to.")
     executor: str = config_option("local", help="Where episodes run: local, sandbox or e2b.")
     sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the episode executor.")
 
@@ -185,7 +183,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     Values: ``method`` is the deployment's ``Method``. ``evolution`` and
     ``evaluation`` are the parsed sections. ``scorer`` scores each episode,
-    and ``promoter`` picks the prompts that promotion adds: each is the
+    and ``collector`` picks the prompts that collection adds: each is the
     plugin that ``evaluation`` names, or the instance that a recipe built in
     Python receives, and ``None`` when there is neither. ``seed`` is the first
     tree of a new scenario. ``models`` and ``model_metadata`` are the parsed
@@ -205,7 +203,7 @@ class HarnessEvolutionRecipe(Recipe):
     evaluation: EvaluationSettings
     seed: HarnessTree = field(default_factory=lambda: HarnessTree({}))
     scorer: EpisodeScorer | None = None
-    promoter: Promoter | None = None
+    collector: TaskCollector | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
@@ -237,9 +235,9 @@ class HarnessEvolutionRecipe(Recipe):
                 f"evaluation tasks from a manifest or a task store are task directories, and adapter "
                 f"{descriptor.name!r} takes a prompt (terminus takes a task directory)"
             )
-        if self.evaluation.promote_failures and descriptor.is_prompt_task_directory:
+        if self.evaluation.collect_failures and descriptor.is_prompt_task_directory:
             raise RecipeConfigError(
-                "evaluation.promote_failures adds prompts, and this adapter plays task directories"
+                "evaluation.collect_failures adds prompts, and this adapter plays task directories"
             )
         if issubclass(self.stages().sample2job.plugin_class, TrainTaskRollouts):
             # An offline step plays the imported train tasks, which are task directories, and scores each episode.
@@ -310,10 +308,10 @@ class HarnessEvolutionRecipe(Recipe):
                 if evaluation.scorer is None
                 else EpisodeScorer.from_setting(evaluation.scorer, setting="evolution.evaluation.scorer")
             )
-            promoter = (
+            collector = (
                 None
-                if evaluation.promote is None
-                else Promoter.from_setting(evaluation.promote, setting="evolution.evaluation.promote")
+                if evaluation.collector is None
+                else TaskCollector.from_setting(evaluation.collector, setting="evolution.evaluation.collector")
             )
             models = {
                 name: ModelBinding.from_config(section, values, where=f"evolution.models.{name}")
@@ -339,7 +337,7 @@ class HarnessEvolutionRecipe(Recipe):
             "evaluation": evaluation,
             "seed": seed,
             "scorer": scorer,
-            "promoter": promoter,
+            "collector": collector,
             "models": models,
             "model_metadata": model_metadata,
             "executor": executor,
@@ -400,28 +398,7 @@ class HarnessEvolutionRecipe(Recipe):
         return self.default_model_bindings(scenario)
 
     def build_surface(self, scenario: str) -> Surface:
-        model = self.model_name or (self.runtime.model_path if self.runtime is not None else None)
-        # Only a provider proxy has a dialect; a local engine serves Chat Completions.
-        api = self.runtime.api if isinstance(self.runtime, InferenceProxyRuntime) else "openai"
-        client_models = self.evolution.client_models
-        override = self.scenario_model.runtime if self.scenario_model is not None else None
-        if override is not None:
-            model = override.model_path
-            api = override.api
-            client_models = ()
-        if self.evolution.adapter == "codex" and self.runtime is not None:
-            selected = self.bind_model_metadata(ModelBinding.from_runtime(override or self.runtime, model=model))
-            served_metadata = selected.metadata
-        else:
-            served_metadata = None
-        return create_harness_surface(
-            get_adapter(self.evolution.adapter),
-            served_model=model if isinstance(model, str) and model else None,
-            served_api=api,
-            model_metadata=self.model_metadata,
-            served_metadata=served_metadata,
-            client_models=client_models,
-        )
+        return create_harness_surface(get_adapter(self.evolution.adapter))
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
         """The seed tree's files: a new scenario's base release, which the first step builds on."""
@@ -499,10 +476,10 @@ class HarnessEvolutionRecipe(Recipe):
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
                 task_store=task_store,
-                promote_failures=self.evaluation.promote_failures,
-                promoter=self.promoter,
-                max_promoted=self.evaluation.max_promoted_tasks,
-                max_promoted_per_client=self.evaluation.max_promoted_per_client,
+                collect_failures=self.evaluation.collect_failures,
+                collector=self.collector,
+                max_collected=self.evaluation.max_collected_tasks,
+                max_collected_per_client=self.evaluation.max_collected_per_client,
             ),
             history=history,
             models=models,

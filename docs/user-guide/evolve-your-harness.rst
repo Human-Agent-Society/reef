@@ -378,8 +378,8 @@ becomes the next head.
   directories need an adapter that plays them, such as ``terminus``. A
   scenario whose evaluation reads ``imported-tasks`` takes task uploads
   (``POST /reef/scenarios/{scenario}/tasks?split=eval``). Until the eval split
-  holds a task, ``compare`` and ``floor`` reject every candidate. Promotion
-  can add prompts to the tasks (see `Promotion: growing evaluation suite`_).
+  holds a task, ``compare`` and ``floor`` reject every candidate. Collection
+  can add prompts to the tasks (see `Collection: growing evaluation suite`_).
 - ``evolution.evaluation.scorer`` names the ``EpisodeScorer`` that scores
   each episode.
 - ``evolution.evaluation.policy`` is one of three policies:
@@ -553,31 +553,31 @@ latest pending release serves everything accumulated since the head.
 Similarly, for more detail, refer to `Write a harness method
 <../developer-guide/write-a-harness-method.rst>`__.
 
-Promotion: growing evaluation suite
+Collection: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The evaluation suite consists of the seed tasks from the task source by
 default. To grow it automatically from traffic, configure
-``evolution.evaluation.promote_failures: true``, which adds the prompts of the
+``evolution.evaluation.collect_failures: true``, which adds the prompts of the
 step's traces to the evaluation set permanently. This also means the
 episode scorer must be able to score any arbitrary prompt. A
-request step in ``hybrid`` promotes the traces it carries the same way.
-Promotion adds prompts, so it needs an adapter whose task is a prompt.
+request step in ``hybrid`` collects the traces it carries the same way.
+Collection adds prompts, so it needs an adapter whose task is a prompt.
 
-A promoted prompt is real client traffic, so it is screened before it
+A collected prompt is real client traffic, so it is screened before it
 becomes a task. A prompt carrying a key-shaped literal meets the tree's own
-credential tripwire: it is never promoted, never persisted, and never re-run
+credential tripwire: it is never collected, never persisted, and never re-run
 as a task, and the step goes on without it. A prompt shaped like an
 instruction override (``ignore the previous instructions``, a forged system
 message, a chat-template control token) is screened the same way. One tagged
-client holds at most ``evolution.evaluation.max_promoted_per_client``
-promoted tasks, so a single sender cannot fill the suite, and
-``evolution.evaluation.max_promoted_tasks`` caps them all.
+client holds at most ``evolution.evaluation.max_collected_per_client``
+collected tasks, so a single sender cannot fill the suite, and
+``evolution.evaluation.max_collected_tasks`` caps them all.
 
-An optional ``evolution.evaluation.promote`` names a ``Promoter`` class that
-chooses the prompts. Its ``promote(samples)`` receives the step's trace
-samples and returns the prompts to promote, for example only those of failing
-traces. Without it, every trace's user prompt is promoted. Reef dedupes,
+An optional ``evolution.evaluation.collector`` names a ``TaskCollector`` class that
+chooses the prompts. Its ``collect(samples)`` receives the step's trace
+samples and returns the prompts to collect, for example only those of failing
+traces. Without it, every trace's user prompt is collected. Reef dedupes,
 screens and caps whatever it returns either way.
 
 Rechecking published tree with grown evaluation suite

@@ -77,7 +77,7 @@ class _TreeRecipe(Recipe):
     seed: Mapping[str, str] | None = None
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(get_adapter("pi"), served_model="served-model")
+        return create_harness_surface(get_adapter("pi"))
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
         return self.seed
@@ -164,7 +164,6 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     surface = recipe.build_surface("agent")
     assert surface.names == ("harness", "config")
     assert surface.files_component == "harness"
-    assert surface.harness is not None and surface.harness.served_model == "served-model"
     assert isinstance(surface.components["config"].validator, ConfigValidator)
     assert recipe.base_artifact_files() == {
         "harness/AGENTS.md": "seed",
@@ -192,7 +191,7 @@ def test_composite_recipe_rejects_incoherent_components(tmp_path: Path) -> None:
     with pytest.raises(RecipeConfigError, match="reserves"):
         CompositeRecipe(components={"step": _TreeRecipe(), "config": _ConfigRecipe()})
     two_trees = CompositeRecipe(components={"a": _TreeRecipe(label="a"), "b": _TreeRecipe(label="b")})
-    with pytest.raises(RecipeConfigError, match="harness information"):
+    with pytest.raises(ValueError, match="at most one component exposes a client-pulled file tree"):
         two_trees.build_surface("agent")
 
 

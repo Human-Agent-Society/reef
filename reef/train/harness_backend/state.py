@@ -3,7 +3,7 @@
 The tree itself is not here: it is the git release the commit recorded, and
 the trees a step tried are in the scenario's history. The state keeps what
 crosses steps and must commit with them: the counters the budgets read, the
-promoted evaluation tasks, the failure manifest, the recheck's rollback
+collected evaluation tasks, the failure manifest, the recheck's rollback
 target, and the method's own files.
 """
 
@@ -24,10 +24,10 @@ class HarnessState:
     Values: ``steps`` ≥ 0 counts the steps the backend prepared.
     ``failure_streak`` ≥ 0 counts the candidates rejected since the latest
     selected one. ``manifest`` is the failure manifest of the tree the latest
-    evaluated step committed, ``None`` before the first. ``promoted_tasks``
-    are the prompts promoted into the evaluation tasks, in promotion order,
-    without duplicates. ``promoted_clients`` counts, per tagged client, the
-    prompts promoted from its traffic; every count is positive.
+    evaluated step committed, ``None`` before the first. ``collected_tasks``
+    are the prompts collected into the evaluation tasks, in collection order,
+    without duplicates. ``collected_clients`` counts, per tagged client, the
+    prompts collected from its traffic; every count is positive.
     ``rollback_release_id`` names the release the latest publish replaced,
     which a recheck evaluates again; ``rollback_context`` is the evaluation
     context key the latest publish or the latest recheck that kept the head
@@ -43,8 +43,8 @@ class HarnessState:
     steps: int = 0
     failure_streak: int = 0
     manifest: FailureManifest | None = None
-    promoted_tasks: tuple[str, ...] = ()
-    promoted_clients: Mapping[str, int] = field(default_factory=dict)
+    collected_tasks: tuple[str, ...] = ()
+    collected_clients: Mapping[str, int] = field(default_factory=dict)
     rollback_release_id: str | None = None
     rollback_context: str | None = None
     method_files: Mapping[str, str] = field(default_factory=dict)
@@ -53,13 +53,13 @@ class HarnessState:
         for label, value in (("steps", self.steps), ("failure_streak", self.failure_streak)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"HarnessState.{label} must be an integer of at least 0")
-        if len(set(self.promoted_tasks)) != len(self.promoted_tasks):
-            raise ValueError("HarnessState.promoted_tasks must not repeat a prompt")
+        if len(set(self.collected_tasks)) != len(self.collected_tasks):
+            raise ValueError("HarnessState.collected_tasks must not repeat a prompt")
         if any(
             isinstance(count, bool) or not isinstance(count, int) or count < 1
-            for count in self.promoted_clients.values()
+            for count in self.collected_clients.values()
         ):
-            raise ValueError("HarnessState.promoted_clients counts must be positive integers")
+            raise ValueError("HarnessState.collected_clients counts must be positive integers")
         rollback = (("rollback_release_id", self.rollback_release_id), ("rollback_context", self.rollback_context))
         for label, text in rollback:
             if text is not None and (not isinstance(text, str) or not text):
@@ -68,7 +68,7 @@ class HarnessState:
             raise ValueError("HarnessState rollback_release_id and rollback_context are both set or both None")
         if any(not isinstance(text, str) for text in self.method_files.values()):
             raise ValueError("HarnessState.method_files must map paths to text")
-        object.__setattr__(self, "promoted_clients", MappingProxyType(dict(self.promoted_clients)))
+        object.__setattr__(self, "collected_clients", MappingProxyType(dict(self.collected_clients)))
         object.__setattr__(self, "method_files", MappingProxyType(dict(self.method_files)))
 
     def to_json(self) -> dict[str, Any]:
@@ -77,8 +77,8 @@ class HarnessState:
             "steps": self.steps,
             "failure_streak": self.failure_streak,
             "failure_manifest": None if self.manifest is None else self.manifest.to_state(),
-            "promoted_tasks": list(self.promoted_tasks),
-            "promoted_clients": dict(self.promoted_clients),
+            "collected_tasks": list(self.collected_tasks),
+            "collected_clients": dict(self.collected_clients),
             "rollback_release_id": self.rollback_release_id,
             "rollback_context": self.rollback_context,
             "method_files": dict(self.method_files),
@@ -92,9 +92,9 @@ class HarnessState:
             steps=int(value.get("steps", 0)),
             failure_streak=int(value.get("failure_streak", 0)),
             manifest=None if manifest is None else FailureManifest.from_state(manifest),
-            promoted_tasks=tuple(str(task) for task in value.get("promoted_tasks", ())),
-            promoted_clients={
-                str(name): int(count) for name, count in dict(value.get("promoted_clients", {})).items()
+            collected_tasks=tuple(str(task) for task in value.get("collected_tasks", ())),
+            collected_clients={
+                str(name): int(count) for name, count in dict(value.get("collected_clients", {})).items()
             },
             rollback_release_id=value.get("rollback_release_id"),
             rollback_context=value.get("rollback_context"),

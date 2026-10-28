@@ -2,9 +2,9 @@
 
 A step evaluates the candidate and the head tree on the same tasks: the
 configured tasks (``evolution.evaluation.tasks``, or a task manifest), or the
-eval split of a task store as the step reads it, then the prompts promoted
-from failing traffic. Promotion is off by default. When it is on, a
-``Promoter`` picks the prompts (every trace's user prompt without one), and
+eval split of a task store as the step reads it, then the prompts collected
+from failing traffic. Collection is off by default. When it is on, a
+``TaskCollector`` picks the prompts (every trace's user prompt without one), and
 Reef screens out credentials and instruction overrides, skips duplicates, and
 caps the total and each tagged client's share.
 """
@@ -22,19 +22,19 @@ from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.storage.tasks import TaskStore
 
 
-class Promoter(ConfiguredPlugin, ABC):
+class TaskCollector(ConfiguredPlugin, ABC):
     """Choose which trace prompts become permanent evaluation tasks.
 
-    ``promote`` receives a step's trace samples and returns the prompts to
-    promote. Reef still removes duplicates, screens for credentials and
+    ``collect`` receives a step's trace samples and returns the prompts to
+    collect. Reef still removes duplicates, screens for credentials and
     instruction overrides, and caps them.
-    Purpose: a deployment names the class in ``evolution.evaluation.promote``;
-    ``EvaluationTasks`` calls it in a step that promotes failures.
+    Purpose: a deployment names the class in ``evolution.evaluation.collector``;
+    ``EvaluationTasks`` calls it in a step that collects failures.
     """
 
     @abstractmethod
-    def promote(self, samples: tuple[TrajectorySample, ...]) -> Sequence[str]:
-        """The prompts this step should promote into the evaluation tasks."""
+    def collect(self, samples: tuple[TrajectorySample, ...]) -> Sequence[str]:
+        """The prompts this step should collect into the evaluation tasks."""
 
 
 def prompt_of(sample: TrajectorySample) -> str | None:
@@ -70,11 +70,11 @@ def client_of(sample: TrajectorySample) -> str:
 
 @dataclass(frozen=True)
 class StepTasks:
-    """The tasks one step evaluates, and the promotion state that goes with them.
+    """The tasks one step evaluates, and the collection state that goes with them.
 
-    Values: ``tasks`` is the step's seed tasks, then every promoted prompt not
-    among them, without duplicates. ``promoted_tasks`` are the promoted
-    prompts after this step, in promotion order, and ``promoted_clients``
+    Values: ``tasks`` is the step's seed tasks, then every collected prompt not
+    among them, without duplicates. ``collected_tasks`` are the collected
+    prompts after this step, in collection order, and ``collected_clients``
     counts them per tagged client. ``screened`` ≥ 0 counts the candidate
     prompts the screens refused.
     Purpose: ``EvaluationTasks.for_step`` makes it; the backend evaluates on
@@ -82,8 +82,8 @@ class StepTasks:
     """
 
     tasks: tuple[str, ...]
-    promoted_tasks: tuple[str, ...]
-    promoted_clients: Mapping[str, int]
+    collected_tasks: tuple[str, ...]
+    collected_clients: Mapping[str, int]
     screened: int = 0
 
 
@@ -91,9 +91,9 @@ class EvaluationTasks:
     """The source of every step's evaluation tasks.
 
     ``seed_tasks`` are the configured tasks; with ``task_store`` set, each
-    step reads the store's eval split instead. With ``promote_failures``, a
-    step promotes up to ``max_promoted`` prompts in total and
-    ``max_promoted_per_client`` per tagged client, chosen by ``promoter``
+    step reads the store's eval split instead. With ``collect_failures``, a
+    step collects up to ``max_collected`` prompts in total and
+    ``max_collected_per_client`` per tagged client, chosen by ``collector``
     (every trace's prompt without one).
     """
 
@@ -102,19 +102,19 @@ class EvaluationTasks:
         *,
         seed_tasks: tuple[str, ...],
         task_store: TaskStore | None = None,
-        promote_failures: bool = False,
-        promoter: Promoter | None = None,
-        max_promoted: int = 50,
-        max_promoted_per_client: int = 5,
+        collect_failures: bool = False,
+        collector: TaskCollector | None = None,
+        max_collected: int = 50,
+        max_collected_per_client: int = 5,
     ) -> None:
-        if max_promoted < 0 or max_promoted_per_client < 0:
-            raise ValueError("max_promoted_tasks and max_promoted_per_client must be at least 0")
+        if max_collected < 0 or max_collected_per_client < 0:
+            raise ValueError("max_collected_tasks and max_collected_per_client must be at least 0")
         self.seed_tasks = seed_tasks
         self.task_store = task_store
-        self.promote_failures = promote_failures
-        self.promoter = promoter
-        self.max_promoted = max_promoted
-        self.max_promoted_per_client = max_promoted_per_client
+        self.collect_failures = collect_failures
+        self.collector = collector
+        self.max_collected = max_collected
+        self.max_collected_per_client = max_collected_per_client
 
     def seed(self) -> tuple[str, ...]:
         """The seed tasks as of now: the store's eval split when a store is set, in publication order."""
@@ -125,27 +125,27 @@ class EvaluationTasks:
     def for_step(
         self,
         samples: tuple[TrajectorySample, ...],
-        promoted_tasks: Sequence[str],
-        promoted_clients: Mapping[str, int],
+        collected_tasks: Sequence[str],
+        collected_clients: Mapping[str, int],
     ) -> StepTasks:
-        """The tasks this step evaluates, after promoting this step's prompts when promotion is on.
+        """The tasks this step evaluates, after collecting this step's prompts when collection is on.
 
-        ``promoted_tasks`` and ``promoted_clients`` are the promotion state the previous step committed.
+        ``collected_tasks`` and ``collected_clients`` are the collection state the previous step committed.
         """
         seed = self.seed()
-        promoted = list(promoted_tasks)
-        counts = dict(promoted_clients)
+        collected = list(collected_tasks)
+        counts = dict(collected_clients)
         screened = 0
-        if self.promote_failures:
+        if self.collect_failures:
             candidates = (
                 [prompt for sample in samples if (prompt := prompt_of(sample)) is not None]
-                if self.promoter is None
-                else list(self.promoter.promote(samples))
+                if self.collector is None
+                else list(self.collector.collect(samples))
             )
             clients = {prompt: client_of(sample) for sample in samples if (prompt := prompt_of(sample))}
-            seen = set(seed) | set(promoted)
+            seen = set(seed) | set(collected)
             for prompt in candidates:
-                if len(promoted) >= self.max_promoted:
+                if len(collected) >= self.max_collected:
                     break
                 if not isinstance(prompt, str) or not prompt.strip() or prompt in seen:
                     continue
@@ -154,14 +154,14 @@ class EvaluationTasks:
                     continue
                 # Untagged traffic has no identity to count under, so only a tagged client meets the per-client cap.
                 client = clients.get(prompt, "untagged")
-                if self.max_promoted_per_client and client != "untagged":
-                    if counts.get(client, 0) >= self.max_promoted_per_client:
+                if self.max_collected_per_client and client != "untagged":
+                    if counts.get(client, 0) >= self.max_collected_per_client:
                         continue
                     counts[client] = counts.get(client, 0) + 1
-                promoted.append(prompt)
+                collected.append(prompt)
                 seen.add(prompt)
-        tasks = (*seed, *(task for task in promoted if task not in frozenset(seed)))
-        return StepTasks(tasks, tuple(promoted), counts, screened)
+        tasks = (*seed, *(task for task in collected if task not in frozenset(seed)))
+        return StepTasks(tasks, tuple(collected), counts, screened)
 
 
-__all__ = ["EvaluationTasks", "Promoter", "StepTasks", "client_of", "prompt_of"]
+__all__ = ["EvaluationTasks", "TaskCollector", "StepTasks", "client_of", "prompt_of"]

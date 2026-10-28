@@ -25,7 +25,7 @@ from tests.support.harness_steps import (
     UNCHANGED,
     FixedScorer,
     IdleMethod,
-    NoPromotion,
+    NoCollection,
     TreeReleases,
     changed_rules,
     evolution_config,
@@ -127,14 +127,14 @@ def test_config_without_evolution_section_is_rejected() -> None:
 def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -> None:
     built = from_config(evolution_config())
     assert isinstance(built.method, IdleMethod) and isinstance(built.scorer, FixedScorer)
-    assert built.promoter is None and built.seed == HarnessTree({}) and built.base_artifact_files() is None
-    promoted = from_config(
+    assert built.collector is None and built.seed == HarnessTree({}) and built.base_artifact_files() is None
+    collecting = from_config(
         evolution_config(
             method={"module": f"{SUPPORT}:IdleMethod", "config": {}},
-            evaluation={"promote_failures": True, "promote": f"{SUPPORT}:NoPromotion"},
+            evaluation={"collect_failures": True, "collector": f"{SUPPORT}:NoCollection"},
         )
     )
-    assert isinstance(promoted.method, IdleMethod) and isinstance(promoted.promoter, NoPromotion)
+    assert isinstance(collecting.method, IdleMethod) and isinstance(collecting.collector, NoCollection)
     with pytest.raises(RecipeConfigError, match="IdleMethod takes no config"):
         from_config(evolution_config(method={"module": f"{SUPPORT}:IdleMethod", "config": {"depth": 2}}))
     with pytest.raises(RecipeConfigError, match=r"evolution\.method"):
@@ -156,7 +156,6 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "max_pending_proposals": 2,
         "publish": "review",
         "review_kinds": ["code_extension"],
-        "client_models": ["model-b"],
     }
     evaluation = {
         "statistic": "mean",
@@ -165,14 +164,14 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "episode_timeout_s": 5,
         "forbid_residue": True,
         "recheck_every": 3,
-        "promote_failures": True,
-        "max_promoted_tasks": 10,
-        "max_promoted_per_client": 0,
+        "collect_failures": True,
+        "max_collected_tasks": 10,
+        "max_collected_per_client": 0,
     }
     built = from_config(evolution_config(evaluation=evaluation, **evolution))
     assert built.evolution == dataclasses.replace(
         defaults.evolution,
-        **{**evolution, "review_kinds": ("code_extension",), "client_models": ("model-b",)},
+        **{**evolution, "review_kinds": ("code_extension",)},
     )
     assert built.evaluation == dataclasses.replace(defaults.evaluation, **{**evaluation, "episode_timeout_s": 5.0})
     assert built.batch_size == 2
@@ -199,9 +198,9 @@ INVALID_SETTINGS = {
     "timeout": ({"evaluation": {"episode_timeout_s": 0}}, r"evaluation\.episode_timeout_s must be positive"),
     "residue-type": ({"evaluation": {"forbid_residue": "maybe"}}, r"evaluation\.forbid_residue must be a valid bool"),
     "recheck-floor": ({"evaluation": {"policy": "floor", "recheck_every": 2}}, "recheck_every compares two trees"),
-    "promoter-alone": (
-        {"evaluation": {"promote": f"{SUPPORT}:NoPromotion"}},
-        r"promote applies only with evaluation\.promote_failures",
+    "collector-alone": (
+        {"evaluation": {"collector": f"{SUPPORT}:NoCollection"}},
+        r"collector applies only with evaluation\.collect_failures",
     ),
     "no-tasks": (
         {"evaluation": {"tasks": []}},
@@ -332,7 +331,7 @@ def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
 
 
 def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_path: Path) -> None:
-    """Task directories need an adapter that plays them, and promotion, which adds prompts, does not apply."""
+    """Task directories need an adapter that plays them, and collection, which adds prompts, does not apply."""
     root = tmp_path / "tasks"
     for name in ("held-1", "held-2", "train-1"):
         write_task(root, name)
@@ -346,8 +345,8 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
     assert get_adapter("terminus").is_prompt_task_directory and not get_adapter("pi").is_prompt_task_directory
     with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
         boot(adapter="pi")
-    with pytest.raises(RecipeConfigError, match="promote_failures adds prompts"):
-        boot(promote_failures=True)
+    with pytest.raises(RecipeConfigError, match="collect_failures adds prompts"):
+        boot(collect_failures=True)
     with pytest.raises(RecipeConfigError, match="one task source, not tasks and task_manifest"):
         boot(tasks=["x"])
     with pytest.raises(RecipeConfigError, match=r"task_manifest and evaluation\.tasks_root go together"):
@@ -957,9 +956,9 @@ def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Pa
 # -- the evaluation tasks grown from traffic ------------------------------------------------------
 
 
-def test_promote_failures_grows_the_evaluation_from_traffic(tmp_path: Path) -> None:
-    """With promotion on, a failing trace's prompt becomes a permanent evaluation task: the seed tasks are the
-    floor, and the evaluation runs the union. Promotion is off by default."""
+def test_collect_failures_grows_the_evaluation_from_traffic(tmp_path: Path) -> None:
+    """With collection on, a failing trace's prompt becomes a permanent evaluation task: the seed tasks are the
+    floor, and the evaluation runs the union. Collection is off by default."""
     seen: list[str] = []
 
     def score(task, result):
@@ -967,18 +966,18 @@ def test_promote_failures_grows_the_evaluation_from_traffic(tmp_path: Path) -> N
         return marker_score(task, result)
 
     backend, _ = harness_backend(
-        tmp_path, lambda workspace, tools: MARKER, score=score, evaluation={"promote_failures": True}
+        tmp_path, lambda workspace, tools: MARKER, score=score, evaluation={"collect_failures": True}
     )
     result = step(backend, None, *traced("real request A"))
-    # The evaluation ran the seed task and the promoted prompt, on both sides.
+    # The evaluation ran the seed task and the collected prompt, on both sides.
     assert "task one" in seen and "real request A" in seen
     assert result.metrics["evaluation_task_count"] == 2
-    assert result.state["promoted_tasks"] == ["real request A"]
+    assert result.state["collected_tasks"] == ["real request A"]
 
     (tmp_path / "off").mkdir()
     frozen, _ = harness_backend(tmp_path / "off", lambda workspace, tools: MARKER)
     result = step(frozen, None, *traced("real request A"))
-    assert result.state["promoted_tasks"] == [] and result.metrics["evaluation_task_count"] == 1
+    assert result.state["collected_tasks"] == [] and result.metrics["evaluation_task_count"] == 1
 
 
 def test_the_method_reads_each_traces_record_and_client(tmp_path: Path) -> None:

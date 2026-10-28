@@ -28,14 +28,14 @@ class EvaluationSettings(Settings):
 
     Values: at most one task source is set: ``tasks`` (prompts or task
     directories), ``task_manifest`` with ``tasks_root``, or ``task_store``;
-    one is required unless ``policy`` is ``none``. ``scorer`` and ``promote``
+    one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
     with ``module`` and ``config``); the recipe requires a scorer unless
     ``policy`` is ``none``. ``policy`` is one of ``POLICIES`` and ``statistic`` one of
     ``STATISTICS``. ``min_margin`` ≥ 0, ``floor_score`` > 0 and
     ``episode_timeout_s`` > 0 are finite numbers, ``repeats`` ≥ 1, and every
     count ≥ 0. ``recheck_every`` needs the ``compare`` policy, and
-    ``promote`` needs ``promote_failures``.
+    ``collector`` needs ``collect_failures``.
     Purpose: the harness recipe parses it and builds the evaluator, the task
     source and the publication policy from it.
     """
@@ -57,11 +57,11 @@ class EvaluationSettings(Settings):
     recheck_every: int = config_option(
         0, help="Every this many steps, compare the latest publish with the tree it replaced. 0 turns it off."
     )
-    promote_failures: bool = config_option(False, help="Add failing traffic prompts to the evaluation tasks.")
-    promote: str | Mapping[str, Any] | None = config_option(None, help="The Promoter that picks the prompts.")
-    max_promoted_tasks: int = config_option(50, help="The most prompts promotion adds in total; 0 adds none.")
-    max_promoted_per_client: int = config_option(
-        5, help="The most prompts promotion adds per tagged client; 0 sets no per-client limit."
+    collect_failures: bool = config_option(False, help="Add failing traffic prompts to the evaluation tasks.")
+    collector: str | Mapping[str, Any] | None = config_option(None, help="The TaskCollector that picks the prompts.")
+    max_collected_tasks: int = config_option(50, help="The most prompts collection adds in total; 0 adds none.")
+    max_collected_per_client: int = config_option(
+        5, help="The most prompts collection adds per tagged client; 0 sets no per-client limit."
     )
 
     def __post_init__(self) -> None:
@@ -101,15 +101,15 @@ class EvaluationSettings(Settings):
             raise ValueError("evaluation.episode_timeout_s must be positive")
         for label, value in (
             ("recheck_every", self.recheck_every),
-            ("max_promoted_tasks", self.max_promoted_tasks),
-            ("max_promoted_per_client", self.max_promoted_per_client),
+            ("max_collected_tasks", self.max_collected_tasks),
+            ("max_collected_per_client", self.max_collected_per_client),
         ):
             if value < 0:
                 raise ValueError(f"evaluation.{label} must be at least 0")
         if self.recheck_every and self.policy != "compare":
             raise ValueError("evaluation.recheck_every compares two trees, so it needs the compare policy")
-        if self.promote is not None and not self.promote_failures:
-            raise ValueError("evaluation.promote applies only with evaluation.promote_failures")
+        if self.collector is not None and not self.collect_failures:
+            raise ValueError("evaluation.collector applies only with evaluation.collect_failures")
 
 
 __all__ = ["EvaluationSettings"]

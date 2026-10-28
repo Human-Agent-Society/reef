@@ -48,7 +48,7 @@ from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
-from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.surface.base import ComponentSurface, Surface
 from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.trainer import ComponentTrainer
 
@@ -272,9 +272,8 @@ class CompositeRecipe(Recipe):
         return any_component_report(tuple(declared))
 
     def build_surface(self, scenario: str) -> Surface:
-        """Every component's serving capabilities under its own name; one component may carry harness info."""
+        """Every component's serving capabilities under its own name."""
         components: dict[str, ComponentSurface] = {}
-        harness: HarnessInfo | None = None
         for component, recipe in self.components.items():
             surface = recipe.serving_surface(scenario)
             if len(surface.components) > 1:
@@ -284,11 +283,7 @@ class CompositeRecipe(Recipe):
             # this component here: inside the composite, the component is that recipe's release.
             checks = every_check(surface.validator, served.validator)
             components[component] = served if checks is served.validator else replace(served, validator=checks)
-            if surface.harness is not None:
-                if harness is not None:
-                    raise RecipeConfigError("only one component may serve harness information")
-                harness = surface.harness
-        return Surface(components=components, harness=harness)
+        return Surface(components=components)
 
     def build_trainers(
         self,

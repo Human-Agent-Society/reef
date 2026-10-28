@@ -14,7 +14,7 @@
 ``policy``
     The publication policies ``compare``, ``floor`` and ``none``.
 ``tasks``
-    The tasks each step evaluates, and the promotion of traffic prompts.
+    The tasks each step evaluates, and the collection of traffic prompts.
 ``settings``
     The ``evolution.evaluation`` section.
 """
@@ -37,7 +37,7 @@ from reef.evaluation.harness.scoring import (
     verifier_reward,
 )
 from reef.evaluation.harness.settings import EvaluationSettings
-from reef.evaluation.harness.tasks import EvaluationTasks, Promoter, StepTasks
+from reef.evaluation.harness.tasks import EvaluationTasks, TaskCollector, StepTasks
 
 __all__ = [
     "EVALUATION_SIDES",
@@ -59,7 +59,7 @@ __all__ = [
     "HarnessEpisodeEvaluator",
     "History",
     "NoEvaluationPolicy",
-    "Promoter",
+    "TaskCollector",
     "ScoredEpisode",
     "StepTasks",
     "VerifierRewardScorer",

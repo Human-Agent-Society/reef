@@ -1433,17 +1433,17 @@ def test_every_mode_releases_the_oldest_held_units_beyond_the_buffer(caplog, mod
     processor.close()
 
 
-def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
+def test_hybrid_collects_the_failures_an_instruction_step_carries(tmp_path):
     calls = []
 
     def method(workspace, tools):
         calls.append(asked(workspace))
 
-    recipe = recipe_in("hybrid", tmp_path, method, batch_size=2, evaluation={"promote_failures": True})
+    recipe = recipe_in("hybrid", tmp_path, method, batch_size=2, evaluation={"collect_failures": True})
     dispatcher = harness_dispatcher(tmp_path, recipe)
 
     def evaluation_rows():
-        """Each step's traces, its evaluation's task count (the seed task and the promoted ones) and whether it
+        """Each step's traces, its evaluation's task count (the seed task and the collected ones) and whether it
         answered an instruction, newest first."""
         rows = dispatcher.get_or_create_scenario("s").releases()
         return [
@@ -1456,7 +1456,7 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            # One failure held below the batch size; the instruction step takes it and promotes it.
+            # One failure held below the batch size; the instruction step takes it and collects it.
             dispatcher.accept_record(inference("fails-1"))
             dispatcher.accept_record(report("fails-1"))
             body = {"agent_record_id": "ask-1", "text": "do it", "session": "session-1", "release_id": "release-1"}
@@ -1465,7 +1465,7 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
             assert await asyncio.to_thread(_wait, lambda: len(evaluation_rows()) == 1)
             assert calls == [("do it", ("fails-1",))]
             assert evaluation_rows() == [(1, 2, True)]
-            # The automatic step after grows the evaluation on top of the promoted one.
+            # The automatic step after grows the evaluation on top of the collected one.
             for receipt in ("fails-2", "fails-3"):
                 dispatcher.accept_record(inference(receipt))
                 dispatcher.accept_record(report(receipt))

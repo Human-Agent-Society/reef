@@ -17,7 +17,6 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
 from reef.core.components import validate_component_name
-from reef.core.model_metadata import ModelMetadata
 
 
 @dataclass(frozen=True)
@@ -135,21 +134,6 @@ class FileTree(ABC):
 
 
 @dataclass(frozen=True)
-class HarnessInfo:
-    """What the harness routes need beyond the file tree: the served model and how a client may reach it."""
-
-    served_model: str | None = None
-    #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
-    served_api: str = "openai"
-    #: Further models the installed client may pick from; the served one stays the default.
-    client_models: tuple[str, ...] = ()
-    #: Explicit overrides by exact name; never reuse discovered metadata for a different endpoint.
-    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    #: Discovered metadata for served_model on the default deployment endpoint.
-    served_metadata: ModelMetadata | None = None
-
-
-@dataclass(frozen=True)
 class ComponentSurface:
     """How one named component of a release is admitted, loaded, injected, and read.
 
@@ -245,7 +229,6 @@ class Surface:
     """
 
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
-    harness: HarnessInfo | None = None
     #: The whole release's own admission check, run before each component's: on the release a step publishes and
     #: on a release a rollback or promote restores. A recipe binds its checks on ``ComponentSurface.validator``; this
     #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
@@ -255,7 +238,6 @@ class Surface:
     def __init__(
         self,
         components: Mapping[str, ComponentSurface] | None = None,
-        harness: HarnessInfo | None = None,
         validator: ArtifactValidator | None = None,
         *,
         loader: ArtifactLoader | None = None,
@@ -285,7 +267,6 @@ class Surface:
                     f"surface serves components {list(declared)}: set loader, inference and files per component"
                 )
         object.__setattr__(self, "components", declared)
-        object.__setattr__(self, "harness", harness)
         object.__setattr__(self, "validator", AcceptAnyArtifact() if validator is None else validator)
         self.__post_init__()
 
@@ -453,7 +434,6 @@ __all__ = [
     "ArtifactLoader",
     "ComponentSurface",
     "FileTree",
-    "HarnessInfo",
     "InferenceHooks",
     "InferenceLease",
     "LeasingInferenceHooks",

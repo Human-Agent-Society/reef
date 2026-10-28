@@ -319,7 +319,6 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
     # A fresh scenario's base release is the seed's source tree, which names no endpoint.
     assert built.base_artifact_files() == dict(NATIVE_SEED.files)
     assert not any("upstream" in text for text in NATIVE_SEED.files.values())
-    assert built.build_surface("demo").harness.served_model == "qwen3-8b"
     empty = tmp_path / "empty-seed"
     empty.mkdir()
     assert boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml", seed=str(empty)).base_artifact_files() is None
@@ -359,7 +358,6 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert isinstance(built, HarnessEvolutionRecipe) and built.evolution.adapter == "pi"
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
-    assert built.build_surface("demo").harness.served_model == model_id
     # The person asks while it keeps learning from failures; the method reads the request beside the traces.
     assert built.training_mode == "hybrid" and type(built.method).__name__ == "RulesMethod"
     records = SQLiteRecordStore()

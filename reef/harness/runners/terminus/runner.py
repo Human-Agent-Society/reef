@@ -61,7 +61,7 @@ def _required_env(name: str) -> str:
 def trial_slug(task: str) -> str:
     """A filename for one task's trial, safe under the session directory.
 
-    The task reaches this runner from the episode prompt, and a promoted task
+    The task reaches this runner from the episode prompt, and a collected task
     can originate in recorded traffic, so it never becomes a path component
     unchecked: only the last segment is kept, and only if it is an ordinary
     name. Anything else would let a trial file land outside the directory the

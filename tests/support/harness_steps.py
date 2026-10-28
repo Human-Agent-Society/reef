@@ -22,7 +22,7 @@ from tests.support._trajectories import recorded_trajectory
 
 from reef.artifact.artifact import ArtifactNotFound
 from reef.core.job_data import TrajectorySample
-from reef.evaluation.harness import EpisodeScorer, EvaluationSettings, History, Promoter
+from reef.evaluation.harness import EpisodeScorer, EvaluationSettings, History, TaskCollector
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
@@ -195,13 +195,13 @@ class FixedScorer(EpisodeScorer):
         return self.fixed
 
 
-class NoPromotion(Promoter):
-    """A promoter that promotes no prompt.
+class NoCollection(TaskCollector):
+    """A collector that collects no prompt.
 
-    Purpose: a test names it in ``evolution.evaluation.promote``.
+    Purpose: a test names it in ``evolution.evaluation.collector``.
     """
 
-    def promote(self, samples: tuple[TrajectorySample, ...]) -> list[str]:
+    def collect(self, samples: tuple[TrajectorySample, ...]) -> list[str]:
         return []
 
 
@@ -245,7 +245,7 @@ __all__ = [
     "UNCHANGED",
     "FixedScorer",
     "IdleMethod",
-    "NoPromotion",
+    "NoCollection",
     "TreeReleases",
     "changed_rules",
     "evolution_config",

@@ -200,8 +200,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, PatchAdmission
         head_record = self.history.add_candidate(
             head_tree, step=state.steps, origin="release" if self.history.candidates else "seed"
         )
-        step_tasks = self.tasks.for_step(samples, state.promoted_tasks, state.promoted_clients)
-        state = replace(state, promoted_tasks=step_tasks.promoted_tasks, promoted_clients=step_tasks.promoted_clients)
+        step_tasks = self.tasks.for_step(samples, state.collected_tasks, state.collected_clients)
+        state = replace(state, collected_tasks=step_tasks.collected_tasks, collected_clients=step_tasks.collected_clients)
         metrics.update({"evaluation_task_count": len(step_tasks.tasks), "screened_tasks": step_tasks.screened})
         step_dir = self.records.claim(state.steps)
         metrics["step_record"] = str(step_dir)

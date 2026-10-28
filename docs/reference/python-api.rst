@@ -1422,7 +1422,7 @@ is the reference.
 
 .. code:: python
 
-   from reef.evaluation.harness import EpisodeScorer, History, Promoter
+   from reef.evaluation.harness import EpisodeScorer, History, TaskCollector
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import Method, ModelCalls, StepContext, StepResult, Tools, Trace, Workspace
 
@@ -1434,7 +1434,7 @@ is the reference.
 
 A deployment names each class as ``package.module:ClassName``, or as a mapping
 with ``module`` and ``config``. Reef builds it with the class method
-``from_config``. ``Method``, ``EpisodeScorer`` and ``Promoter`` inherit
+``from_config``. ``Method``, ``EpisodeScorer`` and ``TaskCollector`` inherit
 ``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
 builds the class with no arguments and refuses a non-empty ``config``. A
 class with settings parses ``config`` into a ``reef.core.plugins.PluginSettings``
@@ -1520,9 +1520,9 @@ dataclass, which refuses an unknown key.
        the step's model bindings, and still implements the abstract
        ``score``, for example by raising. A scorer that needs a local GPU
        overrides ``execution_requirements()``
-   * - ``Promoter.promote(samples)``
-     - the prompts to promote from the step's trace samples, with
-       ``evolution.evaluation.promote_failures``
+   * - ``TaskCollector.collect(samples)``
+     - the prompts to collect from the step's trace samples, with
+       ``evolution.evaluation.collect_failures``
    * - ``evaluation.metrics``
      - holds ``candidate_scores`` and ``current_scores`` under
        ``policy: compare`` and ``policy: floor``: one score per task and

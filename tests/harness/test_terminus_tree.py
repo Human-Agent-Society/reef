@@ -136,7 +136,7 @@ def test_runner_refuses_extension_before_importing_or_executing_it(monkeypatch) 
 @pytest.mark.unit
 @pytest.mark.parametrize("task", [".", "..", "", ".hidden", "we*ird?"])
 def test_a_task_that_cannot_name_a_trial_file_is_refused(task: str) -> None:
-    # The task arrives in the episode prompt, and a promoted task can come from
+    # The task arrives in the episode prompt, and a collected task can come from
     # recorded traffic, so it never becomes a path component unchecked.
     with pytest.raises(TerminusTreeError):
         runner.trial_slug(task)

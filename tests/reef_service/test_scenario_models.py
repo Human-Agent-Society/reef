@@ -119,7 +119,7 @@ def make_recipe(platform, tmp_path):
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
         evolution=EvolutionSettings(
-            binary=str(binary), client_models=("managed-alternative",), state_dir=str(tmp_path / "harness")
+            binary=str(binary), state_dir=str(tmp_path / "harness")
         ),
         evaluation=EvaluationSettings(tasks=("test task",)),
         scorer=resolve_episode_scorer(judge),

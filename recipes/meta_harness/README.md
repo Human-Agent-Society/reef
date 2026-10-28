@@ -133,7 +133,7 @@ Zero turns a budget off. Reef's own `max_steps`, `max_model_calls_per_step`,
 executor, timeout, and residue options apply as usual.
 
 Keep the evaluation suite fixed, so that the scores of all candidates stay
-comparable: do not combine this method with task promotion or rechecks.
+comparable: do not combine this method with task collection or rechecks.
 
 ## State and commits
 

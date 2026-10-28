@@ -25,7 +25,7 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     """Why admission refuses an instruction, or ``None``. The reason names the rule, never the text or the item.
 
     The text becomes proposer input and a catalog row. Thus it must pass the
-    same screens as a promoted task prompt. A ``requires`` name, check or
+    same screens as a collected task prompt. A ``requires`` name, check or
     prompt is shown to the person and recorded in the commit. Thus it must
     pass the same screens too.
     """

@@ -455,24 +455,14 @@ def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> No
     )
 
 
-def test_recipe_reads_client_models_into_the_harness_surface() -> None:
+def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:
     runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
-
-    def recipe(**evolution: Any) -> HarnessEvolutionRecipe:
-        config = {"model": {"path": "small"}, **evolution_config(**evolution)}
-        return HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
-
-    built = recipe(client_models=["big/one", "big/two"])
-    assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
-    codex = recipe(
-        client_models=["big/one", "big/two"],
-        adapter="codex",
-        model_metadata={"small": {"context_window": 640_000, "reasoning": True}},
-    )
+    config = {
+        "model": {"path": "small"},
+        **evolution_config(adapter="codex", model_metadata={"small": {"context_window": 640_000, "reasoning": True}}),
+    }
+    codex = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
     assert codex.model_binding().metadata.context_window == 640_000
-    assert codex.build_surface("s").harness.model_metadata["small"] == codex.model_binding().metadata
-    with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
-        recipe(client_models="big/one")
 
 
 def test_unknown_api_is_refused() -> None:
