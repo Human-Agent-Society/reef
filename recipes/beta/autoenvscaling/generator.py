@@ -560,7 +560,7 @@ def contamination_check(config: Mapping[str, object]) -> ContaminationCheck | No
     if tasks_path is None:
         raise ValueError("contamination needs contamination_tasks_path: the directory of the reference tasks")
     return ContaminationCheck(
-        reference_instructions(Path(tasks_path)), n=n, tasks_path=tasks_path, is_refusing=mode == "refuse"
+        reference_instructions(Path(tasks_path).expanduser()), n=n, tasks_path=tasks_path, is_refusing=mode == "refuse"
     )
 
 

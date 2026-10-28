@@ -48,7 +48,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
-3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. The test review follows ([the task checks](#the-task-checks)). With `calibration` on, the current solver's episodes come last ([solver calibration](#solver-calibration)). A duplicate task is invalid.
+3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. With `contamination` on, the contamination check comes next ([contamination](#contamination)). The test review follows ([the task checks](#the-task-checks)). With `calibration` on, the current solver's episodes come last ([solver calibration](#solver-calibration)). A duplicate task is invalid.
 4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.episodes_per_task` episodes of each training task in a task job; the recipe runs no eval tasks.
 5. When every training task of the generation has a result, `record_results` computes the pass rate of each task that ran and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
 
@@ -171,7 +171,7 @@ No results with the calibration are published yet.
 A verifier written from a session tends to grade the session's own implementation: the wording of a report, or a function or a button the instruction never names. A different correct solution then fails. Two measures keep such tasks out:
 
 - **The behaviour rule.** Both authors get it with the rebuild rules: the tests check behaviour that the instruction names, never free-text wording, never a name the instruction does not give, and never a requirement the instruction does not state. `behaviour_rule: false` turns it off.
-- **The test review.** After Harbor's oracle and nop check, `validate` makes one model call that reads `instruction.md` and every file under `tests/` and `solution/`. It lists each requirement that the tests check and the instruction does not state, of kind `wording`, `unnamed_interface` or `unstated_requirement`. The call goes where the author's calls go, through `agent_api` (`openai` or `responses`).
+- **The test review.** After Harbor's oracle and nop check, and the contamination check when it is on, `validate` makes one model call that reads `instruction.md` and every file under `tests/` and `solution/`. It lists each requirement that the tests check and the instruction does not state, of kind `wording`, `unnamed_interface` or `unstated_requirement`. The call goes where the author's calls go, through `agent_api` (`openai` or `responses`).
 
 The review has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing review that lists a requirement gives the task stage `check`. One that could not run, because the call failed or the reply is not the JSON asked for, gives it stage `unchecked`. The generation's report keeps the review's result for each task.
 
@@ -199,7 +199,7 @@ The check compares text only. It does not find a paraphrased copy.
 
 Each `instruction.md` under `contamination_tasks_path` is one reference task, named by its directory under that path. A downloaded Harbor dataset, such as Terminal-Bench, is such a directory. The generator reads the directory when it starts, so a missing directory, or one with no `instruction.md`, fails the config before any session is rebuilt.
 
-The check has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing check that finds a shared 13-gram gives the task stage `check`, with the error `instruction.md shares a 13-gram with reference task <name>: "<the 13-gram>"`. The check always runs, so it never gives stage `unchecked`.
+The check has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing check that finds a shared 13-gram gives the task stage `check`, with the error `instruction.md shares a 13-gram with reference task <name>: "<the 13-gram>"`. The check cannot fail to run, so it never gives stage `unchecked`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

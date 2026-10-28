@@ -653,6 +653,13 @@ def test_lines_naming_a_canary_never_count_as_a_hit(tmp_path: Path) -> None:
     assert result.errors == () and result.details["shared_ngrams"] == 0
 
 
+def test_a_hit_names_the_first_reference_task_by_name_that_holds_it(tmp_path: Path) -> None:
+    # Both copies hold every 13-gram of the instruction; b-copy is written first.
+    result = contamination_result(tmp_path, {"b-copy": INSTRUCTION, "a-copy": INSTRUCTION}, INSTRUCTION)
+    assert {hit["reference_task"] for hit in result.details["hits"]} == {"a-copy"}
+    assert result.errors[0].startswith("instruction.md shares a 13-gram with reference task a-copy: ")
+
+
 def test_an_ngram_never_spans_two_reference_tasks(tmp_path: Path) -> None:
     # In name order, the end of one instruction and the start of the next hold the instruction's first 14 tokens.
     references = {
@@ -725,6 +732,25 @@ def test_contamination_is_off_by_default_and_adds_no_check(tmp_path: Path, field
     assert [check.name for check in generator.task_checks] == ["oracle", "review"]
 
 
+def test_from_config_takes_the_ngram_size_and_a_tasks_path_under_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 7 tokens hold no 13-gram, but they share one 4-gram with the instruction.
+    reference_tasks(tmp_path / "reference", {"port-note": "Write the port number to a file."})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    generator = AutoEnvScalingGenerator.from_config(
+        generating_config(
+            tmp_path, contamination="refuse", contamination_tasks_path="~/reference", contamination_ngram=4
+        ),
+        scenario="one",
+        environ={"E2B_API_KEY": "e2b-test"},
+    )
+    [check] = [check for check in generator.task_checks if check.name == "contamination"]
+    result = asyncio.run(check.run(task_for("harbor-00000-000", "r", 8471), WrittenTask(tmp_path, "t", "d")))
+    assert result.errors == ('instruction.md shares a 4-gram with reference task port-note: "write the port number"',)
+    assert (result.details["n"], result.details["tasks_path"]) == (4, "~/reference")
+
+
 def test_reference_tasks_are_named_by_their_directory_under_the_tasks_path(tmp_path: Path) -> None:
     root = reference_tasks(
         tmp_path / "terminal-bench",
@@ -749,6 +775,8 @@ def test_reference_tasks_are_named_by_their_directory_under_the_tasks_path(tmp_p
         ({"contamination": "refuse", "contamination_tasks_path": "empty"}, "empty holds no instruction.md"),
         # Each key is checked also while the check is off.
         ({"contamination_tasks_path": 7}, "contamination_tasks_path must be a directory path or null"),
+        # An empty path is the working directory, which can hold any instruction.md.
+        ({"contamination_tasks_path": ""}, "contamination_tasks_path must be a directory path or null"),
         ({"contamination_ngram": True}, "contamination_ngram must be an integer of at least 1"),
         ({"contamination_ngram": "13"}, "contamination_ngram must be an integer of at least 1"),
         ({"contamination_ngram": 0}, "contamination_ngram must be an integer of at least 1"),
@@ -760,7 +788,7 @@ def test_from_config_refuses_contamination_settings_that_cannot_run(
     (tmp_path / "empty").mkdir()
     (tmp_path / "empty" / "README.md").write_text("No task here.\n")
     path = fields.get("contamination_tasks_path")
-    paths = {"contamination_tasks_path": str(tmp_path / path)} if isinstance(path, str) else {}
+    paths = {"contamination_tasks_path": str(tmp_path / path)} if isinstance(path, str) and path else {}
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
             generating_config(tmp_path, **{**fields, **paths}), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
