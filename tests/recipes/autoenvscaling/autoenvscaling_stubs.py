@@ -35,6 +35,7 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
+from reef.harness.client.tasks import TaskEpisode
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -344,6 +345,65 @@ def report(tmp_path: Path, generation: int = 0) -> dict[str, Any]:
 
 def cursor(tmp_path: Path) -> dict[str, int]:
     return json.loads((tmp_path / "state" / "cursor.json").read_text())
+
+
+class ScriptedEpisodes(StandInGenerator):
+    """A generator service whose episodes take ``outcomes`` in turn: a reward, or None for an episode that could not
+    run (no reward, the error ``episode_error``). With ``error``, each episode request fails with it instead.
+
+    Each request is recorded in ``episode_requests``.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        outcomes: Sequence[float | None],
+        *,
+        is_solvable: bool = True,
+        error: str = "",
+        episode_error: str = "sandbox failed",
+    ) -> None:
+        super().__init__(root, is_solvable=is_solvable)
+        self.outcomes = list(outcomes)
+        self.error = error
+        self.episode_error = episode_error
+
+    async def run_episodes(
+        self,
+        task_path: Path,
+        *,
+        scenario: str,
+        arm: str,
+        count: int,
+        extra_instruction_files: Sequence[str],
+        tags: Mapping[str, str],
+        model: str | None = None,
+    ) -> tuple[TaskEpisode, ...]:
+        self.episode_requests.append(
+            {"task": task_path.name, "arm": arm, "count": count, "tags": dict(tags), "model": model}
+        )
+        if self.error:
+            raise GeneratorError(self.error)
+        rewards = [self.outcomes.pop(0) for _ in range(count)]
+        return tuple(
+            TaskEpisode(
+                task_path=task_path,
+                name=task_path.name,
+                episode_id=f"episode-{len(self.episode_requests)}-{number}",
+                reward=reward,
+                rewards={} if reward is None else {"reward": reward},
+                error=self.episode_error if reward is None else "",
+                receipts=(),
+                failed_calls=0,
+                report_agent_record_ids=(),
+                trial_uri=None,
+            )
+            for number, reward in enumerate(rewards)
+        )
+
+    @property
+    def requested_counts(self) -> list[object]:
+        return [request["count"] for request in self.episode_requests]
 
 
 class RefusingGenerator(StandInGenerator):

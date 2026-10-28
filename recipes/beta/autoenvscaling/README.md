@@ -35,7 +35,7 @@ beta/autoenvscaling/
   sources.py        the sources file (session records and their repositories), the session rendered for the agent
   author.py         the author contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
   author_tools.ts   the agent's task_check tool
-  checks.py         the task checks: Harbor's oracle and nop agents, and the test review
+  checks.py         the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
   generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band and the parents
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
@@ -48,7 +48,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
-3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. The test review follows ([the task checks](#the-task-checks)). A duplicate task is invalid.
+3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. With `contamination` on, the contamination check comes next ([contamination](#contamination)). The test review follows ([the task checks](#the-task-checks)). With `calibration` on, the current solver's episodes come last ([solver calibration](#solver-calibration)). A duplicate task is invalid.
 4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.episodes_per_task` episodes of each training task in a task job; the recipe runs no eval tasks.
 5. When every training task of the generation has a result, `record_results` computes the pass rate of each task that ran and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
 
@@ -75,6 +75,7 @@ The generation's report gives each session the stage where it stopped:
 | `outage` | the author could not run; the generation ends here |
 | `check` | a check found a defect in the task, or the task is a duplicate |
 | `unchecked` | a refusing check could not run, so `validate` refused the task |
+| `calibration` | with `calibration: refuse`, the solver's calibration episodes put the task below or above the band, or their rewards vary too little |
 | `run` | the recipe could not run the task |
 | `band` | the task ran, and its pass rate is outside the band |
 | `held_out` | the valid task is in the eval split, so the recipe did not run it and it has no band position |
@@ -84,11 +85,11 @@ Three kinds of failure end differently:
 
 - **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken.
 - **The agent's own limits** are not outages: a run that spent `max_model_calls`, ran out of time or hit its reply budget leaves its task as it stands, and admission checks it like any other task.
-- **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
+- **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. So does an episode request of a refusing calibration that the generator service fails ([solver calibration](#solver-calibration)). A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
 
 ### The report and the task store
 
-`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its episodes run. Related source sessions keep the same split. The band does not filter the store.
+`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its episodes run. Related source sessions keep the same split. The training band does not filter the store; the calibration in `refuse` mode does.
 
 The generator's `config` keys:
 
@@ -128,6 +129,45 @@ The pass rate of a task that ran is the mean reward of its training episodes. Th
 
 The band does not decide what trains. The recipe trains on the training episodes of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every episode of a group whose rewards are all equal. With 0 or 1 rewards and four episodes per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
 
+## Solver calibration
+
+The band marks a task after the recipe trained on it. The calibration measures the task in `validate`, before the recipe saves it: the current solver plays the task, and the task is kept only when the solver sometimes solves it. This is the Solver-Guided Calibration of the AutoEnvScaling preprint, rebuilt on the generator service's episodes. The rule, with its defaults:
+
+1. 4 episodes run. The episodes that could not run (the sandbox, the agent or the verifier failed before a score) are left out and asked for once more. An episode that ran without a reward counts as 0.
+2. When the mean reward is within 0.15 of a band edge, on either side, and fewer than 8 episodes scored, the rest up to 8 run, with the same one retry. A null bound is no edge.
+3. The task is kept when the mean reward is inside `[band_low, band_high]` and the population standard deviation of the rewards is at least 0.1. With fewer than 2 scored episodes, the calibration could not run (below).
+
+Upstream also gives a task below the band one episode with hints from the reference solution. Only its proposer revision feedback reads that reward. This generator has no such feedback, so the calibration runs no hint episode.
+
+The calibration is the last task check in `validate`, so it runs only when the oracle check, a refusing contamination check and a refusing test review all pass. It asks the generator service (`POST /episodes`) for episodes of the task's copy on the arm `calibration`, with `calibration_model`. Without it, the episodes use the generator service's default model: its deployment's `inference.upstream-model`, else its `model-path`. In the example's Tinker deployment, that is the policy in training, `Qwen/Qwen3-8B`. In the pool build below, on [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml), it is that provider's `gpt-4o`, so the calibration measures `gpt-4o` and not the policy; name the solver in `calibration_model` when that deployment's Reef can serve it. The agent is the generator service's own (`generator.agent`). These are rollout episodes: Reef keeps no record of them, and nothing trains on them.
+
+The calibration has a mode:
+
+- `off`, the default: no episode runs, and the generation report is the same as without the calibration.
+- `measure`: the calibration runs and its result is recorded; it never refuses a task and never ends the round. Use it to compare the calibration's means with the training pass rates before the calibration refuses anything.
+- `refuse`: a task below or above the band, or with rewards that vary too little, is invalid with stage `calibration`. That stage is apart from `check` (a defect) and `band` (the training pass rate).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `calibration` | `off` | `off`, `measure` or `refuse`; a bare YAML `off` reads as false and means `off` |
+| `calibration_rollouts` | 4 | the episodes asked for first; an integer of at least 2 |
+| `calibration_max_rollouts` | 8 | the most episodes that score; an integer of at least `calibration_rollouts` |
+| `calibration_margin` | 0.15 | the distance from a band edge that asks for more episodes; in [0, 1] |
+| `calibration_min_std` | 0.1 | the least population standard deviation of the rewards; in [0, 0.5] |
+| `calibration_model` | null | the model the calibration episodes ask for; null is the generator service's default model |
+
+The calibration uses the band of `band_low` and `band_high`. Each key is checked also when the mode is `off`.
+
+The generation report keeps the calibration's settings under `calibration`, beside `band`, when the mode is not `off`. Each task's check results get a `calibration` entry: the rewards, their mean and standard deviation, the episodes asked for, the episodes that could not run, whether more episodes ran, the place against the band, the result (`kept`, `below`, `above`, `no_variance` or `outage`) and the errors of the first 3 episodes that failed.
+
+When fewer than 2 episodes scored, the task's difficulty is unknown, and the calibration could not run, with the result `outage`. The cause can be the task itself, for example a task image in which the solver's agent cannot start, so the round goes on: in `refuse` mode the task is invalid with stage `unchecked`, and in `measure` mode it stays valid. An episode request that the generator service fails is an outage of the service. In `refuse` mode it ends the round, as an oracle check that cannot run does; the task stays pending, and the next attempt calibrates it again from the start. In `measure` mode the calibration could not run, and the task stays valid.
+
+The recipe gives a task its train/eval split after `validate`, so eval tasks are calibrated too. Eval tasks run no training episodes.
+
+Cost: each candidate runs up to `calibration_max_rollouts` full episodes that score, and one more for each episode that could not run, `generator.concurrency` (2 by default) at a time. A repository task gives the solver up to an hour per episode. `validate` checks one candidate at a time, so a generation of 8 candidates can take hours more. All attempts of one generation must finish within `pipeline.record2sample.config.generation_deadline_seconds` (1800 by default), so raise it when the calibration is on. A restart calibrates a pending candidate again from the start.
+
+No results with the calibration are published yet.
+
 ## Adaptive generation
 
 With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator keeps its files under `state_dir/<scenario>/parents/` and its pass rate in `adaptive.json`. A later generation gives up to `variant_share` of its slots, rounded down, to the newest parents. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
@@ -139,7 +179,7 @@ Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become p
 A verifier written from a session tends to grade the session's own implementation: the wording of a report, or a function or a button the instruction never names. A different correct solution then fails. Two measures keep such tasks out:
 
 - **The behaviour rule.** Both authors get it with the rebuild rules: the tests check behaviour that the instruction names, never free-text wording, never a name the instruction does not give, and never a requirement the instruction does not state. `behaviour_rule: false` turns it off.
-- **The test review.** After Harbor's oracle and nop check, `validate` makes one model call that reads `instruction.md` and every file under `tests/` and `solution/`. It lists each requirement that the tests check and the instruction does not state, of kind `wording`, `unnamed_interface` or `unstated_requirement`. The call goes where the author's calls go, through `agent_api` (`openai` or `responses`).
+- **The test review.** After Harbor's oracle and nop check, and the contamination check when it is on, `validate` makes one model call that reads `instruction.md` and every file under `tests/` and `solution/`. It lists each requirement that the tests check and the instruction does not state, of kind `wording`, `unnamed_interface` or `unstated_requirement`. The call goes where the author's calls go, through `agent_api` (`openai` or `responses`).
 
 The review has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing review that lists a requirement gives the task stage `check`. One that could not run, because the call failed or the reply is not the JSON asked for, gives it stage `unchecked`. The generation's report keeps the review's result for each task.
 
@@ -152,6 +192,34 @@ With `review: refuse`, the agent's own `task_check` also runs the review once th
 | `review_model` | `agent_model` | the review's model |
 
 The review needs `agent_api: openai` or `responses`; with `anthropic`, set `review: off`.
+
+### Contamination
+
+A generated task can copy the instruction of a benchmark task that is kept for evaluation. An evaluation on that benchmark then measures what the policy saw in training. The contamination check compares the `instruction.md` of each task with the instructions of a set of reference tasks. It runs in `validate` right after the oracle check, before the test review and the calibration, so a contaminated task costs no review call and no calibration episode. It makes no model call and runs no sandbox.
+
+The rule is upstream's, which takes the 13-gram size from TMax (Ivison et al., 2026, `allenai/TMax-15K`):
+
+1. Each instruction loses every line that contains `canary`, in any case. Benchmark tasks can carry the same canary string, and it says nothing about the task.
+2. The rest is lowercased and split into word tokens (`\w+`), so case, punctuation, Markdown and whitespace do not change a match.
+3. The task is contaminated when its instruction shares a run of 13 consecutive tokens (a 13-gram) with the instruction of one reference task. Each reference task is compared on its own, so a 13-gram never spans two reference tasks. An instruction of fewer than 13 tokens has no 13-gram.
+
+The check compares text only. It does not find a paraphrased copy.
+
+Each `instruction.md` under `contamination_tasks_path` is one reference task, named by its directory under that path. A downloaded Harbor dataset, such as Terminal-Bench, is such a directory. The generator reads the directory when it starts, so a missing directory, or one with no `instruction.md`, fails the config before any session is rebuilt.
+
+The check has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing check that finds a shared 13-gram gives the task stage `check`, with the error `instruction.md shares a 13-gram with reference task <name>: "<the 13-gram>"`. The check cannot fail to run, so it never gives stage `unchecked`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `contamination` | `off` | the contamination check's mode; a bare YAML `off` reads as false and means `off` |
+| `contamination_tasks_path` | null | the directory of the reference tasks; required when the mode is not `off` |
+| `contamination_ngram` | 13 | the number of consecutive tokens that a match shares; an integer of at least 1 |
+
+Each key is checked also when the mode is `off`. The directory is read only when the mode is not `off`.
+
+Each task's check results get a `contamination` entry. Its details hold `n`, `tasks_path`, `reference_tasks` (the number of reference tasks), `shared_ngrams` (the number of distinct shared n-grams) and `hits`. `hits` keeps the first 5 shared n-grams in the order of the instruction, each cut to 200 characters, with the first reference task by name that holds it.
+
+The agent's own `task_check` does not run this check, and the agent's rules do not name it. The check also does not read the scenario's task store yet: a generator gets only its config, and a generated-task scenario holds no imported benchmark tasks. When a recipe evaluates its checkpoints on imported eval tasks, a later change can make those tasks the reference set.
 
 ## The prompt Designer baseline
 
@@ -206,7 +274,7 @@ With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a gene
 
 The built-in generated-task recipe rolls a generation's tasks out only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, build the task pool first, then train from it:
 
-1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no episodes. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
+1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no training episodes. With `calibration` on, `validate` runs the calibration episodes on the generator service, with `calibration_model` or that deployment's model (see [solver calibration](#solver-calibration)). Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
 
    ```python
    import os
