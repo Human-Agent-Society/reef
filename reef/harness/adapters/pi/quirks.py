@@ -61,7 +61,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export default function (pi: any) {
-  const path = join(dirname(fileURLToPath(import.meta.url)), "..", "pi-agent", "models.json");
+  const path = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "models.json");
   const { providers } = JSON.parse(readFileSync(path, "utf8"));
   for (const [name, provider] of Object.entries<any>(providers)) {
     const models = (provider.models ?? []).map((model: any) => ({
@@ -82,8 +82,10 @@ export default function (pi: any) {
 class PiAdapterRenderer(AdapterRenderer):
     @staticmethod
     def layer_files(files: dict[str, str]) -> dict[str, str]:
-        # --append-system-prompt reads a file only when it exists, so the rules file is always there.
-        return {"pi-agent/AGENTS.md": "", **files, "reef/pi-provider.ts": PROVIDER_EXTENSION}
+        # --append-system-prompt reads a file only when it exists, so the rules file is always there. The extension
+        # sits where no part renders, in a directory -e loads, so the layer always holds one and pi loads it as a
+        # package rather than as one extension.
+        return {"pi-agent/AGENTS.md": "", **files, "pi-agent/extensions/reef/index.ts": PROVIDER_EXTENSION}
 
     @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:

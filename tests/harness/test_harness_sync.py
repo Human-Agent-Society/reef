@@ -104,7 +104,7 @@ def test_a_layer_runs_the_agent_over_the_persons_own_config_with_the_token_off_t
         "claude": ["--plugin-dir", "/home/a/install/claude", "--settings", "/home/a/install/claude/settings.json"],
         "codex": ["-c", 'model_provider="reef"', "-c", 'model="m1"'],
         "opencode": [],
-        "pi": ["-e", "/home/a/install/pi-agent", "-e", "/home/a/install/reef/pi-provider.ts"],
+        "pi": ["-e", "/home/a/install/pi-agent", "--append-system-prompt", "/home/a/install/pi-agent/AGENTS.md"],
     }[adapter]
     assert list(layer.args[: len(expected)]) == expected
     if adapter == "claude":

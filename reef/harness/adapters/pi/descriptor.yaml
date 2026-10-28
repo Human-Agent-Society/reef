@@ -23,7 +23,6 @@ argv: ["--mode", "json", "-p", "{prompt}"]
 layer:
   args:
     - ["-e", "{root}/pi-agent"]
-    - ["-e", "{root}/reef/pi-provider.ts"]
     - ["--append-system-prompt", "{root}/pi-agent/AGENTS.md"]
     - ["--model", "reef/{model}"]
 env:
