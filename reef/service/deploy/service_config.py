@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
+from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
@@ -213,6 +214,12 @@ class ServiceConfig:
     artifact_cache_dir: str = config_option(
         ".reef/artifact-cache", public_path=("storage", "artifact_cache_dir"), help="Artifact cache directory."
     )
+    #: ``ArtifactSourceReader`` plugins beside the built-in ``hf``, ``file`` and ``s3`` readers of artifact imports.
+    artifact_sources: tuple[str | Mapping[str, Any], ...] = config_option(
+        (),
+        public_path=("storage", "artifact_sources"),
+        help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -364,6 +371,8 @@ class ServiceConfig:
                     "storage.artifact_repository requires storage.artifact_backend: git_lfs; "
                     "a plugin backend reads its own config"
                 )
+        for reader in self.artifact_sources:
+            ArtifactSourceReader.reference(reader, setting="storage.artifact_sources")
         if self.record_backend not in ("sqlite", "postgres"):
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")

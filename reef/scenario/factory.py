@@ -348,7 +348,7 @@ class ScenarioFactory:
             # two leaves the commit history's checkpoint ahead of that pointer.
             if store.durable:
                 checkpoints = [
-                    record for record in store.history() if record.made_artifact and record.step >= checkpoint_step
+                    record for record in store.history() if record.trained_artifact and record.step >= checkpoint_step
                 ]
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].artifact_ref

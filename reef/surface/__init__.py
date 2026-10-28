@@ -15,6 +15,7 @@ imports a concrete one.
 from reef.surface.adapter import adapter_name, parse_adapter_name
 from reef.surface.base import (
     AdapterWeightRuntime,
+    ArtifactLayout,
     ArtifactLoader,
     ComponentSurface,
     FileTree,
@@ -33,6 +34,7 @@ from reef.surface.weights import RuntimeLoadMismatch, WeightInferenceHooks, Weig
 
 __all__ = [
     "AdapterWeightRuntime",
+    "ArtifactLayout",
     "ArtifactLoader",
     "ComponentSurface",
     "ConfigInferenceHooks",

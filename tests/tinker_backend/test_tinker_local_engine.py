@@ -10,11 +10,12 @@ import pytest
 import yaml
 
 from reef.artifact.artifact import Artifact
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime
+from reef.runtime.serving import AdapterServingRuntime
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config

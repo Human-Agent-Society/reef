@@ -44,7 +44,7 @@ Read the artifacts
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one. The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
+An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one, and so does each import (`Import an artifact`_). The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations and train-from operations. ``GET /reef/scenarios/{scenario}/commits`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
@@ -119,7 +119,25 @@ Inference always answers from the scenario's active release. No request header k
 
 A new scenario starts from the base artifact. A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
 
-To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier artifact again, activate it as the next section describes.
+To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier artifact again, activate it as `Activate an artifact`_ describes.
+
+Import an artifact
+------------------
+
+To serve or train an artifact that was made outside Reef, such as an adapter that you fine-tuned elsewhere, a checkpoint on S3, or a harness that you wrote, import it by a URI that Reef reads:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"source": "s3://my-bucket/checkpoints/step-400/"}' \
+     "$REEF_URL/reef/scenarios/code-repair/artifacts"
+
+Reef reads ``hf://org/model@revision``, ``s3://bucket/prefix/`` and ``file:///absolute/path``, a directory on the service's machine. To import a directory from your own machine, upload it to one of these places first. S3 needs the ``s3`` extra (``uv pip install 'reef-infra[s3]'``) and reads with boto3's standard credentials: the environment, a profile or an instance role. Reef stores no credential. A reader can read whatever the service can read, so only give import access to callers that may train the scenario. ``storage.artifact-sources`` adds readers for other schemes (`Python API <../reference/python-api.rst#artifact-imports>`__).
+
+The directory must have the layout of the scenario's releases: the training component's weight files, a Tinker manifest whose saved state is on the configured service, or a harness tree that the adapter renders from its ``reef-entries.json``. Otherwise Reef answers HTTP 400 and changes nothing. `Import an artifact <../reference/http-api.rst#import-an-artifact>`__ in the HTTP API lists each layout and status.
+
+The import adds an ``import`` row to the artifact list, with the URI and the version that Reef read in ``source``. It does not serve the artifact and does not change a training start, and the activation rule does not run. Activate it, or train from it, as any other artifact. Reef copies the files into the artifact store, so a later change at the source does not change the artifact. An import needs the model's size in disk space twice while it runs: once under ``storage.artifact-cache-dir`` and once in the artifact store.
 
 Activate an artifact
 --------------------
@@ -133,7 +151,7 @@ The active release is the one that Reef serves. Inference answers from it, and t
      -d '{"artifact_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/activate"
 
-The target is any row of the artifact list: an artifact that a training step made, or the creation artifact. Reef loads the artifact into serving and makes it the active artifact of its component. What Reef writes depends on the scenario:
+The target is any row of the artifact list: an artifact that a training step or an import made, or the creation artifact. Reef loads the artifact into serving and makes it the active artifact of its component. What Reef writes depends on the scenario:
 
 - In a scenario of one component, Reef writes no artifact or release. It appends an ``activate`` record. The release that made the artifact serves again.
 - In a scenario of several components, Reef publishes a release: the active release with ``component`` bound to the artifact. This release makes no new content. The other components stay as they serve.
