@@ -47,6 +47,8 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
+# Reads s3:// sources of an artifact import (storage.artifact_sources).
+s3 = ["boto3"]
 # Cloud sandboxes for evaluation rollouts and the agent proposer: E2B, and Modal. Harbor's extra of each
 # environment adds what its sandbox needs to build a task's image (dockerfile-parse).
 e2b = ["harbor[e2b]", "e2b>=2.46", "connectrpc>=0.11.1,<0.13"]

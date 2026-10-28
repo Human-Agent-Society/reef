@@ -347,6 +347,13 @@ class Dispatcher(ScenarioLifecycle):
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).train_from(artifact_id, component)
 
+    def import_artifact(
+        self, scenario: str, directory: Path, component: str | None, *, source: Mapping[str, str]
+    ) -> ComponentArtifact:
+        """Publish ``directory`` as a new artifact of ``component`` in ``scenario``; nothing serves or trains it yet."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_artifact(directory, component, source=source)
+
     def current_artifact(
         self,
         scenario: str,

@@ -183,11 +183,13 @@ class Artifact:
         *,
         metadata: Mapping[str, object] | None = None,
         repository: ArtifactRepository | None = None,
+        content_id: str | None = None,
     ) -> Artifact:
+        """The unpublished artifact in ``path``; ``content_id`` names its content, a new unique id when ``None``."""
         token = uuid.uuid4().hex
         return cls(
             ArtifactRef(
-                content_id=f"content:{token}",
+                content_id=f"content:{token}" if content_id is None else content_id,
                 release_id=f"{LOCAL_RELEASE_PREFIX}{token}",
                 parent_release_id=None,
             ),

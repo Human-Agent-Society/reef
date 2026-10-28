@@ -18,11 +18,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.job_data import JobData
-from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
+from reef.core.weight_layout import ADAPTER_DIR, WEIGHT_LAYOUTS, WeightLayout
+from reef.surface.base import ArtifactLayout
 
 JobState = Literal["running", "finished", "failed"]
 
@@ -270,6 +271,41 @@ class TrainingComponent(ABC):
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
+    def check_release(self, directory: Path) -> None:
+        """Raise ``ValueError`` unless ``directory`` holds a release in the layout of this component's releases.
+
+        An artifact import calls it (RFC #980). The default reads ``release_format``: ``"full"`` needs
+        ``config.json`` and weight files at the root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank
+        is at most ``adapter_rank`` and whose target modules are within ``adapter_target_modules``. ``None``
+        refuses every directory. A component whose releases name weights on a service overrides it and also
+        checks that each path resolves there.
+        """
+        release_format = self.release_format
+        if release_format is None:
+            raise ValueError(f"the {self.name} training component takes no imported releases")
+        if release_format.layout == "full":
+            if not (directory / "config.json").is_file() or not any(
+                path.suffix in (".safetensors", ".bin") for path in directory.iterdir() if path.is_file()
+            ):
+                raise ValueError("a full-weight release holds config.json and weight files at its root")
+            return
+        adapter = directory / ADAPTER_DIR
+        if not any((adapter / name).is_file() for name in ("adapter_model.safetensors", "adapter_model.bin")):
+            raise ValueError(f"an adapter release holds a PEFT adapter in {ADAPTER_DIR}/")
+        try:
+            config = json.loads((adapter / "adapter_config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{ADAPTER_DIR}/adapter_config.json is no readable JSON object: {exc}") from exc
+        rank = config.get("r") if isinstance(config, dict) else None
+        # ReleaseFormat's invariant: an adapter format has a rank.
+        max_rank = cast(int, release_format.adapter_rank)
+        if isinstance(rank, bool) or not isinstance(rank, int) or not 0 < rank <= max_rank:
+            raise ValueError(f"the adapter's rank must be a positive int at most {max_rank}")
+        targets = release_format.adapter_target_modules
+        modules = config.get("target_modules")
+        if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
+            raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
+
     @abstractmethod
     def import_start(self, release: Path) -> str:
         """Take the published release in ``release`` as the start of later jobs; return that start.
@@ -315,3 +351,16 @@ class TrainingComponent(ABC):
     def close(self) -> None:
         """Release the component's resources; safe to call repeatedly."""
         return
+
+
+@dataclass(frozen=True)
+class ReleaseLayout(ArtifactLayout):
+    """The layout of the releases of ``component``: an import of the component it trains must meet it.
+
+    ``check`` is ``component.check_release``. A weight recipe binds it on its ``weights`` component.
+    """
+
+    component: TrainingComponent
+
+    def check(self, directory: Path) -> None:
+        self.component.check_release(directory)
