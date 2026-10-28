@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from reef.core.model_metadata import ModelMetadata
 
-from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.surface.base import ArtifactLayout, ComponentSurface, HarnessInfo, Surface
 from reef.surface.files import TextFileTree
 
 #: The component name a harness surface binds.
@@ -19,6 +19,7 @@ def create_harness_surface(
     served_api: str = "openai",
     model_metadata: Mapping[str, ModelMetadata] | None = None,
     served_metadata: ModelMetadata | None = None,
+    layout: ArtifactLayout | None = None,
 ) -> Surface:
     """Build a surface exposing every text file in a harness tree as the ``harness`` component.
 
@@ -30,9 +31,10 @@ def create_harness_surface(
     route binds an installed tree with when a release has no gate of its own,
     and the further models an installed client may switch to. The entries of
     the base harness travel with the base artifact, not with the surface.
+    ``layout`` checks an imported harness; ``None`` takes no import.
     """
     return Surface(
-        components={HARNESS_COMPONENT: ComponentSurface(files=TextFileTree(), kind="harness_plugin")},
+        components={HARNESS_COMPONENT: ComponentSurface(files=TextFileTree(), kind="harness_plugin", layout=layout)},
         harness=HarnessInfo(
             served_model=served_model,
             served_api=served_api,

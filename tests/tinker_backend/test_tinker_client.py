@@ -7,8 +7,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.interfaces import UpstreamStatusError
-from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import TinkerSDKSampler
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerSDKClient
@@ -85,12 +85,20 @@ class Service:
         self.events = events
         self.fail = fail
         self.sampler = Sampler(events)
+        self.weights_info_paths: list[str] = []
 
     def create_rest_client(self):
         return self
 
     def get_weights_info_by_tinker_path(self, path):
-        return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=32))
+        self.weights_info_paths.append(path)
+        # Spindle refuses a sampler path at weights_info with a 400.
+        if "/sampler_weights/" in path:
+            raise BadRequestError(f"invalid checkpoint path: {path}")
+        if path.endswith("/missing"):
+            raise NotFoundError("checkpoint metadata not found")
+        rank = 8 if path.endswith("/rank-8") else 32
+        return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=rank))
 
     def get_external_weights_urls(self, path):
         self.events.append(("external_weights_urls", path))
@@ -471,3 +479,17 @@ def test_installed_sdk_call_signatures_and_datum_without_network():
     assert datum.model_input.length == 3
     assert datum.loss_fn_inputs["target_tokens"].data == [11, 20, 21]
     assert datum.loss_fn_inputs["advantages"].data == [0, 2, 0]
+
+
+def test_an_imported_manifest_is_checked_by_its_state_path_alone(client):
+    checkpoint = TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://run/weights/step-4", "tinker://run/sampler_weights/4")
+    client.check_remote(checkpoint)
+    # The sampler path is not looked up: Spindle refuses it at weights_info.
+    assert client._service.weights_info_paths == ["tinker://run/weights/step-4"]
+    for state_path, message in (
+        ("tinker://run/weights/missing", "does not resolve"),
+        ("tinker://run/sampler_weights/4", "refuses the Tinker path"),
+        ("tinker://run/weights/rank-8", "no rank 32 LoRA"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            client.check_remote(replace(checkpoint, state_path=state_path))

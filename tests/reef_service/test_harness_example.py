@@ -1266,6 +1266,26 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     base_entries = json.loads(files[ENTRIES_FILE])
     assert [entry["id"] for entry in base_entries][:3] == ["read_file", "write_file", "run_bash"]
     assert info.served_model == "qwen3-8b"
+    # The base harness meets the layout that an imported harness must meet: its entries render to its other files.
+    layout = built.build_surface("demo").components["harness"].layout
+    assert layout is not None
+    tree = tmp_path / "harness"
+    for relative, text in files.items():
+        (tree / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tree / relative).write_text(text, encoding="utf-8")
+    layout.check(tree)
+    (tree / ENTRIES_FILE).write_text(json.dumps(base_entries), encoding="utf-8")
+    layout.check(tree)
+    (tree / "notes.txt").write_text("extra", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"extra \['notes.txt'\]"):
+        layout.check(tree)
+    (tree / "notes.txt").unlink()
+    (tree / "native" / "models.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"native/models\.json differs from the render"):
+        layout.check(tree)
+    (tree / ENTRIES_FILE).write_text(json.dumps([{"id": "x", "name": "unknown_kind"}]), encoding="utf-8")
+    with pytest.raises(ValueError, match="the harness entries are refused"):
+        layout.check(tree)
     assert CordisRecipe.from_environment(
         {},
         config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},

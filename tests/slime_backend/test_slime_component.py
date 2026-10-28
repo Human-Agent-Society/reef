@@ -26,11 +26,11 @@ from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcesso
 from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.core.job_data import TaskSample
 from reef.core.trajectories import trajectory_reward
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import write_json
 from reef.runtime.executor import ExecutorFuture, base
 from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.runtime.jobs import JobStatus, ReleaseFormat, TrainingJob
-from reef.runtime.serving import ADAPTER_DIR
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.slime_backend import component as slime_component
