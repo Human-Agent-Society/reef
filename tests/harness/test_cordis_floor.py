@@ -40,7 +40,7 @@ class DecideOnlyBackend:
 
 
 def _evaluation(scores: tuple[float | str | list[float | str], ...]) -> EvaluationResult:
-    """The candidate's scores, one task per value: a score, ``no_answer``, ``not_run``, or a list of runs."""
+    """The candidate's scores, one task per value: a score, ``"failed"``, or a list of runs."""
     tasks = [
         {"task": f"t{index}", "scores": value if isinstance(value, list) else [value]}
         for index, value in enumerate(scores)
@@ -61,26 +61,26 @@ def test_floor_selects_only_when_every_task_meets_the_floor() -> None:
 
     met = plugin.decide(candidate, _evaluation((1.0, 1.5)))
     assert met.selected and met.policy == "floor"
-    assert met.metrics == {"passed": 2, "failed": 0, "not_run": 0, "floor_score": 1.0}
+    assert met.metrics == {"passed": 2, "failed": 0, "failed_rollouts": 0, "floor_score": 1.0}
     assert met.reason == "candidate met the floor on all 2 tasks"
 
-    # A rollout that gave no answer misses the floor.
-    missed = plugin.decide(candidate, _evaluation((1.0, 0.5, "no_answer")))
+    # A rollout that gave no answer scores 0 and misses the floor.
+    missed = plugin.decide(candidate, _evaluation((1.0, 0.5, 0.0)))
     assert not missed.selected
-    assert missed.metrics == {"passed": 1, "failed": 2, "not_run": 0, "floor_score": 1.0}
+    assert missed.metrics == {"passed": 1, "failed": 2, "failed_rollouts": 0, "floor_score": 1.0}
     assert missed.reason == "candidate missed the floor on 2 of 3 tasks"
 
-    # A rollout that did not run fails no task, but a task with no rollout that ran does not pass.
-    partly = plugin.decide(candidate, _evaluation(([1.0, "not_run"],)))
-    assert partly.selected and partly.metrics["not_run"] == 1
-    assert not plugin.decide(candidate, _evaluation(([1.0, 1.0], ["not_run", "not_run"]))).selected
+    # A failed rollout fails no task, but a task whose rollouts all failed does not pass.
+    partly = plugin.decide(candidate, _evaluation(([1.0, "failed"],)))
+    assert partly.selected and partly.metrics["failed_rollouts"] == 1
+    assert not plugin.decide(candidate, _evaluation(([1.0, 1.0], ["failed", "failed"]))).selected
 
     lowered = FloorPlugin(DecideOnlyBackend(), floor_score=0.5)
     assert lowered.decide(candidate, _evaluation((0.5, 0.75))).selected
     assert lowered.decide(candidate, _evaluation((0.5, 0.25))).metrics == {
         "passed": 1,
         "failed": 1,
-        "not_run": 0,
+        "failed_rollouts": 0,
         "floor_score": 0.5,
     }
 

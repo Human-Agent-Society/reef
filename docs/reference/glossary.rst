@@ -312,8 +312,8 @@ Rollout
 
 One run of one task by an agent, a harness and a model, in one environment. It
 goes from the task's first step to its scored end, and gives one trajectory and
-one score. The score is ``scored`` (with a value), ``no_answer`` (the agent gave
-no answer) or ``not_run`` (the environment could not run the rollout). In each
+one score. The score is a value, 0 when the agent gave no answer, or
+``failed`` when the environment could not run the rollout. In each
 step, harness evolution runs each evaluation task ``rollout_repeats`` times on
 each side. A Tinker task job runs each task ``rollouts_per_task`` times on the
 job's start weights.

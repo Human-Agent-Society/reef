@@ -387,11 +387,10 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         return list(await asyncio.gather(*(run_one(request) for request in requests)))
 
     def rollout_score(self, rollout: TaskRollout) -> RolloutScore:
-        """``not_run`` when the environment could not run the rollout, ``no_answer`` when it ran without a
-        reward, else its reward."""
+        """Failed when the environment could not run the rollout, else its reward, 0 when it ran without one."""
         if rollout.is_infrastructure_failure:
-            return RolloutScore.not_run()
-        return RolloutScore.no_answer() if rollout.reward is None else RolloutScore.scored(rollout.reward)
+            return RolloutScore.failed()
+        return RolloutScore.scored(0.0 if rollout.reward is None else rollout.reward)
 
     async def run_async(self, task_path: Path) -> TaskRollout:
         task_path = Path(task_path)

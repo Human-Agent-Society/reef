@@ -565,7 +565,7 @@ def test_every_rollout_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path:
     broken = native_backend(tmp_path, binary=str(tmp_path / "missing"), step_record_dir=tmp_path / "broken")
     run_backend_step(broken, batch(), broken.initial_state())
     record = read_json(tmp_path / "broken" / "1" / "rollouts" / "candidate-0" / "rollout.json")
-    assert record["score"] == "not_run" and record["failure"]["stage"] == "launch"
+    assert record["score"] == "failed" and record["failure"]["stage"] == "launch"
     assert record["exit_code"] is None and record["stdout"] is None and record["residue"] is None
 
 

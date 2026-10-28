@@ -14,62 +14,56 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-#: The kind of a rollout's score: it ran and was scored, it ran but the policy gave no answer, or the
-#: environment could not run it.
-RolloutKind = Literal["scored", "no_answer", "not_run"]
-ROLLOUT_KINDS: tuple[RolloutKind, ...] = ("scored", "no_answer", "not_run")
+#: The JSON value of a failed rollout's score (``RolloutScore.to_json``).
+FAILED = "failed"
 
 
 @dataclass(frozen=True)
 class RolloutScore:
     """The score of one rollout: one run of a task under one policy in one environment.
 
-    Values: ``kind`` is ``scored`` (the rollout ran and the scorer gave ``value``), ``no_answer`` (the rollout
-    ran, but the policy gave no answer: the policy caused it) or ``not_run`` (the environment could not run the
-    rollout: the policy did not cause it). ``value`` is a finite number exactly when ``kind`` is ``scored``,
-    else None. Purpose: a rollout runner makes it; publication policies and sample assembly read it through
-    ``RolloutScores``.
+    Values: ``value`` is a finite number when the rollout ran: the scorer's value, or 0 when the policy gave no
+    answer. ``value`` is None when the rollout failed: the environment could not run it, so the policy did not
+    cause the result. Purpose: a rollout runner makes it; publication policies and sample assembly read it
+    through ``RolloutScores``.
     """
 
-    kind: RolloutKind
-    value: float | None = None
+    value: float | None
 
     def __post_init__(self) -> None:
-        if self.kind not in ROLLOUT_KINDS:
-            raise ValueError(f"RolloutScore.kind must be one of {ROLLOUT_KINDS}, got {self.kind!r}")
-        if self.kind == "scored":
-            value = self.value
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ValueError("a scored rollout has a finite value")
-            object.__setattr__(self, "value", float(value))
-        elif self.value is not None:
-            raise ValueError(f"a {self.kind} rollout has no value")
+        value = self.value
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("a rollout score is a finite number, or None for a failed rollout")
+        object.__setattr__(self, "value", float(value))
 
     @classmethod
     def scored(cls, value: float) -> RolloutScore:
-        return cls("scored", value)
+        """The score of a rollout that ran; ``ValueError`` unless ``value`` is a finite number."""
+        if value is None:
+            raise ValueError("a scored rollout has a finite value")
+        return cls(value)
 
     @classmethod
-    def no_answer(cls) -> RolloutScore:
-        return cls("no_answer")
+    def failed(cls) -> RolloutScore:
+        return cls(None)
 
-    @classmethod
-    def not_run(cls) -> RolloutScore:
-        return cls("not_run")
+    @property
+    def is_failed(self) -> bool:
+        return self.value is None
 
     def to_json(self) -> float | str:
-        """The value of a scored rollout, else its kind."""
-        return self.kind if self.value is None else self.value
+        """The value, or ``FAILED`` for a failed rollout."""
+        return FAILED if self.value is None else self.value
 
     @classmethod
     def from_json(cls, value: object) -> RolloutScore:
         """Read ``to_json``'s value; ``ValueError`` for another value."""
-        if value == "no_answer":
-            return cls.no_answer()
-        if value == "not_run":
-            return cls.not_run()
+        if value == FAILED:
+            return cls.failed()
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"a rollout score is a number, no_answer or not_run, not {value!r}")
+            raise ValueError(f"a rollout score is a number or {FAILED!r}, not {value!r}")
         return cls.scored(value)
 
 
@@ -121,9 +115,9 @@ class RolloutScores:
         """Every rollout's score, task by task, in run order."""
         return tuple(score for _, scores in self.tasks for score in scores)
 
-    def kind_count(self, kind: RolloutKind) -> int:
-        """The rollouts of kind ``kind``."""
-        return sum(score.kind == kind for score in self.rollouts())
+    def failed_count(self) -> int:
+        """The rollouts that failed."""
+        return sum(score.is_failed for score in self.rollouts())
 
     def to_json(self) -> list[dict[str, Any]]:
         """The value as JSON: ``[{"task": ..., "scores": [...]}, ...]``; ``from_json`` reads it back."""
@@ -147,8 +141,8 @@ class RolloutScores:
 
 
 def mean_score(scores: Iterable[RolloutScore]) -> float | None:
-    """The mean of the rollouts that ran, with each ``no_answer`` as 0; None when no rollout ran."""
-    values = [0.0 if score.value is None else score.value for score in scores if score.kind != "not_run"]
+    """The mean of the rollouts that did not fail; None when every rollout failed."""
+    values = [score.value for score in scores if score.value is not None]
     return math.fsum(values) / len(values) if values else None
 
 
@@ -452,7 +446,7 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
 
 __all__ = [
     "ARTIFACT_KINDS",
-    "ROLLOUT_KINDS",
+    "FAILED",
     "ArtifactKind",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
@@ -462,7 +456,6 @@ __all__ = [
     "PolicyEvaluation",
     "PolicyHarness",
     "PolicyModel",
-    "RolloutKind",
     "RolloutRequest",
     "RolloutRunner",
     "RolloutScore",

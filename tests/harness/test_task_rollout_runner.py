@@ -605,15 +605,15 @@ def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_a_rollout_that_ne
     )
 
 
-def test_a_rollout_that_could_not_run_scores_not_run_and_one_without_a_reward_scores_no_answer(
+def test_a_rollout_that_could_not_run_fails_and_one_without_a_reward_scores_zero(
     reef: StandInReef, tmp_path: Path
 ) -> None:
     def rollout(reward: float | None, error: str = "") -> TaskRollout:
         return TaskRollout(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
 
     scorer = runner(reef, tmp_path, StandInLab({}))
-    assert scorer.rollout_score(rollout(None, "the sandbox is gone")) == RolloutScore.not_run()
-    assert scorer.rollout_score(rollout(None)) == RolloutScore.no_answer()
+    assert scorer.rollout_score(rollout(None, "the sandbox is gone")) == RolloutScore.failed()
+    assert scorer.rollout_score(rollout(None)) == RolloutScore.scored(0.0)
     assert scorer.rollout_score(rollout(0.5, "a late error")) == RolloutScore.scored(0.5)
     with pytest.raises(TaskRolloutError, match="concurrency"):
         runner(reef, tmp_path, StandInLab({}), concurrency=0)

@@ -97,13 +97,13 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     # Each task's two rollouts form its group; the task whose sandbox failed has none.
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add", "sort", "sort"]
     assert rollouts.rewards() == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": ()}
-    # The sandbox of "broken" did not start: its rollouts did not run, which is not the policy's failure.
+    # The sandbox of "broken" did not start: its rollouts failed, which is not the policy's failure.
     assert rollouts.evaluation.harness == PolicyHarness("terminus-2")
     assert rollouts.evaluation.model == PolicyModel(MODEL, "tinker://start/sampler")
     assert rollouts.evaluation.scores.to_json() == [
         {"task": "add", "scores": [1.0, 1.0]},
         {"task": "sort", "scores": [0.0, 0.0]},
-        {"task": "broken", "scores": ["not_run", "not_run"]},
+        {"task": "broken", "scores": ["failed", "failed"]},
     ]
     training = rollouts.samples[0].training
     assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
