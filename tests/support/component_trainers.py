@@ -191,6 +191,7 @@ class _TwoTrainerRecipe(Recipe):
                 FixedJobPlan(JobRequest()),
                 AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
+                model_kind="model",
             ),
             algorithm_state=algorithm_states.get(WEIGHTS),
             experiment_logger=experiment_logger,

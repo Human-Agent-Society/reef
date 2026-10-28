@@ -10,7 +10,16 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import CheckpointCandidate, EvaluationResult, SelectionDecision
+from reef.core.evaluation import (
+    CheckpointCandidate,
+    EvaluationResult,
+    PolicyEvaluation,
+    PolicyHarness,
+    PolicyModel,
+    RolloutScore,
+    RolloutScores,
+    SelectionDecision,
+)
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
@@ -103,6 +112,7 @@ def loop_with(component, *, plan=None, evaluator=None, scenario="math"):
         plan or FixedJobPlan(JobRequest({"method": "sft"})),
         evaluator or AlwaysSelectCheckpointPlugin(),
         scenario=scenario,
+        model_kind="model",
     )
 
 
@@ -540,6 +550,13 @@ class EvalTasks(ArtifactEvaluation):
         )
 
 
+def policy_evaluation(kind: str) -> PolicyEvaluation:
+    """An evaluation of the Harbor agent on a model of ``kind``: one task, scored 1.0 and 0.0."""
+    model = PolicyModel("qwen", "tinker://eval/sampler" if kind == "model_adapter" else None)
+    scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
+    return PolicyEvaluation(PolicyHarness("terminus-2"), model, scores)
+
+
 @pytest.mark.unit
 def test_every_artifact_is_evaluated_from_its_own_checkpoint_and_its_result_is_committed(component, tmp_path):
     loop = JobLoop(
@@ -547,6 +564,7 @@ def test_every_artifact_is_evaluated_from_its_own_checkpoint_and_its_result_is_c
         FixedJobPlan(JobRequest({"method": "sft"})),
         AlwaysSelectCheckpointPlugin(),
         scenario="math",
+        model_kind="model",
         artifact_evaluation=EvalTasks(tmp_path),
     )
     state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
@@ -571,13 +589,16 @@ def test_every_artifact_is_evaluated_from_its_own_checkpoint_and_its_result_is_c
     assert state.job is None and len(state.evaluations) == 2
     assert loop.poll(state) is None
     later = state.evaluations[1].job_id
-    component.statuses[later] = JobStatus(later, "finished", metrics={"evaluation_reward_mean": 0.75})
+    report = policy_evaluation("model").to_json()
+    component.statuses[later] = JobStatus(later, "finished", metrics={"policy_evaluation": report, "rollouts": 2})
     recorded = loop.poll(state).result
     assert recorded.artifact is None and recorded.metrics["artifact_evaluation"] == {
         "candidate_id": f"{training}:2",
         "job_id": later,
         "event": "finished",
-        "metrics": {"evaluation_reward_mean": 0.75},
+        "metrics": {"rollouts": 2},
+        "policy_evaluation": report,
+        "mean_score": 0.5,
     }
     state = JobLoopState.from_dict(recorded.state)
     earlier = state.evaluations[0].job_id
@@ -585,8 +606,25 @@ def test_every_artifact_is_evaluated_from_its_own_checkpoint_and_its_result_is_c
     failed = loop.poll(state).result
     assert failed.metrics["artifact_evaluation"]["error"] == "the sandbox did not start"
     assert JobLoopState.from_dict(failed.state).evaluations == ()
+    # A finished evaluation job must report a policy evaluation of the kind of model that the trainer publishes.
+    for metrics, error in (
+        ({}, "no valid policy_evaluation"),
+        ({"policy_evaluation": {"scores": []}}, "no valid policy_evaluation"),
+        ({"policy_evaluation": policy_evaluation("model_adapter").to_json()}, "evaluated a model_adapter"),
+    ):
+        component.statuses[earlier] = JobStatus(earlier, "finished", metrics=metrics)
+        event = loop.poll(state).result.metrics["artifact_evaluation"]
+        assert event["event"] == "failed" and error in event["error"] and "policy_evaluation" not in event
     with pytest.raises(ValueError, match="polls only a running job or an artifact evaluation"):
         loop.poll(JobLoopState.from_dict(failed.state))
+    with pytest.raises(ValueError, match="model or model_adapter"):
+        JobLoop(
+            component,
+            FixedJobPlan(JobRequest()),
+            AlwaysSelectCheckpointPlugin(),
+            scenario="math",
+            model_kind="harness",
+        )
 
 
 @pytest.mark.unit
@@ -596,6 +634,7 @@ def test_an_artifact_with_nothing_to_evaluate_on_submits_no_evaluation(component
         FixedJobPlan(JobRequest({"method": "sft"})),
         AlwaysSelectCheckpointPlugin(),
         scenario="math",
+        model_kind="model",
         artifact_evaluation=EvalTasks(tmp_path, empty=True),
     )
     state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
@@ -619,7 +658,9 @@ def test_a_trainer_with_no_job_polls_its_artifact_evaluations_until_they_end(com
     )
     component.statuses["e1"] = JobStatus("e1", "running")
     assert trainer.needs_polling() and trainer.run_once() is None
-    component.statuses["e1"] = JobStatus("e1", "finished", metrics={"evaluation_reward_mean": 1.0})
+    component.statuses["e1"] = JobStatus(
+        "e1", "finished", metrics={"policy_evaluation": policy_evaluation("model").to_json()}
+    )
     recorded = trainer.run_once()
     assert recorded is not None and recorded.metrics["artifact_evaluation"]["candidate_id"] == "j0:1"
     trainer.commit(trainer.prepare_commit(recorded))

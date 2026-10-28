@@ -1460,13 +1460,21 @@ decides a checkpoint, it also submits an evaluation job that starts from that
 checkpoint, rolls out every eval task with ``task_job_parameters``, and trains
 nothing (the Tinker job parameter ``evaluation_of``). The component runs it
 after the jobs before it. When it ends, the trainer commits its result in the
-commit metric ``artifact_evaluation``: the ``candidate_id`` of the checkpoint
-(``<training job>:<step>``, the ``selection.candidate_id`` of the release's
-commit), the job's ``event``, and its ``metrics``: ``evaluation_scores``, the
-score of each rollout by task (``RolloutScores`` in JSON), and
-``evaluation_mean_score``, the mean of the rollouts that did not fail. The
-evaluation decides nothing: the ``evaluation`` section decides which release
-serves.
+commit metric ``artifact_evaluation``. It holds these keys:
+
+- ``candidate_id``: the checkpoint, ``<training job>:<step>``. This is the
+  ``selection.candidate_id`` of the release's commit.
+- ``event``: ``finished`` or ``failed``, with an ``error`` when it failed.
+- ``policy_evaluation``: the policy that the rollouts ran, a ``harness`` (the
+  Harbor agent) and a ``model`` (the checkpoint's sampler), and the score of
+  each rollout by task (``RolloutScores`` in JSON).
+- ``mean_score``: the mean of the rollouts that did not fail.
+- ``metrics``: the job's other metrics.
+
+An evaluation job that finishes without a valid ``policy_evaluation`` is a
+``failed`` event. So is one whose model is not of the kind that the serving
+runtime serves (``model`` or ``model_adapter``). The evaluation decides
+nothing: the ``evaluation`` section decides which release serves.
 
 .. code:: yaml
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluationPlugin, CheckpointCandidate
+from reef.core.evaluation import ArtifactKind, CandidateEvaluationPlugin, CheckpointCandidate, PolicyEvaluation
 from reef.core.job_data import JobData, JobOutcome
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainStepResult
@@ -312,6 +312,8 @@ class JobLoop:
     ``component`` runs the jobs; ``plan`` gives their parameters;
     ``evaluator`` decides which checkpoints Reef serves; ``artifact_evaluation``
     gives each artifact's evaluation job, or is ``None`` for no evaluation job;
+    ``model_kind`` is the kind of the weights that the trainer publishes
+    (``model`` or ``model_adapter``), which every evaluated model must have;
     ``scenario`` is the non-empty name of the trainer's scenario, which is part
     of each job's identity, so two scenarios never share a job. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
@@ -324,6 +326,7 @@ class JobLoop:
         evaluator: CandidateEvaluationPlugin,
         *,
         scenario: str,
+        model_kind: ArtifactKind,
         artifact_evaluation: ArtifactEvaluation | None = None,
     ) -> None:
         if not isinstance(component, TrainingComponent):
@@ -338,7 +341,10 @@ class JobLoop:
             raise TypeError(
                 f"artifact_evaluation must be an ArtifactEvaluation, got {type(artifact_evaluation).__name__}"
             )
+        if model_kind not in ("model", "model_adapter"):
+            raise ValueError(f"model_kind must be model or model_adapter, got {model_kind!r}")
         self.artifact_evaluation = artifact_evaluation
+        self.model_kind = model_kind
         self.component = component
         self.plan = plan
         self.evaluator = evaluator
@@ -525,8 +531,12 @@ class JobLoop:
 
         The evaluation leaves ``state.evaluations``. The commit's metrics are
         ``artifact_evaluation``: the evaluated ``candidate_id``, the job's ID,
-        its ``event`` (``finished`` or ``failed``), its ``metrics`` and, when it
-        failed, its ``error``. Raise ``ValueError`` when ``status`` is still
+        its ``event`` (``finished`` or ``failed``), the job's other ``metrics``
+        and, when it failed, its ``error``. A finished job reports a
+        ``PolicyEvaluation`` in its metrics as ``policy_evaluation``, whose model
+        has ``model_kind``; the event then adds it and its ``mean_score``. A
+        finished job without a valid one is a ``failed`` event, with an
+        ``error`` that says why. Raise ``ValueError`` when ``status`` is still
         running or ``evaluation`` is not in ``state``.
         """
         if status.state == "running":
@@ -539,10 +549,26 @@ class JobLoop:
             "candidate_id": evaluation.candidate_id,
             "job_id": evaluation.job_id,
             "event": status.state,
-            "metrics": dict(status.metrics),
+            "metrics": {key: value for key, value in status.metrics.items() if key != "policy_evaluation"},
         }
         if status.error is not None:
             event["error"] = status.error
+        if status.state == "finished":
+            try:
+                result = PolicyEvaluation.from_json(status.metrics.get("policy_evaluation"))
+            except (TypeError, ValueError) as exc:
+                event["event"] = "failed"
+                event["error"] = f"the evaluation job reported no valid policy_evaluation: {exc}"
+            else:
+                if result.model.kind == self.model_kind:
+                    event["policy_evaluation"] = result.to_json()
+                    event["mean_score"] = result.mean_score
+                else:
+                    event["event"] = "failed"
+                    event["error"] = (
+                        f"the evaluation job evaluated a {result.model.kind}, but the trainer publishes a "
+                        f"{self.model_kind}"
+                    )
         return JobCommit(
             TrainStepResult(
                 state=recorded.to_dict(), metrics={"artifact_evaluation": event}, training_job_id=evaluation.job_id

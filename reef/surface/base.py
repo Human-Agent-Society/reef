@@ -17,6 +17,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
 from reef.core.components import validate_component_name
+from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
 
 
@@ -152,16 +153,24 @@ class HarnessInfo:
 
 @dataclass(frozen=True)
 class ComponentSurface:
-    """How one named component of a release is admitted, loaded, injected, and read.
+    """How one named component of a release is admitted, loaded, injected, and read, and what kind it is.
 
     ``None`` means the capability is absent. ``validator`` runs before the
     component is published or restored; it defaults to accepting anything.
+    ``kind`` is the ``ArtifactKind`` of every artifact of the component, or
+    ``None`` when the component is no side of a policy, such as the records
+    of a trainer that serves nothing, or when the surface declares no kind.
     """
 
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
     loader: ArtifactLoader | None = None
     inference: InferenceHooks | None = None
     files: FileTree | None = None
+    kind: ArtifactKind | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is not None and self.kind not in ARTIFACT_KINDS:
+            raise ValueError(f"component kind must be one of {ARTIFACT_KINDS} or None, got {self.kind!r}")
 
 
 class ChainedLease(InferenceLease):
