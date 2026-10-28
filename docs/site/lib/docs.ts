@@ -70,7 +70,6 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "user-guide/recipes/tttd.rst",
       "user-guide/recipes/guidance-ttt.rst",
       "user-guide/recipes/openclawrl.rst",
-      "user-guide/recipes/skillclaw.rst",
       "user-guide/recipes/gepa.rst",
       "user-guide/operate.rst",
       "user-guide/troubleshooting.rst",

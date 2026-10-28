@@ -2,8 +2,6 @@
 
 This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a tree of text files, each evolve step's method changes that tree, and a change that wins the evaluation publishes as a release any client can pull. The method is the tutorial's own `RulesMethod` (`harness/plugins.py`), a short example of the method protocol: one call to the served model reads the step's failing traces and rewrites `rules.md`. The scorer grades real headless episodes on a small fixed task set by exact final answer, so a change only publishes when it makes previously failing tasks pass their episodes.
 
-The pinned paper reproduction built on this mechanism lives at `recipes/skillclaw/`.
-
 ## Directory layout
 
 ```text

@@ -649,8 +649,8 @@ not, with every episode and every decision. It is the score cache, and
 methods read it. Each scenario's history is the directory
 ``<evolution.state_dir>/<scenario>/<component>/history/``. ``<component>``
 is the release component that the recipe evolves: ``harness`` for
-``HarnessEvolutionRecipe``, ``skills`` for SkillClaw, and the component's own
-name in a composite recipe.
+``HarnessEvolutionRecipe``, and the component's own name in a composite
+recipe.
 
 - ``candidates.jsonl`` has one line per tree: its checksum, its parent, the
   step that first proposed or evaluated it, its origin (``seed``,
@@ -1108,9 +1108,6 @@ learn in different ways:
 - `Meta-Harness <../../recipes/meta_harness/README.md>`__
   (``recipes/meta_harness/``): a model reads every earlier candidate with its
   scores, and writes a whole new tree.
-- `SkillClaw <recipes/skillclaw.rst>`__ (``recipes/skillclaw/``): grows a
-  pool of skills from each day's recorded traffic, and serves the pool's
-  catalog with every request.
 - `ACE <../../recipes/ace/README.md>`__ (``recipes/ace/``): Agentic Context
   Engineering. A reflector and a curator turn each trace into edits of a
   playbook in ``rules.md``. It learns online, with ``policy: none``.

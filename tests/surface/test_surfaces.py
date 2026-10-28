@@ -13,41 +13,28 @@ from reef.surface import (
     ComponentSurface,
     InferenceHooks,
     LeasingInferenceHooks,
-    RequestSkillLayer,
-    SkillLayer,
     Surface,
+    TextFileTree,
     WeightInferenceHooks,
     WeightLoader,
     WeightRuntime,
-    create_skill_surface,
     create_weight_surface,
 )
 from reef.surface.base import AcceptAnyArtifact
-from reef.surface.skills import SkillValidator
 from reef.surface.weights import reported_runtime_load_id, reported_runtime_load_spans
 
 
-class _InjectingModule(RequestSkillLayer):
-    """Test stand-in for a method-owned injecting layer module.
+class InjectingHooks(InferenceHooks):
+    """Test stand-in for a recipe's request hooks: prepend the release's rule file as a system message."""
 
-    Mirrors the shape of skillclaw's catalog module: reads its layer's
-    files and prepends a system message to chat payloads.
-    """
-
-    layer = "skills"
-
-    def prepare_request(self, files, path, payload):
-        del path
-        text = files.get("SKILL.md", "").strip()
+    def prepare_request(self, artifact, path, payload):
+        text = (TextFileTree().read_files(artifact) or {}).get("rules.md", "").strip()
         if not text:
             return payload
         return {**payload, "messages": [{"role": "system", "content": text}, *payload["messages"]]}
 
-
-class _PullOnlyModule(SkillLayer):
-    """Test stand-in for a pull-only layer module: never transforms."""
-
-    layer = "skills"
+    def verify_response(self, artifact, path, response):
+        return None
 
 
 def test_recipe_default_surface_is_noop() -> None:
@@ -61,7 +48,6 @@ def test_recipe_default_surface_is_noop() -> None:
 def test_surface_factories_return_composed_surface_instances() -> None:
     assert type(create_weight_surface()) is Surface
     assert type(create_harness_surface(get_adapter("pi"))) is Surface
-    assert type(create_skill_surface([_PullOnlyModule()])) is Surface
 
 
 def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations() -> None:
@@ -70,18 +56,6 @@ def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations(
     assert isinstance(loader, ArtifactLoader)
     assert isinstance(hooks, InferenceHooks)
     assert not isinstance(hooks, LeasingInferenceHooks)
-    assert isinstance(_InjectingModule(), RequestSkillLayer)
-    assert not isinstance(_PullOnlyModule(), RequestSkillLayer)
-
-
-def test_request_injection_requires_declaring_the_optional_layer_capability() -> None:
-    class UndeclaredLayer(SkillLayer):
-        layer = "skills"
-
-        def prepare_request(self, files, path, request):
-            raise AssertionError("undeclared request hook must not run")
-
-    assert create_skill_surface([UndeclaredLayer()]).inference is None
 
 
 def test_default_component_validator_accepts_anything() -> None:
@@ -92,64 +66,15 @@ def test_default_component_validator_accepts_anything() -> None:
     Recipe().build_surface("s").validate(object())  # type: ignore[arg-type]
 
 
-def _skill_artifact(tmp_path, text: str = "Always check units."):
-    from reef.artifact import Artifact
-
-    d = tmp_path / "skill-artifact" / "skills"
-    d.mkdir(parents=True)
-    (d / "SKILL.md").write_text(text, encoding="utf-8")
-    return Artifact.local(d.parent)
-
-
-def test_skill_surface_hands_each_module_its_layer_files(tmp_path) -> None:
-    artifact = _skill_artifact(tmp_path)
-    payload = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-    hooks = create_skill_surface([_InjectingModule()]).inference
-    assert hooks is not None
-    out = hooks.prepare_request(artifact, "/v1/chat/completions", payload)
-    assert out["messages"][0] == {"role": "system", "content": "Always check units."}
-    assert out["messages"][1] == {"role": "user", "content": "hi"}
-    assert payload["messages"][0]["role"] == "user"
-
-
-def test_skill_surface_has_no_inference_hooks_for_pull_only_layers() -> None:
-    layer = _PullOnlyModule()
-    surface = create_skill_surface([layer])
-    assert surface.inference is None
-
-
-def test_skill_validator_rejects_empty_and_stray_files(tmp_path) -> None:
-    from reef.artifact import Artifact
-
-    validator = SkillValidator((_PullOnlyModule(),))
-    d = tmp_path / "bad-artifact"
-    d.mkdir()
-    with pytest.raises(ReefError):
-        validator.validate(Artifact.local(d))
-    (d / "skills").mkdir()
-    (d / "skills" / "SKILL.md").write_text("  ", encoding="utf-8")
-    with pytest.raises(ReefError):
-        validator.validate(Artifact.local(d))
-    (d / "skills" / "SKILL.md").write_text("Real content.", encoding="utf-8")
-    validator.validate(Artifact.local(d))
-    (d / "stray.md").write_text("outside every layer", encoding="utf-8")
-    with pytest.raises(ReefError):
-        validator.validate(Artifact.local(d))
-
-
-def test_skill_validator_ignores_repository_bookkeeping(tmp_path) -> None:
+def test_text_file_tree_ignores_repository_bookkeeping(tmp_path) -> None:
     from reef.artifact import Artifact
 
     root = tmp_path / "artifact"
-    (root / "skills").mkdir(parents=True)
-    (root / "skills" / "SKILL.md").write_text("rule", encoding="utf-8")
+    root.mkdir()
+    (root / "rules.md").write_text("rule", encoding="utf-8")
     (root / "reef-artifact.json").write_text("{}", encoding="utf-8")
     (root / ".gitattributes").write_text("* text", encoding="utf-8")
-    layer = _PullOnlyModule()
-    surface = create_skill_surface([layer])
-    assert surface.files is not None
-    assert surface.files.read_files(Artifact.local(root)) == {"skills/SKILL.md": "rule"}
-    SkillValidator((layer,)).validate(Artifact.local(root))
+    assert TextFileTree().read_files(Artifact.local(root)) == {"rules.md": "rule"}
 
 
 def test_default_prepare_request_is_identity(tmp_path) -> None:
@@ -266,9 +191,9 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
     from reef.runtime.interfaces import InferenceHandler
     from reef.service.app import RequestService
 
-    class SkillRecipe(Recipe):
+    class InjectingRecipe(Recipe):
         def build_surface(self, scenario):
-            return create_skill_surface([_InjectingModule()])
+            return Surface(inference=InjectingHooks())
 
     class RecordingBackend(InferenceHandler):
         def __init__(self) -> None:
@@ -280,10 +205,10 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
             return {"ok": True}
 
     bootstrap = tmp_path / "bootstrap"
-    (bootstrap / "skills").mkdir(parents=True)
-    (bootstrap / "skills" / "SKILL.md").write_text("Always check units.", encoding="utf-8")
+    bootstrap.mkdir()
+    (bootstrap / "rules.md").write_text("Always check units.", encoding="utf-8")
 
-    recipe = SkillRecipe(name="skill_delivery")
+    recipe = InjectingRecipe(name="request_injection")
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),

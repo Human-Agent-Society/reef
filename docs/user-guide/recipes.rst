@@ -106,11 +106,6 @@ recipe reads it out of the traffic it already serves.
      - ``recipes/openclawrl/``
      - `OpenClaw-RL <recipes/openclawrl.rst>`__
      - `OpenClaw-RL on the GSM8K homework stream <../../recipes/openclawrl/examples/openclawrl/README.md>`__
-   * - SkillClaw
-     - harness skill pool
-     - ``recipes/skillclaw/``
-     - `SkillClaw <recipes/skillclaw.rst>`__
-     - `SkillClaw on WildClawBench <../../recipes/skillclaw/README.md>`__
    * - ACE
      - harness rules: a playbook of lessons
      - ``recipes/ace/``

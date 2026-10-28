@@ -15,8 +15,9 @@ PI = get_adapter("pi")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK_SOURCES = (
     "tutorials/evolve-your-harness/configs/serve.yaml",
+    "tutorials/evolve-your-harness/configs/serve-native.yaml",
     "recipes/beta/reefine/examples/configs/deployment.yaml",
-    "recipes/skillclaw/skillclaw.yaml",
+    "recipes/beta/reefine/examples/configs/serve.yaml",
 )
 
 CREDENTIAL_BODIES = [

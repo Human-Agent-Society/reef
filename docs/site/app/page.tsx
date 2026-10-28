@@ -34,7 +34,6 @@ const recipeGroups = [
     title: "Agent harness",
     note: "no GPU · any model endpoint",
     recipes: [
-      { name: "SkillClaw", href: "/docs/user-guide/recipes/skillclaw", signal: "grows skills from failures" },
       { name: "GEPA", href: "/docs/user-guide/recipes/gepa", signal: "reflective prompt evolution" },
       { name: "Meta-Harness", href: `${siteConfig.repository}/tree/main/recipes/meta_harness`, signal: "searches full harness designs" },
     ],

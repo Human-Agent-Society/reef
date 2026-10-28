@@ -72,8 +72,6 @@ tests/recipes/sao/test_sao_reference.py
 tests/recipes/sdft/test_sdft_pipeline.py
 tests/recipes/sdpo/test_sdpo_parity.py
 tests/recipes/sdpo/test_sdpo_pipeline.py
-tests/recipes/skillclaw/test_skillclaw.py
-tests/recipes/skillclaw/test_skillclaw_catalog.py
 tests/recipes/tttd/test_tttd.py
 tests/record2record/test_record_set_unit_pool.py
 tests/record2sample/test_generator_designer.py
@@ -134,7 +132,7 @@ tests/reef_service/test_service_config_arguments.py
 tests/reef_service/test_service_executor_ray.py
 tests/reef_service/test_service_executors.py
 tests/reef_service/test_service_guard.py
-tests/reef_service/test_skill_delivery.py
+tests/reef_service/test_sse_streams.py
 tests/reef_service/test_startup_diagnostics.py
 tests/reef_service/test_step_record_history.py
 tests/reef_service/test_train_admission.py

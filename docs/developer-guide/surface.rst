@@ -30,7 +30,7 @@ GPU placement, or adapter caches. Those live in ``train/``, ``artifact/``,
 Components
 ----------
 
-A release binds named components: ``weights``, ``harness``, ``skills``, or
+A release binds named components: ``weights``, ``harness``, ``config``, or
 whatever a recipe declares. ``Surface.components`` maps each name to a
 ``ComponentSurface`` holding that component's ``validator``, ``loader``,
 ``inference`` hooks, and ``files`` tree. Every shipped recipe declares one
@@ -115,8 +115,6 @@ Built-in surfaces
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 | ``create_harness_surface(descriptor)`` | ``harness`` | accepts any        | none                    | none                             | ``HarnessFiles`` |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
-| ``create_skill_surface(...)``          | ``skills``  | ``SkillValidator`` | none                    | optional ``SkillInferenceHooks`` | ``TextFileTree`` |
-+----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 | ``create_config_surface()``            | ``config``  | ``ConfigValidator``| none                    | ``ConfigInferenceHooks``         | none             |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 
@@ -166,14 +164,6 @@ because a token count carries no generation fields. A change of defaults is
 a release like any other, frozen per request and recorded against the
 release that served it. The service applies it; it exposes no pulled tree,
 so it composes beside a harness component.
-
-**Skill trees.** ``create_skill_surface()`` adds optional server-side
-injection to the same ``TextFileTree``. A ``SkillLayer`` owns one top-level
-directory and validates it; a layer that also implements
-``RequestSkillLayer`` can prepare inference requests. Pull-only layers expose
-no request method, so the surface has no inference capability and never
-materializes the artifact on the inference path. The same layers form the
-component's ``SkillValidator``, its admission policy.
 
 Building a surface
 ------------------

@@ -2,7 +2,7 @@
 
 A surface describes how one frozen release reaches inference or a
 client pulling files. A release binds named components (``weights``,
-``harness``, ``skills``, ...), and the surface binds each component's
+``harness``, ``config``, ...), and the surface binds each component's
 capabilities explicitly: record-only surfaces have no components, while
 model, adapter, and harness surfaces compose only the pieces they use.
 """
@@ -330,7 +330,7 @@ class Surface:
 
         The episode renders its own candidate of that component, so the served
         release's hooks for it would mix the served content into the
-        candidate's calls (a skill catalog, for one); the rest of the release
+        candidate's calls; the rest of the release
         (weights, request defaults) is served as it is. ``None`` names the only
         component of a flat release and no component of a composed one.
         """

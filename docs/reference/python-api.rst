@@ -146,13 +146,12 @@ for every scenario in a deployment.
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── HarnessEvolutionRecipe   harness tree + episodes  reef.recipe.harness
-       ├── SkillClawRecipe                                recipes.skillclaw.recipe
        └── ReefineRecipe (beta)                           recipes.beta.reefine
 
 A harness method is a ``Method`` that ``HarnessEvolutionRecipe`` runs, not a
 recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
-``evolution.method``. SkillClaw and Reefine subclass it because they change
-more than the tree.
+``evolution.method``. The beta Reefine subclasses it because it changes more
+than the tree.
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the
@@ -1612,8 +1611,7 @@ Surface
 
    from reef.harness.delivery import create_harness_surface
    from reef.surface import (
-       ComponentSurface, Surface, create_config_surface, create_skill_surface,
-       create_weight_surface,
+       ComponentSurface, Surface, create_config_surface, create_weight_surface,
    )
 
 A surface binds one frozen release to its consumers.

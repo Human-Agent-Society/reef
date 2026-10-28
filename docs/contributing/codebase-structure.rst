@@ -13,7 +13,7 @@ at ``reef/train/harness_backend/`` and the harness source tree at
 ``reef/recipe/sft/``, and its Slime loss family is in
 ``reef/train/slime_backend/sft.py``. Paper-backed methods live in separate
 packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``gepa``,
-``meta_harness``, ``skillclaw``, ``ace``, ``reasoning_bank``). Beta methods
+``meta_harness``, ``ace``, ``reasoning_bank``). Beta methods
 live under ``recipes/beta/`` (``coral``, ``spade``, ``autoenvscaling``,
 ``reefine``) until they publish reproducible results. A weight method holds
 its recipe, processor and training objective, with the ``slime/`` subpackage

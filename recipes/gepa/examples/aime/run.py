@@ -1,9 +1,9 @@
 """The AIME driver: one embedded Reef service, GEPA's search, two sealed test passes.
 
 The method is the recipe (``gepa.yaml``); this file is only the benchmark
-around it. It owns the Reef service in process the way ``recipes/skillclaw``
-does, so every problem it solves is real recorded traffic against the served
-tree and the method reflects on transcripts it actually produced.
+around it. It owns the Reef service in process, so every problem it
+solves is real recorded traffic against the served tree and the method
+reflects on transcripts it actually produced.
 
 One round is one GEPA step: pull the served tree, run the next epoch-shuffled
 minibatch of three training problems as Pi episodes against it with a model

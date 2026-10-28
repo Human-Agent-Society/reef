@@ -1,4 +1,4 @@
-"""File trees shared by harness and skill surfaces."""
+"""The file tree that serves an artifact's text files as stored."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class TextFileTree(FileTree):
                 continue
             try:
                 # Bytes-then-decode avoids universal-newline rewriting. The
-                # pulled tree must equal the tree measured by the gate.
+                # pulled tree must equal the tree the validator checked.
                 files[relative] = path.read_bytes().decode("utf-8")
             except UnicodeDecodeError:
                 continue

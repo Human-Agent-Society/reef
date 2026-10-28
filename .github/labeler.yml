@@ -33,11 +33,9 @@
           - "reef/train/harness_backend/**"
           - "reef/surface/**"
           - "tutorials/evolve-your-harness/**"
-          - "recipes/skillclaw/**"
           - "recipes/gepa/**"
           - "tests/reef_service/test_harness*.py"
           - "tests/reef_service/test_*recipe*.py"
-          - "tests/reef_service/test_skill*.py"
           - "tests/reef_service/test_*surface*.py"
           - "tests/smoke/**"
 

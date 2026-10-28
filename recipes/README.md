@@ -104,7 +104,6 @@ recipe reads it out of the traffic it already serves.
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
 | OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
-| SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
 | ACE | harness rules: a playbook of lessons | [`recipes/ace/`](ace/) | [ACE](ace/README.md) | [online deployment](ace/examples/serve.yaml) |
 | ReasoningBank | harness skills: memory items | [`recipes/reasoning_bank/`](reasoning_bank/) | [ReasoningBank](reasoning_bank/README.md) | [online deployment](reasoning_bank/examples/serve.yaml) |
 
@@ -115,20 +114,6 @@ reef, and the metric is the number of sessions before the agent's answers
 match the student's taste. The method (session correlation, PRM judging, the
 hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
 contains only the harness side.
-
-[SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
-reproduction as a method package on the same mechanism: each step is the
-sealed night (one decision per skill group plus the no-skill bucket) mapped
-to one patch of the skill pool, `policy: none` publishes every non-skip
-night as the paper does and leaves the measurement to the next day, and the method ships its
-own delivery - a recipe surface that injects the served pool's catalog into
-every proxied request. The campaign driver embeds the Reef service, runs
-the frozen 60-task WildClawBench day in docker, pulls the published pool
-from `GET /reef/harness`, and seals rounds for the preregistered gain
-criterion carried verbatim from the sealed campaign. Its `harbor/` is one
-WildClawBench task vendored in the standard Harbor format (self-contained
-image, the benchmark's own programmatic grader), and `run.py solve` is the
-one-episode reef-eval smoke over it.
 
 [ACE](ace/README.md) and [ReasoningBank](reasoning_bank/README.md) learn from
 traffic without ground truth and run no evaluation episode (`policy: none`).

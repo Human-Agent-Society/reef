@@ -176,9 +176,8 @@ Choose your next step
 
 - `Compare learning recipes <../user-guide/recipes.rst>`__ to choose between
   model training and harness evolution based on the feedback you have.
-- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ or
-  `SkillClaw skill evolution <../user-guide/recipes/skillclaw.rst>`__ for
-  worked harness examples, or `SAO rollout training
+- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ for a
+  worked harness example, or `SAO rollout training
   <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
 - Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
   your own agent: it covers inference headers, feedback reports, and release

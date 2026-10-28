@@ -597,8 +597,7 @@ A method in this repository is one package under ``recipes/``:
      examples/       runnable deployments
 
 A method needs no recipe of its own. Subclass ``HarnessEvolutionRecipe`` only
-when the method changes more than the tree. SkillClaw's recipe adds a
-delivery surface that injects its skill catalog. The beta Reefine recipe runs
+when the method changes more than the tree. The beta Reefine recipe runs
 a coding agent in a sandbox that it configures. A subclass that reads keys of
 its own removes them from the ``evolution`` section in ``_recipe_kwargs``
 before it calls the base class.

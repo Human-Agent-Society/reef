@@ -31,7 +31,6 @@
 /reef/train/harness_backend/ @Benjamin-eecs @hanfeiyu
 /reef/surface/ @Benjamin-eecs @quao627
 /tutorials/evolve-your-harness/ @Benjamin-eecs @quao627
-/recipes/skillclaw/ @Benjamin-eecs @quao627
 /recipes/gepa/ @simonucl @Benjamin-eecs
 
 # Runnable examples of the weight methods (the method packages above stay
