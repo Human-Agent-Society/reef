@@ -4,6 +4,8 @@
 
 - :class:`OracleCheck`: Harbor's oracle and nop agents. The reference solution must score 1, and doing nothing
   must score below 1.
+- :class:`ContaminationCheck`: the instruction must share no run of 13 consecutive word tokens (by default) with
+  the instruction of a reference task, such as a benchmark task kept for evaluation.
 - :class:`ReviewCheck`: one model call reads the instruction, the tests and the reference solution, and lists
   each requirement that the tests check and the instruction does not state.
 - :class:`CalibrationCheck`: episodes of the current solver on the task. Their mean reward must lie inside the
@@ -23,6 +25,7 @@ import statistics
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from recipes.beta.autoenvscaling.author import ModelReplies
 from reef.core.prompts import untrusted_text
@@ -60,6 +63,15 @@ CALIBRATION_MIN_SCORED = 2
 # so float error does not move a value that equals its bound past it: 0.4 is 0.15 from 0.25, and the population std
 # of [0.4, 0.6, 0.4, 0.6] is 0.1, though plain floats make them 0.15000000000000002 and 0.09999999999999998.
 COMPARISON_DECIMALS = 9
+# The contamination check: an instruction is contaminated when it shares CONTAMINATION_N consecutive word tokens
+# with the instruction of a reference task. Its result keeps CONTAMINATION_HITS shared n-grams, each cut to
+# CONTAMINATION_NGRAM_CHARS characters.
+CONTAMINATION_N = 13
+CONTAMINATION_HITS = 5
+CONTAMINATION_NGRAM_CHARS = 200
+# Benchmark tasks can carry the same canary string; a line that names a canary says nothing about the task.
+CANARY_LINE = re.compile(r"canary", re.IGNORECASE)
+WORD_TOKEN = re.compile(r"\w+")
 
 REVIEW_SYSTEM_PROMPT = """You review the tests of a coding task before an agent is trained on it. The agent that \
 solves the task reads only the instruction. It never sees the tests or the reference solution. A correct solution is \
@@ -413,3 +425,87 @@ class CalibrationCheck(TaskCheck):
             result, error = CALIBRATION_KEPT, ""
         details = {**details, "mean": mean, "std": std, "place": place, "result": result}
         return CheckResult(self.name, (error,) if error else (), details=details)
+
+
+def instruction_tokens(text: str) -> list[str]:
+    """The lowercase word tokens of ``text``, without the lines that name a canary.
+
+    Case, punctuation, Markdown and whitespace do not change the tokens.
+    """
+    kept = "\n".join(line for line in text.splitlines() if not CANARY_LINE.search(line))
+    return WORD_TOKEN.findall(kept.lower())
+
+
+def instruction_ngrams(tokens: list[str], n: int) -> list[str]:
+    """Every run of ``n`` consecutive tokens, with stride 1, joined by spaces; none for fewer than ``n`` tokens."""
+    return [" ".join(tokens[start : start + n]) for start in range(len(tokens) - n + 1)]
+
+
+def reference_instructions(root: Path) -> dict[str, str]:
+    """Every ``instruction.md`` under ``root``, in path order, by the name of its task.
+
+    A task's name is its directory relative to ``root``, or ``root``'s own name for an ``instruction.md`` in
+    ``root``. Raises ``ValueError`` when ``root`` is not a directory or holds no ``instruction.md``.
+    """
+    if not root.is_dir():
+        raise ValueError(f"contamination_tasks_path {root} is not a directory")
+    instructions: dict[str, str] = {}
+    for path in sorted(root.rglob("instruction.md")):
+        relative = path.parent.relative_to(root).as_posix()
+        instructions[root.name if relative == "." else relative] = path.read_text(encoding="utf-8", errors="replace")
+    if not instructions:
+        raise ValueError(f"contamination_tasks_path {root} holds no instruction.md")
+    return instructions
+
+
+class ContaminationCheck(TaskCheck):
+    """The task's instruction must share no n-gram of word tokens with the instruction of a reference task.
+
+    Values: ``n`` is at least 1. ``index`` maps each n-gram of a reference instruction to the reference tasks
+    whose instruction holds it, in name order. Each reference task is indexed on its own, so no n-gram spans two
+    tasks. ``reference_task_count`` is the number of reference tasks, and ``tasks_path`` the directory they were
+    read from, as the config gives it.
+    Purpose: ``from_config`` builds it from the ``contamination`` keys and puts it in ``task_checks`` right after
+    the oracle check. ``validate`` runs it on each task, and the generation report keeps its result.
+
+    The rule is upstream's, after Tmax: the tokens are :func:`instruction_tokens`, and the n-grams
+    :func:`instruction_ngrams`. Any shared n-gram is a defect. The index is built once, so the check never fails
+    to run. It makes no model call and runs no sandbox.
+    """
+
+    def __init__(self, instructions: Mapping[str, str], *, n: int, tasks_path: str, is_refusing: bool = True) -> None:
+        if n < 1:
+            raise ValueError("contamination_ngram must be an integer of at least 1")
+        super().__init__("contamination", is_refusing=is_refusing)
+        self.n = n
+        self.tasks_path = tasks_path
+        self.reference_task_count = len(instructions)
+        index: dict[str, list[str]] = {}
+        for name in sorted(instructions):
+            for ngram in set(instruction_ngrams(instruction_tokens(instructions[name]), n)):
+                index.setdefault(ngram, []).append(name)
+        self.index: dict[str, tuple[str, ...]] = {ngram: tuple(names) for ngram, names in index.items()}
+
+    async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
+        # Each distinct shared n-gram, in the instruction's order, and the first reference task that holds it.
+        shared: dict[str, str] = {}
+        for ngram in instruction_ngrams(instruction_tokens(task.instruction), self.n):
+            if ngram in self.index and ngram not in shared:
+                shared[ngram] = self.index[ngram][0]
+        hits = [
+            {"reference_task": name, "ngram": ngram[:CONTAMINATION_NGRAM_CHARS]}
+            for ngram, name in list(shared.items())[:CONTAMINATION_HITS]
+        ]
+        details = {
+            "n": self.n,
+            "tasks_path": self.tasks_path,
+            "reference_tasks": self.reference_task_count,
+            "shared_ngrams": len(shared),
+            "hits": hits,
+        }
+        if not hits:
+            return CheckResult(self.name, details=details)
+        first = hits[0]
+        quoted = f'"{first["ngram"]}"'
+        error = f"instruction.md shares a {self.n}-gram with reference task {first['reference_task']}: {quoted}"
+        return CheckResult(self.name, (error,), details=details)

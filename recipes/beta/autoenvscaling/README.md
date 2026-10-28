@@ -35,7 +35,7 @@ beta/autoenvscaling/
   sources.py        the sources file (session records and their repositories), the session rendered for the agent
   author.py         the author contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
   author_tools.ts   the agent's task_check tool
-  checks.py         the task checks: Harbor's oracle and nop agents, the test review and the solver calibration
+  checks.py         the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
   generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks and the band
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
@@ -137,7 +137,7 @@ The band marks a task after the recipe trained on it. The calibration measures t
 
 Upstream also gives a task below the band one episode with hints from the reference solution. Only its proposer revision feedback reads that reward. This generator has no such feedback, so the calibration runs no hint episode.
 
-The calibration is the last task check in `validate`, so it runs only when the oracle check and a refusing test review pass. It asks the generator service (`POST /episodes`) for episodes of the task's copy on the arm `calibration`, with `calibration_model`. Without it, the episodes use the generator service's default model: its deployment's `inference.upstream-model`, else its `model-path`. In the example's Tinker deployment, that is the policy in training, `Qwen/Qwen3-8B`. In the pool build below, on [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml), it is that provider's `gpt-4o`, so the calibration measures `gpt-4o` and not the policy; name the solver in `calibration_model` when that deployment's Reef can serve it. The agent is the generator service's own (`generator.agent`). These are rollout episodes: Reef keeps no record of them, and nothing trains on them.
+The calibration is the last task check in `validate`, so it runs only when the oracle check, a refusing contamination check and a refusing test review all pass. It asks the generator service (`POST /episodes`) for episodes of the task's copy on the arm `calibration`, with `calibration_model`. Without it, the episodes use the generator service's default model: its deployment's `inference.upstream-model`, else its `model-path`. In the example's Tinker deployment, that is the policy in training, `Qwen/Qwen3-8B`. In the pool build below, on [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml), it is that provider's `gpt-4o`, so the calibration measures `gpt-4o` and not the policy; name the solver in `calibration_model` when that deployment's Reef can serve it. The agent is the generator service's own (`generator.agent`). These are rollout episodes: Reef keeps no record of them, and nothing trains on them.
 
 The calibration has a mode:
 
@@ -184,6 +184,34 @@ With `review: refuse`, the agent's own `task_check` also runs the review once th
 | `review_model` | `agent_model` | the review's model |
 
 The review needs `agent_api: openai` or `responses`; with `anthropic`, set `review: off`.
+
+### Contamination
+
+A generated task can copy the instruction of a benchmark task that is kept for evaluation. An evaluation on that benchmark then measures what the policy saw in training. The contamination check compares the `instruction.md` of each task with the instructions of a set of reference tasks. It runs in `validate` right after the oracle check, before the test review and the calibration, so a contaminated task costs no review call and no calibration episode. It makes no model call and runs no sandbox.
+
+The rule is upstream's, after Tmax:
+
+1. Each instruction loses every line that contains `canary`, in any case. Benchmark tasks can carry the same canary string, and it says nothing about the task.
+2. The rest is lowercased and split into word tokens (`\w+`), so case, punctuation, Markdown and whitespace do not change a match.
+3. The task is contaminated when its instruction shares a run of 13 consecutive tokens (a 13-gram) with the instruction of one reference task. Each reference task is compared on its own, so a 13-gram never spans two reference tasks. An instruction of fewer than 13 tokens has no 13-gram.
+
+The check compares text only. It does not find a paraphrased copy.
+
+Each `instruction.md` under `contamination_tasks_path` is one reference task, named by its directory under that path. A downloaded Harbor dataset, such as Terminal-Bench, is such a directory. The generator reads the directory when it starts, so a missing directory, or one with no `instruction.md`, fails the config before any session is rebuilt.
+
+The check has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing check that finds a shared 13-gram gives the task stage `check`, with the error `instruction.md shares a 13-gram with reference task <name>: "<the 13-gram>"`. The check always runs, so it never gives stage `unchecked`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `contamination` | `off` | the contamination check's mode; a bare YAML `off` reads as false and means `off` |
+| `contamination_tasks_path` | null | the directory of the reference tasks; required when the mode is not `off` |
+| `contamination_ngram` | 13 | the number of consecutive tokens that a match shares; an integer of at least 1 |
+
+Each key is checked also when the mode is `off`. The directory is read only when the mode is not `off`.
+
+Each task's check results get a `contamination` entry. Its details hold `n`, `tasks_path`, `reference_tasks` (the number of reference tasks), `shared_ngrams` (the number of distinct shared n-grams) and `hits`. `hits` keeps the first 5 shared n-grams in the order of the instruction, each cut to 200 characters, with the first reference task by name that holds it.
+
+The agent's own `task_check` does not run this check, and the agent's rules do not name it. The check also does not read the scenario's task store yet: a generator gets only its config, and a generated-task scenario holds no imported benchmark tasks. When a recipe evaluates its checkpoints on imported eval tasks, a later change can make those tasks the reference set.
 
 ## The prompt Designer baseline
 

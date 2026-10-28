@@ -41,13 +41,16 @@ from recipes.beta.autoenvscaling.author import (
 )
 from recipes.beta.autoenvscaling.checks import (
     BAND_INSIDE,
+    CONTAMINATION_N,
     CalibrationCheck,
     CheckResult,
+    ContaminationCheck,
     OracleCheck,
     ReviewCheck,
     TaskCheck,
     band_place,
     check_mode,
+    reference_instructions,
     validate_band,
 )
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
@@ -100,6 +103,7 @@ DEFAULT_CALIBRATION_ROLLOUTS = 4
 DEFAULT_CALIBRATION_MAX_ROLLOUTS = 8
 DEFAULT_CALIBRATION_MARGIN = 0.15
 DEFAULT_CALIBRATION_MIN_STD = 0.1
+DEFAULT_CONTAMINATION = "off"
 # A repository task builds a toolchain and the repository: more room and time than a generated shell task gets. The
 # build (1200 s) and the verifier (450 s) stay inside the service's 1800 s bound on one oracle or nop trial
 # (ORACLE_TIMEOUT_S), so a slow build or verifier refuses the task instead of stopping the round.
@@ -173,6 +177,9 @@ CONFIG_KEYS = frozenset(
         "calibration_margin",
         "calibration_min_std",
         "calibration_model",
+        "contamination",
+        "contamination_tasks_path",
+        "contamination_ngram",
     }
 )
 
@@ -534,6 +541,29 @@ def calibration_check(
     return None if mode == "off" else check
 
 
+def contamination_check(config: Mapping[str, object]) -> ContaminationCheck | None:
+    """The contamination check the config's ``contamination`` mode asks for, against the instructions under
+    ``contamination_tasks_path``; none when off.
+
+    Raises ``ValueError`` for a key of the wrong type, also when the mode is off. When the mode is not off, it also
+    raises when ``contamination_tasks_path`` is null, is not a directory or holds no ``instruction.md``.
+    """
+    mode = check_mode(config.get("contamination", DEFAULT_CONTAMINATION), "contamination")
+    n = config.get("contamination_ngram", CONTAMINATION_N)
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError("contamination_ngram must be an integer of at least 1")
+    tasks_path = config.get("contamination_tasks_path")
+    if tasks_path is not None and not (isinstance(tasks_path, str) and tasks_path.strip()):
+        raise ValueError("contamination_tasks_path must be a directory path or null")
+    if mode == "off":
+        return None
+    if tasks_path is None:
+        raise ValueError("contamination needs contamination_tasks_path: the directory of the reference tasks")
+    return ContaminationCheck(
+        reference_instructions(Path(tasks_path)), n=n, tasks_path=tasks_path, is_refusing=mode == "refuse"
+    )
+
+
 class AutoEnvScalingGenerator(TaskGenerator):
     """Recorded sessions rebuilt as Harbor tasks by the author, checked through the generator service, and banded
     by the solver's pass rate.
@@ -614,6 +644,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             service = HttpGenerator(generator_url)
             band_low = band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low")
             band_high = band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high")
+            # The contamination check runs right after the oracle check: it makes no model call and runs no episode.
+            contamination = contamination_check(config)
             review = review_check(config, environ, scenario=scenario)
             # The calibration runs last: its episodes are the costliest check.
             calibration = calibration_check(config, service, scenario=scenario, band_low=band_low, band_high=band_high)
@@ -627,7 +659,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 band_low=band_low,
                 band_high=band_high,
                 max_checks=int(config.get("max_checks", DEFAULT_MAX_CHECKS)),
-                task_checks=tuple(check for check in (review, calibration) if check is not None),
+                task_checks=tuple(check for check in (contamination, review, calibration) if check is not None),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc

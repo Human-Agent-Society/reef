@@ -10,7 +10,8 @@ tasks and trains on them.
 - ``sources``: the sources file (session records and their repositories) and the session renderer.
 - ``author``: the author contract and its two implementations: the agent, pi in a cloud sandbox (E2B or Modal) behind a
   gateway that records its model calls on Reef, and the one-reply prompt Designer.
-- ``checks``: the task checks: Harbor's oracle and nop agents, the test review, and the solver calibration.
+- ``checks``: the task checks: Harbor's oracle and nop agents, the contamination check, the test review, and the
+  solver calibration.
 - ``generator``: ``AutoEnvScalingGenerator``: the sessions walked with a cursor, admission and the history
   step, the agent's check and the task checks through the generator service, and the band.
 """
@@ -28,6 +29,7 @@ from recipes.beta.autoenvscaling.author import (
 from recipes.beta.autoenvscaling.checks import (
     CalibrationCheck,
     CheckResult,
+    ContaminationCheck,
     OracleCheck,
     ReviewCheck,
     ReviewFinding,
@@ -44,6 +46,7 @@ __all__ = [
     "CalibrationCheck",
     "CandidateChecks",
     "CheckResult",
+    "ContaminationCheck",
     "GeneratorChecks",
     "OracleCheck",
     "PromptAuthor",
