@@ -842,7 +842,9 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     checkpoint = first.get_or_create_scenario("math").store.history()[1]
     assert checkpoint.checkpoint is True
 
-    second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory)
+    first.close()
+    # Inspect checkpoint recovery before the worker can commit the missing job's failure.
+    second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory, hold_local_cycles=True)
     recovered = second.get_or_create_scenario("math")
 
     # The release chain ends at the checkpoint, so recovery returns to its step and metrics.
@@ -852,6 +854,8 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     assert recovered_status["step"] == 2
     assert recovered_status["metrics"] == checkpoint.metrics
     assert not list(tmp_path.rglob("*.sqlite3"))
+
+    second.close()
 
 
 @dataclass(frozen=True)
