@@ -20,6 +20,12 @@ pool holds fewer than ``refill_tasks`` tasks. A round that made no train task, a
 nothing, and an empty task pool with no tasks handed out are followed at once. A restart continues from the
 task store: train tasks that did not train go back to the task pool.
 
+With ``pool_capacity`` above 0, each train task trains again: when its job ends, it goes back to the end of the
+pool. Rounds then start only while the pool holds fewer active tasks than ``pool_capacity``. Every
+``review_interval`` jobs, a review retires the tasks whose recent rewards are outside the band or do not spread
+(:mod:`reef.recipe.generated_tasks.review`). A restart puts every train task that no review retired back in the
+pool, least used first.
+
 The record stage trains on no report. It holds the reports that are source sessions for the rounds, and
 releases the others, such as a generator's own reports.
 """
@@ -53,6 +59,14 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
+from reef.recipe.generated_tasks.review import (
+    ReviewSettings,
+    pool_reviews,
+    retired_tasks,
+    review_pool,
+    save_task_uses,
+    task_uses,
+)
 from reef.recipe.generated_tasks.rollout import (
     HandedOutTasks,
     PooledTask,
@@ -85,6 +99,20 @@ DEFAULT_SPLIT_SEED = 0
 DEFAULT_GENERATION_ATTEMPTS = 3
 DEFAULT_GENERATION_DEADLINE_SECONDS = 1800.0
 DELIVERY_RECEIPT = "delivery"
+# The pool review's defaults follow the AutoEnvScaling pool: a review every 16 solver steps, four rollouts, and
+# the band and reward spread that admit a task.
+DEFAULT_REVIEW_INTERVAL = 16
+DEFAULT_REVIEW_WINDOW = 4
+DEFAULT_REVIEW_BAND_LOW = 0.25
+DEFAULT_REVIEW_BAND_HIGH = 0.75
+DEFAULT_REVIEW_MIN_REWARD_STD = 0.1
+DEFAULT_REVIEW_SETTINGS = ReviewSettings(
+    interval=DEFAULT_REVIEW_INTERVAL,
+    window=DEFAULT_REVIEW_WINDOW,
+    band_low=DEFAULT_REVIEW_BAND_LOW,
+    band_high=DEFAULT_REVIEW_BAND_HIGH,
+    min_reward_std=DEFAULT_REVIEW_MIN_REWARD_STD,
+)
 
 
 def split_source_ids(task: HarborTask) -> tuple[str, ...]:
@@ -155,17 +183,30 @@ def complete_generation_count(store: TaskStore) -> int:
     return sum(state.is_complete for state in store.generations())
 
 
-def available_tasks(store: TaskStore) -> tuple[tuple[int, StoredTask], ...]:
-    """The train tasks of complete generations that have not trained, with their generation, oldest first."""
+def pool_tasks(store: TaskStore) -> tuple[tuple[int, StoredTask], ...]:
+    """The published train tasks of complete generations, with their generation, oldest first."""
     published = {stored.name: stored for stored in store.tasks(split="train")}
-    trained = store.trained_task_names()
     return tuple(
         (state.generation, published[name])
         for state in store.generations()
         if state.is_complete
         for name in train_task_names(state)
-        if name in published and name not in trained
+        if name in published
     )
+
+
+def available_tasks(store: TaskStore) -> tuple[tuple[int, StoredTask], ...]:
+    """The train tasks of complete generations that have not trained, with their generation, oldest first."""
+    trained = store.trained_task_names()
+    return tuple((generation, stored) for generation, stored in pool_tasks(store) if stored.name not in trained)
+
+
+def active_tasks(store: TaskStore) -> tuple[tuple[int, StoredTask], ...]:
+    """The train tasks of complete generations that no review retired, least used first, then oldest first."""
+    retired = retired_tasks(store)
+    uses = task_uses(store)
+    active = (pair for pair in pool_tasks(store) if pair[1].name not in retired)
+    return tuple(sorted(active, key=lambda pair: len(uses.get(pair[1].name, ()))))
 
 
 def deliverable_generations(store: TaskStore) -> tuple[GenerationState, ...]:
@@ -465,17 +506,58 @@ class RoundSettings(PluginSettings):
 
 @dataclass(frozen=True)
 class TaskJobSettings(PluginSettings):
-    """The config of ``GeneratedTaskJobData``: ``tasks_per_step``, a positive int, the saved tasks of one task job.
+    """The config of ``GeneratedTaskJobData``: the tasks of one task job, and the reuse and review of the pool.
+
+    Values: ``tasks_per_step`` is a positive int, the saved tasks of one task job. ``pool_capacity`` is a
+    non-negative int; 0 trains each task once, and above 0 each task trains again until a review retires it.
+    The ``review_*`` values are those of ``ReviewSettings``; with ``pool_capacity`` 0 they keep their defaults.
+    The constructor refuses other values.
+    Purpose: ``GeneratedTaskJobData.from_config`` parses it from ``pipeline.sample2job.config``.
 
     The rollout of the tasks is the training component's: its ``rollout`` job parameter sets the episodes of
     each task and the agent that runs them.
     """
 
     tasks_per_step: int = config_option(DEFAULT_TASKS_PER_STEP, help="The saved tasks of one task job.")
+    pool_capacity: int = config_option(
+        0, help="Above 0, tasks train again, and rounds start only while fewer tasks than this are active."
+    )
+    review_interval: int = config_option(
+        DEFAULT_REVIEW_INTERVAL, help="The task jobs between two pool reviews; 0 reviews nothing."
+    )
+    review_window: int = config_option(
+        DEFAULT_REVIEW_WINDOW, help="The most recent rewards of a task that a review reads."
+    )
+    review_band_low: float = config_option(
+        DEFAULT_REVIEW_BAND_LOW, help="A review retires a task whose pass rate is below this."
+    )
+    review_band_high: float = config_option(
+        DEFAULT_REVIEW_BAND_HIGH, help="A review retires a task whose pass rate is above this."
+    )
+    review_min_reward_std: float = config_option(
+        DEFAULT_REVIEW_MIN_REWARD_STD,
+        help="A review retires a task whose rewards have a smaller standard deviation; 0 turns this off.",
+    )
 
     def __post_init__(self) -> None:
         if self.tasks_per_step <= 0:
             raise ValueError("tasks_per_step must be positive")
+        if isinstance(self.pool_capacity, bool) or not isinstance(self.pool_capacity, int) or self.pool_capacity < 0:
+            raise ValueError("pool_capacity must be a non-negative integer")
+        review = self.review_settings()
+        # The parsed settings cannot tell a default from a key set to it, so a key that changes a default counts.
+        if self.pool_capacity == 0 and review != DEFAULT_REVIEW_SETTINGS:
+            raise ValueError("the review_* settings need a pool_capacity above 0")
+
+    def review_settings(self) -> ReviewSettings:
+        """The rule of the pool reviews. Raises ``ValueError`` for a review setting out of its range."""
+        return ReviewSettings(
+            interval=self.review_interval,
+            window=self.review_window,
+            band_low=self.review_band_low,
+            band_high=self.review_band_high,
+            min_reward_std=self.review_min_reward_std,
+        )
 
 
 class GeneratedTaskRecord2Record(ReportRecord2Record):
@@ -491,8 +573,9 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
     the rounds that finished a generation and the rounds whose generation ran out of attempts; a round of
     sessions that a complete generation already used does not count. A restart counts complete generations
     only, so a generation that ran out of attempts gets new attempts after a restart. A round is due when no
-    round is running, the limit is not reached, the task pool that ``attach_task_pool`` gave holds fewer than
-    ``refill_tasks`` tasks, and one of these is true:
+    round is running, the limit is not reached, the task pool that ``attach_task_pool`` gave needs tasks
+    (``TaskPool.needs_tasks``: fewer than ``refill_tasks`` waiting tasks, or with a capacity, fewer active
+    tasks than the capacity), and one of these is true:
 
     * it is the first round after a start;
     * the last round made no train task, or the last task job failed, so no job data comes;
@@ -559,7 +642,9 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
     def round_due(self) -> bool:
         """Whether the next round should start now."""
         pool = self.task_pool
-        if pool is None or self.rounds_stopped or self.running_round is not None or len(pool) >= self.refill_tasks:
+        if pool is None or self.rounds_stopped or self.running_round is not None:
+            return False
+        if not pool.needs_tasks(self.refill_tasks):
             return False
         if self.follow_at_once or self.trained_jobs >= self.jobs_per_round:
             return True
@@ -986,6 +1071,11 @@ class GeneratedTaskJobData(Sample2Job):
     such a task belongs to the ended job, or to an earlier job that a rollback cancelled. A second call for
     the same end saves nothing new. The record-to-sample stage then sends the finished generations' results to
     the generator.
+
+    With ``pool_capacity`` above 0, the job's end also saves a use of each of its tasks with the job's rewards
+    (``use/<task>/<job>``), runs the pool review that is due, and puts the job's tasks that no review retired
+    back at the end of the pool. A start repeats a review that a stop cut short, then puts every train task
+    that no review retired in the pool, least used first, then oldest first.
     """
 
     #: The tasks wait in the task pool, not in a buffer, and a job trains ``tasks_per_step`` tasks.
@@ -1020,21 +1110,31 @@ class GeneratedTaskJobData(Sample2Job):
         record2sample: GeneratedTaskSamples,
     ) -> None:
         super().__init__(context, None, None)
+        if settings.pool_capacity > 0 and record2record.refill_tasks > 1:
+            raise ValueError("pool_capacity sets when rounds start: leave refill_tasks at 1")
         self.record2record = record2record
         self.record2sample = record2sample
         self.tasks_per_step = settings.tasks_per_step
-        self.task_pool = TaskPool()
+        self.task_pool = TaskPool(settings.pool_capacity or None)
+        self.review_settings = settings.review_settings()
         record2record.attach_task_pool(self.task_pool)
         store = record2sample.task_store
         if store is not None:
-            for generation, stored in available_tasks(store):
+            if self.task_pool.capacity is None:
+                loaded = available_tasks(store)
+            else:
+                # A stop between a review's retired tasks and the review itself repeats the same review now.
+                self.run_due_review(store)
+                loaded = active_tasks(store)
+            for generation, stored in loaded:
                 self.task_pool.add(stored.name, task_item(store, generation, stored), group_key=generation)
         #: The tasks of the next job, from hand-out until the trainer commits the job's submission.
         self.handed_out: HandedOutTasks | None = None
         #: The submitted jobs whose submission's commit is not yet durable. Their tasks are marked trained when
         #: one of the IDs that the commit lists is released.
         self.trained_rollouts: list[SubmittedTaskJob] = []
-        #: The tasks of the jobs submitted in this process that did not end; they leave the pool at the end.
+        #: The tasks of the jobs submitted in this process that did not end; at the end they leave the pool, or
+        #: go back to it with a pool capacity.
         self.submitted_tasks: tuple[PooledTask, ...] = ()
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
@@ -1075,7 +1175,8 @@ class GeneratedTaskJobData(Sample2Job):
 
     def job_ended(self, outcome: JobOutcome) -> None:
         """Save a result for each trained task without one: its rewards in the job's ``rollout_rewards``, or why
-        no episode ran."""
+        no episode ran. With a pool capacity, also save the job's uses, run the due review, and put the job's
+        tasks that no review retired back in the pool."""
         rewards = outcome.metrics.get("rollout_rewards", {})
         if not isinstance(rewards, Mapping):
             raise TypeError("a task job's rollout_rewards metric must map task names to rewards")
@@ -1095,19 +1196,62 @@ class GeneratedTaskJobData(Sample2Job):
                         self.record2sample.save_result(
                             TaskRolloutResult(name, error=error, infrastructure_failure=True)
                         )
+        retired: frozenset[str] = frozenset()
+        if store is not None and self.task_pool.capacity is not None:
+            names = {stored.name for _, stored in pool_tasks(store)}
+            save_task_uses(
+                store,
+                job_id=outcome.job_id,
+                rewards={name: tuple(values or ()) for name, values in rewards.items() if name in names},
+            )
+            self.run_due_review(store)
+            retired = frozenset(retired_tasks(store))
         if self.submitted_tasks:
-            self.task_pool.drop(self.submitted_tasks)
+            if self.task_pool.capacity is None:
+                self.task_pool.drop(self.submitted_tasks)
+            else:
+                self.task_pool.requeue(
+                    tuple(task for task in self.submitted_tasks if task_name_of(task) not in retired)
+                )
+                self.task_pool.drop(tuple(task for task in self.submitted_tasks if task_name_of(task) in retired))
             self.submitted_tasks = ()
         self.record2record.task_job_ended(finished=outcome.event == "finished")
         self.record2sample.deliver_later()
 
+    def run_due_review(self, store: TaskStore) -> None:
+        """Run the pool review that is due, if any, and take the tasks that it retired out of the pool."""
+        review = review_pool(store, self.review_settings, tuple(stored.name for _, stored in pool_tasks(store)))
+        if review is None:
+            return
+        self.task_pool.retire(frozenset(review.retired))
+        logger.info(
+            "generated-task pool review %d on scenario %r after %d jobs: kept %d, retired %s",
+            review.review,
+            self.scenario,
+            review.jobs,
+            review.kept,
+            ", ".join(f"{name} ({reason})" for name, reason in review.retired.items()) or "none",
+        )
+
     def status(self) -> Mapping[str, Any]:
         handed_out = self.handed_out
-        return {
+        status: dict[str, object] = {
             "task_pool": len(self.task_pool),
             "handed_out": None if handed_out is None else {"batch": handed_out.batch, "tasks": len(handed_out.tasks)},
             "submitted_tasks": len(self.submitted_tasks),
         }
+        if self.task_pool.capacity is None:
+            return status
+        store = self.record2sample.task_store
+        reviews = pool_reviews(store) if store is not None else ()
+        status["training_pool"] = {
+            "capacity": self.task_pool.capacity,
+            "active": len(self.task_pool.waiting) + len(self.task_pool.taken),
+            "retired": len(retired_tasks(store)) if store is not None else 0,
+            "reviews": len(reviews),
+            "last_review_retired": dict(reviews[-1].retired) if reviews else {},
+        }
+        return status
 
 
 def task_name_of(task: PooledTask) -> str:
