@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self
@@ -18,7 +16,6 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import CheckpointCandidate
 from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
@@ -38,7 +35,6 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.recipe.generated_tasks.processor import (
-    TASK_STORE_NAME,
     DeliveryJob,
     GeneratedTaskRecord2Record,
     GeneratedTaskSamples,
@@ -51,16 +47,14 @@ from reef.recipe.generated_tasks.processor import (
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
 from reef.recipe.generated_tasks.rollout import HandedOutTasks, PooledTask
-from reef.recipe.imported_tasks import ImportedTaskEvaluation
 from reef.record2record import InferenceRecord2Record
 from reef.record2sample import NoSamples
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
+from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import TrainingPipeline
-from reef.train.tinker_backend.rollout import RolloutSettings
 
 MODULE = "tests.reef_recipe.test_generated_tasks"
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
@@ -949,103 +943,6 @@ def test_the_recipe_refuses_a_training_component_that_runs_no_task_jobs() -> Non
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
     with pytest.raises(RecipeConfigError, match="the stub training component trains no task jobs"):
         GeneratedTaskRecipe(TrajectoryOnly(), runtime=runtime, job_parameters={"rollout": ROLLOUT})
-
-
-def publish(store: TaskStore, root: Path, split: str, *names: str) -> None:
-    """Publish a Harbor task for each name to ``split`` of ``store``; ``root`` holds their directories."""
-    for offset, name in enumerate(names):
-        task = task_for(name, "record-1", 9300 + offset + 10 * len(name))
-        store.add_task(directory=write_harbor_task(task, root / split), split=split)
-
-
-def test_without_checkpoint_eval_rollouts_per_task_no_artifact_is_evaluated(tmp_path: Path) -> None:
-    storage = task_storage(tmp_path)
-    publish(storage.open(IMPORTED_TASK_STORE), tmp_path / "imported", "eval", "held-out")
-    recipe = training_recipe()
-    assert recipe.checkpoint_eval_rollouts_per_task is None and recipe.artifact_evaluation(storage) is None
-
-
-def test_every_artifact_is_evaluated_on_the_imported_eval_tasks_with_k_rollouts_each(tmp_path: Path) -> None:
-    storage = task_storage(tmp_path)
-    recipe = GeneratedTaskRecipe.from_environment(
-        {},
-        config={
-            "data": {
-                "job_parameters": {"rollout": {"rollouts_per_task": 2, "environment": "e2b"}, "save_interval": 4},
-                "checkpoint-eval-rollouts-per-task": 5,
-            },
-            "model": {"path": "Qwen/Qwen3-8B"},
-        },
-        runtime=InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000"),
-        training_component=StubTrainingComponent(),
-    )
-    evaluation = recipe.artifact_evaluation(storage)
-    assert isinstance(evaluation, ImportedTaskEvaluation) and recipe.artifact_evaluation(None) is None
-    candidate = CheckpointCandidate(candidate_id="job-1:4", training_job_id="job-1", step=4, release_path="/r")
-    publish(storage.open(IMPORTED_TASK_STORE), tmp_path / "imported", "train", "imported-train")
-    publish(storage.open(TASK_STORE_NAME), tmp_path / "generated", "eval", "generated-eval")
-    assert evaluation.evaluation_job(candidate) is None, "no imported eval task, nothing to evaluate on"
-    publish(storage.open(IMPORTED_TASK_STORE), tmp_path / "imported", "eval", "held-out-a", "held-out-b")
-    job = evaluation.evaluation_job(candidate)
-    assert job is not None
-    assert [item.metadata["task"]["name"] for item in job.data.samples] == ["held-out-a", "held-out-b"]
-    assert job.parameters == {
-        "rollout": {"rollouts_per_task": 5, "environment": "e2b"},
-        "save_interval": 4,
-        "method": {"objective": "task_group", "learning_rate_schedule": None},
-        "evaluation_of": "job-1:4",
-    }
-    training = recipe.job_plan().experiment_config()["parameters"]
-    assert training["rollout"] == {"rollouts_per_task": 2, "environment": "e2b"}, "training keeps its k"
-
-
-@pytest.mark.parametrize("spelling", ["rollouts_per_task", "rollouts-per-task"])
-def test_the_evaluation_k_replaces_either_spelling_of_the_training_k(tmp_path: Path, spelling: str) -> None:
-    recipe = training_recipe(
-        job_parameters={"rollout": {spelling: 2, "concurrency": 4}}, checkpoint_eval_rollouts_per_task=3
-    )
-    evaluation = recipe.artifact_evaluation(task_storage(tmp_path))
-    assert isinstance(evaluation, ImportedTaskEvaluation)
-    assert evaluation.parameters["rollout"] == {"concurrency": 4, "rollouts_per_task": 3}
-
-
-@pytest.mark.parametrize("rollouts", [0, -1, True, "5"])
-def test_checkpoint_eval_rollouts_per_task_must_be_a_positive_int(rollouts: object) -> None:
-    with pytest.raises(RecipeConfigError, match="checkpoint_eval_rollouts_per_task must be a positive int"):
-        training_recipe(checkpoint_eval_rollouts_per_task=rollouts)
-
-
-def test_the_component_checks_the_evaluation_rollout() -> None:
-    class RolloutChecking(StubTrainingComponent):
-        """Checks a task job's rollout as the Tinker component does."""
-
-        def check_task_jobs(self, parameters: Mapping[str, object]) -> None:
-            RolloutSettings.from_parameters(parameters)
-
-    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
-    with pytest.raises(
-        RecipeConfigError,
-        match=r"checkpoint evaluation .*rollout.rollouts_per_task must be an int of at least 2, got 1",
-    ):
-        GeneratedTaskRecipe(
-            RolloutChecking(),
-            runtime=runtime,
-            job_parameters={"rollout": ROLLOUT},
-            checkpoint_eval_rollouts_per_task=1,
-        )
-    built = GeneratedTaskRecipe(
-        RolloutChecking(), runtime=runtime, job_parameters={"rollout": ROLLOUT}, checkpoint_eval_rollouts_per_task=2
-    )
-    assert built.checkpoint_eval_rollouts_per_task == 2
-
-
-@pytest.mark.parametrize(
-    "package", ["reef.recipe.sft_then_rl", "reef.recipe.generated_tasks", "reef.recipe.imported_tasks"]
-)
-def test_each_recipe_package_imports_first_in_a_fresh_interpreter(package: str) -> None:
-    # The SFT-then-RL stage imports the generated-task rollout, so a cycle shows only in a fresh interpreter.
-    result = subprocess.run([sys.executable, "-c", f"import {package}"], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
 
 
 def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str, Any]) -> WeightTrainingRecipe:

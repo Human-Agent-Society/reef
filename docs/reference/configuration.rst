@@ -1458,28 +1458,6 @@ job's start weights. The ``rollout`` job parameter configures them:
    rollout.verifier_timeout_reward | 0.0 | the reward of a rollout whose verifier timed out; ``null`` leaves it unscored
    rollout.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
 
-The recipe can also evaluate every artifact on held-out tasks of your own:
-the eval tasks of the scenario's ``imported-tasks`` store, which `Upload
-Harbor tasks <http-api.rst#upload-harbor-tasks>`__ or the ``task-import``
-section fill. Set ``checkpoint_eval_rollouts_per_task`` to k. When the trainer
-decides a checkpoint, it also submits an evaluation job from that checkpoint
-that rolls out every eval task k times and trains nothing. The job uses
-``job_parameters`` with k in place of ``rollout.rollouts_per_task``, so the
-agent and the environment are those of training. The job and its commit
-metric are those of the SFT-then-RL recipe's evaluation (`SFT then RL
-<#sft-then-rl>`__). For each published checkpoint, the training component runs
-k rollouts of every eval task between training jobs. The recipe reads no
-imported train task, so Reef refuses a task upload to the train split, and
-without the key to either split. The eval tasks that the rounds generate are
-not evaluated, for two reasons. Each round adds to them, so two checkpoints
-would get scores on different tasks. And the generator of the train tasks also
-makes them, so they do not show how the model does on tasks from another
-source.
-
-.. config::
-
-   recipe.config.checkpoint_eval_rollouts_per_task | none | rollouts of each imported eval task in the evaluation job of every published checkpoint; none evaluates no checkpoint. The training component checks the value: Tinker needs at least 2.
-
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
 credentials through environment references in ``config``. The generator

@@ -29,7 +29,6 @@ from reef.artifact.artifact import Artifact
 from reef.core.evaluation import CandidateEvaluationPlugin, CheckpointCandidate
 from reef.core.job_data import JobData, JobOutcome
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
-from reef.storage.tasks import SplitName
 from reef.train.types import TrainStepResult
 
 #: The keys of a checkpoint decision's commit metrics that the job loop writes itself.
@@ -155,17 +154,7 @@ class EvaluationJob:
 
 
 class ArtifactEvaluation(ABC):
-    """The recipe's evaluation of every artifact that its weight trainer publishes.
-
-    Values: a subclass gives ``evaluation_job``. ``imported_task_splits`` is a frozenset of the splits of the
-    scenario's ``imported-tasks`` store that the evaluation reads; empty for an evaluation that reads none.
-    Purpose: a recipe's ``artifact_evaluation`` makes it, and ``JobLoop.decide`` asks it for the evaluation job of
-    each checkpoint. A task upload to a split in ``imported_task_splits`` is admitted
-    (``reef.dispatcher.ingest.append_tasks``), also when the recipe's pipeline reads no imported tasks.
-    """
-
-    #: The splits of the scenario's ``imported-tasks`` store that the evaluation reads.
-    imported_task_splits: frozenset[SplitName] = frozenset()
+    """The recipe's evaluation of every artifact that its weight trainer publishes."""
 
     @abstractmethod
     def evaluation_job(self, candidate: CheckpointCandidate) -> EvaluationJob | None:

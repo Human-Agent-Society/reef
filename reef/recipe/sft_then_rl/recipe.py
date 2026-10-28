@@ -9,10 +9,9 @@ from typing import Any
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
-from reef.recipe.imported_tasks import ImportedTaskEvaluation
 from reef.recipe.sft.processor import SFTRecord2Record, SFTSamples
 from reef.recipe.sft.recipe import SFTRecipe
-from reef.recipe.sft_then_rl.processor import SFTThenRLJobData, SFTThenRLJobPlan
+from reef.recipe.sft_then_rl.processor import ImportedTaskEvaluation, SFTThenRLJobData, SFTThenRLJobPlan
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.tasks import TaskStorage
 from reef.train.jobs import ArtifactEvaluation, JobPlan, JobRequest

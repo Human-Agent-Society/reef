@@ -8,16 +8,13 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.runtime_stubs import runtime_bindings
 from tests.support.task_service_stubs import task_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.recipe.generated_tasks import GeneratedTaskRecipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
@@ -139,34 +136,6 @@ def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> N
             assert "does not use imported tasks" in await response.text()
             store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
             assert store.tasks() == ()
-
-    try:
-        asyncio.run(run())
-    finally:
-        dispatcher.close()
-
-
-@pytest.mark.parametrize(("rollouts", "eval_status"), [(2, 200), (None, 400)])
-def test_a_generated_task_scenario_admits_only_eval_uploads_with_checkpoint_evaluation(
-    tmp_path: Path, rollouts: int | None, eval_status: int
-) -> None:
-    # The generated-task recipe reads imported tasks only to evaluate checkpoints, on the eval split.
-    recipe = GeneratedTaskRecipe(
-        **runtime_bindings(),
-        job_parameters={"rollout": {"rollouts_per_task": 2}},
-        checkpoint_eval_rollouts_per_task=rollouts,
-    )
-    dispatcher = dispatcher_for(tmp_path, recipe)
-
-    async def run() -> None:
-        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            held_out = archive(tmp_path, "held-out")
-            response = await client.post("/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=held_out)
-            assert response.status == eval_status, await response.text()
-            train = archive(tmp_path, "task-a", port=9100)
-            response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=train)
-            assert response.status == 400
-            assert "does not use imported tasks of split 'train'" in await response.text()
 
     try:
         asyncio.run(run())
