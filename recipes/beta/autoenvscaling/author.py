@@ -490,8 +490,11 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
         git("checkout", "-q", repository.commit, cwd=partial)
         shutil.rmtree(partial / ".git")
         git("init", "-q", cwd=partial)
-        git("add", "-A", cwd=partial)
-        commit = ("-c", "user.name=reef", "-c", "user.email=reef@localhost", "-c", "gc.auto=0", "commit")
+        # No gc and no auto maintenance (Git 2.54 runs it after a commit even with gc.auto=0) while the agent copies
+        # the snapshot.
+        no_upkeep = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+        git(*no_upkeep, "add", "-A", cwd=partial)
+        commit = (*no_upkeep, "-c", "user.name=reef", "-c", "user.email=reef@localhost", "commit")
         git(*commit, "-qm", "base commit", cwd=partial)
         partial.rename(target)
     except subprocess.CalledProcessError as exc:
