@@ -7,8 +7,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.interfaces import UpstreamStatusError
-from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import TinkerSDKSampler
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerSDKClient

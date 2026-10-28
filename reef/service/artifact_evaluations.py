@@ -111,8 +111,9 @@ class NewArtifacts(RecordObserver):
         self.queue: queue.SimpleQueue[NewArtifact | None] = queue.SimpleQueue()
 
     def record_committed(self, commit: CommitRecord) -> None:
-        # An activation or a new training start names an artifact that exists already: it reports none.
-        if not commit.made_artifact:
+        # Only training makes the artifacts that Reef evaluates on its own: an activation or a new training start
+        # names one that exists, and a person who imports an artifact decides what to do with it.
+        if not commit.trained_artifact:
             return
         if commit.components is None:
             self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))

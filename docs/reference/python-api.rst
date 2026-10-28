@@ -762,6 +762,48 @@ that the backend supports:
 behavior that a backend must have. ``GitLFSRepositoryBackendFactory`` is the
 built-in plugin. Reef does not call a close method on a backend factory.
 
+Artifact imports
+----------------
+
+``POST /reef/scenarios/{scenario}/artifacts`` imports a directory as a new
+artifact of one component (`Import an artifact
+<../user-guide/operate.rst#import-an-artifact>`__). Two contracts decide what an
+import accepts.
+
+A component's layout is the ``layout`` of its ``ComponentSurface``, an
+``reef.surface.ArtifactLayout``. ``check(directory)`` returns when the
+directory holds an artifact in the layout of the component's releases, and
+every remote path that it names resolves. Otherwise it raises ``ValueError``,
+and Reef answers HTTP 400. ``None``, the default, means that the component
+takes no import. The built-in recipes bind one:
+
+- A weight recipe binds ``ReleaseLayout(training_component)``, which calls
+  the component's ``check_release`` (see `Training jobs and components`_).
+- A harness recipe binds ``HarnessLayout``. ``reef-entries.json`` must hold
+  entries that a seed may hold, and the other files must be exactly their
+  render for the adapter.
+
+After the layout, the release's own admission check runs, as at a training
+publication.
+
+A source reader fetches the directory that a URI names. It is a subclass of
+``reef.artifact.ArtifactSourceReader`` with two members:
+
+.. code:: python
+
+   @property
+   def schemes(self) -> tuple[str, ...]: ...
+
+   def fetch(self, uri: str, directory: Path) -> str: ...
+
+``fetch`` writes the files of ``uri`` into the empty ``directory`` and returns
+the version that it read, or ``""`` when the source has no version. Raise
+``ValueError`` for a URI that names nothing the reader can read, and
+``ArtifactSourceError`` when the source fails. Reef ships ``HuggingFaceReader``
+(``hf``), ``FileReader`` (``file``) and ``S3Reader`` (``s3``). A deployment adds
+readers in ``storage.artifact_sources``. A configured reader replaces the
+built-in reader of a scheme that it reads.
+
 Record storage and audit
 ------------------------
 
@@ -1795,6 +1837,14 @@ loop:
        it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
+   * - ``check_release(directory)``
+     - Raise ``ValueError`` unless ``directory`` holds a release in the
+       layout of this component's releases. An artifact import calls it.
+       The default reads ``release_format``: ``full`` needs ``config.json``
+       and weight files, ``adapter`` needs a PEFT adapter in ``adapter/``
+       with a rank of at most ``adapter_rank`` and target modules within
+       ``adapter_target_modules``. ``None`` refuses. Tinker checks its
+       manifest and that each ``tinker://`` path resolves on its service.
    * - ``fresh_start(start)``
      - Return a start with the weights of ``start`` and no training state: a
        new optimizer state, the learning-rate schedule at step 0, and an

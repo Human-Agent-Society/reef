@@ -13,11 +13,13 @@ from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
+from reef.artifact.sources import directory_content_id
 from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
@@ -231,7 +233,7 @@ class ScenarioCommitter:
                         record
                         for record in reversed(records)
                         if (record.operation == "train_from" and record.component == on_record)
-                        or (self.own_record(record, on_record) and record.made_artifact)
+                        or (self.own_record(record, on_record) and record.trained_artifact)
                     ),
                     None,
                 )
@@ -412,6 +414,73 @@ class ScenarioCommitter:
                 )
                 self.advance_to(record.step)
             return selected
+
+    def import_artifact(
+        self, directory: Path, component: str | None = None, *, source: Mapping[str, str] | None = None
+    ) -> ComponentArtifact:
+        """Publish the files in ``directory`` as a new artifact of ``component``; return it (RFC #980).
+
+        ``component`` may be left out when the scenario has one component.
+        The component's layout (``ComponentSurface.layout``) checks the
+        directory first, outside the locks, since it can ask a remote service.
+        Then the release's own admission check runs, as at a training
+        publication. The artifact's content id is ``directory_content_id``.
+        The release binds the artifact as ``component`` and every other
+        component as the active release binds it; its parent is the chain tip,
+        and it is published beside the chain. An ``"import"`` record lands at
+        the next step with ``source`` (``{"uri", "version"}``, ``None`` for an
+        uploaded archive) as its metrics. The active release, the chain tip,
+        every training start and the activation rule are left alone. Raise
+        ``ValueError`` for an unknown component, a component that takes no
+        import, or a directory that the layout or the admission check refuses;
+        ``CommitPending`` while a training result waits for its commit.
+        Nothing changes then.
+        """
+        names = self.component_names()
+        if component is None:
+            if len(names) > 1:
+                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
+            component = names[0]
+        if component not in names:
+            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+        surface = self._binding.surface
+        component_surface = surface.components.get(component)
+        if component_surface is None or component_surface.layout is None:
+            raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
+        component_surface.layout.check(directory)
+        imported = Artifact.local(directory, content_id=directory_content_id(directory))
+        with self._lock, self._publication_lock:
+            self.require_no_pending_commit("import an artifact")
+            next_step = self._step + 1
+            if surface.single:
+                surface.validate(imported)
+                staged = self._artifacts.stage(next_step, imported, parent=self._artifacts.checkpoint)
+                metadata = dict(staged.metadata)
+            else:
+                component_surface.validator.validate(imported)
+                active = self._artifacts.resolve(self._artifacts.current)
+                self.require_components(active)
+                staged = self.stage_combination(next_step, active, component, imported)
+                metadata = {**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict()}
+            # Published beside the chain: the chain tip, the backend head and the active release stay.
+            published_ref = self._artifacts.publish(
+                staged, expected_parent=self._artifacts.checkpoint, metadata=metadata, advance_heads=False
+            )
+            published = self._artifacts.resolve(published_ref)
+            record = self.append_operation_record(
+                "import",
+                published_ref,
+                component=None if surface.single else component,
+                components=self.recorded_components(published, published_ref.release_id),
+                metrics=None if source is None else {"source": dict(source)},
+            )
+            self.advance_to(record.step)
+            return ComponentArtifact(
+                component,
+                made_artifact_id(published_ref.release_id, component, single=surface.single),
+                imported.ref.content_id,
+                published_ref.release_id,
+            )
 
     def resume_training_starts(self) -> None:
         """After a restart, give each trainer its newest ``"train_from"`` start that its training records do not hold.
@@ -772,7 +841,7 @@ class ScenarioCommitter:
         becomes the chain tip. It also becomes the active artifact when the
         record is ``activated``.
         """
-        if record.made_artifact:
+        if record.trained_artifact:
             if self._artifacts.checkpoint == record.artifact_ref:
                 if self._store.durable:
                     self._refresh_committed_checkpoint()
@@ -840,17 +909,20 @@ class ScenarioCommitter:
         *,
         component: str | None,
         components: Mapping[str, str] | None = None,
+        metrics: Mapping[str, Any] | None = None,
     ) -> CommitRecord:
-        """Append an ``"activate"`` or ``"train_from"`` record at the next step; it carries no trainer state.
+        """Append an ``"activate"``, ``"train_from"`` or ``"import"`` record at the next step; it carries no trainer
+        state.
 
-        ``components`` is the manifest of a release that an activation published, and ``component`` then names
-        the activated component.
+        ``components`` is the manifest of a release that an activation or an import published, and ``component``
+        then names the activated or imported component. ``metrics`` is an import's source.
         """
         record = CommitRecord(
             scenario=self._name,
             step=self._step + 1,
             artifact_ref=artifact_ref,
-            checkpoint=False,
+            checkpoint=operation == "import",
+            metrics=metrics,
             algorithm_state=None,
             high_water_sequence=0,
             high_water_offset=0,

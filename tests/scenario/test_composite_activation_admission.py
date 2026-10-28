@@ -18,7 +18,8 @@ from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ComponentSurface, Surface, TextFileTree
+from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
+
 from reef.surface.weights import WeightInferenceHooks, WeightLoader
 
 
@@ -42,7 +43,7 @@ class RefusingImports(WeightsJobComponent):
         raise ValueError("cannot train from these weights")
 
 
-def _dispatcher(tmp_path: Path) -> Dispatcher:
+def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> Dispatcher:
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True)
@@ -50,7 +51,7 @@ def _dispatcher(tmp_path: Path) -> Dispatcher:
     backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     records = tmp_path / "records"
     return Dispatcher(
-        _LoadedRecipe(backends=backends),
+        recipe(backends=backends),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(records),
@@ -245,5 +246,67 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         assert not trainer.has_pending_commit
         scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
         assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
+    finally:
+        dispatcher.close()
+
+
+class HarnessText(ArtifactLayout):
+    """The harness layout of the two trainer recipe: one ``harness.txt``."""
+
+    def check(self, directory: Path) -> None:
+        if [path.name for path in directory.iterdir()] != [f"{HARNESS}.txt"]:
+            raise ValueError(f"a harness artifact holds only {HARNESS}.txt")
+
+
+@dataclass(frozen=True)
+class _ImportingRecipe(_LoadedRecipe):
+    """The loaded recipe whose harness takes imports; its weights take none."""
+
+    def build_surface(self, scenario: str) -> Surface:
+        surface = super().build_surface(scenario)
+        harness = replace(surface.components[HARNESS], layout=HarnessText())
+        return replace(surface, components={**surface.components, HARNESS: harness})
+
+
+@pytest.mark.unit
+def test_an_import_binds_one_component_on_the_active_release_and_activates_nothing(tmp_path: Path) -> None:
+    runtime = StubInferenceRuntime()
+    dispatcher = _dispatcher(tmp_path, _ImportingRecipe)
+    imported_dir = tmp_path / "imported"
+    imported_dir.mkdir()
+    (imported_dir / f"{HARNESS}.txt").write_text("harness imported", encoding="utf-8")
+    try:
+        scenario = _scenario(dispatcher, runtime)
+        _step(scenario, WEIGHTS, 1)
+        served = scenario.current_artifact_ref()
+        tip = scenario.repository.checkpoint_artifact
+
+        imported = scenario.import_artifact(imported_dir, HARNESS)
+
+        assert imported.artifact_id == f"{imported.release_id}:{HARNESS}"
+        assert scenario.current_artifact_ref() == served
+        assert scenario.repository.checkpoint_artifact == tip
+        record = scenario.store.history()[-1]
+        assert (record.operation, record.component, record.checkpoint) == ("import", HARNESS, True)
+        weights_id = scenario.artifact_status()[WEIGHTS]["active"]
+        assert record.components == {HARNESS: imported.artifact_id, WEIGHTS: weights_id}
+        rows = [row for row in scenario.artifacts() if row["operation"] == "import"]
+        assert [(row["artifact_id"], row["component"], row["active"]) for row in rows] == [
+            (imported.artifact_id, HARNESS, False)
+        ]
+        with pytest.raises(ValueError, match="name the component"):
+            scenario.import_artifact(imported_dir)
+        with pytest.raises(ValueError, match="takes no imported artifact"):
+            scenario.import_artifact(imported_dir, WEIGHTS)
+        (imported_dir / "extra.txt").write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError, match="holds only"):
+            scenario.import_artifact(imported_dir, HARNESS)
+
+        # Activating it binds the imported harness to the weights that serve now.
+        scenario.activate(imported.artifact_id, HARNESS)
+        assert component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights step 1",
+            HARNESS: "harness imported",
+        }
     finally:
         dispatcher.close()

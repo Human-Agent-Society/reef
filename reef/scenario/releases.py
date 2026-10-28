@@ -70,7 +70,8 @@ class ScenarioReleases:
         return self._store.history() if self._store.durable else ()
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
-        """List the creation and every training step, newest first; activations and new training starts are not listed.
+        """List the creation, every training step and every import, newest first; activations and new training starts
+        are not listed.
 
         ``active`` is true on the row that made the active release (see
         :func:`active_record`), and ``activated`` on each row whose release
@@ -113,7 +114,7 @@ class ScenarioReleases:
                     components=record.components,
                 )
                 for record in records
-                if record.operation == "training"
+                if record.operation in ("training", "import")
             )
             if recovered:
                 rows.append(
@@ -157,8 +158,8 @@ class ScenarioReleases:
         An artifact is the content of one component. Each row lists an
         artifact under the release that made it.
 
-        - With one component, each release that a training step made is one
-          artifact. Its ``artifact_id`` is its ``release_id``.
+        - With one component, each release that a training step or an import
+          made is one artifact. Its ``artifact_id`` is its ``release_id``.
         - With several components, a release made the artifact of a component
           when its manifest gives the component the ``artifact_id`` that the
           release makes (``made_artifact_id``). The row's ``content_id`` is
@@ -169,7 +170,9 @@ class ScenarioReleases:
         - When the manifest of a release is unknown, the row lists the
           artifact of the component that the release's trainer named.
 
-        ``activated`` marks an artifact that has been active at some time.
+        ``activated`` marks an artifact that has been active at some time. An
+        import's row has ``source``: where its content was read from, or
+        ``None`` for an uploaded archive.
         """
         with self.publication_lock:
             made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
@@ -248,7 +251,10 @@ class ScenarioReleases:
         }
         if row["operation"] == "training":
             listed["record_progress"] = dict(row["record_progress"])
-        if "metrics" in row:
+        if row["operation"] == "import":
+            # An import's metrics hold only where its content was read from; an uploaded archive has no source.
+            listed["source"] = row["metrics"]["source"] if "metrics" in row else None
+        elif "metrics" in row:
             listed["metrics"] = dict(row["metrics"])
         return listed
 

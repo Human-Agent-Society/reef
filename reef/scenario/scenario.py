@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -277,6 +278,12 @@ class Scenario:
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
+
+    def import_artifact(
+        self, directory: Path, component: str | None = None, *, source: Mapping[str, str] | None = None
+    ) -> ComponentArtifact:
+        """Publish ``directory`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
+        return self._committer.import_artifact(directory, component, source=source)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""
