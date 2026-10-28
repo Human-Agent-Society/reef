@@ -67,7 +67,16 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The selected content: a model checkpoint or a harness tree.
+The selected content. An artifact is of exactly one of four kinds:
+
+- ``harness``: a whole agent harness that Reef runs as it is, such as a Harbor
+  agent or an adapter's binary.
+- ``harness_plugin``: a part that installs into a base harness, such as a
+  harness tree that Reef evolves, a skill tree, or the request defaults of a
+  ``config`` component.
+- ``model``: a whole model, such as a provider's model or full weights.
+- ``model_adapter``: a LoRA adapter on a base model.
+
 ``content_id`` identifies those contents independently of when or why Reef
 published them.
 
@@ -125,12 +134,21 @@ Training pipeline
 -----------------
 
 The method's data side. Three stages turn records into typed job data: the
-record-to-record stage decides which records train, the record-to-task stage
-turns each record set into tasks, and the task-to-job stage shapes the tasks
+record-to-record stage decides which records train, the record-to-sample stage
+turns each record set into samples, and the sample-to-job stage shapes the samples
 into one job's data. Reported feedback uses valid reports with existing
 inference references; computed feedback derives its signal from traffic.
 Reef's ``TrainingPipeline`` drives the stages and owns job size,
 consumption, and retention.
+
+Sample
+------
+
+One item of job data, a ``Sample`` (``reef.core.job_data``): a
+``TrajectorySample`` that trains as it is, or a ``TaskSample``, a Harbor task that
+the training component rolls out. The record-to-sample stage makes samples;
+``job_samples`` and the sample buffer count them. A sample is not a sampling
+call to a model.
 
 Training objective
 ------------------
@@ -216,9 +234,9 @@ job's data and the parameters, so a retry submits the same job.
 Job data
 --------
 
-The data of one training job: a ``JobData`` value of trajectories and tasks
-that the task-to-job stage makes. A job's data holds at least
-``pipeline.task2job.config.job_samples`` samples. The training component cuts
+The data of one training job: a ``JobData`` value of samples that the
+sample-to-job stage makes. A job's data holds at least
+``pipeline.sample2job.config.job_samples`` samples. The training component cuts
 it into optimizer batches by its own batch size.
 
 SAO
@@ -289,12 +307,16 @@ tree with an executable to make a running harness (`Harness adapters
 <../developer-guide/harness-adapters.rst>`__). For weight
 serving, a LoRA/PEFT adapter layered on a frozen base model.
 
-Episode
+Rollout
 -------
 
-One headless run of the agent under test against one task, in a throwaway root
-holding nothing but the rendered tree. Harness evolution scores every task twice
-per step, once per side.
+One run of one task by an agent, a harness and a model, in one environment. It
+goes from the task's first step to its scored end, and gives one trajectory and
+one score. The score is a value, 0 when the agent gave no answer, or
+``failed`` when the environment could not run the rollout. In each
+step, harness evolution runs each evaluation task ``rollout_repeats`` times on
+each side. A Tinker task job runs each task ``rollouts_per_task`` times on the
+job's start weights.
 
 Mutation
 --------

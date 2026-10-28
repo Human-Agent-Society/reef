@@ -20,19 +20,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from reef.sandbox.e2b import (
-    RELAY_SCRIPT,
-    E2BExecutor,
-    E2BSession,
-    TunnelPump,
-    pack,
-    remote_command,
-    remote_root,
-    template_alias,
-    unpack,
-)
-from reef.sandbox.e2b_relay import Relay
-from reef.sandbox.process import EpisodeLaunchError, EpisodeTimeout, ProcessOutcome, SandboxUnavailable
+from reef.sandbox.e2b import E2BExecutor, E2BSession, template_alias
+from reef.sandbox.process import ProcessOutcome, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
+from reef.sandbox.relay import Relay
+from reef.sandbox.remote import RELAY_SCRIPT, TunnelPump, pack, remote_command, remote_root, unpack
 
 
 @pytest.mark.unit
@@ -61,7 +52,7 @@ def test_command_disconnect_reconnects_without_starting_the_command_again(tmp_pa
         outcome = session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
         assert outcome == ProcessOutcome(0, "complete output", "")
     else:
-        with pytest.raises(EpisodeLaunchError, match="connection"):
+        with pytest.raises(RolloutLaunchError, match="connection"):
             session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
         sandbox.commands.kill.assert_called_once_with(42)
     sandbox.commands.run.assert_called_once()
@@ -87,7 +78,7 @@ def test_command_timeout_kills_the_process_before_copying_its_files(tmp_path, mo
         sandbox.commands.kill.assert_called_once_with(42)
 
     monkeypatch.setattr(session, "pull", pull)
-    with pytest.raises(EpisodeTimeout):
+    with pytest.raises(RolloutTimeout):
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
     sandbox.commands.connect.assert_not_called()
 
@@ -108,7 +99,7 @@ def test_reconnecting_does_not_extend_the_command_deadline(tmp_path, monkeypatch
     session = E2BSession(sandbox)
     monkeypatch.setattr(session, "push", lambda root: None)
     monkeypatch.setattr(session, "pull", lambda root: None)
-    with pytest.raises(EpisodeTimeout):
+    with pytest.raises(RolloutTimeout):
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
     sandbox.commands.connect.assert_not_called()
     sandbox.commands.kill.assert_called_once_with(42)
@@ -395,7 +386,7 @@ def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path
         "PI_CODING_AGENT_DIR": "/home/user/reef/reef-proposer-abc/pi-agent",
         "REEF_TOKEN": "t",
     }
-    assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2-episodes-v1"
+    assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2-rollouts-v1"
 
 
 @pytest.mark.unit
@@ -409,16 +400,16 @@ def test_an_e2b_executor_needs_its_key(monkeypatch) -> None:
 def test_the_first_sandbox_stops_only_the_ones_its_own_deployment_left(tmp_path: Path, monkeypatch) -> None:
     e2b = pytest.importorskip("e2b")  # the e2b extra; the reap is the SDK's list and kill
 
-    import reef.sandbox.e2b as e2b_executor
-    from reef.sandbox.e2b import deployment_owner
+    import reef.sandbox.remote as remote_executor
+    from reef.sandbox.remote import deployment_owner
 
     mine, theirs = deployment_owner(tmp_path / "a"), deployment_owner(tmp_path / "b")
     assert mine != theirs and mine == deployment_owner(tmp_path / "a")
     running = [
-        SimpleNamespace(sandbox_id="left-1", metadata={"reef": "episode", "reef_owner": mine}),
-        SimpleNamespace(sandbox_id="left-2", metadata={"reef": "episode", "reef_owner": mine}),
+        SimpleNamespace(sandbox_id="left-1", metadata={"reef": "sandbox", "reef_owner": mine}),
+        SimpleNamespace(sandbox_id="left-2", metadata={"reef": "sandbox", "reef_owner": mine}),
         # A filter the API does not honour must not cost another deployment its sandbox.
-        SimpleNamespace(sandbox_id="other", metadata={"reef": "episode", "reef_owner": theirs}),
+        SimpleNamespace(sandbox_id="other", metadata={"reef": "sandbox", "reef_owner": theirs}),
     ]
     queries, killed = [], []
 
@@ -439,14 +430,14 @@ def test_the_first_sandbox_stops_only_the_ones_its_own_deployment_left(tmp_path:
     )
 
     executor = E2BExecutor(api_key="k", owner=mine)
-    assert executor.labels() == {"reef": "episode", "reef_owner": mine}
-    monkeypatch.setattr(e2b_executor, "REAPED_OWNERS", set())
+    assert executor.labels() == {"reef": "sandbox", "reef_owner": mine}
+    monkeypatch.setattr(remote_executor, "REAPED_OWNERS", set())
     executor.reap_once()
     assert killed == ["left-1", "left-2"]
     # Once per process: the sandboxes it starts itself are never taken for leftovers.
     executor.reap_once()
     assert len(queries) == 1
-    assert queries == [({"reef": "episode", "reef_owner": mine}, "k")]
+    assert queries == [({"reef": "sandbox", "reef_owner": mine}, "k")]
     # No owner, no deployment to speak for: nothing is listed or stopped.
     E2BExecutor(api_key="k").reap_once()
     assert E2BExecutor(api_key="k").reap() == 0 and len(queries) == 1
@@ -457,7 +448,7 @@ def test_a_run_longer_than_e2bs_ceiling_opens_within_it_and_keeps_its_sandbox_al
     extends the deadline while it works, instead of losing the sandbox mid-run."""
     e2b = pytest.importorskip("e2b")
 
-    import reef.sandbox.e2b as e2b_executor
+    import reef.sandbox.remote as remote_executor
     from reef.sandbox.e2b import SANDBOX_MAX_TIMEOUT_S, E2BExecutor, E2BSession
 
     asked: list[int] = []
@@ -475,7 +466,7 @@ def test_a_run_longer_than_e2bs_ceiling_opens_within_it_and_keeps_its_sandbox_al
         return Sandbox()
 
     monkeypatch.setattr(e2b.Sandbox, "create", staticmethod(create))
-    monkeypatch.setattr(e2b_executor, "REAPED_OWNERS", set())
+    monkeypatch.setattr(remote_executor, "REAPED_OWNERS", set())
 
     # Four hours of agent run: the sandbox is still created within what E2B grants.
     session = E2BExecutor(api_key="k", template="reef-pi", timeout_s=14400).open()

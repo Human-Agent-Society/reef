@@ -13,8 +13,8 @@ everything the shared engines need to drive one harness binary:
 - ``tree_path`` (optional, ``files.tree``): where the entries list travels
   beside the rendered files, for a binary that reconciles the tree live.
 - ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
-  episode) and the relocation environment (``{root}`` substituted per
-  episode) that points the binary's whole composition at the episode root.
+  rollout) and the relocation environment (``{root}`` substituted per
+  rollout) that points the binary's whole composition at the rollout root.
 - ``trajectory``: which session-log reader applies and where it reads.
 - ``cleanup_whitelist``: root-relative patterns for files the harness
   legitimately creates (session storage, boot mutations); anything else
@@ -26,20 +26,20 @@ everything the shared engines need to drive one harness binary:
   or proxies binary bytes.
 - ``client_env`` and ``client_args`` (optional): the variables and the leading
   arguments a ``reef-<adapter>`` run adds when a person runs the binary, which
-  an episode never gets (``{root}`` in a ``client_env`` value is the install
+  a rollout never gets (``{root}`` in a ``client_env`` value is the install
   root); ``client_version_args`` names the version flags that get no leading
   arguments.
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
   keeps in the installed tree, so a later run finds them; the check of the
   installed files at a session start skips them, except the keys of a
   settings file outside its ``preference_keys``.
-- ``self_isolating`` (optional): the adapter runs episodes inside its own
+- ``self_isolating`` (optional): the adapter runs rollouts inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
-- ``host_env`` (optional): service environment variables a local episode
+- ``host_env`` (optional): service environment variables a local rollout
   keeps, for a host tool the relocated ``HOME`` would otherwise hide.
 - ``is_root_bind_mounted`` (optional): the binary bind-mounts paths below the
-  episode root into a container, so on macOS a local episode makes its root
+  rollout root into a container, so on macOS a local rollout makes its root
   under the home directory, which Docker's VM shares with the host.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
@@ -66,14 +66,14 @@ import yaml
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
-from reef.sandbox.process import EpisodeExecutor
+from reef.sandbox.process import ProgramExecutor
 
 
 class ExecutionValidator(ABC):
-    """Adapter-specific constraints checked by the shared episode lifecycle."""
+    """Adapter-specific constraints checked by the shared rollout lifecycle."""
 
     @abstractmethod
-    def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
+    def __call__(self, files: Mapping[str, str], executor: ProgramExecutor) -> None: ...
 
 
 class AdapterRenderer:
@@ -300,7 +300,7 @@ class InstallSpec:
 
 @dataclass(frozen=True)
 class AdapterDescriptor:
-    """Everything the shared render and episode engines know about one harness."""
+    """Everything the shared render and rollout engines know about one harness."""
 
     name: str
     binary: str
@@ -315,7 +315,7 @@ class AdapterDescriptor:
     #: The adapter's own render steps; the base class changes nothing.
     renderer: type[AdapterRenderer] = AdapterRenderer
     install: InstallSpec | None = None
-    #: True when the adapter isolates episodes itself; nesting is refused
+    #: True when the adapter isolates rollouts itself; nesting is refused
     #: unless validate_execution checks a compatible configuration.
     self_isolating: bool = False
     #: True when the ``{prompt}`` argv slot names a task directory (a Harbor task) rather than text the
@@ -324,16 +324,16 @@ class AdapterDescriptor:
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
-    #: the matching set when it runs evaluation episodes, so the served tree
+    #: the matching set when it runs evaluation rollouts, so the served tree
     #: never carries a provider binding.
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
-    #: Service environment variables an episode under the local executor keeps: the service's own value, else
+    #: Service environment variables a rollout under the local executor keeps: the service's own value, else
     #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
     #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as terminus's docker CLI.
     host_env: Mapping[str, str] = field(default_factory=dict)
-    #: True when the binary bind-mounts paths below the episode root into a container. On macOS Docker runs in a VM
-    #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
-    #: then makes its root under ``~/.reef/episodes``; on other platforms the root stays in the temp directory.
+    #: True when the binary bind-mounts paths below the rollout root into a container. On macOS Docker runs in a VM
+    #: that shares the home directory, and colima does not share ``$TMPDIR``, so a rollout under the local executor
+    #: then makes its root under ``~/.reef/rollouts``; on other platforms the root stays in the temp directory.
     is_root_bind_mounted: bool = False
     #: ``files.tree``: where the entries list travels with the rendered files (a JSON
     #: array of ``{id, name, config}``), so a resident process can reconcile the
@@ -343,7 +343,7 @@ class AdapterDescriptor:
     #: replacing the blanket self_isolating restriction before launch.
     validate_execution: ExecutionValidator | None = None
     #: Environment the ``reef-<adapter>`` wrapper adds when a person runs the
-    #: binary: what an interactive run needs that an episode's ``env`` (offline,
+    #: binary: what an interactive run needs that a rollout's ``env`` (offline,
     #: hermetic) must not carry, such as silencing the binary's self-updater
     #: while reef pins its version. ``{root}`` in a value is the install root,
     #: for a directory of the installed tree outside the relocated composition.
@@ -364,7 +364,7 @@ class AdapterDescriptor:
     def compose_relocation(self) -> tuple[str, str]:
         """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
 
-        That entry relocates the binary's whole composition at the episode
+        That entry relocates the binary's whole composition at the rollout
         root, and it is the only env entry a client-side wrapper needs."""
         primary = PurePosixPath(self.config_targets["primary"].path)
         for parent in primary.parents:
@@ -398,7 +398,7 @@ def _relative_paths(value: Any, where: str) -> tuple[str, ...]:
     for path in paths:
         pure = PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] == "workspace":
-            raise DescriptorError(f"{where} entries must stay below the episode root and outside workspace")
+            raise DescriptorError(f"{where} entries must stay below the rollout root and outside workspace")
     return paths
 
 

@@ -5,7 +5,7 @@
   :class:`reef.core.reports.TeacherContextReport` plus the rollout's
   coordinates in the sampling step.
 - ``processor`` — the stages ``SDPORecord2Record`` (the grid),
-  ``SDPOTasks`` (the teacher's renderer and windows) and ``SDPOJobData``, with
+  ``SDPOSamples`` (the teacher's renderer and windows) and ``SDPOJobData``, with
   a whole sampling step as one batch: the teacher's request is composed once
   the step's rollouts are known, from the reference's reprompt template.
 - ``objective`` — the backend-agnostic training objective.
@@ -17,11 +17,11 @@
 """
 
 from recipes.sdpo.objective import SdpoObjective
-from recipes.sdpo.processor import SDPOJobData, SDPORecord2Record, SDPOTasks
+from recipes.sdpo.processor import SDPOJobData, SDPORecord2Record, SDPOSamples
 from recipes.sdpo.recipe import SDPORecipe
 from recipes.sdpo.report import SDPOReport
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("sdpo", "recipes.sdpo.slime:SdpoAlgorithm")
 
-__all__ = ["SDPOJobData", "SDPORecipe", "SDPORecord2Record", "SDPOReport", "SDPOTasks", "SdpoObjective"]
+__all__ = ["SDPOJobData", "SDPORecipe", "SDPORecord2Record", "SDPOReport", "SDPOSamples", "SdpoObjective"]

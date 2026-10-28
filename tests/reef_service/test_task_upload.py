@@ -15,11 +15,11 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.record2task import NoTasks
+from reef.record2sample import NoSamples
+from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE
-from reef.task2job import Task2Job
 from reef.train import JobData, Trainer
 from reef.train.pipeline import TrainingPipeline
 
@@ -28,11 +28,11 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 GZIP = {**AUTH, "Content-Type": "application/gzip"}
 
 
-class TaskReadingJobData(Task2Job):
+class TaskReadingJobData(Sample2Job):
     accepts_imported_tasks = True
 
-    def make_job_data(self, tasks, data_id):
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples, data_id):
+        return JobData(data_id, samples)
 
 
 class RecordOnlyJobData(TaskReadingJobData):
@@ -41,14 +41,14 @@ class RecordOnlyJobData(TaskReadingJobData):
 
 @dataclass(frozen=True, kw_only=True)
 class TaskRecipe(Recipe):
-    batch_stage: type[Task2Job] = TaskReadingJobData
+    batch_stage: type[Sample2Job] = TaskReadingJobData
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=lambda context: TrainingPipeline(
-                context, record2task=NoTasks(), task2job=self.batch_stage(context, None, None)
+                context, record2sample=NoSamples(), sample2job=self.batch_stage(context, None, None)
             ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
@@ -124,7 +124,7 @@ def test_uploaded_tasks_join_the_split_and_a_retry_changes_nothing(tmp_path: Pat
         dispatcher.close()
 
 
-def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> None:
+def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upload_does_not(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, TaskRecipe(batch_stage=RecordOnlyJobData))
 
     async def run() -> None:
@@ -133,9 +133,15 @@ def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> N
                 "/reef/scenarios/s/tasks?split=train", headers=GZIP, data=archive(tmp_path, "t")
             )
             assert response.status == 400
-            assert "does not use imported tasks" in await response.text()
+            assert "does not train on imported tasks" in await response.text()
             store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
             assert store.tasks() == ()
+            # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
+            evaluated = await client.post(
+                "/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=archive(tmp_path, "t")
+            )
+            assert evaluated.status == 200
+            assert [task.name for task in store.tasks(split="eval")] == ["t"]
 
     try:
         asyncio.run(run())

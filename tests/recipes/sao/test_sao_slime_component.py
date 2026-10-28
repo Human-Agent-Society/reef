@@ -488,7 +488,7 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     (critic_init / "latest_checkpointed_iteration.txt").write_text("23", encoding="utf-8")
 
     # No checkpoint of its own yet: the value model trained on an earlier
-    # episode is loaded, weights and optimizer, and saves go to the save root.
+    # rollout is loaded, weights and optimizer, and saves go to the save root.
     args = critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
     configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)

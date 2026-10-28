@@ -29,8 +29,8 @@ from reef.core.requirements import required_by
 from reef.harness.step_result import (
     design_sections,
     floor_tasks_note,
-    missed_episode_text,
-    missed_episodes,
+    missed_rollout_text,
+    missed_rollouts,
     reef_installs,
     unscored_failures,
 )
@@ -49,7 +49,7 @@ RESULT_FIELDS = (
     "evaluation_sides",
     "current_score",
     "candidate_score",
-    "episode_failures",
+    "rollout_failures",
     "proposer_input_tokens",
     "proposer_output_tokens",
 )
@@ -65,7 +65,7 @@ RESULT_LABELS = {
     "evaluation_sides": "Evaluation sides",
     "current_score": "Current score",
     "candidate_score": "Candidate score",
-    "episode_failures": "Episode failures",
+    "rollout_failures": "Rollout failures",
     "proposer_input_tokens": "Proposer input tokens",
     "proposer_output_tokens": "Proposer output tokens",
 }
@@ -102,7 +102,7 @@ def failed_words(metrics: Mapping[str, Any]) -> str:
     there, not before it."""
     if metrics.get("failed_stage") == "evaluating":
         return (
-            "The step failed during its evaluation: the change was proposed and its episodes ran, but the "
+            "The step failed during its evaluation: the change was proposed and its rollouts ran, but the "
             "evaluation raised. Nothing was published; see the error below before retrying."
         )
     return RESULT_WORDS["failed"]
@@ -480,11 +480,11 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
         words[selection_result] = (
             f"Passed the checks and was {selection_result}; the release that step published serves it."
         )
-    # Every candidate episode failed before a score: the checks judged nothing, so no score stands for the change.
+    # Every candidate rollout failed before a score: the checks judged nothing, so no score stands for the change.
     unscored = unscored_failures(metrics) if selection_result == "rejected" else []
     if unscored:
         words["rejected"] = (
-            "The evaluation could not run: every candidate episode failed before it was scored, so nothing judged "
+            "The evaluation could not run: every candidate rollout failed before it was scored, so nothing judged "
             "the change. The head stayed where it was."
         )
     summary = (
@@ -519,10 +519,10 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     if unscored:
         details.extend(f"<div><dt>Could not run</dt><dd>{escape(cause)}</dd></div>" for cause in unscored)
     elif selection_result == "rejected":
-        # What the checks saw: each missed episode's task, and why it failed or the reply that was graded.
+        # What the checks saw: each missed rollout's task, and why it failed or the reply that was graded.
         details.extend(
-            f"<div><dt>Missed</dt><dd>{escape(missed_episode_text(episode))}</dd></div>"
-            for episode in missed_episodes(metrics)
+            f"<div><dt>Missed</dt><dd>{escape(missed_rollout_text(rollout))}</dd></div>"
+            for rollout in missed_rollouts(metrics)
         )
     if metrics.get("step_record"):
         details.append(f'<div><dt>Step record</dt><dd class="id">{escape(metrics["step_record"])}</dd></div>')

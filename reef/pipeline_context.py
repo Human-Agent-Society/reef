@@ -34,7 +34,7 @@ class PipelineContext:
     admitted_report_type: type[ReportBase] | None = None
     #: Opens the generated task stores of the scenario. ``None`` if the trainer has no scenario session.
     task_storage: TaskStorage | None = None
-    #: The fewest samples of one job when the task-to-job stage sets no ``job_samples``:
+    #: The fewest samples of one job when the sample-to-job stage sets no ``job_samples``:
     #: ``evolution.batch_size`` for harness evolution. None otherwise: a weight trainer's stage sets its own
     #: ``job_samples``, and a trainer that trains nothing keeps every sample.
     default_job_samples: int | None = None

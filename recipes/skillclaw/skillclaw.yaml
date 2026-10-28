@@ -20,14 +20,14 @@ recipe:
       batch_size: 60
       # The method module in the harness/ package: propose is the sealed night
       # flow (one decision per skill group plus the no-skill bucket) mapped to
-      # one composite mutation sequence; evaluate grades the probe episodes.
+      # one composite mutation sequence; evaluate grades the probe rollouts.
       propose: harness.plugins:NightProposer
       evaluate: harness.plugins:ProbeScorer
-      # The SkillClaw regime: every non-skip night publishes; the probe episode
+      # The SkillClaw regime: every non-skip night publishes; the probe rollout
       # scores are saved with the evaluation results. They do not decide which
       # changes are published; the next day's traffic judges the pool.
       selection: always
-      # The harness binary the probe episodes run headless, from the environment.
+      # The harness binary the probe rollouts run headless, from the environment.
       binary: ${REEF_PI_BINARY}
       # Three exact-answer probe tasks. Each prefix keys the expected answer
       # in harness/skillclaw.py's answer table; each prompt pins the format the
@@ -58,7 +58,7 @@ recipe:
       seed_skills: ${REEF_SC_SKILLS}
       # The first-boot composition carries no provider: the driver (run.py)
       # hands the recipe its model binding, which reef renders into each probe
-      # episode and passes to propose. The served pool never names an endpoint.
+      # rollout and passes to propose. The served pool never names an endpoint.
       seed: []
 inference:
   upstream-model: ${REEF_MODEL}

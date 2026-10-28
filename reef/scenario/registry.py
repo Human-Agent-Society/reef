@@ -239,9 +239,9 @@ class ScenarioRegistry:
     def get_loaded(self, scenario: str, release_id: str | None = None) -> Scenario | None:
         """The loaded instance, or None: nothing is created or recovered, and the scenario's lock is not taken.
 
-        An evaluation episode's call resolves this way. A delete or a
+        An evaluation rollout's call resolves this way. A delete or a
         reload holds the scenario's lock while it closes the instance, which
-        waits for the episode in flight, and an episode of a deleted
+        waits for the rollout in flight, and a rollout of a deleted
         scenario must not bring the scenario back.
         """
         current = self.get_optional(scenario)
@@ -307,6 +307,17 @@ class ScenarioRegistry:
             settings = self._storage.read_settings(scenario)
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current
+
+    def set_artifact_evaluation(self, scenario: str, settings: Mapping[str, object] | None) -> None:
+        """Store the settings that Reef evaluates each new artifact of an existing scenario with; ``None`` stops it."""
+        with self.lock_for(scenario):
+            self.require(scenario)
+            stored = self._storage.read_settings(scenario)
+            self._storage.write_settings(scenario, replace(stored, artifact_evaluation=settings))
+
+    def artifact_evaluation(self, scenario: str) -> Mapping[str, object] | None:
+        """The stored settings that Reef evaluates each new artifact of ``scenario`` with, or ``None``."""
+        return self._storage.read_settings(scenario).artifact_evaluation
 
     def configure_model(
         self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None

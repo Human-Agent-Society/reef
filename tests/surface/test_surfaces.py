@@ -17,6 +17,7 @@ from reef.surface import (
     WeightInferenceHooks,
     WeightLoader,
     WeightRuntime,
+    create_config_surface,
     create_harness_surface,
     create_skill_surface,
     create_weight_surface,
@@ -58,9 +59,25 @@ def test_recipe_default_surface_is_noop() -> None:
 
 
 def test_surface_factories_return_composed_surface_instances() -> None:
-    assert type(create_weight_surface()) is Surface
+    assert type(create_weight_surface(kind="model")) is Surface
     assert type(create_harness_surface()) is Surface
     assert type(create_skill_surface([_PullOnlyModule()])) is Surface
+
+
+def test_each_built_in_surface_declares_the_kind_of_its_component() -> None:
+    def kinds(surface: Surface) -> dict[str, str | None]:
+        return {name: component.kind for name, component in surface.components.items()}
+
+    assert kinds(create_weight_surface(kind="model")) == {"weights": "model"}
+    assert kinds(create_weight_surface(kind="model_adapter")) == {"weights": "model_adapter"}
+    assert kinds(create_harness_surface()) == {"harness": "harness_plugin"}
+    assert kinds(create_skill_surface([_PullOnlyModule()])) == {"skills": "harness_plugin"}
+    assert kinds(create_config_surface()) == {"config": "harness_plugin"}
+    assert kinds(Surface(loader=WeightLoader())) == {"release": None}, "a surface may declare no kind"
+    with pytest.raises(ValueError, match="model or a model_adapter"):
+        create_weight_surface(kind="harness_plugin")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="component kind"):
+        ComponentSurface(kind="weights")  # type: ignore[arg-type]
 
 
 def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations() -> None:
@@ -171,13 +188,13 @@ def _release_without_files():
 
 
 def _weight_hooks(surface: Surface | None = None):
-    hooks = (surface or create_weight_surface()).inference
+    hooks = (surface or create_weight_surface(kind="model")).inference
     assert hooks is not None
     return hooks
 
 
 def _weight_loader(surface: Surface | None = None):
-    loader = (surface or create_weight_surface()).loader
+    loader = (surface or create_weight_surface(kind="model")).loader
     assert loader is not None
     return loader
 
@@ -351,12 +368,12 @@ def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_p
     # A commit, a rollback or a restart loaded the release under a version that the runtime names.
     release = Artifact.local(tmp_path)
     runtime = _StubTrainingRuntime("e:6", published="e:5")
-    assert create_weight_surface().served_runtime_load_id(release, runtime) == "e:5"
+    assert create_weight_surface(kind="model").served_runtime_load_id(release, runtime) == "e:5"
     # A runtime that serves no weights leaves the served version unknown.
-    assert create_weight_surface().served_runtime_load_id(release, None) is None
+    assert create_weight_surface(kind="model").served_runtime_load_id(release, None) is None
     # A per-scenario adapter serves a durable release under the version the engine holds for the scenario.
     adapters = _StubAdapterRuntime("e:6", {"math": "e:4"})
-    surface = create_weight_surface(scenario="math", runtime=adapters)
+    surface = create_weight_surface(scenario="math", runtime=adapters, kind="model_adapter")
     assert surface.served_runtime_load_id(release, adapters) == "e:4"
     # An engine that holds no adapter for the scenario leaves the served version unknown.
     assert surface.served_runtime_load_id(release, _StubAdapterRuntime("e:6", {})) is None
@@ -370,7 +387,7 @@ def test_recover_serves_the_checkpoint_when_the_head_is_not_durable() -> None:
 
 
 def test_recover_short_circuits_when_already_at_the_head() -> None:
-    surface = create_weight_surface()
+    surface = create_weight_surface(kind="model")
     checkpoint = _checkpoint_ref()
     assert _weight_loader(surface).recover(None, checkpoint, _StubTrainingRuntime("wv-1")) is checkpoint
     same = _checkpoint_ref(checkpoint.release_id)

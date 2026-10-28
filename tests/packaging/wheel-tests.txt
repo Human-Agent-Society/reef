@@ -23,12 +23,12 @@ tests/harness/test_compose_loader.py
 tests/harness/test_cordis_floor.py
 tests/harness/test_e2b_executor.py
 tests/harness/test_e2b_tunnel.py
-tests/harness/test_episode_executor.py
+tests/harness/test_program_executor.py
 tests/harness/test_evolution_executor_ray.py
 tests/harness/test_failure_manifest.py
 tests/harness/test_harbor_tasks.py
 tests/harness/test_harness_contracts.py
-tests/harness/test_harness_episode.py
+tests/harness/test_harness_rollout.py
 tests/harness/test_harness_evolve_runner.py
 tests/harness/test_harness_model_route.py
 tests/harness/test_harness_read.py
@@ -43,9 +43,9 @@ tests/harness/test_node_credential_scan.py
 tests/harness/test_node_directive_scan.py
 tests/harness/test_requests_extension.py
 tests/harness/test_requests_requires.py
-tests/harness/test_task_episode_runner.py
+tests/harness/test_task_rollout_runner.py
 tests/harness/test_terminus_agent.py
-tests/harness/test_terminus_episode.py
+tests/harness/test_terminus_rollout.py
 tests/harness/test_terminus_tree.py
 tests/harness/test_version_check.py
 tests/inference/test_inference_control.py
@@ -73,9 +73,9 @@ tests/recipes/skillclaw/test_skillclaw.py
 tests/recipes/skillclaw/test_skillclaw_catalog.py
 tests/recipes/tttd/test_tttd.py
 tests/record2record/test_record_set_unit_pool.py
-tests/record2task/test_generator_designer.py
-tests/record2task/test_generator_harbor.py
-tests/record2task/test_generator_service.py
+tests/record2sample/test_generator_designer.py
+tests/record2sample/test_generator_harbor.py
+tests/record2sample/test_generator_service.py
 tests/reef_recipe/test_composite_recipe.py
 tests/reef_recipe/test_generated_tasks.py
 tests/reef_recipe/test_recipe_config_fields.py
@@ -203,5 +203,5 @@ tests/train/test_reported_feedback_processor.py
 tests/train/test_sample_task_metadata.py
 tests/train/test_step_schedule.py
 tests/train/test_trainer.py
-tests/train/test_training_data_items.py
+tests/train/test_training_data_samples.py
 tests/sandbox/test_environment.py

@@ -154,7 +154,7 @@ class ServiceConfig:
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
-    #: evaluation episodes from it. ``upstream_model`` is a provider model
+    #: evaluation rollouts from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
     upstream_url: str | None = config_option(
         None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."
@@ -303,11 +303,11 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
     )
-    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2job``.
+    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2job, each with module and "
+            "Pipeline stages as a JSON/YAML object: record2record, record2sample and sample2job, each with module and "
             "config.",
             path=("pipeline",),
         ),

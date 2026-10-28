@@ -45,7 +45,7 @@ def generated(name: str, *, instruction: str = "", sources: tuple[str, ...] = ("
 
 
 def candidates(root: Path, *tasks: HarborTask) -> tuple[Path, ...]:
-    """Write each task in a directory of its own, as the record-to-task stage does."""
+    """Write each task in a directory of its own, as the record-to-sample stage does."""
     staging = Path(tempfile.mkdtemp(dir=root))
     return tuple(write_harbor_task(task, staging / str(index)) for index, task in enumerate(tasks))
 

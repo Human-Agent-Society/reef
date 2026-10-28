@@ -1244,7 +1244,7 @@ def _running(state: str, **rest: Any) -> dict[str, Any]:
         "state": state,
         "meaning": None,
         "started_at": None,
-        "episodes_total": None,
+        "rollouts_total": None,
         "step_record": None,
         **rest,
     }
@@ -1258,7 +1258,7 @@ def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_report
         _install_root(tmp_path),
         {
             **WAITING,
-            f"GET {PROGRESS_PATH}": _running("evaluating", episodes_total=2, step_record="/work/steps/1"),
+            f"GET {PROGRESS_PATH}": _running("evaluating", rollouts_total=2, step_record="/work/steps/1"),
             f"GET {RECORD_PATH}": {"status": 200, "body": {}},
         },
         REEF_HARNESS_WATCH_MS="10",

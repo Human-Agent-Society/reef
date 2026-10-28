@@ -8,7 +8,7 @@ new head Reef serves reaches the process through the release poll or the
 two steps of the open turn, or at once when no turn is open; a mount that
 leaves an entry FAILED is rolled back whole. Every mount, unmount and failed
 mount is an event in the open turn's session, else in ``sessions/serve.jsonl``.
-``reef-native -p`` stays the episode form: one process, one turn.
+``reef-native -p`` stays the rollout form: one process, one turn.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, WrapperError
 from reef.harness.compose import Context, FiberState
 from reef.harness.compose.loader import Loader
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, Session, _Loop, binding_from
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
 from reef.harness.runners.native.graph import Run, run_graph, run_loop_module

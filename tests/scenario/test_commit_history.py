@@ -18,8 +18,8 @@ from threading import Event, Thread
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
-from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks, threshold_pipeline
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
+from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
@@ -31,7 +31,7 @@ from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
@@ -42,7 +42,7 @@ from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.cordis_backend import CordisBackend
-from reef.train.cordis_backend.processor import TraceJobData, TraceTasks
+from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
 from reef.train.pipeline import TrainingPipeline
 
@@ -281,7 +281,7 @@ class RecordingComponent(StubTrainingComponent):
         self.trained_data: list[list[str]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.trained_data.append([source_record_id(sample) for sample in job.data.items])
+        self.trained_data.append([source_record_id(sample) for sample in job.data.samples])
         return super().train(job)
 
 
@@ -528,8 +528,8 @@ class ProtectAllPipeline(TrainingPipeline):
         super().__init__(
             context,
             record2record=ReportRecord2Record(context, ReportGrouping()),
-            record2task=ThresholdTasks(),
-            task2job=ThresholdJobData(context, None, None),
+            record2sample=ThresholdSamples(),
+            sample2job=ThresholdJobData(context, None, None),
         )
         self._seen: set[str] = set()
 
@@ -881,7 +881,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
-            score_episode=resolve_episode_scorer(self.evaluate),
+            score_rollout=resolve_rollout_scorer(self.evaluate),
             tasks=self.tasks,
             binary="fake-pi",
             models=ModelBinding(base_url="http://localhost:8000", model="qwen3-8b"),
@@ -892,8 +892,8 @@ class _HarnessEvolveTestRecipe(Recipe):
             pipeline_factory=lambda context: TrainingPipeline(
                 context,
                 record2record=ReportRecord2Record(context, ReportGrouping()),
-                record2task=TraceTasks(),
-                task2job=TraceJobData(context, None, None),
+                record2sample=TraceSamples(),
+                sample2job=TraceJobData(context, None, None),
             ),
             candidate_backend=candidate_backend,
             candidate_evaluator=ScoreComparisonPlugin(candidate_backend),

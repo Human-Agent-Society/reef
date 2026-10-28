@@ -227,6 +227,7 @@ def sqlite_session(*, database=None, initial_step=0):
         records.commit_history(),
         tasks=tasks,
         trajectories=records.trajectory_store(),
+        evaluations=records.evaluation_store(),
         initial_step=initial_step,
     )
 

@@ -11,23 +11,12 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import CheckpointCandidate, EvaluationResult, SelectionDecision
-from reef.core.job_data import JobOutcome, TaskItem
+from reef.core.job_data import JobOutcome
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.pipeline_context import PipelineContext
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import (
-    ArtifactEvaluation,
-    EvaluationJob,
-    FixedJobPlan,
-    JobLoop,
-    JobLoopState,
-    JobPlan,
-    JobPlanContext,
-    JobRequest,
-    PendingEvaluation,
-    RunningJob,
-)
+from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlan, JobPlanContext, JobRequest, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
@@ -180,7 +169,7 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
     assert JobLoopState.from_dict(result.state).job == RunningJob(job.job_id)
     # The same rows are the same job, whatever the batch's number; another scenario's are another job.
-    assert loop.submit(JobLoopState(), JobData("renumbered", batch().items)).result.training_job_id == job.job_id
+    assert loop.submit(JobLoopState(), JobData("renumbered", batch().samples)).result.training_job_id == job.job_id
     other_scenario = loop_with(component, scenario="code").submit(JobLoopState(), batch())
     assert other_scenario.result.training_job_id != job.job_id
     # The next job of the same trainer is another job, even with the same data from the same start.
@@ -325,12 +314,8 @@ def test_the_committed_state_round_trips_and_checks_its_values():
         RunningJob("j", -1)
     with pytest.raises(ValueError, match="job_id"):
         RunningJob("")
-    evaluating = JobLoopState("/s", None, 3, FINISHED, (PendingEvaluation("e1", "j:1"),))
-    assert JobLoopState.from_dict(evaluating.to_dict()) == evaluating
-    with pytest.raises(ValueError, match="distinct job IDs"):
-        JobLoopState(evaluations=(PendingEvaluation("e1", "j:1"), PendingEvaluation("e1", "j:2")))
-    with pytest.raises(ValueError, match="job_id and candidate_id"):
-        JobLoopState.from_dict({**evaluating.to_dict(), "evaluations": [{"job_id": "e1"}]})
+    with pytest.raises(ValueError, match="keys"):
+        JobLoopState.from_dict({**state.to_dict(), "evaluations": []})
 
 
 @pytest.mark.unit
@@ -488,7 +473,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         stages.append(EndedJobs(context))
-        return threshold_pipeline(context, task2job=stages[-1])
+        return threshold_pipeline(context, sample2job=stages[-1])
 
     trainer = Trainer.build(
         "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
@@ -523,104 +508,3 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
         default_job_samples=1,
     )
     assert stages[-1].outcomes == ended.outcomes
-
-
-class EvalTasks(ArtifactEvaluation):
-    """Evaluates each artifact on one task, or on none when ``empty``."""
-
-    def __init__(self, tmp_path: Path, *, empty: bool = False) -> None:
-        self.task = TaskItem(tmp_path, metadata={"task": {"name": "held-out", "split": "eval"}})
-        self.empty = empty
-
-    def evaluation_job(self, candidate):
-        if self.empty:
-            return None
-        return EvaluationJob(
-            JobData(f"{candidate.candidate_id}:evaluation", (self.task,)), {"evaluation_of": candidate.candidate_id}
-        )
-
-
-@pytest.mark.unit
-def test_every_artifact_is_evaluated_from_its_own_checkpoint_and_its_result_is_committed(component, tmp_path):
-    loop = JobLoop(
-        component,
-        FixedJobPlan(JobRequest({"method": "sft"})),
-        AlwaysSelectCheckpointPlugin(),
-        scenario="math",
-        artifact_evaluation=EvalTasks(tmp_path),
-    )
-    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
-    training = state.job.job_id
-    first, second = (SavedCheckpoint(step, str(tmp_path / str(step)), str(tmp_path / str(step))) for step in (1, 2))
-    component.statuses[training] = JobStatus(training, "running", (first, second))
-
-    decided = loop.poll(state).result
-    state = JobLoopState.from_dict(decided.state)
-    (evaluation,) = state.evaluations
-    submitted = component.jobs[-1]
-    assert (evaluation.candidate_id, submitted.job_id) == (f"{training}:1", evaluation.job_id)
-    assert submitted.start == first.path and submitted.parameters == {"evaluation_of": f"{training}:1"}
-    assert decided.metrics["artifact_evaluation"] == {"job_id": evaluation.job_id, "event": "submitted"}
-    state = JobLoopState.from_dict(loop.poll(state).result.state)
-    assert [pending.candidate_id for pending in state.evaluations] == [f"{training}:1", f"{training}:2"]
-    assert component.jobs[-1].start == second.path, "each artifact is scored from its own checkpoint"
-
-    # The training job ends while both evaluations run; the trainer polls them alone afterwards.
-    component.statuses[training] = JobStatus(training, "finished", (first, second))
-    state = JobLoopState.from_dict(loop.poll(state).result.state)
-    assert state.job is None and len(state.evaluations) == 2
-    assert loop.poll(state) is None
-    later = state.evaluations[1].job_id
-    component.statuses[later] = JobStatus(later, "finished", metrics={"evaluation_reward_mean": 0.75})
-    recorded = loop.poll(state).result
-    assert recorded.artifact is None and recorded.metrics["artifact_evaluation"] == {
-        "candidate_id": f"{training}:2",
-        "job_id": later,
-        "event": "finished",
-        "metrics": {"evaluation_reward_mean": 0.75},
-    }
-    state = JobLoopState.from_dict(recorded.state)
-    earlier = state.evaluations[0].job_id
-    component.statuses[earlier] = JobStatus(earlier, "failed", error="the sandbox did not start")
-    failed = loop.poll(state).result
-    assert failed.metrics["artifact_evaluation"]["error"] == "the sandbox did not start"
-    assert JobLoopState.from_dict(failed.state).evaluations == ()
-    with pytest.raises(ValueError, match="polls only a running job or an artifact evaluation"):
-        loop.poll(JobLoopState.from_dict(failed.state))
-
-
-@pytest.mark.unit
-def test_an_artifact_with_nothing_to_evaluate_on_submits_no_evaluation(component, tmp_path):
-    loop = JobLoop(
-        component,
-        FixedJobPlan(JobRequest({"method": "sft"})),
-        AlwaysSelectCheckpointPlugin(),
-        scenario="math",
-        artifact_evaluation=EvalTasks(tmp_path, empty=True),
-    )
-    state = JobLoopState.from_dict(loop.submit(JobLoopState(), batch()).result.state)
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"))
-    component.statuses[state.job.job_id] = JobStatus(state.job.job_id, "running", (saved,))
-    decided = loop.poll(state).result
-    assert JobLoopState.from_dict(decided.state).evaluations == () and "artifact_evaluation" not in decided.metrics
-    assert len(component.jobs) == 1
-
-
-@pytest.mark.unit
-def test_a_trainer_with_no_job_polls_its_artifact_evaluations_until_they_end(component):
-    state = JobLoopState("/start", None, 1, FINISHED, (PendingEvaluation("e1", "j0:1"),))
-    trainer = Trainer.build(
-        "math",
-        SQLiteRecordStore(),
-        pipeline_factory=threshold_pipeline,
-        job_loop=loop_with(component),
-        algorithm_state=state.to_dict(),
-        default_job_samples=1,
-    )
-    component.statuses["e1"] = JobStatus("e1", "running")
-    assert trainer.needs_polling() and trainer.run_once() is None
-    component.statuses["e1"] = JobStatus("e1", "finished", metrics={"evaluation_reward_mean": 1.0})
-    recorded = trainer.run_once()
-    assert recorded is not None and recorded.metrics["artifact_evaluation"]["candidate_id"] == "j0:1"
-    trainer.commit(trainer.prepare_commit(recorded))
-    assert JobLoopState.from_dict(trainer.state).evaluations == () and not trainer.needs_polling()

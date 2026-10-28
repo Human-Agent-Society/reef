@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.mutations import Mutation
 from reef.observability import ExperimentLogger
 from reef.recipe.cordis import CordisRecipe
@@ -53,7 +53,7 @@ from reef.storage.tasks import TaskStorage
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.trainer import Trainer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 from .archive import Archive
 from .backend import ARCHIVE_STATE_KEY, GEPABackend
@@ -78,7 +78,7 @@ class _UnboundProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: Any,
         *,
         manifest: FailureManifest | None = None,
@@ -175,16 +175,16 @@ class GEPARecipe(CordisRecipe):
         propose = self.propose
         if isinstance(propose, _UnboundProposer):
             descriptor = get_adapter(self.adapter)
-            # The minibatch episodes run the harness the evaluation runs, bound as the backend binds it.
+            # The minibatch rollouts run the harness the evaluation runs, bound as the backend binds it.
             executor, binary = self.executor.for_program(AdapterProgram(descriptor), binary=self.binary)
             propose = GEPAProposer(
                 archive=archive,
                 descriptor=descriptor,
                 binary=binary,
                 executor=executor,
-                episode_timeout_s=self.episode_timeout_s,
+                rollout_timeout_s=self.rollout_timeout_s,
                 forbid_residue=self.forbid_residue,
-                score_episode=self.score_episode,
+                score_rollout=self.score_rollout,
                 feedback=self.feedback or ScoreFeedback(),
                 minibatch_size=self.minibatch_size,
                 rng_seed=self.rng_seed,

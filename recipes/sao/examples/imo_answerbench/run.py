@@ -11,10 +11,10 @@ For each task, in order:
 
 The ordering is the experiment: task N+1 measures what task N taught. That
 only holds if task N's rollouts have actually trained before task N+1
-starts, so after each episode the loop blocks until the scenario's version
+starts, so after each rollout the loop blocks until the scenario's version
 chain carries one ``training`` release per scored rollout so far. Rollouts
 are quick at this model size while a train step also saves a checkpoint and
-publishes weights; without the barrier the episode loop finishes ahead of
+publishes weights; without the barrier the rollout loop finishes ahead of
 training and the process exit tears the stack down over a queue of
 never-trained rollouts.
 """

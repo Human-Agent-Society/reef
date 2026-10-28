@@ -25,9 +25,9 @@ import pytest
 
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import run_episode
-from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import run_rollout
+from reef.harness.rollouts.trajectory import final_assistant_text
 from reef.harness.tree.render import render_composition
 from reef.service.install_script import render_install_script
 
@@ -174,7 +174,7 @@ def test_real_codex_accepts_every_admitted_tuning_key() -> None:
             ),
             binding=model_binding(base_url),
         )
-        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+        result = run_rollout(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
     finally:
         server.shutdown()
         server.server_close()
@@ -191,7 +191,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
             binding=model_binding(base_url),
         )
         capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
-        result = run_episode(
+        result = run_rollout(
             get_adapter("codex"),
             files,
             "Reply with exactly the word READY",
@@ -220,7 +220,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert re.search(r"`r0` = `[^`]*/codex/skills`", body)
     assert "reef-smoke: Reef smoke skill (file: r0/reef-smoke/SKILL.md)" in body
     assert "reef-command: Reef smoke command (file: r0/reef-command/SKILL.md)" in body
-    # config.toml sets no approval_policy; the episode still runs with approval never, so it never waits.
+    # config.toml sets no approval_policy; the rollout still runs with approval never, so it never waits.
     assert "Approval policy is currently never" in body and "# Escalation Requests" not in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
@@ -230,8 +230,8 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert capture.is_file() and capture.stat().st_size > 0
 
 
-def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> None:
-    """The tree's web_search is for a person's session; the episode argv turns it off again, and without that
+def test_real_codex_rollout_offers_no_web_search_when_the_tree_turns_it_on() -> None:
+    """The tree's web_search is for a person's session; the rollout argv turns it off again, and without that
     override the same tree offers the model the hosted web_search tool."""
     descriptor = get_adapter("codex")
     pin = descriptor.argv.index('web_search="disabled"')
@@ -241,7 +241,7 @@ def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> 
         server, base_url = _server()
         try:
             files = _bound_files(("config", {"data": {"web_search": "live"}}), binding=model_binding(base_url))
-            result = run_episode(adapter, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+            result = run_rollout(adapter, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
         finally:
             server.shutdown()
             server.server_close()
@@ -357,7 +357,7 @@ def test_codex_sends_reasoning_parameters_only_when_supported(reasoning: bool) -
     try:
         binding = replace(model_binding(base_url), metadata=ModelMetadata(640_000, reasoning))
         files = _bound_files(binding=binding)
-        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        result = run_rollout(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert result.exit_code == 0, result.stderr
         assert "fallback metadata" not in result.stdout + result.stderr
         body = json.loads(server.requests[0][2])
@@ -375,10 +375,10 @@ def test_metadata_preserves_codex_unknown_model_instructions() -> None:
     try:
         descriptor = get_adapter("codex")
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
-        before = run_episode(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_rollout(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert before.exit_code == 0, before.stderr
         assert "fallback metadata" in before.stdout
-        after = run_episode(
+        after = run_rollout(
             descriptor, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert after.exit_code == 0, after.stderr
@@ -422,7 +422,7 @@ def test_codex_bundled_model_catalog_matches_the_pin() -> None:
     from reef.harness.adapters.codex.quirks import bundled_model_catalog
 
     descriptor = get_adapter("codex")
-    result = run_episode(
+    result = run_rollout(
         replace(descriptor, argv=("debug", "models", "--bundled")),
         render_composition([], descriptor),
         "",
@@ -440,8 +440,8 @@ def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> 
         descriptor = get_adapter("codex")
         switched = replace(descriptor, argv=(*descriptor.argv, "--model", model))
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
-        before = run_episode(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
-        after = run_episode(
+        before = run_rollout(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        after = run_rollout(
             switched, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
@@ -459,9 +459,9 @@ def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: s
     try:
         descriptor = get_adapter("codex")
         binding = ModelBinding(base_url=base_url, model=model, api="responses")
-        before = run_episode(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_rollout(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         configured = replace(binding, metadata=ModelMetadata(32_000, reasoning))
-        after = run_episode(
+        after = run_rollout(
             descriptor, _bound_files(binding=configured), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)

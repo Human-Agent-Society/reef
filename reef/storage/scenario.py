@@ -1,4 +1,4 @@
-"""Storage boundary for a scenario's records, commits, settings, tasks, uploaded trajectories, and recovery.
+"""Storage boundary for a scenario's records, commits, settings, tasks, uploaded trajectories, evaluations, and recovery.
 
 Artifact publication remains the responsibility of the committer. A
 store settles record consumption and the committed scenario state together;
@@ -16,6 +16,7 @@ from typing import Any, Self
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.storage.commits import CommitRecord
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
 from reef.storage.trajectories import TrajectoryStore
@@ -31,17 +32,22 @@ class ScenarioSettings:
 
     ``model_config`` is the validated model override as JSON (``None`` selects
     the recipe's model). ``training_mode`` is the selected mode (``None``
-    selects the recipe's default).
+    selects the recipe's default). ``artifact_evaluation`` is the
+    ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
+    artifact with (``None`` evaluates none).
     """
 
     model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
+    artifact_evaluation: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.model_config is not None and not isinstance(self.model_config, Mapping):
             raise ValueError("scenario settings model_config must be an object or null")
         if self.training_mode is not None and not isinstance(self.training_mode, str):
             raise ValueError("scenario settings training_mode must be a string or null")
+        if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
+            raise ValueError("scenario settings artifact_evaluation must be an object or null")
 
 
 class ScenarioStore(ABC):
@@ -67,7 +73,7 @@ class ScenarioStore(ABC):
     def tasks(self) -> TaskStorage:
         """Opens the generated task stores of this scenario.
 
-        Each record-to-task stage opens its own store name. The stores close
+        Each record-to-sample stage opens its own store name. The stores close
         with this session. They survive a restart if ``durable`` is true.
         """
 
@@ -77,6 +83,14 @@ class ScenarioStore(ABC):
         """The trajectories that clients uploaded to this scenario.
 
         The store closes with this session. Its trajectories survive a restart if ``durable`` is true.
+        """
+
+    @property
+    @abstractmethod
+    def evaluations(self) -> EvaluationStore:
+        """The artifact evaluations that clients asked this scenario for.
+
+        The store closes with this session. Its evaluations survive a restart if ``durable`` is true.
         """
 
     @abstractmethod
@@ -123,7 +137,7 @@ class ScenarioStorage(Plugin, ABC):
     shared resources only; sessions remain owned by their scenarios.
 
     Every piece of per-scenario state that Reef owns goes through this
-    interface: records, commits, generated tasks and uploaded trajectories through sessions, settings
+    interface: records, commits, generated tasks, uploaded trajectories and evaluations through sessions, settings
     through ``read_settings`` and ``write_settings``. Archiving a scenario
     retires all of it. A deployment names a subclass in ``storage.record_backend``.
     """

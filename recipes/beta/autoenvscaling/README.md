@@ -22,9 +22,9 @@ In every run, the agent and the prompt Designer use `gpt-6-sol`, `gpt-6-luna` ru
 | | Without checks | With checks |
 |---|---|---|
 | Sessions | 20 | 84 |
-| Tasks that ran and that `gpt-6-luna` solves in 1 or more of 2 episodes (fair tasks) | 6 of 19 (32%) | **41 of 51 (80%)** |
+| Tasks that ran and that `gpt-6-luna` solves in 1 or more of 2 rollouts (fair tasks) | 6 of 19 (32%) | **41 of 51 (80%)** |
 | Sessions that give a fair task | 30% | **49%** |
-| Qwen3.5-9B episodes of the fair tasks that solve them (4 episodes for each task) | 3 of 23 (13%) | **36 of 91 (40%)** |
+| Qwen3.5-9B rollouts of the fair tasks that solve them (4 rollouts for each task) | 3 of 23 (13%) | **36 of 91 (40%)** |
 
 On the 15 sessions that both arms ran, the arms give 5 and 6 fair tasks. The checks refuse more tasks, but the tasks they admit are much more often solvable, by the strong solver and by a 9B model.
 
@@ -40,7 +40,7 @@ beta/autoenvscaling/
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
-AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2task.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
 
 ## The generator
 
@@ -49,7 +49,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. The test review follows ([the task checks](#the-task-checks)). A duplicate task is invalid.
-4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.episodes_per_task` episodes of each training task in a task job; the recipe runs no eval tasks.
+4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.rollouts_per_task` rollouts of each training task in a task job; the recipe runs no eval tasks.
 5. When every training task of the generation has a result, `record_results` computes the pass rate of each task that ran and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
 
 Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
@@ -88,7 +88,7 @@ Three kinds of failure end differently:
 
 ### The report and the task store
 
-`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its episodes run. Related source sessions keep the same split. The band does not filter the store.
+`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its rollouts run. Related source sessions keep the same split. The band does not filter the store.
 
 The generator's `config` keys:
 
@@ -107,8 +107,10 @@ The generator's `config` keys:
 | `max_checks` | 6 | the agent's checks that ran, in one run |
 | `max_model_calls` | 250 | the agent's model calls in one run |
 | `agent_timeout_seconds` | 2700 | the longest one agent run lasts |
+| `agent_sandbox` | `e2b` | the cloud sandbox the agent runs in: `e2b` or `modal` |
+| `agent_sandbox_options` | none | that provider's options, such as `e2b_template`, or `modal_app` and `modal_image` |
 
-Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
+Set `eval_fraction` and `split_seed` in `pipeline.record2sample.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
 ## The author
 
@@ -120,9 +122,9 @@ The agent holds no credential. Its model calls go through a loopback gateway tha
 
 ## The band
 
-The pass rate of a task that ran is the mean reward of its training episodes. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
+The pass rate of a task that ran is the mean reward of its training rollouts. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-The band does not decide what trains. The recipe trains on the training episodes of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every episode of a group whose rewards are all equal. With 0 or 1 rewards and four episodes per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
+The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every rollout of a group whose rewards are all equal. With 0 or 1 rewards and four rollouts per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
 
 ## The task checks
 
@@ -147,11 +149,11 @@ The review needs `agent_api: openai` or `responses`; with `anthropic`, set `revi
 
 To compare Designers on identical inputs, set `author: prompt`. The author is then the generator service's one-reply prompt Designer, the one SPADE uses, on the same sources. It makes one model call with the repository, the session cut to 240,000 characters (tool results first, never the user's words), the agent's rebuild rules and the Designer's reply format. The reply's JSON block is the task. The call goes where the agent's calls go, through `agent_api`, which must be `openai` or `responses`. The agent's own settings go unused, and no E2B key is needed.
 
-Everything else is the same for both authors: the cursor, admission, the checks, episodes, generation reports and the task store. SPADE keeps every task that passes its checks, so the baseline runs with the band off:
+Everything else is the same for both authors: the cursor, admission, the checks, rollouts, generation reports and the task store. SPADE keeps every task that passes its checks, so the baseline runs with the band off:
 
 ```yaml
 pipeline:
-  record2task:
+  record2sample:
     config:
       generator:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
@@ -196,7 +198,7 @@ With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a gene
 
 The built-in generated-task recipe rolls a generation's tasks out only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, build the task pool first, then train from it:
 
-1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskTasks.run` generates, validates and saves one generation with no trainer, and runs no episodes. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
+1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no rollouts. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
 
    ```python
    import os
@@ -204,7 +206,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.pipeline_context import PipelineContext
-   from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
+   from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
    from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings, next_generation
    from reef.storage.sqlite import SQLiteScenarioStorage
    from reef.storage.tasks import LocalTaskFileStore
@@ -223,7 +225,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
            generator_url=str(generator_config["generator_url"]),
        )
        record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
-       tasks = GeneratedTaskTasks(context, settings, record_stage, task_generator=generator)
+       tasks = GeneratedTaskSamples(context, settings, record_stage, task_generator=generator)
        try:
            for number in range(next_generation(tasks.task_store), rounds):
                await tasks.run(GenerationJob(receipt=f"generation-{number:05d}", generation=number))
@@ -238,12 +240,12 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
 2. **Train from the pool.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it puts their train tasks in the task pool and rolls them out, `tasks_per_step` at a time.
 
    ```bash
-   reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2task.config.rounds 4
+   reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2sample.config.rounds 4
    ```
 
 ## Requirements
 
-- For the agent, an E2B API key in `E2B_API_KEY` and the `e2b` extra (`pip install 'reef-infra[e2b]'`). The sandbox runs pi from a template Reef builds on first use.
+- For the agent, a cloud sandbox: an E2B API key in `E2B_API_KEY` and the `e2b` extra (`pip install 'reef-infra[e2b]'`), or with `agent_sandbox: modal`, Modal's credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or `~/.modal.toml`) and the `modal` extra. The sandbox runs pi from an image Reef builds on first use.
 - For the agent, `git` on the Reef host, for the repository snapshots.
 - Docker and the `harbor` command line on the generator service's host, as for SPADE.
 

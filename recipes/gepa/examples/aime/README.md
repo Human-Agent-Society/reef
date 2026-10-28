@@ -22,7 +22,7 @@ minibatch order) say so in `harness/aime.py`.
 | Pareto-sample a parent from the archive | `Archive.select_parent` over per-problem fronts, dominated candidates pruned |
 | Evaluate the parent on a train minibatch, with traces | the served composition's own recorded traffic: the driver runs the minibatch through the service, so `propose` gets the transcripts free |
 | Reflect on one component and propose a rewrite | `models["reflection"]` (gpt-5) with GEPA's own prompt, over `Inputs` / `Generated Outputs` / `Feedback` records |
-| Accept the child iff it beats the parent on the minibatch | the proposer runs its own episodes and returns `None` on a reject, which skips the step |
+| Accept the child iff it beats the parent on the minibatch | the proposer runs its own rollouts and returns `None` on a reject, which skips the step |
 | Full validation pass, then Pareto update | the mechanism's `evolution.tasks` is the validation set; `GEPASelectorMixin.decide` reads the per-task scores it produced |
 | Serve the argmax-mean candidate | select on a strict mean improvement over the served composition, which publishes the tree for `GET /reef/harness` |
 
@@ -49,8 +49,8 @@ embedded service keeps its artifacts in memory under `./work`.
 OPENAI_API_KEY=... REEF_PI_BINARY=/path/to/pi ./run.sh
 ```
 
-A live run is roughly 150 search episodes plus the mechanism's validation
-passes, then 300 test episodes. Episodes are independent, so `REEF_GEPA_WORKERS`
+A live run is roughly 150 search rollouts plus the mechanism's validation
+passes, then 300 test rollouts. Rollouts are independent, so `REEF_GEPA_WORKERS`
 (default 128) run at once everywhere: the mechanism's validation pass through
 `execution.evolution.workers`, the driver's minibatch, and the test passes. It
 changes wall time only. `--budget` lowers the search budget for a
@@ -58,7 +58,7 @@ shorter run. `REEF_GEPA_MULTI=1` adds an `aime-solver` skill node to the seed
 and evolves it alongside the rules node, which is the extension case, not the
 comparison. The credential is read once, handed to the embedded service as its
 upstream, and never written into a candidate, a checkpoint, or a published
-tree; the Pi episodes authenticate to the local service with a placeholder.
+tree; the Pi rollouts authenticate to the local service with a placeholder.
 
 The validation pool defaults to `auto`: one worker selects `uni`, multiple
 workers select `mp` (or Ray in an existing multi-worker placement group).
@@ -71,7 +71,7 @@ worker. At recipe construction,
 the driver binds the scoring/feedback hooks to a serializable snapshot of the
 answer and context tables. Workers do not rely on driver globals, and later
 registrations do not change an existing recipe. Labels stay in scorer state,
-not in the task prompts or rendered harness files. Episode subprocesses and
+not in the task prompts or rendered harness files. Rollout subprocesses and
 temporary directories remain isolated. Custom hooks are preserved; they must
 carry their own serializable state when used across processes.
 
@@ -96,7 +96,7 @@ Ray affects **only the mechanism's candidate/current validation pool**. The
 driver's minibatch and held-out test passes still use local threads. Validation
 workers call the configured upstream model directly; they do not need access
 to the embedded loopback service. They do need network access to the provider,
-and receive the model credential in their transient episode binding, so use
+and receive the model credential in their transient rollout binding, so use
 only trusted Ray nodes. The embedded service remains bound to `127.0.0.1`.
 
 Size the Ray pool to available resources and provider rate limits: each worker
@@ -109,7 +109,7 @@ named profiles and Ray actor options such as `runtime_env`. `--dry-run`
 validates the recipe but does not launch workers or check remote dependencies.
 
 One round is: pull the served tree, take the method's plan for the iteration
-(its parent choice and its three training problems), run each as a Pi episode against that tree with a
+(its parent choice and its three training problems), run each as a Pi rollout against that tree with a
 model binding pointed back at the embedded service, score it, find its recorded
 request by problem text, and report the score against it. The third report
 fills the step's job data (`evolution.batch_size: 3`) and schedules the training step, which
@@ -127,7 +127,7 @@ Everything under `./work`, and a rerun resumes from it:
   one seeded generator in upstream's own order, so seed 0 here shows the
   reflection model the same problems the official seed-0 run showed it.
 - `heldout/{frozen,selected}/example-NNNN.json` - one checkpoint per test
-  episode, keyed by the problem and the composition; a checkpoint written for
+  rollout, keyed by the problem and the composition; a checkpoint written for
   a different composition is refused, never folded into the score.
 - `reef-data/`, `artifacts/` - the scenario's records and its release chain.
 - `summary.json` - validation seed and selected means from the archive, both
@@ -172,7 +172,7 @@ validation means at every iteration.
 ## Deviations
 
 - The mechanism re-evaluates the served composition on the validation set at
-  every evaluated step, so one accepted proposal costs `2 x 45` episodes where
+  every evaluated step, so one accepted proposal costs `2 x 45` rollouts where
   upstream GEPA pays 45. The archive counts the method's own metric calls, so
   the budget still means what it means upstream; the wall-clock and spend do
   not compare directly.

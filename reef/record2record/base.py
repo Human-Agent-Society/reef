@@ -24,12 +24,12 @@ from reef.record2record.staleness import ServedVersions, stale_units
 from reef.runtime.interfaces import inference_aborted
 
 
-class TaskStatus(Enum):
-    """What the record-to-task stage made of a record set. The status settles all records of the set together."""
+class SampleStatus(Enum):
+    """What the record-to-sample stage made of a record set. The status settles all records of the set together."""
 
-    #: The set has one or more tasks. Its records wait in one record set unit until job data uses it.
+    #: The set has one or more samples. Its records wait in one record set unit until job data uses it.
     READY = "ready"
-    #: The set has no task and cannot train. The stage ends its records.
+    #: The set has no sample and cannot train. The stage ends its records.
     SKIPPED = "skipped"
 
 
@@ -86,11 +86,11 @@ class Record2Record(ABC, Plugin):
     advances the stage to the current time (``advance``): the stage takes in
     background work that ended, such as judgments, and starts work that is due. No record is in two record sets of one stage:
     ``form`` refuses a set that holds a record of another set. The pipeline
-    makes tasks from each set and gives the result back (``settle``). Before
+    makes samples from each set and gives the result back (``settle``). Before
     exposing a set, ``form`` rejects it if any inference response reports an
     engine abort. Rejection ends the whole set through the stage's lifecycle,
     including reports that reference an aborted inference. The stage
-    holds the sets that have tasks in record set units in its ``pool`` until the
+    holds the sets that have samples in record set units in its ``pool`` until the
     pipeline reserves them for job data; the pipeline reserves and consumes
     through the pool, and the stage ends the consumed units (``consume``). The
     pool applies the stage's selection policy. The stage never calls the pipeline.
@@ -131,7 +131,7 @@ class Record2Record(ABC, Plugin):
         self.max_staleness = max_staleness
         #: The held record set units. The pipeline reserves job data from it and consumes the reservation.
         self.pool = RecordSetUnitPool(selection)
-        #: Record sets that ended after the task stage saw them. The pipeline forgets their tasks.
+        #: Record sets that ended after the sample stage saw them. The pipeline forgets their samples.
         self.ended_set_ids: set[Hashable] = set()
         #: Records that ended and that no live set references, until their release.
         self.terminal: set[str] = set()
@@ -152,7 +152,7 @@ class Record2Record(ABC, Plugin):
         """Form ``record_set`` for the pipeline. Raises ``ValueError`` if a record of it is in another set.
 
         A set with the ID of an earlier set takes its records again, as a retry does.
-        An engine-aborted inference rejects the whole set before task creation.
+        An engine-aborted inference rejects the whole set before sample creation.
         Replaying retained records applies the same check.
         """
         record_ids = record_set.record_ids()
@@ -189,7 +189,7 @@ class Record2Record(ABC, Plugin):
     def settle(
         self,
         record_set: RecordSet,
-        status: TaskStatus,
+        status: SampleStatus,
         producing_runtime_load_ids: frozenset[str | None] = frozenset(),
     ) -> None:
         """Keep a READY record set in the pool, or end a SKIPPED one.
@@ -197,14 +197,14 @@ class Record2Record(ABC, Plugin):
         ``producing_runtime_load_ids`` are the versions that produced the
         training data of the set. The staleness check reads them.
         """
-        if status is TaskStatus.READY:
+        if status is SampleStatus.READY:
             self.producing_runtime_load_ids[record_set.set_id] = producing_runtime_load_ids
             self.accept(record_set)
         else:
             self.reject(record_set)
 
     def accept(self, record_set: RecordSet) -> None:
-        """Hold a set that has tasks in the pool, as a record set unit by itself."""
+        """Hold a set that has samples in the pool, as a record set unit by itself."""
         self.pool.put(SingleSetUnit.of(record_set))
 
     def reject(self, record_set: RecordSet) -> None:
@@ -213,7 +213,7 @@ class Record2Record(ABC, Plugin):
         self.ended_set_ids.add(record_set.set_id)
 
     def take_ended(self) -> frozenset[Hashable]:
-        """Return the IDs of the record sets that ended since the last call. The pipeline forgets their tasks."""
+        """Return the IDs of the record sets that ended since the last call. The pipeline forgets their samples."""
         ended, self.ended_set_ids = frozenset(self.ended_set_ids), set()
         for set_id in ended:
             self.producing_runtime_load_ids.pop(set_id, None)
@@ -287,7 +287,7 @@ class NoRecordSets(Record2Record):
     """Form no record set: the default of a pipeline that trains nothing. No config.
 
     The stage reads each record and keeps nothing. The pipeline then makes no
-    task and no job data, and the records stay stored for audit. The stage
+    sample and no job data, and the records stay stored for audit. The stage
     holds no unit, so it refuses ``max_staleness``.
     """
 

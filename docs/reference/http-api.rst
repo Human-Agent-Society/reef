@@ -39,11 +39,11 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
 |                                                                                  | the named scenario and kept by nobody: what a     |
-|                                                                                  | recipe's evaluation episodes call; a flat         |
+|                                                                                  | recipe's evaluation rollouts call; a flat         |
 |                                                                                  | release's request hooks stay out, since the       |
-|                                                                                  | episode runs a candidate of it. It serves a       |
+|                                                                                  | rollout runs a candidate of it. It serves a       |
 |                                                                                  | scenario loaded in this process and never creates |
-|                                                                                  | one: 404 for a scenario deleted under its episode |
+|                                                                                  | one: 404 for a scenario deleted under its rollout |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
 |                                                                                  | composed release: every other component's hooks   |
@@ -87,6 +87,12 @@ Routes
 | ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/tasks``                                         | imported tasks, their splits, which trained       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations``                                  | evaluate one artifact of a release                |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations``                                   | artifact evaluations, newest first                |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                   | one evaluation: its state and result              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -140,8 +146,8 @@ Headers
 |                                   | ``metadata.tags``. The ``release`` tag can select the   |
 |                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout episode that |
-|                                   | Reef runs itself. It is served from the scenario's      |
+| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
+|                                   | runs itself. It is served from the scenario's           |
 |                                   | release like any other call, but no record is kept, and |
 |                                   | the response keeps its ``training`` block with the      |
 |                                   | runtime load ID that answered. The call must not        |
@@ -176,7 +182,8 @@ Scenario model settings
 scenario. Existing scenarios retain their settings on repeated creation.
 The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
-existing ``training_mode`` field. Send ``model: null`` to restore deployment
+existing ``training_mode`` field, and ``artifact_evaluation`` (`Automatic
+evaluation`_). Send ``model: null`` to restore deployment
 defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
@@ -313,8 +320,8 @@ Upload trajectories
 
 Use this route when your data is already a complete ATIF trajectory. An
 uploaded trajectory is not a record. Reef keeps it in the scenario storage.
-The recipe's record-to-task stage renders it as a training sample, and the
-task-to-job stage puts it in the next job's data. The scenario's recipe
+The recipe's record-to-sample stage renders it as a training sample, and the
+sample-to-job stage puts it in the next job's data. The scenario's recipe
 must accept uploaded trajectories. If it does not, Reef refuses the upload with
 400. For the recipe side, see
 `Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
@@ -365,10 +372,12 @@ Upload Harbor tasks
 Use this route to give a scenario your own Harbor tasks, for training or as
 held-out tasks. It adds the tasks to the scenario's task store
 ``imported-tasks``, the same store that the `task-import section
-<../user-guide/operate.rst#import-harbor-tasks>`__ fills. The scenario's recipe
-must read imported tasks, such as the SFT-then-RL recipe (`SFT then RL
-<configuration.rst#sft-then-rl>`__). If it does not, Reef refuses the upload
-with 400.
+<../user-guide/operate.rst#import-harbor-tasks>`__ fills. An upload to the
+``train`` split needs a recipe that trains on imported tasks, such as the
+SFT-then-RL recipe (`SFT then RL <configuration.rst#sft-then-rl>`__). If the
+recipe does not, Reef refuses the upload with 400. The ``eval`` split takes
+tasks for any recipe, because an `artifact evaluation <#evaluate-an-artifact>`__
+runs them.
 
 The body is a gzip-compressed tar archive with ``Content-Type:
 application/gzip``. The archive and the files it unpacks to are each at most
@@ -403,6 +412,108 @@ same receipt. Reef returns:
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
 [{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
 added. ``trained`` is true once a task job trained the task.
+
+Evaluate an artifact
+--------------------
+
+Use these routes to score one artifact of a scenario on the scenario's eval
+tasks. An artifact is one component of one of the scenario's artifacts, such
+as the ``weights`` of a model checkpoint. A policy is a harness and a model,
+and the artifact is one side of it, so the request configures the other side.
+Reef runs the rollouts itself and stores the result with the scenario. The
+evaluation never changes what the scenario serves, and its model calls are not
+records. A scenario can also hold settings that Reef evaluates each new
+artifact with (`Automatic evaluation`_).
+
+This version evaluates a model artifact (a ``model`` or ``model_adapter``
+component) with a Harbor agent, on a runtime that serves any artifact on
+request: the Tinker runtime. Reef refuses a harness artifact, a model artifact
+on another runtime, and a scenario whose artifacts also hold a harness, with
+400.
+
+First upload the tasks to the ``eval`` split (`Upload Harbor tasks
+<#upload-harbor-tasks>`__). Then start the evaluation:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/scenarios/my-agent/evaluations \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"artifact_id": "8f3c...", "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}'
+
+The body takes these fields:
+
+- ``artifact_id`` (required): one of the scenario's artifacts, by the
+  ``release_id`` that ``GET /reef/scenarios/{scenario}/releases`` lists.
+- ``component``: the component to evaluate. Leave it out when the artifacts
+  hold one component with a kind.
+- ``harness``: the Harbor agent that runs a model artifact. ``{"name":
+  "terminus-2"}`` runs Reef's default terminus-2 configuration. Any other
+  agent is its whole Harbor configuration, with ``{model}``, ``{base_url}``
+  and ``{api_key}`` where Reef fills them in, as the Tinker job parameter
+  ``rollout.agent`` takes it.
+- ``model``: the model binding that a harness artifact runs on. A request
+  sets exactly one of ``harness`` and ``model``.
+- ``task_names``: the eval tasks to run. Leave it out to run every eval task.
+- ``rollouts_per_task``: the rollouts of each task, 1 by default.
+- ``environment``: the Harbor environment type, ``docker`` by default.
+
+The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
+``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
+it runs and after it ends:
+
+.. code:: json
+
+   {"evaluation_id": "1d0e...", "state": "finished",
+    "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
+                "model": null, "task_names": [], "rollouts_per_task": 2, "environment": "docker"},
+    "created_at": 1793169552.2, "finished_at": 1793169840.7,
+    "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
+                          "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
+                          "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
+    "mean_score": 0.5, "error": null}
+
+``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
+evaluation holds its ``policy_evaluation``: the harness and the model that its
+rollouts ran, and each rollout's score by task (see `Rollout
+<glossary.rst#rollout>`__). A failed one holds its ``error``. An evaluation
+that was queued or running when the service stopped reads as ``failed``; Reef
+does not resume it. ``GET /reef/scenarios/{scenario}/evaluations`` lists the
+evaluations, newest first, at most ``limit`` (50 by default).
+
+Reef returns:
+
+- 400, and runs nothing, for a request that the scenario cannot run: an
+  unknown field or task, the wrong side configured, a component that is no
+  side of a policy, an artifact or a runtime that this version refuses, or no
+  eval task;
+- 404 for an unknown scenario, artifact or evaluation;
+- 429 when the service runs two evaluations already.
+
+Automatic evaluation
+~~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/update`` with ``artifact_evaluation`` stores
+the settings that Reef evaluates each new artifact of the scenario with. The
+settings are the body of an evaluation request without ``artifact_id``:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/scenarios/my-agent/update \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2}}'
+
+Reef checks the settings against the scenario's current artifact, as it checks
+a request, but the eval tasks may still be missing. The answer holds the
+stored settings, or 400 for settings that the scenario cannot run. Send
+``"artifact_evaluation": null`` to stop the automatic evaluations.
+
+Each training step that publishes a checkpoint is a new artifact. Reef then
+stores an evaluation of it in the ``queued`` state and runs it when fewer than
+two evaluations run. The evaluations routes list it like any other. An
+automatic evaluation that cannot run, for example because the eval split holds
+no task, is not stored; the service logs why.
 
 Manual training
 ---------------
@@ -678,7 +789,7 @@ backend that the engine aborts also carries no receipt, because Reef cannot
 restart a stream after it sent frames. In both cases a harness that reports by
 receipt does not reference the record. Reef stores it as an incomplete delivery
 record and preserves the captured response, including any training tensors.
-The record-to-record stage excludes aborted records from task creation and
+The record-to-record stage excludes aborted records from sample creation and
 training, including when a report references their IDs directly or retained
 records are replayed after a restart.
 
@@ -694,7 +805,7 @@ A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
 The evaluation calls do not present a service token. When auth is configured,
 the service issues a random token at startup that opens the evaluation routes
-alone, and hands it to the recipe: the episodes and proposer run candidate
+alone, and hands it to the recipe: the rollouts and proposer run candidate
 code, which can then sample the served release but reach no other route. A
 restart issues a new one.
 
@@ -748,7 +859,7 @@ data inside ``metadata`` or ``feedback``.
      - no
      - Recipe metadata; ``training.eligible`` is not supported. ``metadata.task``
        (``name``, with ``path`` and ``digest`` when known) or
-       ``metadata.harbor.task_name`` names the Harbor task the episode ran;
+       ``metadata.harbor.task_name`` names the Harbor task the rollout ran;
        the assembled training sample carries it as ``task``, so a recipe can
        group samples by task.
 
@@ -905,7 +1016,7 @@ Use ``?release_id=`` on the manifest or install route to request a specific
 catalog release. An unknown or unrestorable release returns HTTP 404.
 
 Catalog and manifest reads do not wait for an evolve step's proposer or
-evaluation episodes: they continue serving the existing releases while a
+evaluation rollouts: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
 rollback so a manifest's artifact and evaluation metrics come from the same
 release: reads do not interleave with head movement and its commit-history
@@ -916,7 +1027,7 @@ Proposals
 
 An agent running on the served tree can propose a change to it. The
 proposal enters the same evaluation as the method's own: nothing it says is served
-until paired episodes settle it.
+until paired rollouts settle it.
 
 .. code:: bash
 
@@ -1065,7 +1176,7 @@ only when the row carries a review or that list), Result (the result and what
 it means, then the evaluation's numbers: ``wins``, ``losses``, ``ties``,
 ``passed``, ``failed``,
 ``floor_score``, ``evaluation_sides``, ``current_score``, ``candidate_score`` and
-``episode_failures``, each when the row carries it, so a ``floor`` evaluation,
+``rollout_failures``, each when the row carries it, so a ``floor`` evaluation,
 which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
 and no ``current_score``, then the skip reason, the selection reason, the step
 record directory when ``evolution.step_record_dir`` is set, and
@@ -1125,7 +1236,7 @@ time and machine requirements are available in expandable details.
 Progress shows
 the request's state and what it means: ``queued`` while no step has taken
 the request, ``proposing`` while the served model writes the change,
-``evaluating`` while the candidate's episodes run (with their count and the
+``evaluating`` while the candidate's rollouts run (with their count and the
 step record directory when the backend reports them, and the time into the
 step), ``running`` while the trainer holds the request and the backend
 reports no phase, and ``settling`` while the row that consumed the record
@@ -1156,7 +1267,7 @@ row landed as once it settles, else null), ``state`` (the page's own
 the settled row's result once a row answers the request, including ``failed``
 when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total``,
+step holds this request, ``started_at``, ``rollouts_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
 ``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
 ``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
@@ -1168,7 +1279,7 @@ an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 naming it.
 
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
-``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
+``evaluation_task_count`` and ``evaluation_context``. Running rollouts use the
 phase ``evaluating``. Reviews and settled proposals store their outcome under
 ``result``. A harness manifest carries the evaluation metrics under
 ``evaluation`` only.
@@ -1204,7 +1315,7 @@ Retained step files
 for the same catalog step, authenticated and scenario-scoped like the version
 page. The response is ``{"status": "retained", "files": [{"path": "proposer.json",
 "bytes": 123}]}``. Add ``?path=proposer.json`` (or an inventory path under
-``episodes/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
+``rollouts/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
 The service does not interpret proposer replies or agent events. A console can
 render those persisted formats without changing their learning semantics.
 
@@ -1263,7 +1374,7 @@ failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 ``job_data_ready`` says whether the processor has a job's data waiting.
 ``processor`` includes ``ready_samples``, the samples of the held record sets
 and uploaded trajectories; ``job_samples``, the samples that automatic job
-data needs (``pipeline.task2job.config.job_samples``); and ``buffer_size``,
+data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
 the most samples the held record sets keep.
 
 A scenario that trains weights also reports its training job.

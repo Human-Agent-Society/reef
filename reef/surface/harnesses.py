@@ -34,7 +34,7 @@ def create_harness_surface(
     own, and the further models an installed client may switch to.
     """
     return Surface(
-        components={HARNESS_COMPONENT: ComponentSurface(files=TextFileTree())},
+        components={HARNESS_COMPONENT: ComponentSurface(files=TextFileTree(), kind="harness_plugin")},
         harness=HarnessInfo(
             seed_entries=tuple(seed_entries),
             served_model=served_model,

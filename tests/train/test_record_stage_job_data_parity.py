@@ -23,7 +23,7 @@ from typing import Any, Self
 
 import pytest
 from tests.recipes.sdpo.test_sdpo_pipeline import SDPOTokenizer
-from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
+from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
 
 from recipes.beta.coral.recipe import CoralRecipe
@@ -47,16 +47,16 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import JudgedTasks, Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.distill import DistillTasks
+from reef.record2sample import JudgedSamples, Record2Sample, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.distill import DistillSamples
+from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.task2job import DistillJobData, Task2Job, Task2JobSettings
 from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.cordis_backend.processor import TraceJobData, TraceTasks
+from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.pipeline import PipelineConfig, PipelineSpec
-from reef.train.types import JobData, TaskItem, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
 
@@ -101,9 +101,9 @@ def json_value(value: object) -> object:
     return json.loads(json.dumps(value, sort_keys=True, default=str))
 
 
-def describe_item(item: TrainDataItem) -> dict[str, object]:
+def describe_item(item: Sample) -> dict[str, object]:
     """The deterministic parts of one batch item."""
-    if isinstance(item, TaskItem):
+    if isinstance(item, TaskSample):
         return {"task": str(item.task_path), "sources": list(item.source_agent_record_ids)}
     training = item.training
     metadata = item.metadata
@@ -188,7 +188,7 @@ class StreamRun:
                 {
                     "data_id": batch.data_id,
                     "request": None if batch.request is None else batch.request.id,
-                    "items": [describe_item(item) for item in batch.items],
+                    "items": [describe_item(item) for item in batch.samples],
                     "consumed": sorted(prepared.consumed_ids),
                     "released": sorted(prepared.released_ids),
                 }
@@ -284,7 +284,7 @@ class AnyGroupReady(SlotGrouping):
         return GroupDecision.READY
 
 
-class AssembledTasks(ReportTasks):
+class AssembledSamples(ReportSamples):
     """One report as one assembled policy sample."""
 
     def __init__(self) -> None:
@@ -299,15 +299,15 @@ class AssembledTasks(ReportTasks):
         context: PipelineContext,
         record2record: Record2Record,
         environ: Mapping[str, str],
-    ) -> AssembledTasks:
+    ) -> AssembledSamples:
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         return self.assembly.build(context, context.require_score())
 
 
-class SlotJobData(Task2Job):
+class SlotJobData(Sample2Job):
     @classmethod
     def from_config(
         cls,
@@ -315,14 +315,14 @@ class SlotJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class SlotGroupRecord2Record(ReportRecord2Record):
@@ -356,19 +356,19 @@ class OrderedMixRecord2Record(ReportRecord2Record):
 # Each recipe builds its three stages. These specs name the same stages, as the recipe would.
 
 THRESHOLD_STAGES = PipelineSpec(
-    record2record=ReportRecord2Record, record2task=ThresholdTasks, task2job=ThresholdJobData
+    record2record=ReportRecord2Record, record2sample=ThresholdSamples, sample2job=ThresholdJobData
 )
 SLOT_GROUP_STAGES = PipelineSpec(
-    record2record=SlotGroupRecord2Record, record2task=AssembledTasks, task2job=SlotJobData
+    record2record=SlotGroupRecord2Record, record2sample=AssembledSamples, sample2job=SlotJobData
 )
 ORDERED_MIX_STAGES = PipelineSpec(
-    record2record=OrderedMixRecord2Record, record2task=AssembledTasks, task2job=SlotJobData
+    record2record=OrderedMixRecord2Record, record2sample=AssembledSamples, sample2job=SlotJobData
 )
 DISTILL_STAGES = PipelineSpec(
-    record2record=ExclusiveReportRecord2Record, record2task=DistillTasks, task2job=DistillJobData
+    record2record=ExclusiveReportRecord2Record, record2sample=DistillSamples, sample2job=DistillJobData
 )
 #: The harness-evolution pipeline of reported traces.
-TRACE_STAGES = PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2job=TraceJobData)
+TRACE_STAGES = PipelineSpec(record2record=ReportRecord2Record, record2sample=TraceSamples, sample2job=TraceJobData)
 
 
 @dataclass(frozen=True)
@@ -415,7 +415,7 @@ class ToyJudging(RecordJudging):
         raise AssertionError("the immediate worker judges without the coroutine")
 
 
-class ToyTasks(JudgedTasks):
+class ToySamples(JudgedSamples):
     """One-token stub samples; a judgment that is not good cannot train."""
 
     @classmethod
@@ -426,11 +426,11 @@ class ToyTasks(JudgedTasks):
         context: PipelineContext,
         record2record: Record2Record,
         environ: Mapping[str, str],
-    ) -> ToyTasks:
+    ) -> ToySamples:
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectorySample | None:
         if not isinstance(judgment, ToyJudgment) or not judgment.good:
             return None
         return policy_trajectory(
@@ -443,7 +443,7 @@ class ToyTasks(JudgedTasks):
         )
 
 
-class ToyJobData(Task2Job):
+class ToyJobData(Sample2Job):
     @classmethod
     def from_config(
         cls,
@@ -451,14 +451,14 @@ class ToyJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class ToyJudgingRecord2Record(JudgingRecord2Record):
@@ -473,7 +473,9 @@ class ToyJudgingRecord2Record(JudgingRecord2Record):
 
 
 #: Trains the judged records of ``ToyJudging``.
-TOY_COMPUTED_STAGES = PipelineSpec(record2record=ToyJudgingRecord2Record, record2task=ToyTasks, task2job=ToyJobData)
+TOY_COMPUTED_STAGES = PipelineSpec(
+    record2record=ToyJudgingRecord2Record, record2sample=ToySamples, sample2job=ToyJobData
+)
 
 
 def turn(record_id: str, *, version: str, completes: str | None = None, track: bool = True) -> AgentRecord:
@@ -706,9 +708,9 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
     grid = {"groups_per_step": 2, "rollouts_per_group": 2}
     sdpo = stage_configs(
         record2record={"groups_per_step": 1, "rollouts_per_group": 2},
-        record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 18432},
+        record2sample={"tokenizer_path": "/models/s", "max_teacher_tokens": 18432},
     )
-    distill = stage_configs(record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 30})
+    distill = stage_configs(record2sample={"tokenizer_path": "/models/s", "max_teacher_tokens": 30})
     return {
         "ungrouped": (ungrouped_stream(), ungrouped_steps()),
         "ungrouped_reload": (ungrouped_stream(), [*ungrouped_steps()[:5], RELOAD, *ungrouped_steps()[5:]]),

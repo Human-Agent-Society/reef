@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 
 from reef.core.plugins import ConfiguredPlugin, PluginConfigError, PluginReference
-from reef.evaluation.harness import EpisodeScorer, VerifierRewardScorer
+from reef.evaluation.harness import RolloutScorer, VerifierRewardScorer
 from reef.train.cordis_backend.strategies import Proposer
 
 MODULE = "tests.core.test_plugins"
 
 
-class FixedScore(EpisodeScorer):
+class FixedScore(RolloutScorer):
     def __init__(self, value: float = 0.0) -> None:
         self.value = value
 
@@ -23,7 +23,7 @@ class FixedScore(EpisodeScorer):
         return self.value
 
 
-class NeedsArgument(EpisodeScorer):
+class NeedsArgument(RolloutScorer):
     def __init__(self, value: float) -> None:
         self.value = value
 
@@ -31,7 +31,7 @@ class NeedsArgument(EpisodeScorer):
         return self.value
 
 
-class AbstractScorer(EpisodeScorer):
+class AbstractScorer(RolloutScorer):
     pass
 
 
@@ -41,27 +41,27 @@ def plain_function(task, result):
 
 @pytest.mark.unit
 def test_the_string_form_builds_with_no_config() -> None:
-    scorer = EpisodeScorer.from_setting(f"{MODULE}:FixedScore", setting="evolution.evaluate")
+    scorer = RolloutScorer.from_setting(f"{MODULE}:FixedScore", setting="evolution.evaluate")
     assert isinstance(scorer, FixedScore) and scorer.value == 0.0
 
 
 @pytest.mark.unit
 def test_the_mapping_form_hands_its_config_to_from_config() -> None:
     setting = {"module": f"{MODULE}:FixedScore", "config": {"value": 0.5}}
-    scorer = EpisodeScorer.from_setting(setting, setting="evolution.evaluate")
+    scorer = RolloutScorer.from_setting(setting, setting="evolution.evaluate")
     assert isinstance(scorer, FixedScore) and scorer.value == 0.5
 
 
 @pytest.mark.unit
 def test_a_reference_is_checked_without_building_the_plugin() -> None:
-    reference = EpisodeScorer.reference(f"{MODULE}:NeedsArgument", setting="evolution.evaluate")
+    reference = RolloutScorer.reference(f"{MODULE}:NeedsArgument", setting="evolution.evaluate")
     assert reference == PluginReference(NeedsArgument)
 
 
 @pytest.mark.unit
 def test_python_callers_may_pass_a_built_instance() -> None:
     scorer = VerifierRewardScorer()
-    assert EpisodeScorer.from_setting(scorer, setting="evolution.evaluate") is scorer
+    assert RolloutScorer.from_setting(scorer, setting="evolution.evaluate") is scorer
 
 
 @pytest.mark.unit
@@ -78,8 +78,8 @@ def test_the_default_from_config_refuses_config() -> None:
         (None, r"must be 'package\.module:ClassName' or a mapping"),
         ("no-colon", r"must be 'package\.module:ClassName'"),
         (f"{MODULE}:Missing", r"cannot import evolution\.evaluate"),
-        (f"{MODULE}:plain_function", r"must name a class that inherits EpisodeScorer"),
-        (f"{MODULE}:Proposer", r"must name a class that inherits EpisodeScorer"),
+        (f"{MODULE}:plain_function", r"must name a class that inherits RolloutScorer"),
+        (f"{MODULE}:Proposer", r"must name a class that inherits RolloutScorer"),
         (f"{MODULE}:AbstractScorer", r"names an abstract class"),
         ({"module": f"{MODULE}:FixedScore", "extra": 1}, r"unknown key\(s\) extra"),
         ({"module": f"{MODULE}:FixedScore", "config": []}, r"evolution\.evaluate\.config must be a mapping"),
@@ -87,7 +87,7 @@ def test_the_default_from_config_refuses_config() -> None:
 )
 def test_an_unusable_setting_is_refused(setting, match) -> None:
     with pytest.raises(PluginConfigError, match=match):
-        EpisodeScorer.from_setting(setting, setting="evolution.evaluate")
+        RolloutScorer.from_setting(setting, setting="evolution.evaluate")
 
 
 @pytest.mark.unit

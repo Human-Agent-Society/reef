@@ -9,10 +9,11 @@ shared contracts live in ``reef.core.evaluation`` and are re-exported here.
 Runtimes import those contracts directly; this package owns the built-in
 evaluators, selectors, and configuration machinery.
 
-``harness`` measures harness candidates by running evaluation episodes. It
-holds ``HarnessCandidate``, its evaluator ``HarnessEpisodeEvaluator``, the
-``EpisodeScorer`` contract that a method supplies, and the ``score_comparison``
-and ``floor`` selection policies.
+``harness`` measures harness candidates by running evaluation rollouts. It
+holds ``HarnessCandidate``, its evaluator ``HarnessRolloutEvaluator``, the
+``RolloutScorer`` contract that a method supplies, and the ``score_comparison``
+and ``floor`` selection policies. ``artifact_endpoint`` answers the model calls
+of an artifact evaluation's rollouts from the release that it evaluates.
 """
 
 from reef.core.evaluation import (

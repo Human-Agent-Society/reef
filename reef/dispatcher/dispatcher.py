@@ -6,7 +6,8 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, Thread
@@ -16,7 +17,7 @@ from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
 from reef.dispatcher.errors import TrainingErrors
@@ -327,8 +328,8 @@ class Dispatcher(ScenarioLifecycle):
             pipeline = current.trainer.pipeline
             return {
                 "scenario": scenario,
-                # The key keeps its name for callers; the value names the recipe's task-to-job stage.
-                "processor": type(pipeline.task2job).__name__,
+                # The key keeps its name for callers; the value names the recipe's sample-to-job stage.
+                "processor": type(pipeline.sample2job).__name__,
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
@@ -394,7 +395,7 @@ class Dispatcher(ScenarioLifecycle):
             return stored
 
     def accept_trajectories(
-        self, scenario: str, trajectories: tuple[tuple[str, TrajectoryItem], ...], *, release_id: str | None = None
+        self, scenario: str, trajectories: tuple[tuple[str, TrajectorySample], ...], *, release_id: str | None = None
     ) -> None:
         """Save uploaded ``(trajectory_id, trajectory)`` pairs in one transaction, then wake their consumer."""
         if not trajectories:
@@ -418,6 +419,27 @@ class Dispatcher(ScenarioLifecycle):
             published = ingest.append_tasks(current, directories, split)
             self.local_workers.wake(current)
             return published
+
+    @contextmanager
+    def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
+        """The loaded scenario ``scenario``, loaded again when it was unloaded, held under its lock.
+
+        Raise ``UnknownScenario`` when the scenario does not exist. The caller must not keep the scenario, or its
+        storage session, after the block: an unload closes the session.
+        """
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            yield current
+
+    def set_artifact_evaluation(self, scenario: str, settings: Mapping[str, object] | None) -> None:
+        """Store the settings that Reef evaluates each new artifact of ``scenario`` with; ``None`` stops it."""
+        self.registry.set_artifact_evaluation(scenario, settings)
+
+    def artifact_evaluation(self, scenario: str) -> Mapping[str, object] | None:
+        """The stored settings that Reef evaluates each new artifact of ``scenario`` with, or ``None``."""
+        return self.registry.artifact_evaluation(scenario)
 
     def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
         """The scenario's imported tasks in publication order, each with whether it trained."""

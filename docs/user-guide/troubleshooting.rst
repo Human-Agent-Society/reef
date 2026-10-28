@@ -64,7 +64,7 @@ them does not give one generation more time.
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``pipeline.task2job.config.job_samples`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether job data is ready (``job_data_ready``), and its ``processor`` entry compares ``ready_samples`` with ``job_samples``. When more samples wait than ``pipeline.task2job.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``pipeline.sample2job.config.job_samples`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether job data is ready (``job_data_ready``), and its ``processor`` entry compares ``ready_samples`` with ``job_samples``. When more samples wait than ``pipeline.sample2job.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
@@ -91,7 +91,7 @@ Harness evolution
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 
-**no skill mutation passed the selection.** A step ran and the candidate did not win. Read the step's episodes in the service log. Both sides scoring nothing means the episodes could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or an episode exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
+**no skill mutation passed the selection.** A step ran and the candidate did not win. Read the step's rollouts in the service log. Both sides scoring nothing means the rollouts could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
 
 **GET /reef/harness returns 404.** Nothing has been published yet, or the scenario's recipe serves no files. The catalog at ``GET /reef/harness/releases`` lists what exists.
 

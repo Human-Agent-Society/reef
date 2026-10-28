@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass
 
-from recipes.opd.processor import OPDTasks
+from recipes.opd.processor import OPDSamples
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.task2job import DistillJobData
+from reef.sample2job import DistillJobData
 from reef.train.pipeline import PipelineSpec
 
 
@@ -16,9 +16,9 @@ class OPDRecipe(WeightTrainingRecipe):
 
     A report references one inference and leaves ``teacher_context`` empty.
     The teacher reads the recorded prompt and response ids, so the recipe
-    needs no tokenizer. Its stages are ``ExclusiveReportRecord2Record``, ``OPDTasks``,
+    needs no tokenizer. Its stages are ``ExclusiveReportRecord2Record``, ``OPDSamples``,
     and ``DistillJobData``; the deployment's ``pipeline`` section gives their
-    config: ``max_teacher_tokens`` in ``record2task``. The backend's batch
+    config: ``max_teacher_tokens`` in ``record2sample``. The backend's batch
     size (Slime ``--global-batch-size``) of responses forms one optimizer
     step; the caller waits for publication before sampling the next batch. The teacher
     checkpoint and the divergence are the backend's ``--opd-*`` training
@@ -37,4 +37,6 @@ class OPDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ExclusiveReportRecord2Record, record2task=OPDTasks, task2job=DistillJobData)
+        return PipelineSpec(
+            record2record=ExclusiveReportRecord2Record, record2sample=OPDSamples, sample2job=DistillJobData
+        )

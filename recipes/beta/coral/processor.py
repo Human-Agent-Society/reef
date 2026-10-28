@@ -15,7 +15,7 @@ the task seed.
 
 Token/loss-mask/logprob materialization is reef's ``SampleAssembly`` over the
 referenced INFERENCE records; a CORAL attempt is a multi-call trajectory, so
-``CoralTasks`` turns multi-turn assembly on by default.
+``CoralSamples`` turns multi-turn assembly on by default.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ from reef.core.config import config_option
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
-from reef.record2task import Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2job import Task2Job, Task2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
+from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +72,15 @@ def attempt_release_ids(context: ReportContext) -> set[str]:
 
 @dataclass(frozen=True)
 class CoralAssemblySettings(SampleAssemblySettings):
-    """The config of ``CoralTasks``: the sample-assembly keys, with multi-turn samples on by default."""
+    """The config of ``CoralSamples``: the sample-assembly keys, with multi-turn samples on by default."""
 
     accept_multi_turn_policy_samples: bool = config_option(
         True, help="Train on an attempt that references several model calls as one multi-turn sample."
     )
 
 
-class CoralTasks(ReportTasks):
-    """One scored attempt as one task, with its CORAL metadata, sibling group, and release.
+class CoralSamples(ReportSamples):
+    """One scored attempt as one sample, with its CORAL metadata, sibling group, and release.
 
     Config: the sample-assembly keys of ``CoralAssemblySettings``.
     """
@@ -100,7 +100,7 @@ class CoralTasks(ReportTasks):
     ) -> Self:
         return cls(CoralAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         coral = coral_metadata(context)
         if coral is None:
             raise ValueError("CoralJobData requires metadata.coral with a commit_hash")
@@ -113,7 +113,7 @@ class CoralTasks(ReportTasks):
         )
 
 
-class CoralJobData(Task2Job):
+class CoralJobData(Sample2Job):
     """Complete CORAL sibling groups, one job's data: the siblings of one parent are one relative-reward group.
 
     The record stage decides when a group is complete (``group_size`` in
@@ -128,15 +128,15 @@ class CoralJobData(Task2Job):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         data = JobData(data_id, items)
-        groups: dict[str, list[TrajectoryItem]] = {}
+        groups: dict[str, list[TrajectorySample]] = {}
         for sample in trajectories(data):
             groups.setdefault(str(sample.metadata["coral"]["group"]), []).append(sample)
         for parent, group in groups.items():
@@ -156,5 +156,5 @@ class CoralJobData(Task2Job):
             )
         return replace(
             data,
-            items=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(data)),
+            samples=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(data)),
         )

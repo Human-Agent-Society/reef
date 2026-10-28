@@ -1,7 +1,7 @@
 """Focused unit tests for the computed-feedback pipeline's state machine.
 
 tests.recipes.openclawrl.test_openclawrl_contracts pins the real recipe's behavior; these tests pin the
-mechanics of a pipeline with a ``JudgingRecord2Record`` and ``JudgedTasks`` with a
+mechanics of a pipeline with a ``JudgingRecord2Record`` and ``JudgedSamples`` with a
 toy recipe, where recipe policy cannot blur the state machine.
 """
 
@@ -19,10 +19,10 @@ from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, RecordJudging
-from reef.record2task import JudgedTasks
-from reef.task2job import Task2Job
+from reef.record2sample import JudgedSamples
+from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 pytestmark = pytest.mark.unit
 
@@ -75,10 +75,10 @@ class _ToyJudging(RecordJudging):
         return _Judgment(job.receipt)
 
 
-class _ToyTasks(JudgedTasks):
+class _ToySamples(JudgedSamples):
     """One-token stub samples; a judgment that is not good cannot train."""
 
-    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> TrajectorySample | None:
         if not judgment.good:
             return None
         return policy_trajectory(
@@ -91,11 +91,11 @@ class _ToyTasks(JudgedTasks):
         )
 
 
-class ToyJobData(Task2Job):
+class ToyJobData(Sample2Job):
     """Batches the judged samples in the order that the stage selected them."""
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class _ToyProcessor(TrainingPipeline):
@@ -105,8 +105,8 @@ class _ToyProcessor(TrainingPipeline):
         super().__init__(
             context,
             record2record=JudgingRecord2Record(_ToyJudging(), worker, max_staleness=max_staleness),
-            record2task=_ToyTasks(),
-            task2job=ToyJobData(context, None, None),
+            record2sample=_ToySamples(),
+            sample2job=ToyJobData(context, None, None),
         )
 
 
@@ -133,7 +133,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     worker.push(_Judgment("r1"))
     assert processor.ready(1)
     batch = processor.build_job_data(1)
-    assert source_record_id(batch.items[0]) == "r1"
+    assert source_record_id(batch.samples[0]) == "r1"
     processor.acknowledge(batch.data_id)
     decision = processor.releasable_record_ids()
     assert "r1" in decision
