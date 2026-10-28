@@ -50,6 +50,11 @@ Serving and training each read artifacts of the chain:
   After each job or step, the trainer moves its start to its own newest
   output. ``train-from`` sets the start to an existing artifact and leaves the
   active release alone.
+- An *import* makes an artifact from a directory that came from outside
+  Reef. It publishes a release beside the chain that binds the new artifact
+  and the active release's other components. It appends an ``import``
+  record and leaves the active release, the chain tip and every training
+  start alone.
 
 The training component decides which checkpoints a job saves. A Slime or
 Tinker job saves a checkpoint every ``save_interval`` optimizer steps when
@@ -81,8 +86,9 @@ repository keeps two heads: the active release, and the *chain tip*. The chain
 tip is the newest release on the chain, and the parent of the next release
 that a training step publishes. A training step that makes an artifact and
 activates it moves both heads to its release. The release of an inactive
-artifact, and the release that an activation publishes in a scenario of
-several components, are published beside the chain: they move neither the
+artifact, the release that an import publishes, and the release that an
+activation publishes in a scenario of several components, are published
+beside the chain: they move neither the
 chain tip nor the backend head. Heads move only by compare-and-swap:
 ``activate`` requires the expected active release, ``publish`` requires the
 expected parent, and the push carries a lease, so a stale publication

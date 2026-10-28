@@ -29,7 +29,7 @@ from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingMethod
-from reef.runtime.jobs import TrainingComponent
+from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
@@ -474,10 +474,13 @@ class WeightTrainingRecipe(Recipe):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
 
     def build_surface(self, scenario: str) -> Surface:
+        layout = ReleaseLayout(self.training_component)
         if self.runtime.per_scenario_adapters:
             # Every scenario owns an adapter on the shared base: route by scenario.
-            return create_weight_surface(scenario=scenario, runtime=self.runtime, kind=self.runtime.served_weight_kind)
-        return create_weight_surface(kind=self.runtime.served_weight_kind)
+            return create_weight_surface(
+                scenario=scenario, runtime=self.runtime, kind=self.runtime.served_weight_kind, layout=layout
+            )
+        return create_weight_surface(kind=self.runtime.served_weight_kind, layout=layout)
 
     def base_artifact_source(self) -> BaseArtifactSource:
         """The training component's untrained checkpoint (``TrainingComponent.base_artifact_source``)."""

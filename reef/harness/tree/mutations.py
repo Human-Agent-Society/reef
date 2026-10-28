@@ -175,6 +175,35 @@ def admit_mutations(
     return admitted, None
 
 
+def entries_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDescriptor) -> str | None:
+    """Why ``entries`` cannot serve as one whole tree under ``descriptor``, or None when they can.
+
+    The seed's admission over a fresh loader, touching no live state: each
+    entry has a non-empty string ``id`` and ``name``, no two share an ``id``,
+    each meets ``_load_error``, the entries render, and a native host would
+    boot them (``_native_refusal``)."""
+    seen: set[str] = set()
+    for options in entries:
+        for key in ("id", "name"):
+            value = options.get(key)
+            if not isinstance(value, str) or not value:
+                return f"entry {options!r} requires a non-empty string {key!r}"
+        if options["id"] in seen:
+            return f"the entries name {options['id']!r} twice"
+        seen.add(str(options["id"]))
+    loader = Loader(Context(), NODE_KINDS.get)
+    loader.root.update([dict(options) for options in entries])
+    for options in entries:
+        error = _load_error(loader, str(options["id"]), descriptor)
+        if error is not None:
+            return f"entry {options['id']!r} rejected: {error}"
+    try:
+        render_composition(nodes_from_entries(entries), descriptor)
+    except RenderError as error:
+        return str(error)
+    return _native_refusal(entries, descriptor)
+
+
 def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDescriptor) -> str | None:
     """The first config entry a native host would refuse at boot, None when the tree is not native or all pass.
 

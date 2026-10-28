@@ -73,6 +73,9 @@ event that makes a version servable:
 | ``validator.validate(artifact)``                  | ``scenario/committer.py``           | Admit a component before it is published or activated. Raising       |
 |                                                   |                                     | rejects the step or the activation; the default accepts anything.    |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
+| ``layout.check(directory)``                       | ``scenario/committer.py``           | Check an imported directory against the component's release layout   |
+|                                                   |                                     | before admission. Without ``layout``, the component takes no import. |
++---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``inference.prepare_request(...)``                | ``service/request_service.py``      | Address or inject the frozen artifact before forwarding. The         |
 |                                                   |                                     | returned request is both forwarded and recorded.                     |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+

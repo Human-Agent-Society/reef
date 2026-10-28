@@ -10,10 +10,11 @@ import pytest
 
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.core.errors import ReefError
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.deployment import InferenceService
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, RuntimeContractError
 from reef.runtime.residency import AdapterCapacityExhausted, AdapterResidencyError
-from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime, FullWeightServingRuntime
+from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
 from reef.surface.adapter import adapter_name, parse_adapter_name
 
 

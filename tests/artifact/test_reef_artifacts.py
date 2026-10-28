@@ -225,6 +225,13 @@ def test_parse_huggingface_source(value, expected) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("value", "message"), [("hf://model", "org/model syntax"), ("hf://org/model@", "non-empty")])
+def test_parse_huggingface_source_refuses_another_form(value, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_huggingface_source(value)
+
+
+@pytest.mark.unit
 def test_download_huggingface_snapshot_returns_locked_version(tmp_path: Path) -> None:
     snapshot = tmp_path / "models--org--model" / "snapshots" / "locked-sha"
     snapshot.mkdir(parents=True)
