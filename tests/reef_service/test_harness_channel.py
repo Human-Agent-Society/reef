@@ -6,6 +6,7 @@ binary through the real adapter path, and the reads go through the real HTTP app
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -176,6 +177,10 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
             assert pi["binary"] == "pi" and pi["trajectory_format"] == "pi-session-jsonl"
             assert pi["install"]["package"].startswith("@")
             assert isinstance(pi["model_bindings"], list) and pi["model_bindings"]
+            # A client finds a person's harness under the roots, and copies the files the patterns name.
+            assert pi["roots"] == {"pi-agent": {"variable": "PI_CODING_AGENT_DIR", "default": "~/.pi/agent"}}
+            assert "pi-agent/skills/{name}/SKILL.md" in pi["files"] and "pi-agent/settings.json" not in pi["files"]
+            assert by_name["hermes"]["roots"] == {} and by_name["hermes"]["files"] == []
         finally:
             await client.close()
 
@@ -198,7 +203,7 @@ def test_the_served_files_are_the_evaluated_tree_rendered_for_the_adapter_and_th
             pulled = await source.json()
             assert pulled["files"] == dict(TREE_V1.files) and pulled["release_id"] == manifest["release_id"]
             invalid = await client.get("/reef/harness", params={"form": "zip"}, headers=HEADERS)
-            assert invalid.status == 400 and "form must be 'rendered' or 'source'" in await invalid.text()
+            assert invalid.status == 400 and "form must be 'rendered', 'source' or 'client'" in await invalid.text()
         finally:
             await client.close()
 
@@ -486,4 +491,19 @@ def test_descriptor_install_fields_constrain_their_charset(tmp_path, adapter: st
 def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) -> None:
     target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("writable_paths", [path]))
     with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+        load_descriptor(target)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adapter", "roots", "message"),
+    [
+        ("pi", {"pi": "~/.pi/agent"}, "root 'pi' needs exactly one 'env' variable"),
+        ("pi", {"pi-agent": "pi/agent"}, "must be absolute or under ~/"),
+        ("hermes", {"hermes": "~/.hermes"}, "renders 'hermes-commands/{name}/SKILL.md' under no declared root"),
+    ],
+)
+def test_descriptor_roots_place_every_rendered_file(tmp_path, adapter: str, roots, message: str) -> None:
+    target = descriptor_with(tmp_path, adapter, lambda data: data.__setitem__("roots", roots))
+    with pytest.raises(DescriptorError, match=re.escape(message)):
         load_descriptor(target)

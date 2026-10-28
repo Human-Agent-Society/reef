@@ -97,7 +97,11 @@ Harness evolution
 
 **A client captures no receipts, so a report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
 
-**An agent on a pulled tree gets HTTP 400 ``missing or empty x-reef-scenario``.** The pulled files carry no endpoint and no credential, so the client binds the agent's model itself. Every model call must reach Reef with the ``x-reef-scenario`` header and the token. Configure the agent's provider to send both, or run a local proxy in front of Reef that adds them (`Use a published tree <evolve-your-harness.rst#use-a-published-tree>`__).
+**An agent on a pulled tree gets HTTP 400 ``missing or empty x-reef-scenario``.** The default ``GET /reef/harness`` files carry no endpoint and no credential, so the client binds the agent's model itself. Install with ``reef-client harness connect``, or pull ``?form=client&service_url=<reef>``: those files send each call to ``<reef>/reef/scenarios/<scenario>/v1``, which names the scenario in the path. A binding of your own must send the ``x-reef-scenario`` header and the token (`Use a published tree <evolve-your-harness.rst#use-a-published-tree>`__).
+
+**``reef-client harness connect`` says it did not import your harness.** The scenario has releases beyond its first, and an import would replace what Reef made. ``connect`` installs the head instead. Edit the install and ``reef-client harness push`` to publish your files on top of the head, or connect to a new scenario name.
+
+**``reef-client harness pull`` refuses with ``files changed since release``.** The install has edits that are not pushed. ``push`` publishes them, and ``pull --force`` drops them.
 
 Docs and links
 --------------

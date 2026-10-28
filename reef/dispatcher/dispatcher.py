@@ -337,6 +337,13 @@ class Dispatcher(ScenarioLifecycle):
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).rollback(release_id, operation=operation)
 
+    def import_release(
+        self, scenario: str, artifact: Artifact, *, component: str, metrics: Mapping[str, Any]
+    ) -> ArtifactRef:
+        """Publish a person's own ``component`` tree as ``scenario``'s new head, under the scenario's lock."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_release(artifact, component=component, metrics=metrics)
+
     def current_artifact(
         self,
         scenario: str,

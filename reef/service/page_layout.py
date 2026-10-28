@@ -109,6 +109,7 @@ STATUS_LABELS = {
     "creation": "Starting point",
     "promote": "Promoted by a person",
     "rollback": "Rolled back by a person",
+    "import": "Imported by a person",
     "recovery": "Recovered at boot",
 }
 

@@ -20,6 +20,10 @@ install:
   version: "1.18.18"
   binary_path: "node_modules/.bin/opencode"
 argv: ["run", "--format", "json", "--auto", "{prompt}"]
+# Where the render root lives on a person's machine when its env variable is unset. A client
+# reads the person's harness there, and runs the agent with the variable at its install.
+roots:
+  opencode: "~/.config/opencode"
 env:
   OPENCODE_CONFIG_DIR: "{root}/opencode"
   XDG_CONFIG_HOME: "{root}/xdg-config"

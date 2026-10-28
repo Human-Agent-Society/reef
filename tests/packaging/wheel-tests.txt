@@ -31,6 +31,7 @@ tests/harness/test_harness_evolve_runner.py
 tests/harness/test_harness_model_route.py
 tests/harness/test_harness_read.py
 tests/harness/test_harness_render.py
+tests/harness/test_harness_sync.py
 tests/harness/test_harness_tree.py
 tests/harness/test_model_binding.py
 tests/harness/test_native_enforce.py
@@ -98,6 +99,7 @@ tests/reef_service/test_harness_example.py
 tests/reef_service/test_harness_recipe.py
 tests/reef_service/test_harness_requests.py
 tests/reef_service/test_harness_step_record.py
+tests/reef_service/test_harness_sync.py
 tests/reef_service/test_learning_inspection.py
 tests/reef_service/test_local_inference_startup.py
 tests/reef_service/test_manual_training.py

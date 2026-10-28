@@ -88,6 +88,7 @@ RESULT_WORDS = {
     "creation": "The tree this scenario started from, before any step ran.",
     "promote": "A person promoted a pending release, which now serves.",
     "rollback": "A person moved the head back to an earlier release.",
+    "import": "A person published the harness from their machine, which now serves. Reef did not evaluate it.",
     "recovery": "The head this process recovered at boot.",
 }
 
@@ -334,6 +335,8 @@ def why_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
             "creation": "The tree this scenario started from; no step made it.",
             "promote": f"A person promoted release {target} after reading it.",
             "rollback": f"A person rolled the head back to release {target}.",
+            "import": "A person published the harness from their machine; Reef checked its files and did not "
+            "evaluate it.",
             "recovery": "The head this process recovered at boot.",
         }
         return f"<p>{escape(words.get(str(operation), f'A {operation} commit.'))}</p>"
@@ -567,10 +570,11 @@ def setup_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequenc
 
 
 def ran_on(other: Mapping[str, Any], release_id: Any) -> bool:
-    """Whether ``other`` is a child of ``release_id``: a step evaluated on it, or a promote or rollback made on it."""
+    """Whether ``other`` is a child of ``release_id``: a step evaluated on it, or a promote, rollback or import made
+    on it."""
     if not release_id:
         return False
-    if other.get("operation") in ("promote", "rollback"):
+    if other.get("operation") in ("promote", "rollback", "import"):
         return other.get("parent_release_id") == release_id
     # Not the parent: a rejected or skipped row copies the head's ref, so its parent is the grandparent.
     return before_release_id(other) == release_id

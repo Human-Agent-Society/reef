@@ -15,6 +15,10 @@ install:
   version: "0.84.2"
   binary_path: "node_modules/.bin/pi"
 argv: ["--mode", "json", "-p", "{prompt}"]
+# Where the render root lives on a person's machine when its env variable is unset. A client
+# reads the person's harness there, and runs the agent with the variable at its install.
+roots:
+  pi-agent: "~/.pi/agent"
 env:
   PI_CODING_AGENT_DIR: "{root}/pi-agent"
   PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"

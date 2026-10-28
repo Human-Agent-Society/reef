@@ -89,6 +89,8 @@ class Part:
     review: bool = False
     #: The full match pattern of ``path``.
     matcher: re.Pattern[str] = field(init=False, repr=False, compare=False)
+    #: The full match pattern of ``renders``; ``None`` for a config part.
+    render_matcher: re.Pattern[str] | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not re.fullmatch(PART_NAME_PATTERN, self.name):
@@ -103,11 +105,20 @@ class Part:
         if not isinstance(self.holds, str) or not self.holds.strip():
             raise TreeLayoutError(f"part {self.name!r} needs holds: what its file holds, in one line")
         object.__setattr__(self, "matcher", template_pattern(self.path))
+        object.__setattr__(self, "render_matcher", None if self.renders is None else template_pattern(self.renders))
 
     def match(self, path: str) -> str | None:
         """The name ``path`` holds in this part's ``{name}``, ``""`` for a part without one, or ``None`` when
         ``path`` is not a path of this part."""
         found = self.matcher.fullmatch(path)
+        if found is None:
+            return None
+        return found.groupdict().get("name") or ""
+
+    def match_render(self, path: str) -> str | None:
+        """The name a rendered ``path`` holds in this part's ``{name}``, ``""`` for a part without one, or
+        ``None`` when ``path`` is not where this part renders (always ``None`` for a config part)."""
+        found = None if self.render_matcher is None else self.render_matcher.fullmatch(path)
         if found is None:
             return None
         return found.groupdict().get("name") or ""
@@ -156,7 +167,7 @@ class TreeLayout:
     order. No tree path is a path of two parts, and at most one part has
     the ``config`` format.
     Purpose: an ``AdapterDescriptor`` holds its adapter's layout; ``locate``
-    gives each tree path its part.
+    gives each tree path its part, and ``locate_render`` each rendered path.
     """
 
     parts: Mapping[str, Part]
@@ -176,6 +187,19 @@ class TreeLayout:
         """What ``path`` is in this tree, or ``None`` when no part takes it."""
         for part in self.parts.values():
             name = part.match(path)
+            if name is not None:
+                return TreeLocation(part, name)
+        return None
+
+    def locate_render(self, path: str) -> TreeLocation | None:
+        """The part that renders to ``path`` and the name it holds, or ``None`` when no part renders there.
+
+        A config part renders no path of its own. When two parts render to one path, such as Codex's skills and
+        commands, the part declared first takes it: ``locate(part.tree_path(name))`` of the result renders to
+        ``path`` again.
+        """
+        for part in self.parts.values():
+            name = part.match_render(path)
             if name is not None:
                 return TreeLocation(part, name)
         return None

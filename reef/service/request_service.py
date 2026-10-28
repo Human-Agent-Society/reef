@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
+from reef.harness.sync import client_files, import_files
+from reef.harness.tree import HarnessTree, validate_tree
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
@@ -31,7 +35,10 @@ from reef.service.request_page import STATE_WORDS, build_request_page, request_s
 from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.capabilities import StepProgressReader, StepRecords
+from reef.train.harness_backend.records import bounded
+from reef.train.harness_backend.release import patch_parts
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -604,7 +611,11 @@ class RequestService:
         )
 
     def harness_manifest(
-        self, headers: Mapping[str, str], release_id: str | None = None, form: str = "rendered"
+        self,
+        headers: Mapping[str, str],
+        release_id: str | None = None,
+        form: str = "rendered",
+        service_url: str | None = None,
     ) -> dict[str, Any]:
         """The served tree plus its parent release and evaluation metrics.
 
@@ -612,18 +623,108 @@ class RequestService:
         serving head, so a consumer can pin or roll back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
         naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
-        is the release rendered for the scenario's adapter, and ``source`` is
-        its source tree, the paths a patch names. The ``evaluation`` field
-        carries the metrics of the training step that published the release,
-        so a consumer can audit what a pulled tree changed and why it was
-        admitted before running it. Read-only: never creates a scenario.
+        is the release rendered for the scenario's adapter, ``source`` is
+        its source tree, the paths a patch names, and ``client`` is the
+        release rendered with a model binding at ``service_url``'s route of
+        the scenario (``reef.harness.sync.client_files``), which a client
+        installs. The ``evaluation`` field carries the metrics of the
+        training step that published the release, so a consumer can audit
+        what a pulled tree changed and why it was admitted before running
+        it. Read-only: never creates a scenario.
         """
-        if form not in ("rendered", "source"):
-            raise ValueError(f"form must be 'rendered' or 'source', got {form!r}")
+        if form not in ("rendered", "source", "client"):
+            raise ValueError(f"form must be 'rendered', 'source' or 'client', got {form!r}")
+        if form == "client" and not service_url:
+            raise ValueError("form=client needs service_url: the address the client reaches Reef at")
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(
-            scenario, release_id or self.harness_release_id(scenario), source=form == "source"
+        manifest = self._harness_manifest_for_scenario(
+            scenario, release_id or self.harness_release_id(scenario), source=form != "rendered"
         )
+        if form == "client" and service_url is not None:
+            backend = self.harness_backend(scenario)
+            scenario_url = f"{service_url.rstrip('/')}/reef/scenarios/{scenario.name}"
+            manifest["files"] = client_files(
+                HarnessTree(manifest["files"]), backend.descriptor, backend.models.served, scenario_url
+            )
+        return manifest
+
+    def harness_import(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish a person's harness files as the scenario's new head: ``POST /reef/harness/import``.
+
+        ``payload["files"]`` maps each file's path under the adapter's render
+        roots to its text. ``payload["base_release_id"]`` is the release the
+        client installed, or ``None`` for a client that installed none, which
+        only a scenario still at its creation release takes. Any other base
+        that is not the served head raises ``ArtifactConflict``: the client
+        pulls first, so an import never drops a release it has not seen. The
+        files become the tree that ``reef.harness.sync.import_files`` reads,
+        with the head's config files; a tree that fails validation raises
+        ``ValueError`` naming every problem. An import that changes nothing
+        publishes nothing. The answer names the head after the import, the
+        parent it was made on, whether it changed, the tree's paths, and the
+        imported paths no part takes.
+        """
+        files = payload.get("files")
+        if not isinstance(files, Mapping) or not all(
+            isinstance(path, str) and isinstance(text, str) for path, text in files.items()
+        ):
+            raise ValueError("files must map each path under the adapter's roots to the file's text")
+        base = payload.get("base_release_id")
+        if base is not None and (not isinstance(base, str) or not base):
+            raise ValueError("base_release_id must be the release the client installed, or null for none")
+        scenario = self._file_scenario(headers)
+        backend = self.harness_backend(scenario)
+        component = scenario.surface.files_component
+        if component is None:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+        head_id = self.harness_release_id(scenario)
+        if base is None and head_id != scenario.release_queries.creation_artifact.release_id:
+            raise ArtifactConflict(
+                f"scenario {scenario.name!r} has evolved to release {head_id}: install it before you import, "
+                "so the import does not replace what Reef made"
+            )
+        if base is not None and base != head_id:
+            raise ArtifactConflict(f"the head is release {head_id}, not {base}: pull it before you import")
+        head = HarnessTree(self._harness_manifest_for_scenario(scenario, head_id, source=True)["files"])
+        imported = import_files(files, head, backend.descriptor)
+        answer = {
+            "parent_release_id": head_id,
+            "files": sorted(imported.tree.files),
+            "ignored": list(imported.ignored),
+        }
+        if imported.tree == head:
+            return {**answer, "release_id": head_id, "changed": False}
+        validation = validate_tree(imported.tree, backend.descriptor)
+        if not validation.passed:
+            raise ValueError(f"the imported harness fails validation: {validation.message()}")
+        patch = head.diff(imported.tree)
+        directory = Path(tempfile.mkdtemp(prefix="reef-harness-import-"))
+        imported.tree.write(directory)
+        artifact = Artifact.local(directory)
+        try:
+            published = self._dispatcher.import_release(
+                scenario.name,
+                artifact,
+                component=component,
+                metrics={
+                    "import": {"files": len(imported.tree.files), "ignored": list(imported.ignored)},
+                    "patch": bounded(patch.to_json()),
+                    "patch_parts": patch_parts(patch, backend.descriptor),
+                },
+            )
+        finally:
+            artifact.discard()
+        return {**answer, "release_id": published.release_id, "changed": True}
+
+    def harness_backend(self, scenario: Scenario) -> HarnessBackend:
+        """The backend evolving the harness a client pulls; ArtifactNotFound when the recipe evolves no harness."""
+        backend = self.files_trainer(scenario).candidate_backend
+        if not isinstance(backend, HarnessBackend):
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} evolves no harness: the deployment's recipe is not a harness "
+                "evolution recipe"
+            )
+        return backend
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:

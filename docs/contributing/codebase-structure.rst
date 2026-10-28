@@ -337,19 +337,31 @@ The extension points those packages expose are in `Python API
   Put concrete inference engines and their request/control adapters in
   ``reef/inference/<integration>/``; put implementation tied to a concrete
   training stack in its own ``reef/train/<integration>/`` subtree.
-  ``reef/train/harness_backend/`` is the general harness evolution engine:
-  the step, its workspace, and the method contract.
-  ``reef/train/harness_backend/agent/`` runs the deployment's coding agent
-  for a method (``evolution.agent``, ``run_agent``) and holds
-  ``AgentMethod`` and ``protocol.md``, Reef's rules for every agent run.
-  ``reef/evaluation/harness/`` holds the harness evaluation, the history and
-  the publication policies, and ``reef/harness/tree/`` holds the source tree
-  the engine evolves. ``reef/harness/adapters/`` holds one directory per
-  agent: the ``tree.yaml`` that declares the parts of its tree, its
-  ``descriptor.yaml``, and its quirks. ``reef/harness/gateway.py`` is the
-  loopback gateway an agent process reaches its model and its tools
-  through; it defines ``ModelCalls``, the budget each model call spends.
-  ``reef/train/slime_backend/`` is the weights counterpart.
+  ``reef/train/slime_backend/`` trains weights.
+- Is it part of harness evolution? Each part has one owner.
+  ``reef/harness/tree/`` holds the tree that every part reads, and
+  ``reef/train/harness_backend/backend.py`` runs one step through evolve,
+  evaluation and release.
+
+  - Data: the training pipeline below turns the agent's recorded calls,
+    their reports and the uploaded tasks into a step's job data. Weight
+    training shares it; the harness backend only reads job data.
+  - Evolve: ``reef/train/harness_backend/evolve.py`` runs the method in the
+    step's workspace (``workspace.py``) and reads back the candidate tree.
+    ``contract.py`` is the method contract. ``agent/`` runs the deployment's
+    coding agent for a method (``evolution.agent``, ``AgentMethod``,
+    ``protocol.md``), and ``reef/harness/gateway.py`` is the loopback
+    gateway the agent reaches its model and tools through.
+  - Evaluation: ``reef/evaluation/harness/evaluator.py`` scores trees as
+    episodes, with the history as the score cache, and ``policy.py``
+    decides.
+  - Release: ``reef/train/harness_backend/release.py`` turns the decision
+    into the artifact that the scenario committer publishes, with review and
+    recheck.
+  - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
+    machine, in both directions, through the adapter's ``tree.yaml`` and the
+    ``roots`` of its ``descriptor.yaml`` (``reef/harness/adapters/``). The
+    client half is ``reef_client.harness``.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into samples? Put the
   shared contract in ``reef/record2sample/``. Does it shape samples into job data?

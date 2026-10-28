@@ -262,6 +262,15 @@ fields are:
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. It also turns off what would make an episode
   non-deterministic, such as the binary's own updater.
+- ``roots`` (optional) maps each render root to the directory where the
+  agent keeps it on a person's machine when its variable is unset, such as
+  ``pi-agent: "~/.pi/agent"``. The variable is the ``env`` entry set to
+  ``{root}/<name>`` (``PI_CODING_AGENT_DIR``). With ``roots``, every part
+  that renders a path must render it under a declared root, and
+  ``reef-client harness`` can import a person's harness and run the agent
+  on an install (see `Use a published tree
+  <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__). Without
+  it, the adapter does not sync with a person's machine.
 - ``install`` pins the vendor install: ``kind`` (``npm``, or ``git`` for an
   editable virtual environment), ``package``, ``version`` (as ``--version``
   reports it), and ``binary_path`` below the install prefix. A ``git``
@@ -481,12 +490,17 @@ at launch by the quirks module's ``validate_execution`` instead.
 Run a rendered tree
 ^^^^^^^^^^^^^^^^^^^
 
-To run an agent on a published tree yourself, write the files of
-``GET /reef/harness`` under one directory, point the agent at it as the
-descriptor's ``env`` does (for pi, ``PI_CODING_AGENT_DIR`` set to
-``<directory>/pi-agent``), and bind the model. A client that renders the
-source tree (``GET /reef/harness?form=source``) binds the model in the same
-render:
+``reef-client harness`` runs an agent on a published tree for an adapter
+with ``roots``. To do it yourself, write the files of
+``GET /reef/harness?form=client&service_url=<reef>`` under one directory,
+replace ``REEF_TOKEN_PLACEHOLDER`` with your token, and point the agent at
+the directory as the descriptor's ``env`` does (for pi,
+``PI_CODING_AGENT_DIR`` set to ``<directory>/pi-agent``). Those files bind
+the model to ``<reef>/reef/scenarios/<scenario>``, which names the scenario
+in the path, so the agent needs no custom header.
+
+A client that renders the source tree (``GET /reef/harness?form=source``)
+binds the model in the same render:
 
 .. code:: python
 
@@ -498,9 +512,10 @@ render:
    binding = ModelBinding(base_url="http://127.0.0.1:8901", model="qwen3-8b", api_key=token)
    files = render_tree(HarnessTree(source_files), descriptor, binding.config_overlays(descriptor))
 
-Reef's inference routes answer only a call with the ``x-reef-scenario``
-header. A tree must not set provider headers, so the client adds the header
-to its own binding after the render. pi sends ``providers.reef.headers``
+Point ``base_url`` at ``<reef>/reef/scenarios/<scenario>``, or send the
+``x-reef-scenario`` header: ``/v1/*`` answers only a call that names its
+scenario. A tree must not set provider headers, so a client that sends the
+header adds it to its own binding after the render. pi sends ``providers.reef.headers``
 from ``pi-agent/models.json``, as ``recipes/beta/reefine/examples/run.py``
 writes them. For an agent that sends no custom header, point ``base_url``
 at a local proxy that adds it, such as

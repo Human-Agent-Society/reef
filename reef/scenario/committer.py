@@ -12,7 +12,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
@@ -394,6 +394,53 @@ class ScenarioCommitter:
             )
             if restoring is not None:
                 restoring.trainer.apply_rollback_start(restored_start)
+            return published_ref
+
+    def import_release(self, artifact: Artifact, *, component: str, metrics: Mapping[str, Any]) -> ArtifactRef:
+        """Publish ``artifact`` as ``component``'s new release outside a step: a person's own tree, served at once.
+
+        The commit records the operation ``import`` with ``metrics``, and carries every other component of the
+        served release forward. It refuses with ``ArtifactConflict`` while a step holds job data, as a rollback
+        refuses: the step was prepared against the head that the import would replace.
+        """
+        with self._lock, self._publication_lock:
+            if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
+                raise ArtifactConflict(f"scenario {self._name!r} is running a step; import again when it ends")
+            artifacts = self._artifacts
+            current_ref, checkpoint = artifacts.current, artifacts.checkpoint
+            next_step = self._step + 1
+            prepared = replace(self._trainer.prepare_commit(None), metrics=dict(metrics))
+            recorded = self.recorded_retry(prepared, next_step, operation="import")
+            if recorded is not None:
+                return self.finish_recorded_retry(recorded, prepared, self._trainer).artifact_ref
+            if self._store.durable:
+                self._synchronize_checkpoint()
+            staged = self.stage_publication(next_step, SavedArtifactPublication(artifact, component), checkpoint)
+            try:
+                self._activate(staged)
+                published_ref = artifacts.publish(
+                    staged,
+                    expected_parent=checkpoint,
+                    metadata=self.release_metadata(staged, prepared, next_step, operation="import"),
+                    advance_heads=not self._store.durable,
+                )
+                self._activate(artifacts.resolve(published_ref), source=staged)
+                record = self._append_commit_record(
+                    step=next_step,
+                    artifact_ref=published_ref,
+                    checkpoint=True,
+                    prepared=prepared,
+                    operation="import",
+                    components=self.recorded_components(staged),
+                )
+            except Exception:
+                # A lost append acknowledgment can leave the record on file: its bytes must survive for the retry.
+                if not any(row.artifact_ref == staged.ref for row in self._store.history()):
+                    artifacts.discard(staged)
+                raise
+            self.finish_committed_step(
+                prepared, record, self._trainer, expected=current_ref, expected_checkpoint=checkpoint
+            )
             return published_ref
 
     def resume_rollback_start(self) -> None:

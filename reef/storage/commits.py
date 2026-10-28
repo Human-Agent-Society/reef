@@ -62,6 +62,9 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
 
 
 RECORD_KIND = "reef-commit/5"
+#: What made a commit: a step (``training``), a person moving the head to an earlier release (``rollback``) or to
+#: a pending one (``promote``), or a person publishing their own tree (``import``).
+COMMIT_OPERATIONS = ("training", "rollback", "promote", "import")
 
 
 class CommitHistoryError(ReefError):
@@ -81,7 +84,7 @@ def to_json_value(value: Any) -> Any:
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
-    """One committed training step: the atomic release record.
+    """One commit of a scenario: the atomic release record of a step, or of a person's ``operation``.
 
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
@@ -135,15 +138,15 @@ class CommitRecord:
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise CommitHistoryError(f"commit record {name} must be a non-negative integer")
-        if self.operation not in ("training", "rollback", "promote"):
-            raise CommitHistoryError("commit record operation must be 'training', 'rollback', or 'promote'")
+        if self.operation not in COMMIT_OPERATIONS:
+            raise CommitHistoryError("commit record operation must be 'training', 'rollback', 'promote', or 'import'")
         if not isinstance(self.operation_verified, bool):
             raise CommitHistoryError("commit record operation_verified must be a boolean")
         if self.operation in ("rollback", "promote"):
             if not isinstance(self.rollback_target_release_id, str) or not self.rollback_target_release_id:
                 raise CommitHistoryError(f"{self.operation} commit requires rollback_target_release_id")
         elif self.rollback_target_release_id is not None:
-            raise CommitHistoryError("training commit must not carry rollback_target_release_id")
+            raise CommitHistoryError(f"{self.operation} commit must not carry rollback_target_release_id")
         if not isinstance(self.pending, bool) or (self.pending and self.operation != "training"):
             raise CommitHistoryError("only a training commit may be pending")
         if self.metrics is not None and not isinstance(self.metrics, Mapping):
@@ -291,8 +294,8 @@ def scenario_metadata_for(
         "base_artifact": encode_artifact_ref(base_artifact),
         "operation": operation,
     }
-    if operation not in ("training", "rollback", "promote"):
-        raise ValueError("scenario metadata operation must be 'training' or 'rollback'")
+    if operation not in COMMIT_OPERATIONS:
+        raise ValueError("scenario metadata operation must be 'training', 'rollback', 'promote', or 'import'")
     if operation in ("rollback", "promote"):
         if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
             raise ValueError("rollback scenario metadata requires rollback_target_release_id")
@@ -361,8 +364,8 @@ def parse_scenario_metadata(
         raise ValueError("scenario metadata metrics must be an object or null")
     operation = value.get("operation")
     rollback_target_release_id = value.get("rollback_target_release_id")
-    if operation is not None and operation not in ("training", "rollback", "promote"):
-        raise ValueError("scenario metadata operation must be 'training' or 'rollback'")
+    if operation is not None and operation not in COMMIT_OPERATIONS:
+        raise ValueError("scenario metadata operation must be 'training', 'rollback', 'promote', or 'import'")
     if operation in ("rollback", "promote"):
         if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
             raise ValueError("rollback scenario metadata requires rollback_target_release_id")

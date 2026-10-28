@@ -234,6 +234,37 @@ class InstallSpec:
 
 
 @dataclass(frozen=True)
+class LocalRoot:
+    """Where one render root of an adapter lives on a person's machine.
+
+    Values: ``name`` is one path segment, the first segment of every render
+    path under the root (``pi-agent``). ``variable`` is the environment
+    variable the harness reads the root from (``PI_CODING_AGENT_DIR``); the
+    descriptor's ``env`` sets it to ``{root}/<name>`` for an episode.
+    ``default`` is the directory the harness uses when the variable is unset,
+    absolute or under ``~/``.
+    Purpose: ``load_descriptor`` makes one per entry of ``roots``;
+    ``GET /reef/harness/adapters`` serves them, and a client reads a person's
+    harness files there and runs the agent with ``variable`` set.
+    """
+
+    name: str
+    variable: str
+    default: str
+
+    def __post_init__(self) -> None:
+        if not self.name or "/" in self.name or self.name in (".", ".."):
+            raise DescriptorError(f"root {self.name!r} must be one path segment")
+        if not self.variable.isidentifier():
+            raise DescriptorError(f"root {self.name!r} variable {self.variable!r} must be an environment variable")
+        if not (self.default.startswith("/") or self.default.startswith("~/")):
+            raise DescriptorError(f"root {self.name!r} default {self.default!r} must be absolute or under ~/")
+
+    def to_json(self) -> dict[str, str]:
+        return {"variable": self.variable, "default": self.default}
+
+
+@dataclass(frozen=True)
 class AdapterDescriptor:
     """Everything the shared render and episode engines know about one harness."""
 
@@ -273,6 +304,9 @@ class AdapterDescriptor:
     #: Optional quirk that validates the executor against the rendered tree,
     #: replacing the blanket self_isolating restriction before launch.
     validate_execution: ExecutionValidator | None = None
+    #: Where each render root lives on a person's machine, by root name. Empty when the adapter does not sync
+    #: with a person's machine; otherwise every part that renders a path renders it under one of the roots.
+    roots: Mapping[str, LocalRoot] = field(default_factory=dict)
 
 
 def _require_str(data: Mapping[str, Any], key: str, where: str) -> str:
@@ -341,6 +375,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
     renderer, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     model_binding = _parse_model_binding(data.get("model_binding"), config_targets, where)
+    roots = _parse_roots(data.get("roots", {}), env, layout, where)
     return AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
@@ -360,7 +395,31 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,
         validate_execution=validate_execution,
+        roots=roots,
     )
+
+
+def _parse_roots(raw: Any, env: Mapping[str, str], layout: TreeLayout, where: str) -> dict[str, LocalRoot]:
+    """The ``roots`` section: each root's default directory, with the variable ``env`` sets to ``{root}/<name>``.
+
+    A declared root needs that variable, and every part that renders a path must render it under a declared root,
+    so a client can place each file of the tree.
+    """
+    if not isinstance(raw, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in raw.items()
+    ):
+        raise DescriptorError(f"{where} 'roots' must map root names to default directories")
+    roots: dict[str, LocalRoot] = {}
+    for name, default in raw.items():
+        variables = [variable for variable, value in env.items() if value == f"{{root}}/{name}"]
+        if len(variables) != 1:
+            raise DescriptorError(f"{where} root {name!r} needs exactly one 'env' variable set to {{root}}/{name}")
+        roots[name] = LocalRoot(name, variables[0], default)
+    if roots:
+        for part in layout.parts.values():
+            if part.renders is not None and part.renders.split("/", 1)[0] not in roots:
+                raise DescriptorError(f"{where} part {part.name!r} renders {part.renders!r} under no declared root")
+    return roots
 
 
 def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:

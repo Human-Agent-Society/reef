@@ -253,6 +253,18 @@ def register_inference_routes(
         headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
         return await serve(request, headers, path, record=False, evaluated=request.match_info.get("component"))
 
+    async def scenario_inference(request: web.Request) -> web.StreamResponse:
+        """A call to ``/v1/*`` with the scenario in the path, served and recorded as the same call to ``/v1/*`` is.
+
+        A harness that a client installed sends no scenario header: its model
+        binding names the scenario in its base URL (``reef.harness.sync``).
+        """
+        path = "/v1/" + request.match_info["route"]
+        if path not in INFERENCE_PATHS:
+            raise web.HTTPNotFound(text=f"{path} is not an inference route")
+        headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
+        return await serve(request, headers, path, record=True)
+
     async def multimodal(request: web.Request) -> web.StreamResponse:
         """Relay a multimodal call through the scenario's recipe; the answer streams back unchanged, unrecorded."""
         payload = await read_object(request)
@@ -272,6 +284,7 @@ def register_inference_routes(
     app.router.add_post("/v1/responses", inference)
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
+    app.router.add_post("/reef/scenarios/{scenario}/v1/{route:.+}", scenario_inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
     for path in MULTIMODAL_ROUTES:

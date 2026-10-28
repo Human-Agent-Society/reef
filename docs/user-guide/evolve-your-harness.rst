@@ -106,15 +106,55 @@ list the keys for each adapter.
 The loop
 --------
 
-Harness evolution advances one step at a time:
+Harness evolution has five parts. Data and sync happen between steps, and
+each step runs evolve, evaluation and release:
 
 .. flow::
-   :loop: publish a selected candidate; the head stays otherwise
+   :loop: the agent runs the new head, and its model calls are the next data
 
-   Job data :: the traces of one step, or a queued request, or both
-   Method :: edits a copy of the head tree in the step's workspace
-   Evaluation* :: scores the candidate under the publication policy
-   Result :: publish the candidate as a new release, or keep the head
+   Data :: the agent's model calls and reports, uploaded tasks, requests
+   Evolve :: the method edits a copy of the head tree into a candidate
+   Evaluation* :: scores the candidate against the head
+   Release :: a selected candidate becomes the new head
+   Sync :: clients install the head; a person's harness comes back as a release
+
+Each part is one relation between a few values. ``T`` is a harness tree
+(`The harness tree`_), and ``A`` is the deployment's adapter.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 56 30
+
+   * - Part
+     - Definition
+     - Details
+   * - Data
+     - Records and uploaded tasks give ``D``, one step's job data: traces,
+       train tasks, or a request. Weight training uses the same pipeline.
+     - `Step data`_
+   * - Evolve
+     - ``method(T, D, s) = (T', s')``: from the head tree ``T``, the data
+       and the method's state ``s``, the candidate ``T'``. An unchanged or
+       invalid ``T'`` skips the step.
+     - `The method`_
+   * - Evaluation
+     - ``score(T, task, repeat)`` is one episode's score, cached by tree,
+       task, repeat and evaluation context. ``policy`` compares the scores
+       of ``T'`` with those of ``T``, and selects or rejects ``T'``.
+     - `Evaluation: the publication policy`_
+   * - Release
+     - A selected ``T'`` becomes a git release and the head.
+       ``publish: review`` holds it until a person promotes it.
+     - `Promote a pending release`_
+   * - Sync
+     - ``render_A(T)`` is the files that ``A``'s agent reads.
+       ``import_A(F)`` reads those files back, so
+       ``import_A(render_A(T)) = T``. Clients install ``render_A`` of the
+       head, and import their own files as a release.
+     - `Use a published tree`_
+
+Step data
+~~~~~~~~~
 
 A step starts from recorded traffic, from a training request
 (``POST /reef/train``), or from both. ``recipe.config.training_mode``
@@ -425,35 +465,71 @@ To run a long-lived deployment without the example's driver, start
 Use a published tree
 --------------------
 
-``GET /reef/harness`` serves the head release as a JSON manifest. ``files``
-maps each path that the adapter renders to its text. Beside it are the
-``release_id``, its parent, the ``evaluation`` metrics of the step that
-published it, and ``requires``. A fresh scenario serves the recipe's seed, so
-a client can pull before any step runs:
+``reef-client harness`` connects an agent on your machine to a scenario. It
+reads the harness the agent keeps, installs the release that Reef serves, and
+runs the agent on it. The adapters ``pi``, ``claude``, ``codex`` and
+``opencode`` support it. Install ``reef-client`` where the agent runs, and set
+``REEF_TOKEN`` when the deployment has a token:
 
 .. code:: bash
 
-   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
-     http://127.0.0.1:8900/reef/harness | python3 -m json.tool | head
+   pip install reef-client
+   reef-client harness connect code-repair --reef http://127.0.0.1:8900 --adapter pi
+   reef-client harness run code-repair
 
-``?release_id=<id>`` serves an older release, which pins or rolls back one
-client without moving the head. ``?form=source`` serves the source tree
-instead, for a client that renders the tree itself or proposes changes to it.
+.. flow::
+   :loop: each run starts on the newest release
 
-The served files carry no endpoint and no credential. A client writes them
-where its agent reads them and binds the agent's model to this Reef. Every
-model call must carry the ``x-reef-scenario`` header and the token. Configure
-the agent's provider to send them (pi sends ``providers.reef.headers`` from
-``pi-agent/models.json``), or run a local proxy in front of Reef that adds
-them. Reef answers each call with a receipt.
+   connect :: imports your harness into a new scenario, installs the head
+   run :: installs a newer release, then starts the agent on it
+   Reef* :: records each model call; steps publish releases
+   push :: publishes your edits of the install as a release
 
-After a run, send ``POST /reef/report`` with a score and feedback over the
-receipts of its model calls. A release's ``requires`` items name what the
-machine must provide: an ``env`` variable, a ``permission``, a ``service``,
-or a ``binary``, each with an optional ``check`` and a ``prompt`` sentence.
-The client checks them before it runs the release. ``requires`` in the
-manifest covers the release's whole chain of changes.
-``recipes/beta/reefine/examples/run.py`` is a worked client.
+- ``connect`` creates the scenario when it does not exist. While the scenario
+  is at its first release, ``connect`` imports the agent's harness files as a
+  new release: for pi, from ``PI_CODING_AGENT_DIR``, or ``~/.pi/agent`` when
+  the variable is unset. It reads the files of the adapter's parts, such as
+  ``AGENTS.md``, skills, prompts and extensions. It does not import config
+  files: they hold the endpoints and credentials that Reef's model binding
+  owns. A scenario that has evolved keeps its releases, and ``connect``
+  installs its head without an import. Your own directory is only read.
+- The install is ``~/.local/share/reef-client/harness/<scenario>``. Its
+  config sends every model call to ``<reef>/reef/scenarios/<scenario>/v1``
+  with your token, so Reef records the call as the scenario's traffic.
+  ``connect`` and ``pull`` print what a release ``requires`` of the machine.
+- ``run`` installs a newer release, then starts the agent with
+  ``PI_CODING_AGENT_DIR`` at the install. A command after ``--`` replaces the
+  agent's own: ``reef-client harness run code-repair -- pi -c``. When the
+  install has edits that are not pushed, or Reef does not answer, ``run``
+  keeps the installed release.
+- ``push`` publishes your edits of the install as a release. The release
+  serves at once and Reef does not evaluate it: you are its author.
+  ``pull`` installs the head, and refuses to drop edits that are not pushed
+  unless you add ``--force``. ``status`` shows the installed release, the
+  head and the edited files.
+
+Reef learns from your sessions in two ways. A client that grades a run sends
+``POST /reef/report`` with a score over the receipts of its model calls. Or
+you ask for a change in plain words (`Ask for a harness change`_).
+
+A release's ``requires`` items name what the machine must provide: an ``env``
+variable, a ``permission``, a ``service``, or a ``binary``, each with an
+optional ``check`` and a ``prompt`` sentence. ``requires`` covers the
+release's whole chain of changes. Read a check before you run it.
+
+A client of its own uses the routes under ``reef-client`` (see `HTTP API
+<../reference/http-api.rst#harness-artifacts>`__):
+
+- ``GET /reef/harness`` serves the head release as a JSON manifest:
+  ``files`` by render path, ``release_id``, its parent, the ``evaluation``
+  metrics of the step that published it, and ``requires``.
+  ``?release_id=<id>`` serves an older release. ``?form=source`` serves the
+  source tree. ``?form=client&service_url=<url>`` serves the files bound to
+  ``<url>/reef/scenarios/<scenario>``.
+- ``POST /reef/harness/import`` publishes a person's harness files as the
+  head.
+- ``GET /reef/harness/adapters`` says where each adapter's harness lives on a
+  person's machine (``roots``) and which files are the harness's (``files``).
 
 Ask for a harness change
 ~~~~~~~~~~~~~~~~~~~~~~~~

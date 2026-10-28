@@ -27,6 +27,10 @@ argv:
   - workspace-write
   - --skip-git-repo-check
   - "{prompt}"
+# Where the render root lives on a person's machine when its env variable is unset. A client
+# reads the person's harness there, and runs the agent with the variable at its install.
+roots:
+  codex: "~/.codex"
 env:
   CODEX_HOME: "{root}/codex"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged

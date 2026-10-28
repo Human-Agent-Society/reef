@@ -8,6 +8,7 @@ from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.service.auth import page_query
 from reef.service.request_service import RequestService, page_headers
+from reef.service.routes.payload import read_object
 
 
 def register_health_route(app: web.Application) -> None:
@@ -21,11 +22,19 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     async def harness(request: web.Request) -> web.Response:
         release_id = request.query.get("release_id") or None
         form = request.query.get("form", "rendered")
-        manifest = await asyncio.to_thread(request_service.harness_manifest, request.headers, release_id, form)
+        service_url = request.query.get("service_url") or None
+        manifest = await asyncio.to_thread(
+            request_service.harness_manifest, request.headers, release_id, form, service_url
+        )
         return web.json_response(
             manifest,
             headers={"x-reef-release-id": manifest["release_id"]},
         )
+
+    async def harness_import(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        answer = await asyncio.to_thread(request_service.harness_import, request.headers, payload)
+        return web.json_response(answer, headers={"x-reef-release-id": answer["release_id"]})
 
     async def harness_releases(request: web.Request) -> web.Response:
         catalog = await asyncio.to_thread(request_service.harness_releases, request.headers)
@@ -96,11 +105,19 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
                         if install is None
                         else {"kind": install.kind, "package": install.package, "version": install.version}
                     ),
+                    # Where a client finds a person's harness, and which of its files are the tree's.
+                    "roots": {root: local.to_json() for root, local in descriptor.roots.items()},
+                    "files": sorted(
+                        part.renders
+                        for part in descriptor.layout.parts.values()
+                        if descriptor.roots and part.renders is not None
+                    ),
                 }
             )
         return web.json_response({"adapters": entries})
 
     app.router.add_get("/reef/harness", harness)
+    app.router.add_post("/reef/harness/import", harness_import)
     app.router.add_get("/reef/harness/releases", harness_releases)
     # One to nine digits: a step that is no number, or longer than any catalog, is no row; the router's own 404 answers it.
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/page", harness_release_page)

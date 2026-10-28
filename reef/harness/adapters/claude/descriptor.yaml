@@ -23,6 +23,10 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
+# Where the render root lives on a person's machine when its env variable is unset. A client
+# reads the person's harness there, and runs the agent with the variable at its install.
+roots:
+  claude: "~/.claude"
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"

@@ -37,6 +37,11 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages/count_tokens``                                               | count request tokens; recorded like any inference |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/v1/{route}``                                   | one of the inference routes above, with the       |
+|                                                                                  | scenario in the path instead of a header: served  |
+|                                                                                  | and recorded as the same call to ``/v1/{route}``; |
+|                                                                                  | what a client install's model binding calls       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
 |                                                                                  | the named scenario and kept by nobody: what a     |
 |                                                                                  | recipe's evaluation episodes call; a flat         |
@@ -91,7 +96,10 @@ Routes
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                                                            | the served harness tree, rendered for the         |
-|                                                                                  | adapter or as its source tree                     |
+|                                                                                  | adapter, as its source tree, or bound for a       |
+|                                                                                  | client install                                    |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/harness/import``                                                    | publish a person's harness files as the head      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                                                   | the harness release catalog, oldest first         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -808,9 +816,8 @@ A scenario whose artifact is the harness tree works the other way: the client
 pulls. It fetches the served tree with ``GET /reef/harness``, writes the files
 where its agent reads them, binds the agent's model to this Reef, and runs the
 agent on that release. The release it runs is then the one whose receipts it
-reports against. `Use a published tree
-<../user-guide/evolve-your-harness.rst#use-a-published-tree>`__ shows a
-client.
+reports against. ``reef-client harness`` is that client (see `Use a published
+tree <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
 
 Harness artifacts
 ~~~~~~~~~~~~~~~~~
@@ -830,7 +837,15 @@ Harness artifacts
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
-|                                | ``model_bindings``, and the pinned ``install`` spec           |
+|                                | ``model_bindings``, the pinned ``install`` spec, ``roots``    |
+|                                | (each render root to its ``variable`` and ``default``         |
+|                                | directory on a person's machine) and ``files`` (the render    |
+|                                | paths of the harness's files, ``{name}`` for one path         |
+|                                | segment); both are empty for an adapter that does not sync    |
++--------------------------------+---------------------------------------------------------------+
+| ``POST /reef/harness/import``  | ``{release_id, parent_release_id, changed, files, ignored}``, |
+|                                | and an ``x-reef-release-id`` response header; see             |
+|                                | `Importing a harness`_                                        |
 +--------------------------------+---------------------------------------------------------------+
 
 The first two are read-only and take ``x-reef-scenario``. They never create
@@ -846,9 +861,14 @@ does a scenario whose recipe serves no harness tree.
 - ``source``: the source tree the release stores. These are the tree paths
   that the adapter's parts take, the ones a patch names (see `Tree parts
   <../developer-guide/harness-adapters.rst#tree-parts>`__). A client that
-  renders the tree itself, or proposes a patch, reads this form.
+  renders the tree itself reads this form.
+- ``client``: the release rendered with a model binding at
+  ``<service_url>/reef/scenarios/<scenario>``, where ``service_url`` (a
+  required query parameter) is the address the client reaches Reef at. The
+  binding asks for the served model, and its key is the literal
+  ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own token.
 
-Another value is HTTP 400. Neither form carries an endpoint or a
+Another value is HTTP 400. The first two forms carry no endpoint and no
 credential: the client writes its own model binding where its agent reads
 it. A new scenario's base release holds the recipe's ``evolution.seed``, so a
 client can pull before any step publishes. A recipe whose seed is empty
@@ -874,6 +894,38 @@ candidate is being prepared. Reads still serialize with publication and
 rollback so a manifest's artifact and evaluation metrics come from the same
 release: reads do not interleave with head movement and its commit-history
 update.
+
+Importing a harness
+~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/harness/import`` publishes the harness files of a person's
+agent as the scenario's head, with ``x-reef-scenario``:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
+     -d '{"files": {"pi-agent/AGENTS.md": "Run the tests first.\n"},
+          "base_release_id": "rel-12"}' \
+     "$REEF_URL/reef/harness/import"
+
+- ``files`` maps each file's render path (``roots`` and ``files`` of
+  ``GET /reef/harness/adapters``) to its text. Reef maps each file back to
+  the tree path of the part that renders there. A path that no part renders
+  to is ignored and listed in ``ignored``. The files replace the head's
+  files, so a file the person removed leaves the tree. The head's config
+  files stay: the model binding owns them.
+- ``base_release_id`` is the release the client installed. Another release
+  than the served head is HTTP 409, so the client pulls first and an import
+  never drops a release it has not seen. ``null`` is a client that
+  installed nothing; only a scenario still at its first release takes it.
+- The tree must pass the adapter's validation, as a method's candidate
+  does; a problem is HTTP 400 naming it. Reef does not evaluate the tree.
+- An import that changes nothing answers ``changed: false`` and publishes
+  nothing. Otherwise the commit's operation is ``import``, its metrics carry
+  ``patch`` and ``patch_parts``, and the release serves at once. The next
+  step builds on it.
+- An import while a step runs is HTTP 409; send it again when the step ends.
 
 Harness requests
 ~~~~~~~~~~~~~~~~

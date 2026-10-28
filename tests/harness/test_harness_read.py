@@ -50,7 +50,7 @@ def test_the_manifest_serves_the_release_rendered_or_as_its_source_tree(tmp_path
     assert rendered["release_id"]
     source = service.harness_manifest({"x-reef-scenario": "delivery"}, form="source")
     assert source["files"] == {"rules.md": "rule"} and source["release_id"] == rendered["release_id"]
-    with pytest.raises(ValueError, match="form must be 'rendered' or 'source'"):
+    with pytest.raises(ValueError, match="form must be 'rendered', 'source' or 'client'"):
         service.harness_manifest({"x-reef-scenario": "delivery"}, form="tree")
 
 
