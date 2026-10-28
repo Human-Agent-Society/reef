@@ -66,7 +66,13 @@ from recipes.beta.autoenvscaling.checks import (
     reference_instructions,
     validate_band,
 )
-from recipes.beta.autoenvscaling.claude_author import CLAUDE_HARNESS, TOKEN_PREFIX, TOKEN_VARIABLE, ClaudeCodeAuthor
+from recipes.beta.autoenvscaling.claude_author import (
+    CLAUDE_HARNESS,
+    TOKEN_PREFIX,
+    ClaudeCodeAuthor,
+    CredentialHeld,
+    overrides_run,
+)
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
@@ -172,6 +178,7 @@ OPEN_PREFIX = "open-"
 STAGE_SOURCE = "source"  # the source holds no session, or its repository or base commit is not there
 STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission refused its task
 STAGE_OUTAGE = "outage"  # the author could not run; the generation ends here
+STAGE_CREDENTIAL = "credential"  # the author's task held its Claude Code token; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
 STAGE_CALIBRATION = "calibration"  # the solver's calibration rollouts put the task outside the band, or barely vary
@@ -566,7 +573,7 @@ def task_author(
 
 
 def claude_code_author(
-    config: Mapping[str, Any],
+    config: Mapping[str, object],
     environ: Mapping[str, str],
     *,
     reef_url: str,
@@ -581,9 +588,9 @@ def claude_code_author(
     ``claude_token_env`` names.
 
     Raises ``ValueError`` when that variable is unset or empty, or holds no Claude Code OAuth token, and when the
-    sandbox's ``env_from`` forwards a variable that would point Claude Code away from Anthropic (``ANTHROPIC_*``,
-    ``CLAUDE_CODE_USE_*``, a base URL or a proxy) or would put the token on the jail's command line. No message
-    holds the token.
+    sandbox's ``env_from`` forwards a variable that wins over the run's own setup (:func:`overrides_run`: an
+    ``ANTHROPIC_*`` or ``CLAUDE_*`` variable, a base URL, a proxy, or one the run sets), or one whose value holds
+    the token, which would put it on the jail's command line. No message holds the token.
     """
     token_env = config.get("claude_token_env", DEFAULT_CLAUDE_TOKEN_ENV)
     if not isinstance(token_env, str) or not token_env.isidentifier():
@@ -599,17 +606,11 @@ def claude_code_author(
     model = config.get("claude_model", DEFAULT_CLAUDE_MODEL)
     if not isinstance(model, str) or not model.strip():
         raise ValueError("claude_model must be a Claude model name or alias")
-    for name in executor.env:
-        upper = name.upper()
-        if (
-            upper.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_"))
-            or "BASE_URL" in upper
-            or "PROXY" in upper
-            or upper in (TOKEN_VARIABLE, token_env.upper())
-        ):
+    for name, value in executor.env.items():
+        if overrides_run(name) or claude_token in value:
             raise ValueError(
-                f"agent_sandbox_options.env_from must not forward {name} to Claude Code: it calls Anthropic "
-                f"itself, with the token from {token_env} alone"
+                f"agent_sandbox_options.env_from must not forward {name} to Claude Code: it would win over the "
+                f"run's own setup or carry the token, which comes from {token_env} alone"
             )
     return ClaudeCodeAuthor(
         reef_url=reef_url,
@@ -925,8 +926,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 refused.append(replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc)))
             except AuthorError as exc:
                 # An outage must not pass for the author's failure: it ends the generation, and the report names it.
+                # So does a task that held the token, which may have left the sandbox.
                 error = f"the author could not rebuild {source.record_id}: {exc}"
-                refused.append(replace(proposal, stage=STAGE_OUTAGE, refusal=error))
+                stage = STAGE_CREDENTIAL if isinstance(exc, CredentialHeld) else STAGE_OUTAGE
+                refused.append(replace(proposal, stage=stage, refusal=error))
             else:
                 pending[task.name] = replace(
                     proposal, designer_record_id=str(task.metadata.get("designer_record_id", "")), task_name=task.name

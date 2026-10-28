@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import threading
 import time
 import urllib.error
@@ -51,6 +52,8 @@ from recipes.beta.autoenvscaling.claude_author import (
     CheckGateway,
     CheckTools,
     ClaudeCodeAuthor,
+    CredentialHeld,
+    rename_holding,
 )
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
 from reef.core.plugins import PluginConfigError
@@ -59,7 +62,7 @@ from reef.core.tasks.split import TaskSplit, extend_split_by_source
 from reef.recipe.generated_tasks.generator import RolledOutTask
 from reef.recipe.generated_tasks.processor import split_source_ids
 from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
+from reef.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxProgram
 
 TOKEN = "sk-ant-oat01-reef-test-token-7f3a91"
 SESSION_ID = "0b6f2c1e-5d4a-4e8b-9c3f-2a1d7e6b5c40"
@@ -104,9 +107,11 @@ def checked(arguments: Sequence[str], environ: Mapping[str, str]) -> str:
 
 class ScriptedClaudeSession(E2BSession):
     """A sandbox that runs no Claude Code. ``launch`` keeps what it was given, writes what Claude Code would (the
-    task, a transcript, its own state), runs the agent's ``task_check`` commands (``checks``) against the gateway,
-    and prints ``stdout``. ``leak`` goes into the transcript and ``task_leak`` into the task. With ``stop``, it sets
-    the stop signal (a cancellation mid run) and waits for the sandbox to be closed."""
+    task, a transcript named ``session_name``, its own state), runs the agent's ``task_check`` commands
+    (``checks``) against the gateway, and prints ``stdout``, or times out with ``is_timeout``. ``leak`` goes into
+    the transcript and ``task_leak`` into the task; ``link_leak`` goes into a workspace file that a link in the
+    task's tests reads. With ``stop``, it sets the stop signal (a cancellation mid run) and waits for the sandbox
+    to be closed. ``launch_error`` and ``close_error`` are what a failing launch and close raise."""
 
     def __init__(
         self,
@@ -117,6 +122,11 @@ class ScriptedClaudeSession(E2BSession):
         checks: Sequence[Sequence[str]] = (),
         leak: str = "",
         task_leak: str = "",
+        link_leak: str = "",
+        session_name: str = SESSION_ID,
+        is_timeout: bool = False,
+        launch_error: str = "",
+        close_error: str = "",
         stop: threading.Event | None = None,
     ) -> None:
         self.env: dict[str, str] = {}
@@ -127,6 +137,11 @@ class ScriptedClaudeSession(E2BSession):
         self.checks = checks
         self.leak = leak
         self.task_leak = task_leak
+        self.link_leak = link_leak
+        self.session_name = session_name
+        self.is_timeout = is_timeout
+        self.launch_error = launch_error
+        self.close_error = close_error
         self.stop = stop
         self.is_closed = threading.Event()
         self.argv: list[str] = []
@@ -156,10 +171,15 @@ class ScriptedClaudeSession(E2BSession):
             self.stop.set()
             self.is_closed.wait(10)
             raise RolloutLaunchError("the E2B sandbox could not run the process: it is gone")
+        if self.launch_error:
+            raise RolloutLaunchError(self.launch_error)
         task_dir = write_workspace_task(workspace / "task", 8600)
         if self.task_leak:
             with (task_dir / "instruction.md").open("a") as stream:
                 stream.write(f"\nThe key is {self.task_leak}.\n")
+        if self.link_leak:
+            (workspace / "notes.txt").write_text(self.link_leak)
+            (task_dir / "tests" / "data.txt").symlink_to("../../notes.txt")
         self.check_outputs = [checked(arguments, env) for arguments in self.checks]
         projects = root / "claude" / "projects" / f"-home-user-reef-{root.name}-workspace"
         projects.mkdir(parents=True, exist_ok=True)
@@ -167,11 +187,13 @@ class ScriptedClaudeSession(E2BSession):
             {"type": "user", "message": {"role": "user", "content": "Rebuild"}},
             {"type": "x", "note": self.leak},
         ]
-        (projects / f"{SESSION_ID}.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+        (projects / f"{self.session_name}.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
         (root / "claude" / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "o@example.com"}}))
         (root / "claude" / "statsig").mkdir(exist_ok=True)
         (root / "claude" / "statsig" / "cache").write_text("gates")
         (root / "home" / ".cache").mkdir(parents=True, exist_ok=True)
+        if self.is_timeout:
+            raise RolloutTimeout("the agent ran out of time")
         return ProcessOutcome(self.exit_code, self.stdout, self.stderr)
 
     def pull(self, root: Path, relative: str = "") -> None:
@@ -179,6 +201,8 @@ class ScriptedClaudeSession(E2BSession):
 
     def close(self) -> None:
         self.is_closed.set()
+        if self.close_error:
+            raise RolloutLaunchError(self.close_error)
 
 
 @dataclass(frozen=True)
@@ -236,6 +260,11 @@ def files_holding(directory: Path, text: str) -> list[str]:
     return sorted(str(path) for path in directory.rglob("*") if path.is_file() and text.encode() in path.read_bytes())
 
 
+def holds_part_of_token(text: str) -> bool:
+    """Whether ``text`` holds any 10 characters of the token in a row."""
+    return any(TOKEN[start : start + 10] in text for start in range(len(TOKEN) - 9))
+
+
 class CountingChecks(CandidateChecks):
     """Checks that pass at once, or wait for ``release`` when it is given; ``count`` is how many ran."""
 
@@ -290,7 +319,7 @@ def test_runs_pinned_claude_headless_with_token_only_in_secret_env(tmp_path: Pat
     assert session.is_closed.is_set()
 
 
-def test_task_check_script_waits_rechecks_and_respects_max_checks(tmp_path: Path) -> None:
+def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
     release = threading.Event()
     held = CountingChecks(release=release)
     tools = CheckTools(tmp_path, held, token=TOKEN)
@@ -315,6 +344,33 @@ def test_task_check_script_waits_rechecks_and_respects_max_checks(tmp_path: Path
         assert '"check": 2' in quick and '"passed": true' in quick and "Finish now" in quick
     finally:
         gateway.stop()
+
+
+def test_task_check_script_stops_waiting_at_the_run_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(task_check, "WAIT_SECONDS", 30.0)
+    release = threading.Event()
+    gateway = CheckGateway(CheckTools(tmp_path, CountingChecks(release=release), token=TOKEN))
+    gateway.start()
+    past = str(int((time.time() - 1) * 1000))
+    environ = {
+        "REEF_AUTHOR_URL": gateway.base_url,
+        "REEF_AUTHOR_DEADLINE_MS": past,
+        "REEF_AUTHOR_FINISH_SECONDS": "60",
+    }
+    try:
+        started = time.monotonic()
+        output = checked([], environ)
+        assert time.monotonic() - started < 10, "the command stops at the deadline, not after its 30 s wait"
+        assert "state: running\ncheck_id: 1\n" in output and "The run's time is up" in output
+        assert "--wait" not in output and "Remaining time: 0 seconds." in output and "Finish now" in output
+    finally:
+        release.set()
+        gateway.stop()
+
+
+def test_check_tools_need_the_token(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="need the run's token"):
+        CheckTools(tmp_path, CountingChecks(), token="")
 
 
 def test_check_gateway_relays_no_model_call(tmp_path: Path) -> None:
@@ -411,7 +467,19 @@ def test_max_turns_keeps_workspace_and_model_error_is_outage(
     assert session.is_closed.is_set()
 
 
-def test_token_never_reaches_argv_logs_errors_run_dir_or_task(
+def test_timeout_keeps_the_task_and_names_the_newest_transcript(tmp_path: Path, reef_url: str) -> None:
+    older = tmp_path / "run" / "claude" / "projects" / "-elsewhere" / "older.jsonl"
+    older.parent.mkdir(parents=True)
+    older.write_text("{}\n")
+    os.utime(older, (time.time() - 3600, time.time() - 3600))
+    session = ScriptedClaudeSession(is_timeout=True)
+    authored = authored_in(tmp_path, reef_url, session)
+    assert "port.txt" in authored.reply and authored.record_ids == ()
+    assert authored.transcript == f"claude/projects/-home-user-reef-run-workspace/{SESSION_ID}.jsonl"
+    assert session.is_closed.is_set()
+
+
+def test_token_never_reaches_errors_logs_run_dir_or_task(
     tmp_path: Path, reef_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
@@ -429,6 +497,85 @@ def test_token_never_reaches_argv_logs_errors_run_dir_or_task(
     assert not files_holding(tmp_path / "holding" / "run", TOKEN)
     assert "[redacted]" in (tmp_path / "holding" / "run" / "workspace" / "task" / "instruction.md").read_text()
     assert not any(TOKEN in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [(result_json(is_error=True, result="x" * 480 + TOKEN), ""), ("not json", TOKEN + "y" * 480)],
+    ids=("result-tail", "stderr-head"),
+)
+def test_cut_error_text_keeps_no_part_of_the_token(tmp_path: Path, reef_url: str, stdout: str, stderr: str) -> None:
+    session = ScriptedClaudeSession(stdout=stdout, exit_code=1, stderr=stderr)
+    with pytest.raises(AuthorError) as raised:
+        authored_in(tmp_path, reef_url, session)
+    assert "[redacted]" in str(raised.value) and not holds_part_of_token(str(raised.value))
+
+
+def test_result_fields_are_redacted_in_the_log_and_the_error(
+    tmp_path: Path, reef_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    session = ScriptedClaudeSession(stdout=result_json(f"odd-{TOKEN}", num_turns=f"many-{TOKEN}"))
+    with pytest.raises(AuthorError, match=r"error \(odd-\[redacted\]\)") as raised:
+        authored_in(tmp_path, reef_url, session)
+    assert TOKEN not in str(raised.value)
+    [ended] = [record.getMessage() for record in caplog.records if "ended with" in record.getMessage()]
+    assert "many-[redacted] turns" in ended and TOKEN not in ended
+
+
+def test_launch_error_and_close_warning_are_redacted(
+    tmp_path: Path, reef_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    session = ScriptedClaudeSession(launch_error=f"no process: env {TOKEN}", close_error=f"still up: {TOKEN}")
+    with pytest.raises(AuthorError, match=r"could not run: no process: env \[redacted\]") as raised:
+        authored_in(tmp_path, reef_url, session)
+    assert TOKEN not in str(raised.value)
+    [warning] = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert "did not stop" in warning and "still up: [redacted]" in warning and TOKEN not in warning
+
+
+def test_a_name_holding_the_token_is_renamed(tmp_path: Path, reef_url: str) -> None:
+    authored = authored_in(tmp_path, reef_url, ScriptedClaudeSession(session_name=TOKEN, is_timeout=True))
+    run_dir = tmp_path / "run"
+    assert authored.transcript == "claude/projects/-home-user-reef-run-workspace/[redacted].jsonl"
+    assert (run_dir / authored.transcript).is_file()
+    assert not [path for path in run_dir.rglob("*") if TOKEN in str(path)]
+
+
+def test_a_name_that_cannot_take_the_redacted_name_is_deleted(tmp_path: Path) -> None:
+    (tmp_path / f"a{TOKEN}").mkdir()
+    (tmp_path / f"a{TOKEN}" / "x").write_text("x")
+    (tmp_path / "a[redacted]").mkdir()
+    (tmp_path / "a[redacted]" / "y").write_text("y")
+    (tmp_path / f"b{TOKEN}").write_text("b")
+    rename_holding(tmp_path, TOKEN)
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")) == [
+        "a[redacted]",
+        "a[redacted]/y",
+        "b[redacted]",
+    ]
+
+
+def test_check_and_admission_refuse_a_task_link_to_the_token(tmp_path: Path, reef_url: str) -> None:
+    checks = CountingChecks()
+    session = ScriptedClaudeSession(checks=([],), link_leak=TOKEN)
+    with pytest.raises(CredentialHeld):
+        authored_in(tmp_path, reef_url, session, checks)
+    [output] = session.check_outputs
+    assert "holds this run's credential" in output and checks.count == 0
+    workspace = tmp_path / "run" / "workspace"
+    assert not files_holding(tmp_path / "run", TOKEN) and (workspace / "notes.txt").read_text() == "[redacted]"
+
+
+def test_task_holding_token_ends_generation_with_stage_credential(tmp_path: Path, reef_url: str) -> None:
+    generator = autoenvscaling(tmp_path, claude_code(tmp_path, reef_url, ScriptedClaudeSession(task_leak=TOKEN)))
+    assert run_tasks(generator) == ()
+    asyncio.run(generator.record_results((), generation=0))
+    document = report(tmp_path)
+    assert [entry["stage"] for entry in document["proposals"]] == ["credential"]
+    assert "held the run's Claude Code token" in document["error"]
+    assert not files_holding(tmp_path / "state", TOKEN)
 
 
 def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None:
@@ -465,12 +612,32 @@ def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None
                 {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, name: "http://elsewhere"},
                 f"must not forward {name}",
             )
-            for name in ("ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "HTTPS_PROXY", "MY_BASE_URL")
+            for name in (
+                "ANTHROPIC_BASE_URL",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                "HTTPS_PROXY",
+                "MY_BASE_URL",
+            )
         ),
         (
             {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["CLAUDE_CODE_OAUTH_TOKEN"]}},
             {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN},
             "must not forward CLAUDE_CODE_OAUTH_TOKEN",
+        ),
+        (
+            {
+                "author_harness": "claude-code",
+                "claude_token_env": "OWNER_TOKEN",
+                "agent_sandbox_options": {"env_from": ["OWNER_TOKEN"]},
+            },
+            {"OWNER_TOKEN": TOKEN},
+            "must not forward OWNER_TOKEN",
+        ),
+        (
+            {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["SAVED"]}},
+            {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "SAVED": f"key={TOKEN}"},
+            "must not forward SAVED",
         ),
     ],
 )
@@ -482,6 +649,27 @@ def test_claude_config_refusals(
             generating_config(tmp_path, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test", **environ}
         )
     assert TOKEN not in str(raised.value) and "leak-me" not in str(raised.value)
+
+
+def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: str) -> None:
+    session = ScriptedClaudeSession()
+    authored_in(tmp_path / "probe", reef_url, session)
+    names = sorted(session.launch_env)
+    assert {"HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DISABLE_ERROR_REPORTING"} <= set(names)
+    environ = {"E2B_API_KEY": "e2b-test", "CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "OWNER_SETTING": "1"}
+    for name in names:
+        fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": [name]}}
+        with pytest.raises(PluginConfigError, match=f"must not forward {name}"):
+            AutoEnvScalingGenerator.from_config(
+                generating_config(tmp_path, **fields), scenario="one", environ={**environ, name: "0"}
+            )
+    # A variable of the deployment's own still reaches the sandbox.
+    fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["OWNER_SETTING"]}}
+    generator = AutoEnvScalingGenerator.from_config(
+        generating_config(tmp_path, **fields), scenario="one", environ=environ
+    )
+    assert isinstance(generator.author, ClaudeCodeAuthor)
+    assert dict(generator.author.executor.env) == {"OWNER_SETTING": "1"}
 
 
 def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) -> None:

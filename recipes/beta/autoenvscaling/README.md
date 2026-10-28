@@ -75,6 +75,7 @@ The generation's report gives each session the stage where it stopped:
 | `source` | the session's record is gone or holds no session, or its repository or base commit is not there (deleted, private or a wrong URL) |
 | `authoring` | the author made no recorded call, or admission refused its task |
 | `outage` | the author could not run; the generation ends here |
+| `credential` | the task of Claude Code as the author held its token; the generation ends here |
 | `check` | a check found a defect in the task, or the task is a duplicate |
 | `unchecked` | a refusing check could not run, so `validate` refused the task |
 | `calibration` | with `calibration: refuse`, the solver's calibration rollouts put the task below or above the band, or their rewards vary too little |
@@ -149,12 +150,12 @@ export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # the variable claude_token_en
 ```
 
 - Claude Code sends every model call itself, straight to Anthropic, and Reef records none of them. The generator still reads the sessions from `agent_reef_url` with the token from `agent_token_env`, and the test review still calls `agent_model` there through `agent_api`.
-- The token goes only into the environment of the sandbox's Claude Code process. It is never on a command line, in a log, in an error, in the run's directory or in the task. Claude Code removes it from the environment of its shell commands. Reef replaces it in every file of the run's directory, refuses a check of a task that holds it, and admits no such task.
+- The token goes only into the environment of the sandbox's Claude Code process. It is never on a command line, in a log, in an error, in the run's directory or in the task. Claude Code removes it from the environment of its shell commands. Reef replaces it in every file and file name of the run's directory, and refuses a check of a task that holds it, also through a symbolic link. A task that holds it is not admitted, and the generation ends with stage `credential`: the agent had the token, so it may have left the sandbox. Make a new token before the next run.
 - The agent checks its task with the command `python3 "$REEF_AUTHOR_CHECK"`, the same check as pi's tool. The command waits up to 9 minutes; for a longer check it prints `state: running` and the `--wait <check_id>` command that waits again.
 - A run ends at `agent_timeout_seconds` or after `max_model_calls` turns, Claude Code's own limit; either way its task stands. Any other error of Claude Code's (a spent plan, a refused token) is an outage.
 - The task names one source record, the session's, so a variant keeps its parent's split. Its metadata names the transcript, `designer_transcript`, relative to `state_dir/<scenario>/`, and `designer_harness: claude-code`. Each run keeps Claude Code's transcript under `claude/projects/` in its run directory. Reef deletes Claude Code's other state there, which can hold the account's email.
 
-Reef refuses at startup a token that is missing or is no Claude Code OAuth token (`sk-ant-oat...`), and an `agent_sandbox_options.env_from` that names `ANTHROPIC_*`, `CLAUDE_CODE_USE_*`, a `*BASE_URL*` or `*PROXY*` variable, or the token's variable.
+Reef refuses at startup a token that is missing or is no Claude Code OAuth token (`sk-ant-oat...`). It also refuses an `agent_sandbox_options.env_from` variable that would win over the run's own setup: an `ANTHROPIC_*` or `CLAUDE_*` variable, a `*BASE_URL*` or `*PROXY*` variable, a variable the run sets (such as `HOME`, `DISABLE_ERROR_REPORTING` or `BASH_MAX_TIMEOUT_MS`), or a variable whose value holds the token.
 
 ## The band
 

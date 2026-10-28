@@ -10,8 +10,8 @@ route with 404.
 The token stays out of every command line, log, error text, file of the run's directory and task. The sandbox
 gets it through :meth:`~reef.sandbox.process.ProgramExecutor.set_secret_env`. Claude Code removes it from the
 environment of its Bash, hook and MCP subprocesses (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The host redacts every
-text it logs or raises and every file of the run's directory, refuses a check of a task that holds the token, and
-admits no such task.
+text it logs or raises and every file and file name of the run's directory, refuses a check of a task that holds
+the token, and admits no such task (:class:`CredentialHeld`).
 """
 
 from __future__ import annotations
@@ -73,6 +73,23 @@ REDACTED = "[redacted]"
 AUTHOR_TOOLS = "Read,Glob,Grep,Write,Edit,Bash"
 CHECK_SCRIPT = Path(__file__).with_name("task_check.py")
 BASH_TIMEOUT_MS = "600000"
+#: The variables a run sets for Claude Code beside its adapter's own (``CLAUDE_CONFIG_DIR`` and the switches that
+#: turn off its updates and telemetry). A deployment's ``env_from`` would override them in the sandbox.
+RUN_VARIABLES = frozenset(
+    {
+        "HOME",
+        "DISABLE_ERROR_REPORTING",
+        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+        "BASH_DEFAULT_TIMEOUT_MS",
+        "BASH_MAX_TIMEOUT_MS",
+        "REEF_AUTHOR_URL",
+        "REEF_AUTHOR_DEADLINE_MS",
+        "REEF_AUTHOR_FINISH_SECONDS",
+        "REEF_AUTHOR_CHECK",
+    }
+)
+#: The most characters of Claude Code's own text that an error message keeps.
+ERROR_TEXT_CHARS = 500
 #: What stays of Claude Code's config directory after a run: the rendered rules and settings, and the transcripts.
 KEPT_CONFIG = frozenset({"CLAUDE.md", "settings.json", "projects"})
 #: A Claude Code session id names its transcript file.
@@ -96,9 +113,33 @@ HOW TO CHECK:
 """
 
 
+class CredentialHeld(AuthorError):
+    """The agent's task held the run's Claude Code token, so it is not admitted.
+
+    Values: the message names no token. Purpose: :meth:`ClaudeCodeAuthor.author` raises it once the run's directory
+    is redacted; the generator ends the generation with stage ``credential``, since the token may have left the
+    sandbox.
+    """
+
+
 def scrubbed(text: str, token: str) -> str:
-    """``text`` with every occurrence of ``token`` replaced."""
+    """``text`` with every occurrence of ``token`` replaced. Cut a text only after this, so no part of the token
+    stays."""
     return text.replace(token, REDACTED)
+
+
+def overrides_run(name: str) -> bool:
+    """Whether a deployment's sandbox variable ``name``, which wins over the run's own, would change how Claude Code
+    signs in, where it sends its calls or how the run sets it up: an ``ANTHROPIC_*`` or ``CLAUDE_*`` variable, a
+    base URL, a proxy, or a variable the run sets."""
+    upper = name.upper()
+    return (
+        upper.startswith(("ANTHROPIC_", "CLAUDE_"))
+        or "BASE_URL" in upper
+        or "PROXY" in upper
+        or upper in RUN_VARIABLES
+        or upper in get_adapter("claude").env
+    )
 
 
 def holding_files(directory: Path, token: str) -> list[Path]:
@@ -111,6 +152,28 @@ def holding_files(directory: Path, token: str) -> list[Path]:
             if path.is_file() and not path.is_symlink() and needle in path.read_bytes():
                 held.append(path)
     return held
+
+
+def rename_holding(directory: Path, token: str) -> None:
+    """Rename every file and folder under ``directory`` whose name holds ``token``, with the token replaced; one
+    that cannot take the new name, because another of a different kind holds it, is deleted."""
+    for folder, folders, names in os.walk(directory, topdown=False):
+        for name in (*names, *folders):
+            if token in name:
+                path = Path(folder) / name
+                try:
+                    path.rename(path.with_name(scrubbed(name, token)))
+                except OSError:
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        path.unlink(missing_ok=True)
+
+
+def holds_token(task_dir: Path, token: str) -> bool:
+    """Whether the task in ``task_dir`` holds ``token``: in a regular file, or in the reply that a check and the
+    admission send, which follows symbolic links."""
+    return bool(holding_files(task_dir, token)) or token in workspace_reply(task_dir)
 
 
 def claude_result(stdout: str) -> dict[str, object] | None:
@@ -162,11 +225,14 @@ class CheckTools(AgentTools):
     service sees it.
 
     Values: ``token`` is the run's Claude Code token, a non-empty string. A check of a workspace whose ``task/``
-    holds it answers ``ran: false`` and reaches no :class:`CandidateChecks`; ``trial`` answers a check id that
-    never started with ``ran: false``. Purpose: :class:`CheckGateway` serves it to ``task_check.py`` for one run.
+    holds it (:func:`holds_token`) answers ``ran: false`` and reaches no :class:`CandidateChecks`; ``trial``
+    answers a check id that never started with ``ran: false``. Purpose: :class:`CheckGateway` serves it to
+    ``task_check.py`` for one run.
     """
 
     def __init__(self, root: Path, checks: CandidateChecks, *, token: str) -> None:
+        if not token:
+            raise ValueError("the checks need the run's token to refuse a task that holds it")
         super().__init__(root, checks)
         self.token = token
 
@@ -185,7 +251,7 @@ class CheckTools(AgentTools):
             if self.session is not None:
                 download_directory(self.session, self.root, "workspace")
             task_dir = self.root / "workspace" / "task"
-            if holding_files(task_dir, self.token):
+            if holds_token(task_dir, self.token):
                 result = {"ran": False, "passed": False, "error": TOKEN_REFUSAL}
             else:
                 result = self.checks.check(task_dir)
@@ -245,7 +311,7 @@ class ClaudeCodeAuthor(TaskAuthor):
     ) -> AuthoredTask:
         """Claude Code's task from ``source``; ``tags`` go unused, since Reef records none of its model calls.
 
-        Raises :class:`AuthorError` also when the task holds the token: the task is not admitted.
+        Raises :class:`CredentialHeld` when the task holds the token: the task is not admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
@@ -272,11 +338,15 @@ class ClaudeCodeAuthor(TaskAuthor):
                     shutil.rmtree(path, ignore_errors=True)
                 else:
                     path.unlink(missing_ok=True)
-            held = holding_files(work_dir, self.claude_token)
-            for path in held:
+            # Before the redaction, which also rewrites a file outside the task that a link in it reads.
+            is_held = holds_token(task_dir, self.claude_token)
+            for path in holding_files(work_dir, self.claude_token):
                 path.write_bytes(path.read_bytes().replace(self.claude_token.encode(), REDACTED.encode()))
-        if any(path.is_relative_to(task_dir) for path in held):
-            raise AuthorError("the agent's task held the run's Claude Code token, so it is not admitted")
+            rename_holding(work_dir, self.claude_token)
+        if is_held:
+            raise CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
+        # The transcript's path names the file as renamed.
+        transcript = scrubbed(transcript, self.claude_token)
         return AuthoredTask(reply=workspace_reply(task_dir), record_ids=(), transcript=transcript)
 
     def run(
@@ -390,18 +460,17 @@ class ClaudeCodeAuthor(TaskAuthor):
                     )
         result = claude_result(outcome.stdout)
         if result is None:
-            tail = (outcome.stderr.strip() or outcome.stdout.strip())[-500:]
-            raise AuthorError(
-                scrubbed(f"Claude Code exited {outcome.exit_code} without a result: {tail}", self.claude_token)
-            )
-        subtype = str(result.get("subtype"))
+            tail = scrubbed(outcome.stderr.strip() or outcome.stdout.strip(), self.claude_token)[-ERROR_TEXT_CHARS:]
+            raise AuthorError(f"Claude Code exited {outcome.exit_code} without a result: {tail}")
+        # The result holds the agent's own text, so each field logged or raised is redacted.
+        subtype = scrubbed(str(result.get("subtype")), self.claude_token)
         errors = result.get("errors")
         text = str(result.get("result") or ("; ".join(map(str, errors)) if isinstance(errors, list) else ""))
         logger.info(
             "AutoEnvScaling Claude Code ended with %s after %.0f s and %s turns",
             subtype,
             time.monotonic() - started,
-            result.get("num_turns"),
+            scrubbed(str(result.get("num_turns")), self.claude_token),
         )
         transcript = transcript_path(work_dir, str(result.get("session_id") or ""))
         # The turn limit is the agent's own: its workspace stands, as after a timeout.
@@ -414,7 +483,6 @@ class ClaudeCodeAuthor(TaskAuthor):
             or result.get("api_error_status") is not None
             or is_api_error
         ):
-            raise AuthorError(
-                scrubbed(f"Claude Code's run ended with an error ({subtype}): {text[:500]}", self.claude_token)
-            )
+            cut = scrubbed(text, self.claude_token)[:ERROR_TEXT_CHARS]
+            raise AuthorError(f"Claude Code's run ended with an error ({subtype}): {cut}")
         return transcript
