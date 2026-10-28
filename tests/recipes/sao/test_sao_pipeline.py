@@ -608,7 +608,10 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
         # Training resumes at the next rollout from the first job's checkpoint.
         _rollout(second, 2, 0.5)
         _wait_for_finished_jobs(second, 2)
-        assert [job.start for job in component.submitted] == [None, str(tmp_path / "checkpoints" / "1")]
+        assert [job.start for job in component.submitted] == [
+            component.base_start,
+            str(tmp_path / "checkpoints" / "1"),
+        ]
         assert source_record_id(component.submitted[-1].data.samples[0]) == "i2"
     finally:
         second.close()

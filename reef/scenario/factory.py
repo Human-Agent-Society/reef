@@ -371,7 +371,7 @@ class ScenarioFactory:
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
-            surface.activate(Artifact(current_artifact, repository), runtime, base=repository.repository_base)
+            surface.activate(Artifact(current_artifact, repository), runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,

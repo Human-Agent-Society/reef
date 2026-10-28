@@ -15,7 +15,6 @@ from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.repository import BaseArtifactSource
-from reef.artifact.sources import download_huggingface_snapshot, parse_huggingface_source
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
@@ -481,28 +480,8 @@ class WeightTrainingRecipe(Recipe):
         return create_weight_surface(kind=self.runtime.served_weight_kind)
 
     def base_artifact_source(self) -> BaseArtifactSource:
-        """The base model as the base artifact, stored where the training component's checkpoints are.
-
-        A component whose releases hold weight files (``release_format``)
-        keeps checkpoints in the artifact repository, so the base artifact
-        holds the model's files: the directory ``runtime.model_path`` names,
-        or the Hugging Face snapshot of the model it names. A component whose
-        releases name checkpoints on its own service, as Tinker's do, keeps
-        the base model there too, so the base artifact holds the component's
-        manifest of it (``TrainingComponent.base_files``).
-        """
-        model = self.runtime.model_path
-        if self.training_component.release_format is None:
-            return BaseArtifactSource(files=self.training_component.base_files(), inputs={"model": model})
-        directory = Path(model).expanduser()
-        if directory.is_dir():
-            return BaseArtifactSource(model_directory=directory.resolve(), inputs={"model": str(directory.resolve())})
-        if model.startswith(("/", ".", "~")):
-            raise RecipeConfigError(f"model directory {model} does not exist")
-        snapshot = download_huggingface_snapshot(parse_huggingface_source(model))
-        return BaseArtifactSource(
-            model_directory=snapshot.local_path, inputs={"model": model, "version": snapshot.version}
-        )
+        """The training component's untrained checkpoint (``TrainingComponent.base_artifact_source``)."""
+        return self.training_component.base_artifact_source()
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """The engine's adapter residency on a runtime that serves per-scenario adapters."""

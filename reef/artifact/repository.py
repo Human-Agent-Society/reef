@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import cached_property
 from pathlib import Path, PurePosixPath
 from threading import Lock
 from time import monotonic
@@ -306,11 +305,6 @@ class Repository(ArtifactRepository):
     @property
     def base_artifact(self) -> ArtifactRef:
         return self._base_artifact
-
-    @cached_property
-    def repository_base(self) -> ArtifactRef:
-        """The repository's base release (``resolve_release("base")``), read once: it never changes."""
-        return self.backend.resolve_release("base")
 
     @property
     def current_artifact(self) -> ArtifactRef | None:

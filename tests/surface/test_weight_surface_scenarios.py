@@ -77,7 +77,7 @@ class RecordingRuntime(StubInferenceRuntime):
         super().__init__()
         self.scenarios: list[str | None] = []
 
-    def activate_checkpoint(self, artifact, *, scenario=None, base=False):
+    def activate_checkpoint(self, artifact, *, scenario=None):
         self.scenarios.append(scenario)
         return "inc:3"
 
@@ -85,8 +85,8 @@ class RecordingRuntime(StubInferenceRuntime):
 def test_the_loader_activates_releases_through_the_runtime_for_its_scenario(tmp_path: Path) -> None:
     runtime = RecordingRuntime()
     saved = checkpoint(tmp_path)
-    assert WeightLoader("math").activate(saved, runtime, base=False) == "inc:3"
-    assert WeightLoader().activate(saved, runtime, base=False) == "inc:3"
+    assert WeightLoader("math").activate(saved, runtime) == "inc:3"
+    assert WeightLoader().activate(saved, runtime) == "inc:3"
     assert runtime.scenarios == ["math", None]
     # A runtime that serves no weights binds nothing: the release names what serves.
-    assert WeightLoader("math").activate(saved, None, base=False) == saved.ref.release_id
+    assert WeightLoader("math").activate(saved, None) == saved.ref.release_id

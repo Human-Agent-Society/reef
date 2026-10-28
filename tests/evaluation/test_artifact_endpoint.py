@@ -38,7 +38,7 @@ class Runtime(InferenceRuntime):
     def artifact_model(self, artifact):
         return PolicyModel("base", artifact.ref.release_id) if self.serves_any_release else None
 
-    def activate_checkpoint(self, artifact, *, scenario=None, base=False):
+    def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
 
     def current_runtime_load_id(self):

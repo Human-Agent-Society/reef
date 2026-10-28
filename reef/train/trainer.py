@@ -157,7 +157,8 @@ class Trainer:
         if candidate_backend is not None:
             default_state: Mapping[str, Any] = candidate_backend.initial_state()
         elif job_loop is not None:
-            default_state = JobLoopState().to_dict()
+            # A new trainer starts from the untrained checkpoint that the base artifact holds.
+            default_state = JobLoopState(job_loop.component.base_start).to_dict()
         else:
             default_state = {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
@@ -788,7 +789,7 @@ class Trainer:
             if self._pending is not None or self._state is not observed_state:
                 raise CommitPending("a training result reached its commit while the training start was being set")
             # The running job is cancelled only once the new start is sure to apply.
-            if job_loop is not None:
+            if job_loop is not None and imported is not None:
                 self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
             elif started is not None:
                 self._state = dict(started)

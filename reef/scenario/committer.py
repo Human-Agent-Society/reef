@@ -377,7 +377,7 @@ class ScenarioCommitter:
                     selected.component,
                     manifest.artifact_ids(published_ref.release_id),
                 )
-            surface.activate(target, self._binding.runtime, base=self._artifacts.repository_base, previous=served)
+            surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
                 "activate", target.ref, component=recorded_component, components=components
             )
@@ -753,13 +753,7 @@ class ScenarioCommitter:
         # harness step never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
-        self._binding.surface.activate(
-            artifact,
-            self._binding.runtime,
-            base=self._artifacts.repository_base,
-            source=source,
-            previous=previous,
-        )
+        self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
 
     def finish_committed_step(
         self,

@@ -18,13 +18,7 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
-from reef.artifact import (
-    Artifact,
-    BaseArtifactSource,
-    GitLFSRepositoryBackendFactory,
-    InMemoryRepositoryBackend,
-    RepositoryBackendContext,
-)
+from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
@@ -87,10 +81,6 @@ def _example_owned(relative_path: str):
 LOCAL_TRAINING_BACKEND = "tests.support._training_deployment:LocalDeployment"
 
 
-#: A model directory: a weight recipe imports the deployment's model as its base artifact at startup.
-DEMO_MODEL = Path(__file__).parent / "data" / "demo-model"
-
-
 def _settings(**overrides) -> ServiceConfig:
     recipe_settings = dict(overrides.pop("recipe_settings", {}))
     values = {
@@ -101,7 +91,7 @@ def _settings(**overrides) -> ServiceConfig:
         "ray_address": "ray-head:6379",
         "ray_namespace": "reef",
         "inference_url": "http://ray-head:30000",
-        "model_path": str(DEMO_MODEL),
+        "model_path": "/models/demo",
         "training_backend": LOCAL_TRAINING_BACKEND,
         "training_backend_options": {"batch-size": 4},
         "inference_timeout_s": 30.0,
@@ -301,17 +291,16 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
 
     assert dispatcher.recipe.name == "openclawrl"
     component = dispatcher.recipe.training_component
-    assert component.received_model_path == str(DEMO_MODEL)
+    assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
     # The backend serves its own releases by default (``inference.serving: trainer``).
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
+        # The base artifact is the training component's untrained checkpoint.
         "context": RepositoryBackendContext(
-            work_dir=Path("/state/work"),
-            cache_dir=Path("/state/cache"),
-            base=BaseArtifactSource(model_directory=DEMO_MODEL.resolve(), inputs={"model": str(DEMO_MODEL.resolve())}),
+            work_dir=Path("/state/work"), cache_dir=Path("/state/cache"), base=component.base_artifact_source()
         ),
     }
 
@@ -611,7 +600,7 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
 
     config = backend.component_config(dataclasses.asdict(settings), loss_family="policy")
     assert (config["ray_address"], config["namespace"]) == ("ray-head:6379", "reef")
-    assert config["settings"]["model_path"] == str(DEMO_MODEL)
+    assert config["settings"]["model_path"] == "/models/demo"
     serving = serving_runtime_config(settings, backend, ReleaseFormat("full"))
     assert serving["inference_handler_factory"] is SGLangInferenceHandler
     assert serving["inference_handler_config"] == {"tool_call_parser": "qwen25"}
@@ -639,7 +628,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
     component = dispatcher.recipe.training_component
-    assert component.received_model_path == str(DEMO_MODEL)
+    assert component.received_model_path == "/models/demo"
 
 
 @pytest.mark.unit

@@ -15,8 +15,8 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
-from reef.core.components import made_artifact_id, validate_component_name
+from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
 
@@ -54,15 +54,14 @@ class WeightRuntime(ServingRuntime):
         """
 
     @abstractmethod
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the published release ``artifact``; return the runtime load ID that serves it.
 
         Reef calls it at a commit that activates a release, at an activation
         and at a start, before traffic routes to the release. ``scenario`` names
         the release's scenario exactly when the runtime serves a separate
-        adapter per scenario. ``base`` is true exactly when ``artifact`` is the
-        repository's base artifact: the base model, which serving engines
-        start with. A raise leaves the runtime serving what it served before.
+        adapter per scenario. A raise leaves the runtime serving what it served
+        before.
         """
 
 
@@ -77,17 +76,14 @@ class ArtifactLoader(ABC):
     """Make a component's published releases servable on the runtime."""
 
     @abstractmethod
-    def activate(
-        self, artifact: Artifact, runtime: ServingRuntime | None, *, base: bool, source: Artifact | None = None
-    ) -> str:
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         """Make the published release ``artifact`` servable; return the runtime load ID that serves it.
 
         Called once a release is final: after startup recovery has read the
         active artifact from the commit history, after a commit has published
         its release, and at an activation. It runs before the scenario routes
-        traffic to the release. ``base`` is true exactly when ``artifact`` is
-        the repository's base artifact. ``source`` names the staged artifact
-        whose bytes a commit published.
+        traffic to the release. ``source`` names the staged artifact whose
+        bytes a commit published.
         """
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
@@ -419,15 +415,11 @@ class Surface:
         artifact: Artifact,
         runtime: ServingRuntime | None,
         *,
-        base: ArtifactRef,
         source: Artifact | None = None,
         previous: Artifact | None = None,
     ) -> None:
         """Make the runtime-loaded component servable when its loader activates.
 
-        ``base`` is the repository's base release. It made every component that
-        it holds, so the component is the base artifact when its ``artifact_id``
-        is the one that ``base`` gives it (``made_artifact_id``).
         ``previous`` is the release served before this one: a component whose
         content it already served is not activated again.
         """
@@ -439,11 +431,9 @@ class Surface:
             return
         if previous is not None and not self.component_changed(artifact, previous, name):
             return
-        component = self.component_artifact(artifact, name)
         loader.activate(
-            component,
+            self.component_artifact(artifact, name),
             runtime,
-            base=component.artifact_id == made_artifact_id(base.release_id, name, single=self.single),
             source=None if source is None else self.component_artifact(source, name),
         )
 

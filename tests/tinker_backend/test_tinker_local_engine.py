@@ -206,6 +206,7 @@ def train(component, inference, objective, scenario, sample, start=None):
     """Run one job to its end, then serve its checkpoint for ``scenario``; return the checkpoint and its version."""
     data = JobData("b", (item(sample),))
     parameters = {"method": TrainingMethod(objective.name).to_dict()}
+    start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, data, parameters))
     deadline = time.monotonic() + 10
@@ -214,9 +215,7 @@ def train(component, inference, objective, scenario, sample, start=None):
         time.sleep(0.01)
     assert status.state == "finished", status.error
     (checkpoint,) = status.checkpoints
-    return checkpoint, inference.activate_checkpoint(
-        Artifact.local(Path(checkpoint.release_path)), scenario=scenario, base=False
-    )
+    return checkpoint, inference.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)), scenario=scenario)
 
 
 def test_local_engines_run_on_an_inference_component_that_reef_serve_starts(tmp_path):
@@ -305,7 +304,7 @@ def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypat
     engines = Engines()
     component, inference, _ = build(config, monkeypatch, engines)
     try:
-        served = inference.activate_checkpoint(Artifact.local(Path(math.release_path)), scenario="math", base=False)
+        served = inference.activate_checkpoint(Artifact.local(Path(math.release_path)), scenario="math")
         assert engines.loads == [(adapter_name("math", served), Path(math.release_path) / ADAPTER_DIR, served)]
         _, activated = train(component, inference, objective, "math", 1, start=math.path)
         assert component._client.calls[0].state_path == "tinker://update-1/state"

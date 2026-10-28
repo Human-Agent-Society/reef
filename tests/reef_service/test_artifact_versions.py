@@ -72,7 +72,7 @@ def test_the_status_names_each_components_active_artifact_and_training_start(tmp
     moves only the training start."""
     value, _, _ = dispatcher(tmp_path)
     scenario = value.get_or_create_scenario("math")
-    base = scenario.repository.repository_base.release_id
+    base = scenario.repository.backend.resolve_release("base").release_id
     (component,) = scenario.artifact_status()
 
     def artifacts() -> dict:
@@ -103,7 +103,10 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     assert [row["active"] for row in before] == [True, False, False, False]
     # A training step's release made its artifact; the creation made none and carries the base artifact.
     assert all(row["artifact_id"] == row["release_id"] and row["component"] for row in before[:-1])
-    assert before[-1]["artifact_id"] == value.get_or_create_scenario("math").repository.repository_base.release_id
+    assert (
+        before[-1]["artifact_id"]
+        == value.get_or_create_scenario("math").repository.backend.resolve_release("base").release_id
+    )
     target = before[-2]
     last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
     checkpoint = scenario.repository.checkpoint_artifact
@@ -474,7 +477,7 @@ def test_experiment_events_follow_settled_state_and_a_new_training_start(
         assert observed[-1] == (3, 3, trained)
         observed.clear()
         # The creation carries the base artifact, named by the repository base release.
-        value.train_from("math", scenario.repository.repository_base.release_id)
+        value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained release still serves.
         assert observed == [(4, 4, trained), True]
@@ -500,7 +503,7 @@ def test_a_slow_tracker_holds_up_neither_the_training_start_nor_scenario_resolut
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_train_from", record)
-        start = value.train_from("math", scenario.repository.repository_base.release_id)
+        start = value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
         assert entered.wait(5), "the tracker was not called"
         assert runtime.inference.inference_admission_status["open"]
         assert value.get_or_create_scenario("math") is scenario
@@ -623,7 +626,7 @@ def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, monkeypatch
         state = JobLoopState.from_dict(scenario.trainer.state)
         assert state.finished_jobs == runtime.trained == 2
         # Training is linear: the second job starts from the first job's last checkpoint.
-        expected_start = str(runtime.checkpoint_root / f"1-{checkpoints - 1}") if checkpoints else None
+        expected_start = str(runtime.checkpoint_root / f"1-{checkpoints - 1}") if checkpoints else runtime.base_start
         assert runtime.submitted[1].start == expected_start
     finally:
         value.close()

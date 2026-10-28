@@ -1678,17 +1678,13 @@ Neither inherits from the other, and no trainer holds a serving engine.
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model. Activating the base
-  artifact after another release loads the base artifact's files, which the
-  artifact repository keeps.
+  weights. The engines start with the base model. Each release loads its
+  files, the base artifact's included, unless the engines serve its content
+  already.
 
-``WeightRuntime.activate_checkpoint(artifact, *, scenario, base)`` gets
-``base=True`` exactly when ``artifact`` is the repository's base artifact.
-Then the component's ``artifact_id`` is the base release's ID, or
-``<base>:<component>`` in a release of several components. The adapter
-runtime serves the base artifact: it unloads the scenario's adapter and does
-not read the files. The Tinker runtime does not need ``base``. It reads the
-``tinker-base-model.json`` manifest of the base artifact.
+The base artifact has the layout of every other release of its component, so
+no runtime treats it as a special case. An adapter runtime loads its
+untrained adapter, and the Tinker runtime samples its untrained adapter.
 
 Two training scenarios can share a deployment only if its training component
 allows it (``shares_scenarios``) and its runtime serves each scenario its own
@@ -1774,6 +1770,15 @@ loop:
        files that an engine loads, such as Tinker's without
        ``export_adapter``. The serving assembly configures the engines from
        it and refuses a serving runtime that cannot load it.
+   * - ``base_artifact_source()``
+     - The component's untrained checkpoint as a ``BaseArtifactSource``, laid
+       out as one of its releases, with the ``inputs`` that decide its
+       content. Reef imports it as the base artifact. Slime gives the
+       ``hf_checkpoint`` directory, or with LoRA an adapter whose weights are
+       zero. Tinker gives the checkpoint of its untrained adapter.
+   * - ``base_start``
+     - The start of a job from the untrained checkpoint, a non-empty string.
+       The first job of every trainer starts from it.
    * - ``submit(job)``
      - Record the job durably and return; the job runs in the background.
        Submitting a job ID again does nothing.
@@ -1787,7 +1792,7 @@ loop:
      - Stop a running job, which then reports ``failed``.
    * - ``import_start(release)``
      - Copy a published release into the component's own storage and return
-       it as a start (``None`` for the base artifact). Reef calls it
+       it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
    * - ``fresh_start(start)``

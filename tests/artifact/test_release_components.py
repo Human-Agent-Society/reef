@@ -58,13 +58,9 @@ class _RecordingActivator(ArtifactLoader):
 
     def __init__(self) -> None:
         self.activated: list[str] = []
-        self.bases: list[bool] = []
 
-    def activate(
-        self, artifact: Artifact, runtime: ServingRuntime | None, *, base: bool, source: Artifact | None = None
-    ) -> str:
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         self.activated.append(artifact.ref.content_id)
-        self.bases.append(base)
         return artifact.ref.release_id
 
 
@@ -182,21 +178,19 @@ def test_surface_routes_each_capability_to_its_component(tmp_path: Path) -> None
 
     surface.validate(first)
     assert validator.seen == [weights.ref.content_id]
-    unrelated_base = ArtifactRef("content:base", "base-release", None)
-    surface.activate(first, None, base=unrelated_base)
+    surface.activate(first, None)
     assert activator.activated == [weights.ref.content_id]
-    assert activator.bases == [False]
 
     # A release that keeps the served weights does not activate them again.
     evolved = Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "evolved"}))
     second = compose_release({WEIGHTS: weights, HARNESS: evolved}, directory=tmp_path / "r2")
     assert surface.component_changed(second, first, HARNESS)
     assert not surface.component_changed(second, first, WEIGHTS)
-    surface.activate(second, None, base=unrelated_base, previous=first)
+    surface.activate(second, None, previous=first)
     assert activator.activated == [weights.ref.content_id]
     # A release without a manifest counts as changed.
     assert surface.component_changed(second, harness, WEIGHTS)
-    surface.activate(second, None, base=unrelated_base, previous=harness)
+    surface.activate(second, None, previous=harness)
     assert activator.activated == [weights.ref.content_id, weights.ref.content_id]
 
 
@@ -422,13 +416,12 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert activator.activated[served_before:] == []
         assert service.harness_head(headers) == after_harness.ref.release_id
 
-        # Activating the base's weights loads them as the base artifact and keeps the served harness; the chain
-        # tip stays. The creation carried the base artifact forward, so its artifact_id is the base release's.
+        # Activating the base's weights loads them and keeps the served harness; the chain tip stays. The creation
+        # carried the base artifact forward, so its artifact_id is the base release's.
         base_weights_id = base.components.artifact_ids(base.ref.release_id)[WEIGHTS]
-        assert base_weights_id == f"{scenario.repository.repository_base.release_id}:{WEIGHTS}"
+        assert base_weights_id == f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}"
         trained_weights = scenario.artifact_status()[WEIGHTS]["training_start"]
         scenario.activate(base_weights_id, WEIGHTS)
-        assert activator.bases[-1] is True
         # The activation moves the weights' active artifact; their training start stays on the trained weights.
         assert scenario.artifact_status()[WEIGHTS] == {"active": base_weights_id, "training_start": trained_weights}
         assert trained_weights != base_weights_id

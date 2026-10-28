@@ -151,8 +151,11 @@ def test_a_recipe_job_plan_reaches_the_component_through_the_default_build() -> 
     )
     loop = trainer.job_loop
     assert loop is not None and isinstance(loop.plan, SupervisedThenPolicy)
-    loop.submit(JobLoopState(), batch("first"))
-    loop.submit(JobLoopState(finished_jobs=1, last_job=JobOutcome("j", "stub", "finished")), batch("second"))
+    loop.submit(JobLoopState(component.base_start), batch("first"))
+    loop.submit(
+        JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished")),
+        batch("second"),
+    )
     assert [TrainingMethod.from_dict(job.parameters["method"]) for job in component.submitted] == [
         TrainingMethod("sft", SFT),
         TrainingMethod("rl-objective", RL),
@@ -170,5 +173,5 @@ def test_the_job_loop_refuses_a_plan_that_returns_no_job_request() -> None:
         JobLoop(component, "sft", scenario="s")  # type: ignore[arg-type]
     loop = JobLoop(component, Broken(), scenario="s")
     with pytest.raises(TypeError, match=r"Broken\.next_job must return a JobRequest"):
-        loop.submit(JobLoopState(), batch("b"))
+        loop.submit(JobLoopState(component.base_start), batch("b"))
     assert component.submitted == []

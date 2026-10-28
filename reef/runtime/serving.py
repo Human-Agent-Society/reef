@@ -235,15 +235,13 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     def adapter_residency_status(self) -> Mapping[str, Any]:
         return self._residency.status()
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the release ``artifact`` of ``scenario``; return the version that serves it.
 
         A release whose content the engines already serve for the scenario
-        loads nothing. When ``base`` is true, the release is the base artifact,
-        which is the model that the engines hold. The runtime then unloads the
-        scenario's adapter and returns ``base_version``. It does not
-        materialize the base. Any other release loads its adapter under a new
-        version. Raise ``ReefError`` without ``scenario``.
+        loads nothing. Any other release loads its adapter under a new
+        version; the base artifact holds an untrained adapter, which loads in
+        the same way. Raise ``ReefError`` without ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
         adapter took the slot of its own previous one; the residency manager
         records that, so requests then sample the base model.
@@ -259,31 +257,21 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
             current = self._residency.current_adapter(scenario)
             if current is not None and self._content_ids.get(current.runtime_load_id) == content_id:
                 return current.runtime_load_id
-            files: WeightFiles | None
-            if base:
-                # Requests for the base artifact sample the base model.
-                version = self.base_version
-                files = None
-            else:
-                path = artifact.materialize().local_path
-                if path is None:
-                    raise ReefError("serving a release requires a materialized artifact")
-                adapter = path / ADAPTER_DIR
-                if not (adapter / "adapter_config.json").is_file():
-                    raise ReefError(f"release {artifact.ref.release_id} holds no PEFT adapter in {ADAPTER_DIR}/")
-                version = self.next_version()
-                files = WeightFiles(adapter, "adapter")
+            path = artifact.materialize().local_path
+            if path is None:
+                raise ReefError("serving a release requires a materialized artifact")
+            adapter = path / ADAPTER_DIR
+            if not (adapter / "adapter_config.json").is_file():
+                raise ReefError(f"release {artifact.ref.release_id} holds no PEFT adapter in {ADAPTER_DIR}/")
+            version = self.next_version()
+            files = WeightFiles(adapter, "adapter")
             self._backend.pause()
             try:
-                if files is None:
-                    # A refused unload raises before the scenario stops serving its adapter.
-                    self._residency.release(scenario, self._engine)
-                else:
-                    if self._backend.recover():
-                        self.restart_engines()
-                    # Generation is paused, so the scenario's own adapter may make room for its new one.
-                    self._residency.activate(scenario, version, self._engine, files=files, supersede=True)
-                    self._content_ids[version] = content_id
+                if self._backend.recover():
+                    self.restart_engines()
+                # Generation is paused, so the scenario's own adapter may make room for its new one.
+                self._residency.activate(scenario, version, self._engine, files=files, supersede=True)
+                self._content_ids[version] = content_id
             finally:
                 self._backend.resume()
                 resident = {adapter.runtime_load_id for adapter in self._residency.current_adapters()}
@@ -325,9 +313,8 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     requests that follow. The runtime serves one scenario, so it ignores
     ``scenario``; the registry refuses a second training scenario on it
     (``shared_by_training_scenarios`` is False). The engines start with the
-    base model, which is the base artifact (``base``). Before any other
-    release, the activation of the base artifact loads nothing. After another
-    release, it loads the files of the base artifact, as for any release.
+    base model. Every release loads its files, the base artifact's included,
+    unless the engines serve its content already.
     """
 
     def __init__(
@@ -351,14 +338,10 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
             health_interval_s=health_interval_s,
         )
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         content_id = artifact.ref.content_id
         with self._lock:
             if self._served_content == content_id:
-                return self._version
-            if self._served_content is None and base:
-                # The engines still hold the base model they started with.
-                self._served_content = content_id
                 return self._version
             path = artifact.materialize().local_path
             if path is None:

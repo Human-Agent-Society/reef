@@ -308,7 +308,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
 
     assert [source_record_id(job.data.samples[0]) for job in component.calls] == ["inference-1", "inference-2"]
     # Training is linear: the second job starts from the first job's checkpoint.
-    assert component.calls[0].start is None
+    assert component.calls[0].start == component.base_start
     assert component.calls[1].start == str(component.checkpoint_root / "1")
     assert scenario.current_artifact_ref().parent_release_id == first.release_id
     with pytest.raises(ReefError, match="already bound"):

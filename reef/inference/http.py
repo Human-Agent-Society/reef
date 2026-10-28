@@ -267,7 +267,7 @@ class InferenceProxyRuntime(InferenceRuntime):
     def current_runtime_load_id(self) -> str | None:
         return None
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id
 
 

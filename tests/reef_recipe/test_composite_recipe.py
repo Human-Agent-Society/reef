@@ -1101,7 +1101,7 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
         assert published != seed
         # The creation made no artifact: it carries the base's, under the base release's ID.
         seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.release_id)["harness"]
-        assert seed_harness == f"{scenario.repository.repository_base.release_id}:harness"
+        assert seed_harness == f"{scenario.repository.backend.resolve_release('base').release_id}:harness"
         scenario.activate(seed_harness, "harness")
         scenario.activate(f"{published.release_id}:harness", "harness")
         served = scenario.repository.materialize(scenario.current_artifact_ref()).components

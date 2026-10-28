@@ -100,7 +100,11 @@ The base artifact
 
 Every scenario starts from the deployment's base artifact. Reef imports it once, when the artifact repository is new, from the configuration:
 
-- A weight recipe imports the model that ``inference.model-path`` names. The ``slime`` backend and the serving engines keep checkpoints as weight files. Thus the artifact repository keeps a full copy of the model's files, about 2 bytes per parameter in bf16. The ``tinker`` backend keeps checkpoints on the Tinker service. Thus its base artifact holds only a manifest that names the base model.
+- A weight recipe imports its training component's untrained checkpoint, with the layout of the component's other checkpoints:
+
+  - The ``slime`` backend with full weights imports the model that ``inference.model-path`` names. The artifact repository keeps a full copy of the model's files, about 2 bytes per parameter in bf16.
+  - The ``slime`` backend with LoRA imports an adapter whose weights are zero. It serves the model unchanged.
+  - The ``tinker`` backend imports the checkpoint of its untrained adapter, which stays on the Tinker service.
 - A harness recipe imports ``evolution.seed``, rendered for the adapter. Without a seed, the base harness is empty.
 - A recipe of several components imports each component's base under its name.
 

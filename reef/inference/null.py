@@ -62,7 +62,7 @@ class NullInferenceRuntime(InferenceRuntime):
         # The runtime loads nothing, so no load names what serves.
         return None
 
-    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None, base: bool) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id
 
 

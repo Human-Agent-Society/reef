@@ -43,12 +43,10 @@ class WeightLoader(ArtifactLoader):
     def __init__(self, scenario: str | None = None) -> None:
         self._scenario = scenario
 
-    def activate(
-        self, artifact: Artifact, runtime: ServingRuntime | None, *, base: bool, source: Artifact | None = None
-    ) -> str:
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         """Serve the final release on the runtime before traffic reaches it; without a weight runtime, its release ID."""
         if isinstance(runtime, WeightRuntime):
-            return runtime.activate_checkpoint(artifact, scenario=self._scenario, base=base)
+            return runtime.activate_checkpoint(artifact, scenario=self._scenario)
         return artifact.ref.release_id
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
