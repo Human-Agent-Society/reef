@@ -59,15 +59,15 @@ h2{font-size:15px;letter-spacing:-.2px;margin:0 0 22px;font-weight:650}h3{font-s
 .status{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:100px;
 padding:6px 12px;font-size:12px;background:var(--card);white-space:nowrap}
 .status:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
-.tone-selected,.tone-promoted{--status:var(--good);--status-bg:var(--good-bg)}
-.tone-pending,.tone-skipped{--status:var(--warn);--status-bg:var(--warn-bg)}
+.tone-selected{--status:var(--good);--status-bg:var(--good-bg)}
+.tone-inactive,.tone-skipped{--status:var(--warn);--status-bg:var(--warn-bg)}
 .tone-rejected,.tone-failed{--status:var(--bad);--status-bg:var(--bad-bg)}
-.tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-settling,.tone-creation,.tone-promote,
-.tone-rollback,.tone-recovery,.tone-unknown{--status:var(--accent);--status-bg:var(--soft)}
+.tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-settling,.tone-creation,
+.tone-recovery,.tone-unknown{--status:var(--accent);--status-bg:var(--soft)}
 .status{color:var(--status);background:var(--status-bg);border-color:transparent}
-.selected,.promoted,.complete{color:var(--good)}
-.pending,.skipped,.partial,.queued,.proposing,.evaluating,.running,.settling{color:var(--warn)}
-.rejected,.failed{color:var(--bad)}.creation,.promote,.rollback,.recovery,.unknown{color:var(--accent)}
+.selected,.complete{color:var(--good)}
+.inactive,.skipped,.partial,.queued,.proposing,.evaluating,.running,.settling{color:var(--warn)}
+.rejected,.failed{color:var(--bad)}.creation,.recovery,.unknown{color:var(--accent)}
 /* A status word inside a pill takes the pill's tone, which the hero and the summary set. */
 .status span{color:inherit}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px;min-width:0;box-shadow:var(--shadow)}
@@ -103,15 +103,13 @@ STATUS_LABELS = {
     "running": "In progress",
     "settling": "Saving the result",
     "selected": "Published",
-    "pending": "Ready for review",
+    "inactive": "Waiting for activation",
     "rejected": "Not selected",
     "skipped": "No changes",
     "failed": "Failed",
     "complete": "Complete",
     "partial": "Partial",
     "creation": "Starting point",
-    "promote": "Promoted by a person",
-    "rollback": "Rolled back by a person",
     "recovery": "Recovered at boot",
 }
 
@@ -121,27 +119,14 @@ def escape(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-def tone(state: str) -> str:
-    """The first word of a state, which is its CSS class: ``promoted at v5`` tones as ``promoted``."""
-    return state.split(" ")[0]
-
-
 def status_label(state: str) -> str:
     """The state in the words a person reads; an unlisted state stands as written, capitalized."""
-    label = STATUS_LABELS.get(state)
-    if label is not None:
-        return label
-    # A composed state, "promoted at v5", keeps its tail: only the leading word is renamed.
-    first, separator, rest = state.partition(" ")
-    named = STATUS_LABELS.get(first)
-    if named is not None and separator:
-        return f"{named}{separator}{rest}"
-    return state.capitalize()
+    return STATUS_LABELS.get(state, state.capitalize())
 
 
 def status_span(state: str) -> str:
-    """The state as a toned span, the class its tone and the text its label."""
-    return f'<span class="{escape(tone(state))}">{escape(status_label(state))}</span>'
+    """The state as a toned span: the class is the state and the text its label."""
+    return f'<span class="{escape(state)}">{escape(status_label(state))}</span>'
 
 
 def stamp(seconds: float) -> str:
@@ -183,9 +168,9 @@ def document(
     ``style`` is appended to :data:`BASE_STYLE`, so a page declares only what
     its own sections need. ``breadcrumb`` is the section the page sits under
     and ``context`` the scenario shown beside it. ``home`` is where the logo
-    and the "Harness" crumb lead, the served head's page; both stay plain
-    text when it is empty, since the only pages a browser can open are the
-    two ``/page`` routes and a catalog may have no served head to point at.
+    and the "Harness" crumb lead, the page of the active release; both stay
+    plain text when it is empty, since the only pages a browser can open are
+    the two ``/page`` routes and a catalog may have no active release.
     ``head`` adds elements to
     the document head, a reload for instance, and ``tail`` follows the footer,
     where the release page puts its inline data. ``subtitle``, ``body``,
@@ -209,7 +194,7 @@ def document(
         f'<div class="breadcrumb">{harness}<span class="slash" aria-hidden="true">/</span>'
         f"<b>{escape(breadcrumb)}</b></div>"
         f'<span class="context">{escape(context)}</span></div></header>\n'
-        f'<main class="tone-{escape(tone(state))}">\n'
+        f'<main class="tone-{escape(state)}">\n'
         f'<div class="hero"><div><p class="eyebrow">{escape(eyebrow)}</p><h1>{escape(heading)}</h1>'
         f'<p class="subtitle">{subtitle}</p></div>'
         f'<div class="status" role="status">{status_span(state)}</div></div>\n'
@@ -231,5 +216,4 @@ __all__ = [
     "stamp",
     "status_label",
     "status_span",
-    "tone",
 ]

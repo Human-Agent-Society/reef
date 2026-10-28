@@ -91,8 +91,9 @@ empty. These samples are
 scored traces, or unscored records with the inference stages that "Two
 trace sources" below describes.
 
-Reef evaluates request mutations and applies the same ``evolution.publish``
-policy as for other steps. Pending agent proposals and periodic rollback
+Reef evaluates request mutations as it evaluates other mutations. The
+deployment's activation rule decides whether their releases serve, as for
+other steps. Pending agent proposals and periodic
 rechecks cannot take over the step assigned to a request.
 
 Score a rollout
@@ -121,7 +122,7 @@ than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
 candidate and selects it when every task reaches ``evolution.floor_score``
 (default ``1.0``). A rollout that gave no answer fails its task. A rollout
 that did not run fails no task, but a task with no rollout that ran does not
-pass (see `Selection policies <#selection-policies>`__). The current release
+pass (see `Selection policies <#selection-policies>`__). The training start
 does not run under ``floor``, so ``current_scores`` is empty.
 ``always`` selects every applied mutation.
 
@@ -368,8 +369,9 @@ control token. The step counts these under ``screened_tasks``. Promotion is
 capped by ``evolution.max_promoted_per_client`` for each tagged client and
 ``evolution.max_promoted_tasks`` overall.
 
-Put code-bearing mutations derived from client text (``code_extension``,
-``native_tool``, and ``native_hook``) behind ``evolution.review_kinds`` so a
-person reviews them before publication. A ``native_graph`` has no code and
-can publish based on evaluation alone. Add it to ``review_kinds`` if every
-loop change should receive human review.
+List code-bearing mutations derived from client text (``code_extension``,
+``native_tool``, and ``native_hook``) in the ``always`` activation rule's
+``review_kinds``, so a person reviews them before they serve (`Configuration
+<../reference/configuration.rst#the-activation-section>`__). A
+``native_graph`` has no code and can serve based on evaluation alone. Add it
+to ``review_kinds`` if every loop change should receive human review.

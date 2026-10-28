@@ -229,7 +229,7 @@ so the adapter on disk is the one the rollout ended with:
 
 ```bash
 curl -sS -H "Authorization: Bearer $(cat work/token)" \
-  http://$(hostname -I | awk '{print $1}'):28900/reef/scenarios/ceobench-sao/releases
+  http://$(hostname -I | awk '{print $1}'):28900/reef/scenarios/ceobench-sao/artifacts
 ```
 
 ## Results

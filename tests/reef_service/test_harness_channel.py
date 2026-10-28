@@ -186,7 +186,7 @@ def _dispatcher(
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in {**(recipe.base_artifact_files() or {}), **(bootstrap_files or {})}.items():
+    for relative, text in {**recipe.base_artifact_source().files, **(bootstrap_files or {})}.items():
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -462,7 +462,7 @@ def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) ->
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
             assert head["release_id"] == manifest["release_id"]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["published"] is True
             assert head["metrics"]["wins"] == 1
@@ -524,7 +524,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             )
             assert current == pinned == first
             head = catalog["releases"][-1]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["release_id"] == first["release_id"]
             assert head["content_id"] == first["content_id"]
             assert head["metrics"] == first["evaluation"]
@@ -533,9 +533,9 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             second = await asyncio.wait_for(second_step, _ASYNC_UPDATE_TIMEOUT_S)
             updated = await read_release("/reef/harness/releases")
             assert len(updated["releases"]) == len(catalog["releases"]) + 1
-            assert updated["releases"][-2]["current"] is False
+            assert updated["releases"][-2]["active"] is False
             head = updated["releases"][-1]
-            assert head["current"] is True
+            assert head["active"] is True
             assert head["release_id"] == second["release_id"] != first["release_id"]
             assert head["content_id"] == second["content_id"]
             assert head["metrics"] == second["evaluation"]
@@ -2917,8 +2917,8 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
         )
         await client.start_server()
         try:
-            rows = (await (await client.get("/reef/scenarios/delivery/releases")).json())["releases"]
-            current = next(row["release_id"] for row in rows if row["current"])
+            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
+            current = next(row["release_id"] for row in rows if row["active"])
             body = {"messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "delivery"}, json=body)
             assert response.status == 200 and response.headers["x-reef-release-id"] == current
@@ -2963,7 +2963,9 @@ def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one
             assert entries[1] == {"id": "r1", "name": "rules", "config": {"text": "marker rules"}}
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            committed = scenario.release_queries.entries_for_version(manifest["release_id"])
+            committed = scenario.release_queries.entries_for_version(
+                manifest["release_id"], scenario.surface.files_component
+            )
             assert committed is not None and text == json.dumps(list(committed), indent=2, sort_keys=True) + "\n"
             assert "pi-agent/tree.json" not in render_composition(NODES_V1, get_adapter("pi"))
         finally:
@@ -3004,7 +3006,9 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
             # The entries live in the commit history, where the proposals route and the step's proposer read them.
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            entries = scenario.release_queries.entries_for_version(manifest["release_id"])
+            entries = scenario.release_queries.entries_for_version(
+                manifest["release_id"], scenario.surface.files_component
+            )
             assert entries is not None and list(entries) == [notice, *ENTRIES_V1]
             assert tree_files(get_adapter("pi"), entries) == {}
         finally:

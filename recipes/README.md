@@ -127,10 +127,10 @@ one-rollout reef-eval smoke over it.
 
 [Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
 turns a plain-language request into a harness update. The served model
-proposes the change and the gate scores it, and code extensions wait for a
-promote before they run. `reef serve --recipe reefine` starts its profile
+proposes the change and an evaluation checks it. Code extensions wait for a
+person to activate them before they run. `reef serve --recipe reefine` starts its profile
 without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
-records a bug-fix flow, a research loop, and which requests won the gate.
+records a bug-fix flow, a research loop, and which requests passed the evaluation.
 
 ## Basic
 

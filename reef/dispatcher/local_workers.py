@@ -224,7 +224,7 @@ class LocalTrainingWorkers:
                     current.commit(result, component=component)
                 except Exception:
                     # A record may already have crossed the fsync commit point.
-                    # Reload before rollback or acceptance can observe the stale
+                    # Reload before an activation or acceptance can observe the stale
                     # in-memory step and append the same step number again.
                     self.reload_after_local_failure(current)
                     raise

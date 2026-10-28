@@ -71,7 +71,6 @@ NO_INFERENCE_REFUSED_SETTINGS = (
     ("inference_handler_factory", "inference.handler-factory"),
     ("inference_handler_config", "inference.handler-config"),
     ("teacher_model_path", "teacher.model-path"),
-    ("evaluation_settings", "evaluation"),
     ("generator_settings", "generator"),
 )
 

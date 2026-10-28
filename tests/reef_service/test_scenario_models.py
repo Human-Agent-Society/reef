@@ -272,7 +272,7 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
     recipe = make_recipe(platform, tmp_path)
     initial = tmp_path / "initial"
     initial.mkdir()
-    for path, content in recipe.base_artifact_files().items():
+    for path, content in recipe.base_artifact_source().files.items():
         output = initial / path
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(content)

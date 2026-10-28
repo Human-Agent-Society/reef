@@ -149,7 +149,7 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
         {"reef": {"recipe": "recipe"}},
         {
             "training": '{"global_batch_size": 2}',
-            "evaluation": '{"module": "example:Evaluator"}',
+            "activation": '{"module": "example:Rule"}',
             "observability.wandb": '{"enabled": false}',
             "batch_size": "4",
             "execution.services.backend": "uni",
@@ -158,7 +158,7 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
     normalized = normalize_service_config(config)
     settings = service_config_from_mapping(normalized)
     assert settings.training_settings == {"global_batch_size": 2}
-    assert settings.evaluation_settings == {"module": "example:Evaluator"}
+    assert settings.activation_settings == {"module": "example:Rule"}
     assert settings.wandb_config == {"enabled": False}
     assert settings.recipe_settings["batch_size"] == 4
     assert "batch_size" not in parse_service_arguments(normalized)

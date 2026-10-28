@@ -163,17 +163,17 @@ correctness over session reuse and training throughput.
 Reef publishes a small local ``tinker-checkpoint.json`` artifact containing the
 schema version, base model, LoRA rank, training-state URI, and sampler URI.
 After a recipe selects a learning-rate schedule, it also records the schedule's
-progress. It contains references, not portable weight tensors. Restore and
-rollback require continued access to both remote checkpoints in the
-originating account/project. Local disk retention does not remove remote
+progress. It contains references, not portable weight tensors. Restore,
+activation and train-from require continued access to both remote checkpoints
+in the originating account/project. Local disk retention does not remove remote
 files. Use Tinker's checkpoint management for remote retention, preserving all
 checkpoints referenced by Reef.
 
 Requests that are already admitted keep the sampler of the release they
 started with. Restart creates a fresh runtime-load incarnation and serves the
-committed release. Rollback works: Reef imports the older release's manifest
+active release. Train-from works: Reef imports the older artifact's manifest
 into the component, cancels the running job, and the next job starts from that
-release's weights and optimizer state.
+artifact's weights and optimizer state.
 
 Serve on inference engines
 --------------------------
@@ -330,7 +330,7 @@ Verification scope
 
 CPU tests exercise data alignment and loss math, SDK call ordering, rejected and
 uncertain candidates, commit admission, request capture and SSE, deployment,
-scenario commit/restart/rollback, and serving on engines (per-scenario
+scenario commit/restart/activation/train-from, and serving on engines (per-scenario
 adapters, rejection, restart reload) against engine and SDK doubles. The
 component topology is tested with stub engines only; real SGLang engines have
 not been run with it. A live Tinker run is additionally needed

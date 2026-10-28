@@ -64,11 +64,16 @@ def _record(text: str = TEXT, requires: list | None = None) -> dict:
 
 
 def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
+    """A catalog row of a one-component scenario, where the artifact id is the release id; activated unless
+    ``rest`` says otherwise."""
     return {
         "release_id": release_id,
+        "artifact_id": release_id,
         "parent_release_id": parent,
         "operation": "training",
-        "pending": False,
+        "checkpoint": True,
+        "active": False,
+        "activated": True,
         "recorded_at": 1_050.0,
         "metrics": metrics,
         **rest,
@@ -76,6 +81,8 @@ def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-
 
 
 CREATION = _row({}, release_id="rel-0", parent=None, operation="creation")
+#: The creation while it serves: a newer release that passed the checks then waits for activation.
+SERVED_CREATION = {**CREATION, "active": True}
 MUTATION = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
 
 
@@ -103,18 +110,18 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
     assert logo in build_release_page(0, [CREATION])
 
 
-def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> None:
+def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
-    rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION))]
+    rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION), active=True)]
     page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
     head = f"/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}"
     assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
         assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
-    # A catalog with no served head leaves the crumb as text rather than a broken link.
-    pending_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, pending=True)]
-    bare = build_request_page(_record(), pending_only, now=1_100.0)
+    # A catalog with no active release leaves the crumb as text rather than a broken link.
+    inactive_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, activated=False)]
+    bare = build_request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
 
 
@@ -223,18 +230,17 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
     assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in changed
 
 
-def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_row_names_it() -> None:
-    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(), [CREATION, pending], now=1_100.0)
-    assert '<span class="pending">Ready for review</span>' in page
+def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is_active() -> None:
+    inactive = _row(_answered(selected=True, mutation=MUTATION), activated=False)
+    page = build_request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0)
+    assert '<span class="inactive">Waiting for activation</span>' in page
     assert "Proposed changes" in _sections(page)
-    assert "Release rel-1 is ready. This change includes an extension" in page
+    assert "Release rel-1 is ready but does not serve yet. This change includes an extension" in page
     assert REFRESH not in page
     assert "<code>/versions v1 install</code>" in page
-    promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
-    page = build_request_page(_record(), [CREATION, pending, promote], now=1_100.0)
-    assert '<span class="promoted">Promoted at v2</span>' in page
-    assert "passed the checks and was promoted at v2; the release that step published serves it" in page
+    page = build_request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
+    assert '<span class="selected">Published</span>' in page
+    assert "Published as release rel-1" in page
     assert "What changed" in _sections(page)
 
 
@@ -313,15 +319,15 @@ def test_answers_the_proposer_wrote_again_show_under_review_on_both_pages() -> N
 
 def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_session() -> None:
     """hermes has no /versions and no reef-pi: a published release is installed with reef-hermes update, a
-    release waiting for review is served with reef-hermes wait on the request, and the version page's Setup
+    release waiting for activation is activated with reef-hermes wait on the request, and the version page's Setup
     note names reef-hermes setup."""
     selected = _row(_answered(selected=True, published=True, mutation=MUTATION))
     page = build_request_page(_record(), [CREATION, selected], now=1_100.0, adapter="hermes")
     result = _section(page, "Result")
     assert "<code>reef-hermes update</code>" in result and "start reef-hermes again" in result
     assert "/versions" not in page and "reef-pi" not in page
-    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(), [CREATION, pending], now=1_100.0, adapter="hermes")
+    inactive = _row(_answered(selected=True, mutation=MUTATION), activated=False)
+    page = build_request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0, adapter="hermes")
     assert f"<code>reef-hermes wait {RECORD_ID}</code>" in _section(page, "Result")
     requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
     metrics = _answered(selected=True, published=True, mutation=MUTATION)

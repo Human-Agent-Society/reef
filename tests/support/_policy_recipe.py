@@ -12,7 +12,6 @@ from typing import Any
 
 from tests.support._threshold_processor import threshold_pipeline
 
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
 from reef.runtime.interfaces import InferenceRuntime
@@ -65,7 +64,6 @@ class TestPolicyRecipe(WeightTrainingRecipe):
             job_loop=JobLoop(
                 self.training_component,
                 FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,

@@ -103,7 +103,7 @@ from .report import (
     DEFAULT_SCORE_FLOOR,
     DEFAULT_VALUE_HORIZON_WEEKS,
     INITIAL_CASH,
-    ScenarioReleases,
+    ScenarioStatus,
     ScoreScale,
     TrainingPacer,
     WeekRecords,
@@ -389,7 +389,7 @@ class HarborAgent(BaseAgent):
             TrainingPacer(
                 batch,
                 float(environ.get("CEOBENCH_PACE_TIMEOUT_S", "1800") or 1800),
-                ScenarioReleases(self.service_url, self.scenario, self.token),
+                ScenarioStatus(self.service_url, self.scenario, self.token),
                 self.logger,
             )
             if batch > 0

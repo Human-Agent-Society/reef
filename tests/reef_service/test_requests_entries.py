@@ -77,7 +77,7 @@ def test_requests_seeds_the_extension_and_the_skill_after_the_notice(placeholder
     assert files["pi-agent/extensions/reef-requests.ts"] == EXTENSION
     assert files["pi-agent/skills/reef-pi-extension-api/SKILL.md"] == SKILL
     # The base release is the rendered files alone: pi declares no entries list, the extension reads none.
-    base = recipe.base_artifact_files()
+    base = recipe.base_artifact_source().files
     assert base is not None and "pi-agent/tree.json" not in base
     assert base["pi-agent/extensions/reef-requests.ts"] == EXTENSION
 
@@ -247,7 +247,7 @@ def test_a_served_tree_with_older_reef_entries_is_republished_with_the_shipped_o
     backend = _pi_backend(tmp_path, request_entries("pi"))
 
     result = backend.shipped_content_update({"steps": 3, "entries": old_entries}, served)
-    assert result is not None and not result.pending
+    assert result is not None and result.artifact is not None
     assert result.metrics == {"shipped_content_update": {"entries": [REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID]}}
     assert [entry["id"] for entry in result.state["entries"]] == [REQUESTS_ENTRY_ID, "r1", REQUESTS_SKILL_ID]
     assert result.state["steps"] == 3 and result.state["entries"][1] == rules
@@ -301,10 +301,7 @@ def test_a_scenario_opened_by_an_upgraded_reef_commits_the_shipped_entries_once(
     releases, served, entries = open_scenario()
     assert served == UPGRADED and entries[0]["config"]["code"] == UPGRADED
     # Newest first: the update is a served training commit on top of the creation release, held for no review.
-    assert [(row["operation"], row["current"], row["pending"]) for row in releases] == [
-        ("training", True, False),
-        ("creation", False, False),
-    ]
+    assert [(row["operation"], row["active"]) for row in releases] == [("training", True), ("creation", False)]
     assert releases[0]["metrics"] == {"shipped_content_update": {"entries": [REQUESTS_ENTRY_ID]}}
 
     releases_again, served, _ = open_scenario()
