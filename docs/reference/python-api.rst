@@ -510,6 +510,11 @@ The session contract is:
      - The ``TaskStorage`` that opens the task stores of the
        scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
+   * - ``samples``
+     - The ``SampleStore`` of the scenario's training samples: the uploaded
+       trajectories in upload order, each with ``train_counts``, the number of
+       committed jobs of each trainer that trained it. It closes with the session and
+       survives restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
        (including inactive releases), activations, and new training starts.
@@ -542,8 +547,10 @@ expected step, or a retry with conflicting content, raises
 ``SQLCommitHistory`` holds one write transaction of the record store, which
 SQLite locks with ``BEGIN IMMEDIATE`` and PostgreSQL with a row lock on the
 store generation. It reads the history and inserts the commit row in that
-transaction. The commit is durable when the transaction ends; an exception
-before then stores no commit. Direct writes through a ``CommitHistory``
+transaction. In the same transaction, it adds one to the train count of the
+commit's trainer for each sample whose ``sample:<sample_id>`` the commit lists. The commit is
+durable when the transaction ends; an exception before then stores no commit
+and counts no sample. Direct writes through a ``CommitHistory``
 bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses

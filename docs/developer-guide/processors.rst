@@ -298,8 +298,11 @@ order, and then record set units. Each uploaded trajectory is one unit
 and counts as one sample. It does not count toward ``buffer_size``. In ``manual`` mode, an instruction's data takes no units. In a scenario
 of several components, each trainer that accepts uploaded trajectories trains
 on them. Acknowledgement consumes all units of the job data. The commit lists
-each uploaded trajectory as ``trajectory:<trajectory_id>``. Thus a rebuilt
-trainer does not read it again.
+each uploaded trajectory as ``sample:<trajectory_id>``, and the scenario's
+sample store adds one to the trajectory's train count for the commit's trainer
+in the same transaction. Thus a rebuilt trainer does not read again a
+trajectory that it trained, and each trainer of several components still
+trains it.
 
 An uploaded trajectory has no captured rollout tensors or rollout log
 probabilities. Thus an objective that needs them, such as a policy-gradient
