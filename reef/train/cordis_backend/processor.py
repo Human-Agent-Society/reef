@@ -75,10 +75,10 @@ class InferenceSamples(ImmediateRecord2Sample):
 class TraceJobData(DistillJobData):
     """Put trace tasks into job data unmodified; the backends consume them without more processing.
 
-    In ``hybrid`` a queued instruction takes the traces that automatic job
-    data would take next, up to ``job_samples``, so the proposer
-    reads the request beside them; in ``manual`` it runs alone.
+    In ``manual`` a queued instruction takes the traces that automatic job
+    data would take next, up to ``job_samples`` and possibly none, so the
+    proposer reads the request beside them.
     """
 
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    reads_instructions = True
     required_request_types = frozenset(RequestType)

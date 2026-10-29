@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support._threshold_processor import threshold_pipeline
 
 from reef.artifact import Artifact, BaseArtifactSource, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
@@ -103,20 +103,6 @@ class _TreeRecipe(Recipe):
         )
 
 
-class HybridThresholdJobData(ThresholdJobData):
-    """The same batches, taking instructions too."""
-
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
-
-
-@dataclass(frozen=True)
-class _HybridTreeRecipe(_TreeRecipe):
-    """The tree recipe with a pipeline that runs in every mode: one report per batch, taking instructions too."""
-
-    def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, sample2job=HybridThresholdJobData(context, 1, None))
-
-
 @dataclass(frozen=True)
 class _ScoredTreeRecipe(_TreeRecipe):
     """The same tree recipe, consuming scored rollout reports."""
@@ -139,7 +125,6 @@ class _ConfigRecipe(Recipe):
 
 COMPOSITE = "reef.recipe.composite:CompositeRecipe"
 TREE = "tests.reef_recipe.test_composite_recipe:_TreeRecipe"
-HYBRID_TREE = "tests.reef_recipe.test_composite_recipe:_HybridTreeRecipe"
 CONFIG = "tests.reef_recipe.test_composite_recipe:_ConfigRecipe"
 
 
@@ -290,7 +275,7 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
 
     # A flat weight recipe setting has no place at the top of a composite.
     with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
-        _serving_recipe(COMPOSITE, composite_service(training_mode="hybrid"), {})
+        _serving_recipe(COMPOSITE, composite_service(training_mode="manual"), {})
 
     # A top level activation section is the composite's own: one rule activates the artifacts of every component.
     never = _serving_recipe(COMPOSITE, composite_service({"module": "never"}), {})
@@ -1070,11 +1055,11 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("component_config", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
+@pytest.mark.parametrize("component_config", [[["training_mode", "manual"]], "manual", [], "", None])
 def test_a_component_config_that_is_not_an_object_is_refused_under_a_composite_mode(component_config: Any) -> None:
-    harness = {"implementation": HYBRID_TREE, "config": component_config}
+    harness = {"implementation": TREE, "config": component_config}
     with pytest.raises(RecipeConfigError, match=r"components\.harness\.config must be an object"):
-        build_recipe(COMPOSITE, {}, config=composite_config(harness, data={"training_mode": "hybrid"}))
+        build_recipe(COMPOSITE, {}, config=composite_config(harness, data={"training_mode": "manual"}))
 
 
 @pytest.mark.unit
@@ -1126,26 +1111,26 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
     recipe = CompositeRecipe(
         components={
             "config": _ConfigRecipe(),
-            "harness": _HybridTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+            "harness": _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
         }
     )
     with closing(_serve(recipe, tmp_path)) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        assert dispatcher.set_training_mode("agent", "hybrid") == {"scenario": "agent", "training_mode": "hybrid"}
-        assert scenario.training_mode == "hybrid"
+        assert dispatcher.set_training_mode("agent", "manual") == {"scenario": "agent", "training_mode": "manual"}
+        assert scenario.training_mode == "manual"
         assert scenario.trainer_for("config").pipeline.training_mode == "auto"
         harness = scenario.trainer_for("harness")
-        assert harness.pipeline.training_mode == "hybrid"
+        assert harness.pipeline.training_mode == "manual"
         assert scenario.trainer is harness
         block = dispatcher.build_training_status()["scenarios"]["agent"]
-        assert block["training_mode"] == "hybrid"
+        assert block["training_mode"] == "manual"
         assert block["processor"] == {
             **harness.pipeline_status(),
             "pending_instructions": harness.pending_instructions(),
         }
         contract = dispatcher.scenario_contract("agent")
-        assert contract["training_mode"] == "hybrid"
+        assert contract["training_mode"] == "manual"
         assert contract["processor"] == type(harness.pipeline.sample2job).__name__
 
 
@@ -1153,10 +1138,10 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("data", "harness_config"),
     [
-        ({"training_mode": "hybrid"}, None),
+        ({"training_mode": "manual"}, None),
         # ``data.training-mode`` is the spelling every flat recipe accepts; a component naming the same mode in it
         # is not refused for naming the field twice.
-        ({"training-mode": "hybrid"}, {"training-mode": "hybrid"}),
+        ({"training-mode": "manual"}, {"training-mode": "manual"}),
     ],
 )
 def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs_auto(
@@ -1164,16 +1149,16 @@ def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs
 ) -> None:
     """The documented composite takes instructions from its config: the mode reaches every component, and the
     config component, which runs no step, keeps its bare processor in auto."""
-    harness: dict[str, Any] = {"implementation": HYBRID_TREE}
+    harness: dict[str, Any] = {"implementation": TREE}
     if harness_config is not None:
         harness["config"] = harness_config
     recipe = build_recipe(COMPOSITE, {}, config=composite_config(harness, data=data))
     assert isinstance(recipe, CompositeRecipe)
-    assert recipe.training_mode == "hybrid"
-    assert [component.training_mode for component in recipe.components.values()] == ["hybrid", "hybrid"]
+    assert recipe.training_mode == "manual"
+    assert [component.training_mode for component in recipe.components.values()] == ["manual", "manual"]
     with closing(_serve(recipe, tmp_path)) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        assert scenario.training_mode == "hybrid"
-        assert scenario.trainer_for("harness").pipeline.training_mode == "hybrid"
+        assert scenario.training_mode == "manual"
+        assert scenario.trainer_for("harness").pipeline.training_mode == "manual"
         assert scenario.trainer_for("config").pipeline.training_mode == "auto"
