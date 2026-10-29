@@ -34,6 +34,7 @@ from reef.evaluation.harness import (
     RolloutScorer,
     evaluation_selection,
 )
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
@@ -52,7 +53,6 @@ from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.storage.tasks import TaskStore
 from reef.surface.files import entries_file, read_entries
 from reef.train.backend import CandidateBackend, PreparedStep

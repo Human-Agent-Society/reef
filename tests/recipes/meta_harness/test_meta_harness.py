@@ -527,8 +527,8 @@ def test_terminus_extension_uses_shared_recipe_rollout_runner_and_publication(tm
     from harbor.models.trial.config import TrialConfig
     from harbor.utils.import_path import import_class
 
+    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
     from reef.harness.runners.terminus import runner
-    from reef.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = (*SEED, {"id": "agent", "name": "code_extension", "config": {"name": "agent", "code": code}})

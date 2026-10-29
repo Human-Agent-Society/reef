@@ -35,12 +35,12 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
+from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
 from reef.harness.client.tasks import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
 
 
 def stand_in_e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:

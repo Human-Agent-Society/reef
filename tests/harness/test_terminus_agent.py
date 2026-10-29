@@ -228,8 +228,8 @@ def test_harbor_loads_the_reefine_health_task_directory() -> None:
 
 @pytest.mark.unit
 def test_extension_must_remain_a_terminus_agent(monkeypatch) -> None:
+    from reef.execution.sandbox.process import ISOLATION_ENV
     from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError
-    from reef.sandbox.process import ISOLATION_ENV
 
     monkeypatch.setenv(ISOLATION_ENV, "bwrap")
     monkeypatch.setenv(ENVIRONMENT_ENV, "e2b")

@@ -59,10 +59,16 @@ from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, extend_split_by_source
+from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
+from reef.execution.sandbox.process import (
+    ProcessOutcome,
+    ProgramExecutor,
+    RolloutLaunchError,
+    RolloutTimeout,
+    SandboxProgram,
+)
 from reef.recipe.generated_tasks.generator import RolledOutTask
 from reef.recipe.generated_tasks.processor import split_source_ids
-from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxProgram
 
 TOKEN = "sk-ant-oat01-reef-test-token-7f3a91"
 SESSION_ID = "0b6f2c1e-5d4a-4e8b-9c3f-2a1d7e6b5c40"

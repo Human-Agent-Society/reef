@@ -122,7 +122,7 @@ def test_a_tree_without_a_model_name_cannot_run() -> None:
 
 @pytest.mark.unit
 def test_runner_refuses_extension_before_importing_or_executing_it(monkeypatch) -> None:
-    from reef.sandbox.process import ISOLATION_ENV
+    from reef.execution.sandbox.process import ISOLATION_ENV
 
     monkeypatch.delenv(ISOLATION_ENV, raising=False)
     tree = {

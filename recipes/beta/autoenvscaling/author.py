@@ -34,6 +34,8 @@ from reef_client.serve import RECEIPT_HEADER
 
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
 from reef.core.prompts import untrusted_text
+from reef.execution.sandbox.environment import download_directory
+from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.rollouts.vendor_install import AdapterProgram
@@ -46,8 +48,6 @@ from reef.record2sample.generator.designer import (
     DesignerError,
     ReefDesigner,
 )
-from reef.sandbox.environment import download_directory
-from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.train.cordis_backend.strategies import AgentHost, ProposerCalls
 
 logger = logging.getLogger(__name__)

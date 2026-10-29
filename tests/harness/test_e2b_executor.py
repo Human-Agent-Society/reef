@@ -10,13 +10,13 @@ from unittest.mock import Mock
 
 import pytest
 
+from reef.execution.sandbox.config import build_executor
+from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
+from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.remote import protected_command, remote_root, unpack
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.run import run_rollout
 from reef.harness.rollouts.vendor_install import AdapterProgram
-from reef.sandbox.config import build_executor
-from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.process import LocalExecutor, RolloutLaunchError, SandboxExecutor, SandboxUnavailable
-from reef.sandbox.remote import protected_command, remote_root, unpack
 
 
 def test_factory_reads_only_explicit_environment_and_binds_the_remote_binary(monkeypatch):

@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from reef.sandbox.modal import ModalExecutor, ModalSession
-from reef.sandbox.process import RolloutTimeout, SandboxProgram
-from reef.sandbox.remote import deployment_owner
+from reef.execution.sandbox.modal import ModalExecutor, ModalSession
+from reef.execution.sandbox.process import RolloutTimeout, SandboxProgram
+from reef.execution.sandbox.remote import deployment_owner
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_MODAL") != "1", reason="opt-in paid Modal test")
 

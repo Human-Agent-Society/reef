@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, SandboxExecutor
+from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 from reef.harness.tree.render import RenderError
-from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, SandboxExecutor
-from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 
 class TerminusAdapterRenderer(AdapterRenderer):

@@ -83,6 +83,9 @@ from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
+from reef.execution.sandbox.config import remote_executor
+from reef.execution.sandbox.process import SandboxUnavailable
+from reef.execution.sandbox.remote import RemoteExecutor
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -106,9 +109,6 @@ from reef.record2sample.generator.harbor import (
     harbor_task,
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sandbox.config import remote_executor
-from reef.sandbox.process import SandboxUnavailable
-from reef.sandbox.remote import RemoteExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ DEFAULT_MAX_MODEL_CALLS = 250
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700.0
 DEFAULT_AGENT_API = "openai"
 DEFAULT_AGENT_TOKEN_ENV = "REEF_TOKEN"
-# The cloud sandbox the agent runs in: a provider of reef.sandbox.config.REMOTE_EXECUTORS.
+# The cloud sandbox the agent runs in: a provider of reef.execution.sandbox.config.REMOTE_EXECUTORS.
 DEFAULT_AGENT_SANDBOX = "e2b"
 # The Designer: the coding agent, or the generator service's one-reply prompt Designer on the same sessions.
 AUTHORS = ("agent", "prompt")

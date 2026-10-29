@@ -47,13 +47,14 @@ from recipes.beta.autoenvscaling.author import (
     write_inputs,
 )
 from recipes.beta.autoenvscaling.sources import SessionSource
+from reef.execution.sandbox.environment import download_directory, execute
+from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent_gateway import AgentGateway, refuse
-from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
+from reef.record2sample.generator.designer import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 

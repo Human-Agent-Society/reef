@@ -20,7 +20,8 @@ from reef.artifact import (
     GitLFSRepositoryBackendFactory,
     RepositoryBackendContext,
 )
-from reef.artifact.git_lfs import _GitWorkspace
+from reef.artifact.git_client import GitClient
+from reef.artifact.git_lfs import HUB_REFS, _GitWorkspace, token_config
 from reef.core.plugins import PluginConfigError
 
 
@@ -721,3 +722,97 @@ def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path,
     (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
     with pytest.raises(ArtifactSourceError, match=r"broken symlink: .*sub/gone"):
         backend.publish(Artifact.local(source), expected_parent=head)
+
+
+def hub_like_remote(tmp_path: Path) -> Path:
+    """A bare repository with a ``main`` branch of its own, as a new Hugging Face repo has."""
+    remote = tmp_path / "hub.git"
+    run_git("init", "--bare", "-q", str(remote))
+    seed = tmp_path / "hub-seed"
+    run_git("init", "-q", str(seed))
+    (seed / ".gitattributes").write_text("*.safetensors filter=lfs diff=lfs merge=lfs -text\n")
+    run_git("-C", str(seed), "add", ".gitattributes")
+    run_git("-C", str(seed), "-c", "user.name=hub", "-c", "user.email=hub@example", "commit", "-qm", "initial commit")
+    run_git("-C", str(seed), "push", "-q", str(remote), "HEAD:refs/heads/main")
+    return remote
+
+
+@pytest.mark.integration
+def test_the_hub_layout_keeps_releases_on_tags_and_moving_refs_on_branches(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = hub_like_remote(tmp_path)
+    factory = GitLFSRepositoryBackend.factory(
+        remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache", refs=HUB_REFS
+    )
+    # The repo's own main branch is no ref of the backend's, so the repository counts as new.
+    backend = factory("math")
+    base = backend.resolve_release()
+    forked = backend.fork()
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "AGENTS.md").write_text("be brief\n")
+    published = backend.publish(Artifact.local(candidate), expected_parent=forked)
+    pending = backend.publish(Artifact.local(candidate), expected_parent=published, advance_head=False)
+
+    encoded = base64.urlsafe_b64encode(b"math").decode().rstrip("=")
+    refs = dict(line.split()[::-1] for line in run_git("--git-dir", str(remote), "show-ref").splitlines())
+    assert refs.keys() == {
+        "refs/heads/main",
+        "refs/heads/reef/base",
+        "refs/heads/reef/head",
+        f"refs/heads/reef/scenarios/{encoded}",
+        f"refs/tags/reef/releases/{pending.release_id}",
+    }
+    assert refs["refs/heads/reef/base"] == base.release_id
+    assert refs[f"refs/heads/reef/scenarios/{encoded}"] == refs["refs/heads/reef/head"] == published.release_id
+    # A release's ID is its commit, so a release on the Hub is the revision of that commit.
+    assert backend.resolve_release(pending.release_id) == pending
+    assert factory.has_registration("math") and factory.list_registrations() == ("math",)
+
+    # A repository keeps one layout: the other is refused instead of hiding the releases.
+    with pytest.raises(ArtifactSourceError, match="keeps its refs under refs/heads/reef/ and refs/tags/reef/"):
+        GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "reef-work", cache_dir=tmp_path / "reef-cache")
+
+
+def test_a_token_authorizes_its_https_host_only_and_stays_out_of_commands(tmp_path: Path) -> None:
+    token = "hf_secret_token"
+    config = token_config("https://huggingface.co/org/artifacts", token)
+    client = GitClient(tmp_path, config)
+    header = run_git_with(
+        client, "config", "--get-urlmatch", "http.extraHeader", "https://huggingface.co/org/artifacts"
+    )
+    assert header == f"Authorization: Basic {base64.b64encode(f'reef:{token}'.encode()).decode()}"
+    assert run_git_with(client, "config", "--get-urlmatch", "http.extraHeader", "https://example.com/other") == ""
+    with pytest.raises(ArtifactSourceError) as refused:
+        client.run(("git", "config", "--get", "no.such.key"), source_error=True)
+    assert token not in str(refused.value)
+    with pytest.raises(ValueError, match="https:// repository"):
+        token_config("git@huggingface.co:org/artifacts", token)
+
+
+def run_git_with(client: GitClient, *args: str) -> str:
+    """``client``'s output of ``git args``, or empty when git finds nothing."""
+    try:
+        return client.run(("git", *args), source_error=True)
+    except ArtifactSourceError:
+        return ""
+
+
+@pytest.mark.integration
+def test_configured_factory_reads_the_ref_layout_and_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_git_lfs: None
+) -> None:
+    context = RepositoryBackendContext(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    config = {
+        "repository": "https://huggingface.co/org/artifacts",
+        "refs": "branches-and-tags",
+        "token_env": "HF_TOKEN",
+    }
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    with pytest.raises(ArtifactSourceError, match="needs the variable HF_TOKEN"):
+        GitLFSRepositoryBackendFactory.from_config(config, context=context)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_token")
+    factory = GitLFSRepositoryBackendFactory.from_config(config, context=context)
+    assert factory._refs == HUB_REFS
+    assert factory._git_config == token_config(config["repository"], "hf_secret_token")
+    with pytest.raises(PluginConfigError, match="refs must be one of"):
+        GitLFSRepositoryBackendFactory.from_config({"repository": "a", "refs": "custom"}, context=context)
