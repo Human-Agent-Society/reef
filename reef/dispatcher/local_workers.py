@@ -4,9 +4,8 @@ A cycle prepares the trainer's next commit outside the scenario's registry
 lock, because the preparation can take minutes (a harness step's evaluation,
 a training job's checkpoint evaluation). Then it commits under that lock. A
 worker whose trainer has a training job or a pipeline background job (such
-as a judge call) running, or job data waiting, looks again every
-``POLL_SECONDS``, since a job's checkpoints, a judgment, and the job data
-that a status read collects arrive without a new record.
+as a judge call) running looks again every ``POLL_SECONDS``, since a job's
+checkpoints and a judgment arrive without a new record.
 The workers also close the instances that a reload replaced.
 """
 
@@ -26,7 +25,7 @@ from reef.scenario.scenario import Scenario
 
 logger = logging.getLogger(__name__)
 
-#: How soon a worker looks again while its trainer runs a training job or a pipeline background job, or holds job data.
+#: How soon a worker whose trainer has a training job or a pipeline background job running looks again.
 POLL_SECONDS = 2.0
 
 
@@ -94,16 +93,14 @@ class LocalTrainingWorkers:
                 self.start(current.name, component_trainer.component)
 
     def resume(self, current: Scenario) -> None:
-        """Start the worker of each weight trainer of ``current`` that has a job running or records to train.
+        """Start the worker of each weight trainer of ``current``.
 
-        A loaded scenario resumes the job a restart left running, and the
-        records that arrived before it, without waiting for a new record. A
-        created scenario whose pipeline starts its own work, such as a round
-        of generated tasks, starts its worker too: no record would wake it.
+        The worker's first cycle resumes the job a restart left running, trains the records that arrived before
+        the load, and starts the pipeline's own work, such as a round of generated tasks. No record would wake
+        the worker for these.
         """
         for component_trainer in current.trainers:
-            trainer = component_trainer.trainer
-            if trainer.job_loop is not None and (trainer.job_running or trainer.holds_untrained_records()):
+            if component_trainer.trainer.job_loop is not None:
                 self.start(current.name, component_trainer.component)
 
     def remove(self, scenario: str) -> None:

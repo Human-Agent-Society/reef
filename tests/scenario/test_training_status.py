@@ -344,11 +344,11 @@ def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_w
         dispatcher.close()
 
 
-def test_a_worker_trains_the_job_data_that_a_status_read_collects_after_its_last_step(
+def test_a_status_read_leaves_a_finished_step_to_the_worker_which_trains_its_job_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A status read between the worker's last step and its wait ends the step and makes the job data. No
-    # background job runs then, and no record comes, so only the job data can keep the worker polling.
+    # A status read between the worker's last step and its wait does not advance the pipeline: the finished
+    # step stays running until the worker's next cycle collects it, so the worker keeps polling and trains it.
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     wait = LocalTrainingWorkers.wait
     waits = 0
@@ -371,6 +371,6 @@ def test_a_worker_trains_the_job_data_that_a_status_read_collects_after_its_last
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
         assert_trains_the_generated_task(training_component)
-        assert read_ready == [True]
+        assert read_ready == [False]
     finally:
         dispatcher.close()
