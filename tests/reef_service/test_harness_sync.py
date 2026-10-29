@@ -19,7 +19,7 @@ from collections.abc import Iterator
 import pytest
 from aiohttp import web
 from reef_client import ReefClient
-from reef_client.harness import HarnessInstall, HarnessSyncError, commands_root, connect
+from reef_client.harness import SYNC_LOG, HarnessInstall, HarnessSyncError, commands_root, connect
 
 from tests.reef_service.test_harness_channel import HEADERS, PATCHES, app_client, channel_dispatcher, evaluated_step
 from tests.support.harness_service import EchoInference
@@ -178,8 +178,9 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
     monkeypatch.delenv("ZDOTDIR", raising=False)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     with served(channel_dispatcher(tmp_path, PATCHES[:1], seed=PI_SEED)) as url:
-        report = connect("delivery", url, install_dir, assume_yes=True)
-        assert "pi now runs through Reef" in report and str(commands_root()) in (home / ".zshrc").read_text()
+        # One harness on this Reef and a token-free deployment: connect asks nothing and says one line.
+        assert connect("delivery", url, install_dir) == "Done. Open a new terminal and run pi."
+        assert str(commands_root()) in (home / ".zshrc").read_text()
         install = HarnessInstall.open(install_dir)
         assert install.record["agent"] == str(bin_dir / "pi")
         agents = install_dir / "pi-agent" / "AGENTS.md"
@@ -191,7 +192,13 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
         shown = subprocess.run(["pi", "--resume"], capture_output=True, text=True, env=environment)
         assert shown.returncode == 3, shown.stderr
         assert f"-e {install_dir}/pi-agent" in shown.stdout and shown.stdout.strip().endswith("--resume")
-        assert "sent pi-agent/skills/learned/SKILL.md" in shown.stderr
+        assert "sending pi-agent/skills/learned/SKILL.md to Reef in the background" in shown.stderr
+        # The send runs from a process of its own after the session, and reports to the log the next run prints.
+        log = install_dir / SYNC_LOG
+        deadline = time.monotonic() + 10
+        while "sent" not in log.read_text() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert "sent pi-agent/skills/learned/SKILL.md as release" in log.read_text()
         assert install.head()["files"]["pi-agent/skills/learned/SKILL.md"] == learned
         assert sorted(path.name for path in (home / ".pi" / "agent").iterdir()) == ["AGENTS.md"]
         install = HarnessInstall.open(install_dir)

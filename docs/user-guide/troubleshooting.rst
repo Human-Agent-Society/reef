@@ -103,7 +103,7 @@ Harness evolution
 
 **``reef-client harness run`` says to name the scenario.** More than one scenario is installed. Name one, such as ``reef-client harness run code-repair``.
 
-**``run`` or ``sync`` says ``kept your files`` because the scenario is running a step.** Reef takes no import while a step runs. Your changes stay in the install, and the next ``run`` or ``sync`` sends them.
+**``run`` or ``sync`` says ``kept your files`` because the scenario is running a step.** Reef takes no import while a step runs. Your changes stay in the install, and the next ``run`` or ``sync`` sends them. When the send after a session met a running step, the next ``run`` prints the refusal after ``after the last session:``.
 
 Docs and links
 --------------
