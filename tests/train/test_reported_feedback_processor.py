@@ -33,15 +33,12 @@ def report(record_id: str, *references: str, score: float = 1.0) -> AgentRecord:
     )
 
 
-def exclusive_stage(
-    context: PipelineContext, grouping: ReportGrouping | None = None, *, ordered_groups: bool = False
-) -> ReportRecord2Record:
+def exclusive_stage(context: PipelineContext, grouping: ReportGrouping | None = None) -> ReportRecord2Record:
     """A report stage in which a terminal report owns its sources."""
     return ReportRecord2Record(
         context,
         ReportGrouping() if grouping is None else grouping,
         exclusive_sources=True,
-        ordered_groups=ordered_groups,
     )
 
 
@@ -72,7 +69,6 @@ class SamplePipeline(TrainingPipeline):
         self,
         *,
         grouping: ReportGrouping | None = None,
-        ordered_groups: bool = False,
         report_type: type[ReportBase] | None = None,
         tasks: NamedReportSamples | None = None,
         batches: type[SampleJobData] = SampleJobData,
@@ -81,7 +77,7 @@ class SamplePipeline(TrainingPipeline):
         self.sample_tasks = NamedReportSamples() if tasks is None else tasks
         super().__init__(
             context,
-            record2record=exclusive_stage(context, grouping, ordered_groups=ordered_groups),
+            record2record=exclusive_stage(context, grouping),
             record2sample=self.sample_tasks,
             sample2job=batches(context, None, None),
         )
@@ -187,17 +183,16 @@ def test_operational_backlog_counts_the_reports_that_wait_in_the_record_stage() 
     processor.push(inference("i1"))
     processor.push(report("r1", "i1"))
     sample = processor.operational_metrics()
-    assert sample["unreserved_reports"] == 1
-    assert sample["reserved_reports"] == 0
+    assert sample["waiting_reports"] == 1
     assert sample["oldest_report_wait_seconds"] >= 0
     # A ready group's samples go to the sample store, so its reports leave the backlog before any job data.
     processor.push(inference("i2"))
     processor.push(report("r2", "i2"))
-    assert processor.operational_metrics()["unreserved_reports"] == 0
+    assert processor.operational_metrics()["waiting_reports"] == 0
     batch = processor.build_job_data(1)
-    assert processor.operational_metrics()["reserved_reports"] == 0
+    assert "reserved_reports" not in processor.operational_metrics()
     processor.acknowledge(batch.data_id)
-    assert processor.operational_metrics()["unreserved_reports"] == 0
+    assert processor.operational_metrics()["waiting_reports"] == 0
 
 
 def test_inferences_wait_for_reports_and_batch_counts_completed_samples() -> None:
@@ -339,7 +334,7 @@ def test_slot_retry_preserves_first_report() -> None:
     assert {"r-retry", "retry"} <= processor.releasable_record_ids()
 
 
-def test_ordered_groups_and_singleton_samples_train_together_in_store_order() -> None:
+def test_groups_and_singleton_samples_train_together_in_store_order() -> None:
     class PrefixGrouping(ReportGrouping):
         def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
             record_id = context.report.agent_record_id
@@ -348,7 +343,7 @@ def test_ordered_groups_and_singleton_samples_train_together_in_store_order() ->
         def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
             return GroupDecision.READY
 
-    processor = SamplePipeline(grouping=PrefixGrouping(), ordered_groups=True)
+    processor = SamplePipeline(grouping=PrefixGrouping())
     for record_id in ("g-z", "g-a", "single"):
         processor.push(inference(f"source-{record_id}"))
         processor.push(report(record_id, f"source-{record_id}"))
