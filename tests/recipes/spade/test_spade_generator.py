@@ -32,6 +32,7 @@ from reef.recipe.generated_tasks.processor import (
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import GeneratorError, TaskNameConflict
 from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
@@ -284,7 +285,8 @@ def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_sc
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
-    context = PipelineContext("spade", task_storage=SQLiteScenarioStorage(tmp_path / "records").open("spade").tasks)
+    session = SQLiteScenarioStorage(tmp_path / "records").open("spade")
+    context = PipelineContext("spade", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),

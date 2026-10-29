@@ -71,10 +71,10 @@ pipeline:
           hint_plays: 2
           skills: [inspection, repair]
           state_dir: ${REEF_SPADE_STATE_DIR}/generations
-  # One task job holds tasks_per_step saved tasks; Tinker rolls them out and trains on their task groups.
+  # One task job holds up to buffer_size saved tasks; Tinker rolls them out and trains on their task groups.
   sample2job:
     config:
-      tasks_per_step: 2
+      buffer_size: 2
 training:
   backend: tinker
   ready-timeout: 1800

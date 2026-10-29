@@ -251,7 +251,9 @@ def test_a_start_moves_the_imported_tasks_of_the_old_task_store_with_their_train
         store = session.tasks.open("imported-tasks")
         for port, (name, split) in enumerate((("task-a", "train"), ("task-b", "train"), ("held", "eval"))):
             store.add_task(directory=task_directory(tmp_path / "tasks", name, 9000 + port), split=split)
-        store.mark_trained(task_names=("task-a",))
+        # The trained mark that the task store kept before the sample store counted training.
+        with store.records._transaction(write=True) as connection:
+            store.records._insert_if_absent(connection, store.tables.trained, {**store.key, "task_name": "task-a"})
         session.commit_step(
             expected_step=0,
             commit=training_commit(1, "rollout:math:rollout:0123456789ab/task-a", component="b"),
