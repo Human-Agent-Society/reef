@@ -17,13 +17,14 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, JobOutcome, Sample
+from reef.core.job_data import JobData, JobOutcome, Sample, TaskSample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
+from reef.storage.samples import SampleKind
 
 #: The jobs whose data the sample buffer holds when ``pipeline.sample2job.config.buffer_size`` is not set.
 DEFAULT_BUFFER_JOBS = 4
@@ -192,6 +193,32 @@ class Sample2Job(ABC, Plugin):
         instruction's data holds the samples that automatic job data would take next: ``job_samples`` of them, or
         fewer when the stage ``reads_instructions``.
         """
+
+    def job_parameters(self, data: JobData) -> Mapping[str, Any]:
+        """The parameters of the training job that trains ``data``: ``context.job_parameters`` of its samples' kind.
+
+        Together with ``make_job_data``, this is the stage's function from the selected samples to the job: the
+        data, and the parameters that the job loop submits with it. The result depends only on ``data``, since a
+        resubmission after a restart must name the same job. Raise ``ValueError`` for data with both trajectories
+        and tasks, and for a kind that the recipe gives no parameters. Data with no sample has no parameters: a
+        harness step trains such data, and a harness step takes none.
+        """
+        kinds: set[SampleKind] = {
+            "task" if isinstance(sample, TaskSample) else "trajectory" for sample in data.samples
+        }
+        if len(kinds) > 1:
+            raise ValueError(f"job data {data.data_id!r} holds both trajectories and tasks")
+        if not kinds:
+            return {}
+        (kind,) = kinds
+        parameters = self.context.job_parameters.get(kind)
+        if parameters is None:
+            raise ValueError(f"the recipe gives no job parameters for a job of {kind} samples")
+        return dict(parameters)
+
+    def experiment_config(self) -> Mapping[str, Any]:
+        """A non-secret description of the jobs that the stage makes, which experiment runs record."""
+        return {"job_parameters": {kind: dict(parameters) for kind, parameters in self.context.job_parameters.items()}}
 
     # A stage may also make samples itself, from no record, and train them as one job of its own: the
     # pipeline asks ``own_job_data`` before it selects record sets. The defaults make no such samples.

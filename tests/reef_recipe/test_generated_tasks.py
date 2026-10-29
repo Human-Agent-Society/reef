@@ -901,7 +901,7 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     assert TaskGroupObjective.rollout_unit == "sample"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     recipe = training_recipe()
-    assert recipe.job_plan().experiment_config()["parameters"]["rollout"] == ROLLOUT, "every job is a task job"
+    assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
     built = recipe.build_pipeline(PipelineContext("one"))
     assert isinstance(built.record2record, GeneratedTaskRecord2Record)
     assert (

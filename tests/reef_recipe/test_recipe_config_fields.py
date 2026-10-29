@@ -20,9 +20,7 @@ from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import FixedJobPlan, JobPlanContext
 from reef.train.pipeline import PipelineConfig, PipelineSpec
-from reef.train.types import JobData
 
 
 @dataclass(frozen=True)
@@ -251,27 +249,23 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     assert trainer.job_loop is not None
     # With no activation section, every artifact that training makes serves.
     assert isinstance(recipe.activation_rule(), AlwaysActivate)
-    plan = trainer.job_loop.plan
-    assert isinstance(plan, FixedJobPlan)
-    request = plan.next_job(JobPlanContext(JobData("scenario:1"), 0, None))
-    assert request.parameters["method"]["objective"] == "sft"
+    assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "sft"
     # The job size and the buffer size come from the stage config.
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 8)
 
 
 @pytest.mark.unit
-def test_the_default_job_plan_sends_the_configured_job_parameters_with_every_job() -> None:
+def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job() -> None:
     config = {"job_parameters": {"scheduling": {"packing_length": 4096}, "save_interval": 50}}
     job_parameters = resolve_config_field_values(StagedRecipe, config, {})["job_parameters"]
     recipe = StagedRecipe(**runtime_bindings(), job_parameters=job_parameters)
 
-    request = recipe.job_plan().next_job(JobPlanContext(JobData("scenario:1"), 0, None))
-
-    assert request.parameters == {
+    expected = {
         "scheduling": {"packing_length": 4096},
         "save_interval": 50,
         "method": {"objective": "sft", "learning_rate_schedule": None},
     }
+    assert recipe.parameters_by_kind() == {"trajectory": expected, "task": expected}
     with pytest.raises(RecipeConfigError, match="job_parameters cannot set method"):
         StagedRecipe(**runtime_bindings(), job_parameters={"method": {"objective": "other"}})
 
