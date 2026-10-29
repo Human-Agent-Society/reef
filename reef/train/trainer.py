@@ -276,10 +276,10 @@ class Trainer:
     def scenario(self) -> str:
         return self._scenario
 
-    def set_training_mode(self, training_mode: str) -> None:
-        """Serialize mode selection with record push and job data reservation."""
+    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
+        """Serialize mode selection with record push and job data reservation (``TrainingPipeline.set_training_mode``)."""
         with self._lock:
-            self._pipeline.set_training_mode(training_mode)
+            self._pipeline.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
     def pending_instructions(self) -> int:
         """Instructions accepted and not yet consumed: the ones the pipeline buffers plus those unread in storage."""
@@ -419,6 +419,24 @@ class Trainer:
             if self._pipeline.has_unread_samples():
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
+
+    def buffer_listing(self) -> Mapping[str, Any]:
+        """The trainer's training mode and the samples of its buffer (``TrainingPipeline.buffer_listing``)."""
+        with self._lock:
+            self._pipeline.read_store()
+            return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.buffer_listing())}
+
+    def change_buffer(self, sample_ids: tuple[str, ...], *, insert: bool) -> Mapping[str, Any]:
+        """Insert ``sample_ids`` into the manual buffer, or remove them; return ``buffer_listing`` after it.
+
+        Raise as ``TrainingPipeline.insert_into_buffer`` and ``remove_from_buffer`` do.
+        """
+        with self._lock:
+            if insert:
+                self._pipeline.insert_into_buffer(sample_ids)
+            else:
+                self._pipeline.remove_from_buffer(sample_ids)
+        return self.buffer_listing()
 
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""

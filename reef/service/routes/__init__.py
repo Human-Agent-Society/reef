@@ -10,6 +10,7 @@ from reef.service.routes.artifact_imports import register_artifact_import_routes
 from reef.service.routes.evaluations import register_evaluation_routes
 from reef.service.routes.inference import register_inference_routes
 from reef.service.routes.records import register_record_routes
+from reef.service.routes.samples import register_sample_routes
 from reef.service.routes.scenarios import register_scenario_routes
 from reef.service.routes.system import register_health_route, register_system_routes
 from reef.service.routes.tasks import register_task_routes
@@ -35,6 +36,7 @@ def register_routes(
     register_record_routes(app, request_service=request_service)
     register_trajectory_routes(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)
+    register_sample_routes(app, request_service=request_service)
     register_artifact_import_routes(app, request_service=request_service, imports=imports)
     register_evaluation_routes(app, evaluations=evaluations)
 

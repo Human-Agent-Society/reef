@@ -111,6 +111,23 @@ def sample_train_count_table(metadata: MetaData, *, foreign_key: str | None = No
     )
 
 
+def manual_buffer_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
+    """Define the ``manual_buffer`` table in ``metadata``: the samples of each trainer's manual buffer.
+
+    A row ``(trainer, sample_id)`` says that the manual buffer of ``trainer`` (a ``train_counts`` key) holds the
+    sample ``sample_id``. ``foreign_key`` adds the ``storage_id`` column as for ``sample_table``.
+    """
+    columns = (Column("trainer", Text, primary_key=True), Column("sample_id", Text, primary_key=True))
+    if foreign_key is None:
+        return Table("manual_buffer", metadata, *columns)
+    return Table(
+        "manual_buffer",
+        metadata,
+        Column("storage_id", String(32), ForeignKey(foreign_key), primary_key=True),
+        *columns,
+    )
+
+
 def sample_content(sample: TrajectorySample) -> str:
     """The canonical JSON of a trajectory that the sample table stores; ``stored_sample`` reads it back."""
     content = {
@@ -149,8 +166,9 @@ def canonical_json_list(values: tuple[str, ...]) -> str:
 class SQLSampleStore(SampleStore):
     """The training samples of one scenario in its record database.
 
-    ``table`` is the sample table and ``train_counts`` the train count table
-    (``sample_train_count_table``), both in the namespace of the scenario.
+    ``table`` is the sample table, ``train_counts`` the train count table
+    (``sample_train_count_table``) and ``buffer`` the manual buffer table
+    (``manual_buffer_table``), all in the namespace of the scenario.
     ``files`` keeps the directories of the scenario's tasks, under
     ``scenario``.
     """
@@ -160,12 +178,14 @@ class SQLSampleStore(SampleStore):
         records: SQLRecordStore,
         table: ScopedTable,
         train_counts: ScopedTable,
+        buffer: ScopedTable,
         files: TaskFileStore,
         scenario: str,
     ) -> None:
         self.records = records
         self.table = table
         self.train_counts = train_counts
+        self.buffer = buffer
         self.files = files
         self.scenario = scenario
 
@@ -226,6 +246,46 @@ class SQLSampleStore(SampleStore):
                 select(table.c.record_ids_json).where(self.table.condition(), table.c.component == trainer)
             ).scalars()
             return frozenset(record_id for encoded in rows for record_id in json.loads(encoded))
+
+    def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
+        with self.records._transaction(write=False) as connection:
+            return self.read(connection, self.table.table.c.sample_id.in_(list(sample_ids)))
+
+    def manual_buffer(self, trainer: str) -> tuple[str, ...]:
+        table, buffer = self.table.table, self.buffer.table
+        with self.records._transaction(write=False) as connection:
+            held = set(
+                connection.execute(
+                    select(buffer.c.sample_id).where(self.buffer.condition(), buffer.c.trainer == trainer)
+                ).scalars()
+            )
+            if not held:
+                return ()
+            ordered = connection.execute(
+                select(table.c.sample_id)
+                .where(self.table.condition(), table.c.sample_id.in_(list(held)))
+                .order_by(table.c.sequence)
+            ).scalars()
+            return tuple(ordered)
+
+    def insert_into_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
+        if not sample_ids:
+            return
+        with self.records._transaction(write=True) as connection:
+            self.records._insert_if_absent(
+                connection,
+                self.buffer.table,
+                [{**self.buffer.scope, "trainer": trainer, "sample_id": sample_id} for sample_id in sample_ids],
+            )
+
+    def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
+        buffer = self.buffer.table
+        with self.records._transaction(write=True) as connection:
+            connection.execute(
+                buffer.delete().where(
+                    self.buffer.condition(), buffer.c.trainer == trainer, buffer.c.sample_id.in_(list(sample_ids))
+                )
+            )
 
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         if split not in SPLIT_NAMES:

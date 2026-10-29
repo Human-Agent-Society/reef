@@ -436,13 +436,19 @@ storage.
 
 - ``auto`` makes job data when the buffer holds ``job_samples`` samples.
 - ``manual`` makes job data only for a queued TRAIN instruction. The
-  instruction's data takes the samples that automatic job data would take
-  next: the samples of the buffer. By default the pipeline waits until the
-  buffer holds ``job_samples`` samples. A ``Sample2Job`` that sets
-  ``reads_instructions`` runs the instruction at once, with fewer samples or
-  none; harness evolution sets it, because its proposer reads the instruction.
-  A stage's own job data also waits for an instruction, and its job consumes
-  the instruction.
+  instruction's data is the trainer's manual buffer
+  (``TrainerSamples.manual_buffer``): the samples that a client chose with
+  ``TrainingPipeline.insert_into_buffer`` and ``remove_from_buffer`` (`Choose
+  the samples that train
+  <../reference/http-api.rst#choose-the-samples-that-train>`__), in store
+  order, whatever ``job_samples``. New samples never join it by themselves.
+  The pipeline waits until the manual buffer holds a sample. A ``Sample2Job``
+  that sets ``reads_instructions`` runs the instruction at once, also with an
+  empty buffer; harness evolution sets it, because its proposer reads the
+  instruction. The commit of the job removes the trained samples from the
+  manual buffer. A switch from ``auto`` to ``manual`` puts the automatic
+  buffer into the manual buffer. A stage's own job data also waits for an
+  instruction, and its job consumes the instruction.
 
 The pipeline runs the oldest instruction first, one per step. It gives the
 instruction's data the id ``<scenario>:instruction:<request id>`` and attaches
@@ -453,8 +459,8 @@ instruction. ``make_job_data`` must not call models or perform training.
 When the pipeline supports ``manual``, the trainer gives it TRAIN records
 beside the ``Sample2Job``'s ``required_request_types``. The pipeline queues
 them FIFO regardless of the selected mode; ``auto`` leaves the queue for
-``manual``. The pipeline takes records normally in manual mode, so changing to
-auto can train on data already collected.
+``manual``. The pipeline stores the samples of records in both modes, so
+changing to auto can train on data already collected.
 
 Unsupported modes raise ``NotImplementedError``. An invalid mode name raises
 ``ValueError``.
