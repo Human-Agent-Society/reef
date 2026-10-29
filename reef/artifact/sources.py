@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -104,7 +106,8 @@ class HuggingFaceReader(ArtifactSourceReader):
 
     def fetch(self, uri: str, directory: Path) -> str:
         snapshot = download_huggingface_snapshot(parse_huggingface_source(uri))
-        # The Hugging Face cache writes each file once, under its hash, and never rewrites it: a link is safe.
+        # huggingface_hub writes each file once under its hash and replaces it only by a rename, so a link keeps the
+        # bytes that were imported.
         copy_tree(snapshot.local_path, directory, link=True)
         return snapshot.version
 
@@ -117,7 +120,8 @@ class FileReader(ArtifactSourceReader):
         return ("file",)
 
     def fetch(self, uri: str, directory: Path) -> str:
-        source = Path(unquote(uri.removeprefix("file://")))
+        # The path is percent decoded, as ``Path.as_uri`` encodes it; surrogateescape keeps a non UTF-8 name.
+        source = Path(unquote(uri.removeprefix("file://"), errors="surrogateescape"))
         if not source.is_absolute() or not source.is_dir():
             raise ValueError(f"{uri} does not name an absolute directory path")
         # Files on the service can change after the import, and a hard link would carry the change into the store.
@@ -135,7 +139,9 @@ class S3ReaderSettings(PluginSettings):
 class S3Reader(ArtifactSourceReader):
     """Reads ``s3://bucket/prefix/``: every object under the prefix, at its path below it.
 
-    The credentials are boto3's standard chain: the environment, a profile or an instance role. The version is
+    An empty object whose key ends in ``/`` is a folder marker, such as the S3 console's "Create folder" writes, and
+    is skipped; a key that ends in ``/`` and holds data, or a key that is both a file and a folder, is refused. The
+    credentials are boto3's standard chain: the environment, a profile or an instance role. The version is
     the SHA-256 of the objects' keys and ETags, so the same objects read again give the same version.
     """
 
@@ -166,13 +172,17 @@ class S3Reader(ArtifactSourceReader):
             for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
                 for item in page.get("Contents", ()):
                     if item["Key"].endswith("/"):
-                        # A folder marker, such as the S3 console's "Create folder" writes, names no file.
+                        if item.get("Size", 0):
+                            raise ValueError(f"{uri} holds data in {item['Key']}, a key that names a folder")
                         continue
                     relative = PurePosixPath(item["Key"][len(prefix) :])
                     if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                         raise ArtifactSourceError(f"{uri} holds an object outside its prefix: {item['Key']}")
                     target = directory / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                    except (FileExistsError, NotADirectoryError) as exc:
+                        raise ValueError(f"{uri} holds a key that is both a file and a folder: {item['Key']}") from exc
                     client.download_file(bucket, item["Key"], str(target))
                     listed.append((str(relative), str(item["ETag"])))
         except (BotoCoreError, ClientError) as exc:
@@ -229,14 +239,18 @@ def copy_tree(source: Path, directory: Path, *, link: bool) -> None:
     """Put every file under ``source`` into ``directory`` at the same path; a source file is never changed.
 
     ``link`` hard links each file where the file system allows, for a source whose files are never rewritten.
-    Otherwise each file is copied, so a later edit of the source changes nothing in ``directory``.
+    Otherwise each file is copied, so a later edit of the source changes nothing in ``directory``, and a copy drops
+    the setuid and setgid bits, since the service owns it.
     """
-    place = link_or_copy if link else shutil.copy2
     for path in sorted(source.rglob("*")):
         if path.is_file():
             target = directory / path.relative_to(source)
             target.parent.mkdir(parents=True, exist_ok=True)
-            place(str(path), str(target))
+            if link:
+                link_or_copy(str(path), str(target))
+            else:
+                shutil.copy2(path, target)
+                os.chmod(target, stat.S_IMODE(target.stat().st_mode) & ~(stat.S_ISUID | stat.S_ISGID))
 
 
 def directory_content_id(directory: Path) -> str:

@@ -351,8 +351,10 @@ class Dispatcher(ScenarioLifecycle):
         """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
 
         Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an unknown component or one that
-        takes no import.
+        takes no import. An unknown scenario is refused before its lock is made, so a request for any name adds none.
         """
+        if not self.registry.has(scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).import_target(component)
 

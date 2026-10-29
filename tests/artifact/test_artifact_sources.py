@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 import sys
 import types
 from pathlib import Path
@@ -73,6 +74,16 @@ def test_a_file_uri_copies_so_a_later_edit_of_the_source_changes_nothing(tmp_pat
 
 
 @pytest.mark.unit
+def test_a_file_uri_copy_keeps_the_mode_but_drops_setuid_and_setgid(tmp_path: Path) -> None:
+    source = write_tree(tmp_path / "source", {"run.sh": b"#!/bin/sh\n"})
+    (source / "run.sh").chmod(0o755 | stat.S_ISUID | stat.S_ISGID)
+    target = tmp_path / "target"
+    target.mkdir()
+    FileReader().fetch(source.as_uri(), target)
+    assert stat.S_IMODE((target / "run.sh").stat().st_mode) == 0o755
+
+
+@pytest.mark.unit
 def test_a_uri_goes_to_the_reader_of_its_scheme(tmp_path: Path) -> None:
     sources = ArtifactSources.from_setting([f"{__name__}:MemoryReader"])
     # A configured reader replaces the built-in reader of a scheme it reads.
@@ -106,7 +117,8 @@ class FakeS3Client:
                 if client.fail:
                     raise client.error("access denied")
                 keys = sorted(key for key in client.objects if key.startswith(query["Prefix"]))
-                return [{"Contents": [{"Key": key, "ETag": f'"{key}-etag"'} for key in keys]}]
+                contents = [{"Key": key, "ETag": f'"{key}-etag"', "Size": len(client.objects[key])} for key in keys]
+                return [{"Contents": contents}]
 
         return Paginator()
 
@@ -164,8 +176,21 @@ def test_an_s3_uri_skips_folder_markers(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda service, endpoint_url: client))
     monkeypatch.setitem(sys.modules, "botocore", types.SimpleNamespace(exceptions=exceptions))
     monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions)
-    S3Reader.from_config({}).fetch("s3://bucket/models/a", tmp_path)
-    assert sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()) == [
+    reader = S3Reader.from_config({})
+    target = tmp_path / "target"
+    target.mkdir()
+    reader.fetch("s3://bucket/models/a", target)
+    assert sorted(path.relative_to(target).as_posix() for path in target.rglob("*") if path.is_file()) == [
         "config.json",
         "sub/w.bin",
     ]
+    # A key that ends in "/" and holds data, or a key that is a file and a folder, names no tree of files.
+    for extra, message in (
+        ({"models/b/": b"data"}, "a key that names a folder"),
+        ({"models/b/w": b"w", "models/b/w/z": b"z"}, "both a file and a folder"),
+    ):
+        client.objects = {"models/b/config.json": b"{}", **extra}
+        refused = tmp_path / message.replace(" ", "-")
+        refused.mkdir()
+        with pytest.raises(ValueError, match=message):
+            reader.fetch("s3://bucket/models/b", refused)

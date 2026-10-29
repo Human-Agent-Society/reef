@@ -1245,8 +1245,10 @@ the scenario has one component. The body is ``{"source": "<uri>"}``. A source
 reader copies the directory from one of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot.
-- ``s3://bucket/prefix/``: every object under the prefix.
-- ``file:///absolute/path``: a directory on the service's file system.
+- ``s3://bucket/prefix/``: every object under the prefix. Empty folder
+  markers, keys that end in ``/``, are skipped.
+- ``file:///absolute/path``: a directory on the service's file system,
+  percent encoded as ``Path.as_uri()`` writes it. Its files are copied.
 - A scheme that ``storage.artifact-sources`` adds.
 
 To import a directory from your own machine, put it in one of these places
