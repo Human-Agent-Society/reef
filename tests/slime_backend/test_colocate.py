@@ -1,6 +1,7 @@
 """Shared GPU serving drains requests and preserves artifact publication semantics."""
 
 import asyncio
+import json
 import threading
 from unittest.mock import MagicMock
 
@@ -10,7 +11,11 @@ from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.inference.sglang.colocate import ColocatedServingRuntime, build_colocated_serving
+from reef.inference.sglang.colocate import (
+    ColocatedAdapterServingRuntime,
+    ColocatedServingRuntime,
+    build_colocated_serving,
+)
 from reef.inference.sglang.executor import SGLangExecutor
 from reef.inference.sglang.service import SGLangInferenceService
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -18,16 +23,20 @@ from reef.train.slime_backend.component import SlimeTrainingComponent
 from reef.train.slime_backend.launch import SlimeDeployment
 
 
-@pytest.fixture
-def serving():
+@pytest.fixture(params=["full", "adapter"])
+def serving(request):
     backend = MagicMock(spec=SGLangInferenceBackend)
     backend.inference_url.return_value = "http://127.0.0.1:12345"
-    runtime = ColocatedServingRuntime(
+    runtime_type = ColocatedAdapterServingRuntime if request.param == "adapter" else ColocatedServingRuntime
+    options = {"adapter_capacity": 2} if request.param == "adapter" else {}
+    backend.recover.return_value = 0
+    runtime = runtime_type(
         backend,
         MagicMock(spec=SGLangInferenceHandler),
         service=MagicMock(spec=SGLangInferenceService),
         model_path="model",
         inference_timeout_s=1,
+        **options,
     )
     backend.reset_mock()
     yield runtime, backend
@@ -103,17 +112,24 @@ def test_training_waits_for_active_request_and_blocks_new_requests(serving):
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("inference_tp", [1, 2])
+@pytest.mark.parametrize("lora_rank", [0, 8])
 @pytest.mark.parametrize("actor_width", [2, "${training.config.gpus}"])
-def test_shared_config_starts_no_separate_inference_component(tmp_path, actor_width):
+def test_shared_config_starts_no_separate_inference_component(tmp_path, actor_width, inference_tp, lora_rank):
     raw = {
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
-        "inference": {"model-path": "/models/demo", "num-gpus": 2, "tensor-parallel-size": 2},
+        "inference": {"model-path": "/models/demo", "num-gpus": 2, "tensor-parallel-size": inference_tp},
         "training": {
             "backend": "slime",
             "colocate": True,
             "ray-address": "ray://head:10001",
             "config": {"gpus": 2},
-            "options": {"global-batch-size": 4, "actor-num-nodes": 1, "actor-num-gpus-per-node": actor_width},
+            "options": {
+                "global-batch-size": 4,
+                "actor-num-nodes": 1,
+                "actor-num-gpus-per-node": actor_width,
+                "megatron-lora-rank": lora_rank,
+            },
         },
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
@@ -152,7 +168,8 @@ def test_shared_serving_binds_before_recovered_jobs_start(monkeypatch, serving):
     assert events == ["serving-started", "jobs-started"]
 
 
-def test_shared_serving_uses_the_native_sglang_executor(monkeypatch):
+@pytest.mark.parametrize("adapter", [False, True])
+def test_shared_serving_uses_the_native_sglang_executor(monkeypatch, adapter):
     from reef.runtime.deployment import InferenceResources
     from reef.runtime.jobs import ReleaseFormat
 
@@ -166,13 +183,19 @@ def test_shared_serving_uses_the_native_sglang_executor(monkeypatch):
         assert service.config.options["enable_memory_saver"] is True
         assert service.config.options["enable_weights_cpu_backup"] is True
         assert service.config.pause_mode == "in_place"
+        if adapter:
+            assert service.config.options["enable_lora"] is True
+            assert service.config.options["max_lora_rank"] == 8
+            assert service.config.options["max_loaded_loras"] == 2
 
+    monkeypatch.setattr("reef.inference.sglang.deployment.require_lora_tensor_request_schema", lambda: None)
+    monkeypatch.setattr("reef.inference.sglang.deployment.require_lora_distributed_request_schema", lambda: None)
     monkeypatch.setattr(SGLangInferenceService, "start", start)
     monkeypatch.setattr(SGLangInferenceService, "backend", lambda self, connection: backend)
     monkeypatch.setattr(SGLangInferenceHandler, "from_config", lambda *args, **kwargs: MagicMock())
     runtime = build_colocated_serving(
         resources,
-        ReleaseFormat("full"),
+        ReleaseFormat("adapter", 8, ("q_proj", "v_proj")) if adapter else ReleaseFormat("full"),
         {
             "options": {},
             "num_gpus": 1,
@@ -181,8 +204,37 @@ def test_shared_serving_uses_the_native_sglang_executor(monkeypatch):
             "executor_options": {},
             "inference_timeout_s": 1,
             "inference_handler_config": {},
+            "adapter_capacity": 2,
         },
         model_path="model",
         environ={},
     )
     runtime.shutdown()
+
+
+def test_adapter_publication_and_residency_survive_handoff(serving, tmp_path):
+    runtime, backend = serving
+    if not isinstance(runtime, ColocatedAdapterServingRuntime):
+        return
+
+    def loaded(files, *, adapter_name, runtime_load_id):
+        backend.runtime_load_ids.return_value = [runtime_load_id, runtime_load_id]
+
+    backend.load_weight_files.side_effect = loaded
+    for step in range(2):
+        release = tmp_path / str(step)
+        adapter = release / "adapter"
+        adapter.mkdir(parents=True)
+        (adapter / "adapter_config.json").write_text(json.dumps({"r": 8}))
+        published = runtime.activate_checkpoint(Artifact.local(release), scenario="math")
+        assert runtime.serving_adapter_runtime_load_id("math") == published
+        residency = runtime.adapter_residency_status()
+        backend.reset_mock()
+        with runtime.training_phase():
+            pass
+        assert runtime.serving_adapter_runtime_load_id("math") == published
+        assert runtime.adapter_residency_status() == residency
+        backend.load_weight_files.assert_not_called()
+    backend.recover.return_value = 0
+    runtime.recover_engines()
+    assert runtime.serving_adapter_runtime_load_id("math") == published

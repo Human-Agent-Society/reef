@@ -87,7 +87,7 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
     ("inference", "training", "message"),
     [
         # Shared inference must match the training GPU group.
-        ({}, {"colocate": True}, "one node and one engine"),
+        ({}, {"colocate": True}, "one node and inference.num-gpus"),
         ({}, {"options": {"global-batch-size": 4, "offload-rollout": True}}, "shares GPUs"),
         ({}, {"options": {"global-batch-size": 4, "sglang-mem-fraction-static": 0.5}}, "configures inference"),
         ({}, {"options": {"global-batch-size": 4, "rollout-num-gpus": 2}}, "configures inference"),

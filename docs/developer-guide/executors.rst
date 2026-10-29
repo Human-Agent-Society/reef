@@ -225,7 +225,10 @@ reserves there, and Slime's actor (and critic) workers. By default, serving
 uses a separate inference component. With ``training.colocate: true``, the
 Slime deployment builds local SGLang on the same single-node reservation.
 It drains inference before each training operation and restores serving after
-native train offload. File-based checkpoint publication remains unchanged.
+native train offload. The same handoff wraps the existing full-weight and
+adapter serving runtimes. Native SGLang grouping permits several engines
+when inference TP is smaller than the shared GPU count. File-based
+checkpoint publication remains unchanged.
 The component still refuses ``--colocate``, ``--offload-rollout`` and
 ``--keep-lora-base-resident``. Its workers keep running between jobs, so it
 also refuses ``--release-train``.
@@ -237,13 +240,18 @@ dedicated Ray cluster with one or two GPUs and a local Qwen3-0.6B model:
 
    MODEL_DIR=/path/to/Qwen3-0.6B \
    SMOKE_RUN=/scratch/colocate-smoke-new \
-   SMOKE_GPUS=2 RAY_ADDRESS=127.0.0.1:6379 \
+   SMOKE_GPUS=2 SMOKE_INFERENCE_TP=1 SMOKE_LORA_RANK=8 \
+   RAY_ADDRESS=127.0.0.1:6379 \
    python -m tests.slime_backend.colocate_smoke
 
 Run this from the repository root with a fresh ``SMOKE_RUN`` directory.
 The check generates real samples, trains the actor and critic, saves and
 loads a checkpoint, then repeats. It checks GPU reservation sharing and
-keeps metrics in ``results.jsonl``. This small-model check tests the handoff
+keeps metrics in ``results.jsonl``. It requests every engine and compares
+tokens and log probabilities before and after each handoff. With LoRA, the
+second handoff preserves a trained adapter. Set ``SMOKE_LORA_RANK=0`` for
+full weights, or ``SMOKE_INFERENCE_TP=2`` for one engine on two GPUs.
+This small-model check tests the handoff
 and publication path; it does not measure large-model memory capacity.
 
 A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of

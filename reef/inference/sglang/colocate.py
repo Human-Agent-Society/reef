@@ -1,4 +1,4 @@
-"""Synchronous GPU handoff for Slime jobs and one local SGLang serving engine.
+"""Synchronous GPU handoff for Slime jobs and local SGLang serving engines.
 
 The trainer owns the reservation. Serving borrows it and retains its committed
 weights across training. Native memory-saver calls move the models; Reef only
@@ -8,6 +8,7 @@ orders those calls and keeps requests out until the handoff finishes.
 from __future__ import annotations
 
 import logging
+from abc import abstractmethod
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -17,39 +18,31 @@ from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.inference.sglang.deployment import create_inference
-from reef.inference.sglang.service import SGLangInferenceService
 from reef.runtime.deployment import InferenceResources, RuntimeConfigError, RuntimeFactory
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, SharedGpuInferenceRuntime
+from reef.runtime.interfaces import InferenceRuntime, SharedGpuInferenceRuntime
 from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import FullWeightServingRuntime
+from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime, SavedWeightServingRuntime
 
 logger = logging.getLogger(__name__)
 
 
-class ColocatedServingRuntime(FullWeightServingRuntime, SharedGpuInferenceRuntime):
-    """A full-weight serving runtime that lends its GPUs to one serialized training job.
+class SharedSGLangServingRuntime(SavedWeightServingRuntime, SharedGpuInferenceRuntime):
+    """Shared GPU handoff added to an existing saved-weight serving runtime.
 
-    ``phase`` is serving, draining, training, restoring, or failed. Only
-    serving admits requests. A failed handoff leaves admission paused until
-    deployment restart. The Slime component uses ``training_phase`` around
-    each train-and-save operation; publication keeps the inherited artifact
-    loading behavior. ``memory_backend`` controls the same serving engines.
+    Concrete subclasses select full weights or adapters through their existing
+    serving base. ``phase`` starts as serving, then becomes draining, training,
+    restoring, or failed. Only serving admits requests. Each instance assigns
+    its own phase when a handoff starts. A failed handoff requires restart.
     """
 
-    def __init__(
-        self,
-        backend: SGLangInferenceBackend,
-        handler: InferenceHandler,
-        *,
-        service: SGLangInferenceService,
-        model_path: str,
-        inference_timeout_s: float,
-    ) -> None:
-        self.memory_backend = backend
-        self.phase = "serving"
-        super().__init__(
-            backend, handler, service=service, model_path=model_path, inference_timeout_s=inference_timeout_s
-        )
+    phase: str = "serving"
+
+    @property
+    def memory_backend(self) -> SGLangInferenceBackend:
+        """The native backend that controls every engine in this allocation."""
+        if not isinstance(self._backend, SGLangInferenceBackend):
+            raise TypeError("shared GPU serving requires the SGLang memory-control backend")
+        return self._backend
 
     @contextmanager
     def training_phase(self) -> Iterator[None]:
@@ -92,7 +85,30 @@ class ColocatedServingRuntime(FullWeightServingRuntime, SharedGpuInferenceRuntim
         with self._lock:
             if self.phase == "failed":
                 raise RuntimeError("cannot publish after a shared GPU handoff failed; restart the deployment")
-            return super().activate_checkpoint(artifact, scenario=scenario)
+            return self.publish_checkpoint(artifact, scenario=scenario)
+
+    @abstractmethod
+    def publish_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        """Publish through the selected saved-weight runtime under the handoff lock."""
+
+
+class ColocatedServingRuntime(SharedSGLangServingRuntime, FullWeightServingRuntime):
+    """Full-weight publication with the shared SGLang GPU handoff."""
+
+    def publish_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        return FullWeightServingRuntime.activate_checkpoint(self, artifact, scenario=scenario)
+
+
+class ColocatedAdapterServingRuntime(SharedSGLangServingRuntime, AdapterServingRuntime):
+    """Existing adapter publication and residency with the shared GPU handoff.
+
+    SGLang retains its adapter registry and buffers across native memory-saver
+    calls. The base weights use CPU backup. Adapter allocations outside the
+    native managed regions remain resident and need training memory headroom.
+    """
+
+    def publish_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        return AdapterServingRuntime.activate_checkpoint(self, artifact, scenario=scenario)
 
 
 def build_colocated_serving(
@@ -102,10 +118,8 @@ def build_colocated_serving(
     *,
     model_path: str,
     environ: Mapping[str, str],
-) -> ColocatedServingRuntime:
-    """Start full-weight SGLang on the trainer's borrowed, single-node GPU bundles."""
-    if release_format.layout != "full":
-        raise ValueError("colocated serving requires full-weight releases")
+) -> SharedSGLangServingRuntime:
+    """Start full-weight or adapter serving on the trainer's borrowed GPU bundles."""
     options = dict(config["options"])
     options["enable-memory-saver"] = True
     # A trained candidate is not necessarily published. Preserve the incumbent
@@ -118,7 +132,7 @@ def build_colocated_serving(
         tensor_parallel_size=config["tensor_parallel_size"],
         options=options,
         release_format=release_format,
-        adapter_capacity=1,
+        adapter_capacity=config["adapter_capacity"],
         prefix_sharing=False,
         executor=config["executor"],
         executor_options=config["executor_options"],
@@ -135,6 +149,15 @@ def build_colocated_serving(
             timeout_s=config["inference_timeout_s"],
             **dict(config["inference_handler_config"]),
         )
+        if release_format.layout == "adapter":
+            return ColocatedAdapterServingRuntime(
+                backend,
+                handler,
+                adapter_capacity=config["adapter_capacity"],
+                service=service,
+                model_path=model_path,
+                inference_timeout_s=config["inference_timeout_s"],
+            )
         return ColocatedServingRuntime(
             backend,
             handler,

@@ -273,10 +273,11 @@ explicit ``training.options.global-batch-size``, the samples in one optimizer
 step: Slime cuts each job's data into optimizer batches of that size.
 
 Set ``training.colocate: true`` to share Slime's training GPUs with local
-SGLang. This option supports full weights on one node, with one SGLang
-engine spanning all actor GPUs. Set ``inference.num-gpus`` and
-``inference.tensor-parallel-size`` equal to
-``training.options.actor-num-gpus-per-node``. Actor and critic workers use
+SGLang. This option supports full weights and LoRA on one node. Set
+``inference.num-gpus`` equal to ``training.options.actor-num-gpus-per-node``.
+The inference TP size must divide this GPU count. For example, four GPUs
+with inference TP two run two engines; inference TP four runs one engine.
+Training TP is independent of inference TP. Actor and critic workers use
 Slime's native train offload; Reef enables SGLang's memory saver and CPU
 weight backup. Reserve host memory for the served model's weight copy.
 
@@ -287,7 +288,14 @@ Queued requests wait during training. Saved checkpoints still pass through
 normal evaluation and publication; training does not publish weights directly.
 A failed handoff closes admission until deployment restart.
 
-Shared mode refuses remote inference, custom handlers, LoRA, teachers and
+For LoRA, use the existing ``training.options.megatron-lora-rank`` and
+``megatron-to-hf-mode: bridge`` options. Reef publishes the exported PEFT
+adapter through the usual scenario adapter registry. Training restores the
+currently served adapter before publication of a candidate. SGLang adapter
+buffers outside the native memory-saver regions remain on the GPU during
+training; reserve memory for those buffers as well as the training model.
+
+Shared mode refuses remote inference, custom handlers, teachers and
 prefix sharing. Use the default separate deployment for these configurations.
 This option does not enable Slime's own rollout manager or task execution.
 Reef still supplies captured trajectories to bounded training jobs.
@@ -1198,7 +1206,7 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
-   training.colocate | false | share Slime training GPUs with local SGLang; single-node full weights only; Tinker refuses ``true``
+   training.colocate | false | share Slime training GPUs with local SGLang; single-node full weights or LoRA; Tinker refuses ``true``
    training.ready-timeout | 3600 | startup deadline of the services the training backend adds, such as the inference component and the teacher engine; Slime, and every deployment that Reef's engines serve, also raise ``reef.ready-timeout`` to at least this value
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.sample2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.

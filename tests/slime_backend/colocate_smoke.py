@@ -21,6 +21,34 @@ from reef.runtime.jobs import TrainingJob
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.surface.adapter import adapter_name
+
+
+def generate(serving, url, prompt, scenario):
+    version = serving.serving_adapter_runtime_load_id(scenario)
+    payload = {
+        "input_ids": prompt,
+        "sampling_params": {"max_new_tokens": 32, "temperature": 0},
+        "return_logprob": True,
+    }
+    if version is not None:
+        payload["lora_path"] = adapter_name(scenario, version)
+    handle = asyncio.run(serving.acquire_inference())
+    try:
+        response = requests.post(url + "/generate", json=payload, timeout=120)
+        response.raise_for_status()
+        pairs = response.json()["meta_info"]["output_token_logprobs"]
+        assert pairs
+        return pairs
+    finally:
+        handle.release()
+
+
+def same_generation(before, after):
+    assert [pair[1] for pair in before] == [pair[1] for pair in after]
+    assert all(
+        math.isclose(left[0], right[0], rel_tol=1e-4, abs_tol=1e-4) for left, right in zip(before, after, strict=True)
+    )
 
 
 def main() -> None:
@@ -29,12 +57,15 @@ def main() -> None:
     run.mkdir(parents=True, exist_ok=True)
     model = os.environ["MODEL_DIR"]
     gpus = int(os.environ.get("SMOKE_GPUS", "2"))
+    inference_tp = int(os.environ.get("SMOKE_INFERENCE_TP", str(gpus)))
+    lora_rank = int(os.environ.get("SMOKE_LORA_RANK", "0"))
+    scenario = "smoke"
     raw = {
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
         "inference": {
             "model-path": model,
             "num-gpus": gpus,
-            "tensor-parallel-size": gpus,
+            "tensor-parallel-size": inference_tp,
             "timeout-s": 600,
             "options": {
                 "mem-fraction-static": 0.3,
@@ -95,6 +126,10 @@ def main() -> None:
             },
         },
     }
+    if lora_rank:
+        raw["training"]["options"].update(
+            {"megatron-lora-rank": lora_rank, "megatron-lora-alpha": lora_rank, "lr": 1e-4}
+        )
     (run / "config.yaml").write_text(yaml.safe_dump(raw))
     config, _ = resolve_deployment_config(raw, None, run / "config.yaml")
     settings = service_config_from_mapping(config)
@@ -105,9 +140,14 @@ def main() -> None:
         assert int(ray.cluster_resources()["GPU"]) == gpus
         assert component.resources.inference_placement == component.resources.placement_groups["actor"]
         tokenizer = AutoTokenizer.from_pretrained(model)
+        workers = requests.get(serving.base_url + "/workers", timeout=30)
+        workers.raise_for_status()
+        urls = [worker["url"] for worker in workers.json()["workers"]]
+        assert len(set(urls)) == gpus // inference_tp, urls
+        print(f"COLOCATE_ENGINES urls={urls} lora_rank={lora_rank}", flush=True)
         start = component.base_start
         for step in range(2):
-            version = serving.current_runtime_load_id()
+            version = serving.serving_adapter_runtime_load_id(scenario) or serving.current_runtime_load_id()
             samples = []
             for index in range(2):
                 prompt_text = tokenizer.apply_chat_template(
@@ -117,23 +157,7 @@ def main() -> None:
                     enable_thinking=False,
                 )
                 prompt = tokenizer.encode(prompt_text, add_special_tokens=False)
-                handle = asyncio.run(serving.acquire_inference())
-                try:
-                    response = requests.post(
-                        serving.base_url + "/generate",
-                        json={
-                            "input_ids": prompt,
-                            "sampling_params": {"max_new_tokens": 32, "temperature": 0},
-                            "return_logprob": True,
-                        },
-                        timeout=120,
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-                finally:
-                    handle.release()
-                pairs = result["meta_info"]["output_token_logprobs"]
-                assert pairs
+                pairs = generate(serving, serving.base_url, prompt, scenario)
                 samples.append(
                     policy_trajectory(
                         f"{step}:{index}",
@@ -145,6 +169,9 @@ def main() -> None:
                         action_mask=[1] * len(pairs),
                     )
                 )
+            before_engines = [generate(serving, url, prompt, scenario) for url in urls]
+            for before in before_engines:
+                same_generation(pairs, before)
             job = TrainingJob(
                 f"shared-smoke-{step}",
                 component.name,
@@ -164,34 +191,25 @@ def main() -> None:
             assert status.state == "finished", status.error
             assert status.checkpoints
             assert serving.phase == "serving"
-            assert serving.current_runtime_load_id() == version
+            assert (serving.serving_adapter_runtime_load_id(scenario) or serving.current_runtime_load_id()) == version
             checkpoint = status.checkpoints[-1]
             assert checkpoint.metrics["sao/actor_trained"] == 1
             assert checkpoint.metrics["sao/critic_updates"] == 2
             # Version metadata alone cannot prove that offload preserved the
             # incumbent weights. Compare a real deterministic request before
             # publication with the same request sampled before training.
-            handle = asyncio.run(serving.acquire_inference())
-            try:
-                response = requests.post(
-                    serving.base_url + "/generate",
-                    json={
-                        "input_ids": prompt,
-                        "sampling_params": {"max_new_tokens": 32, "temperature": 0},
-                        "return_logprob": True,
-                    },
-                    timeout=120,
-                )
-                response.raise_for_status()
-                restored = response.json()["meta_info"]["output_token_logprobs"]
-            finally:
-                handle.release()
-            assert [pair[1] for pair in restored] == [pair[1] for pair in pairs]
-            assert all(
-                math.isclose(before[0], after[0], rel_tol=1e-4, abs_tol=1e-4)
-                for before, after in zip(pairs, restored, strict=True)
-            )
-            published = serving.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)))
+            for url, before in zip(urls, before_engines, strict=True):
+                same_generation(before, generate(serving, url, prompt, scenario))
+            same_generation(pairs, generate(serving, serving.base_url, prompt, scenario))
+            published = serving.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)), scenario=scenario)
+            after_engines = [generate(serving, url, prompt, scenario) for url in urls]
+            for after in after_engines[1:]:
+                same_generation(after_engines[0], after)
+            if lora_rank:
+                from safetensors.torch import load_file
+
+                weights = load_file(str(Path(checkpoint.release_path) / "adapter" / "adapter_model.safetensors"))
+                assert any(tensor.count_nonzero().item() > 0 for name, tensor in weights.items() if "lora_B" in name)
             assert published != version
             start = checkpoint.path
             with (run / "results.jsonl").open("a") as output:
@@ -199,6 +217,9 @@ def main() -> None:
                     json.dumps(
                         {
                             "step": step,
+                            "inference_tp": inference_tp,
+                            "engines": len(urls),
+                            "lora_rank": lora_rank,
                             "previous_version": version,
                             "published_version": published,
                             "checkpoint": checkpoint.release_path,
@@ -208,12 +229,7 @@ def main() -> None:
                     + "\n"
                 )
             print(f"COLOCATE_STEP_PASS step={step} version={published}", flush=True)
-        response = requests.post(
-            serving.base_url + "/generate",
-            json={"text": "1+1=", "sampling_params": {"max_new_tokens": 8}},
-            timeout=120,
-        )
-        response.raise_for_status()
+        generate(serving, serving.base_url, prompt, scenario)
     finally:
         close_runtimes(component, serving)
     print("COLOCATE_GPU_PASS", flush=True)

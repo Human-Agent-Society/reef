@@ -288,3 +288,34 @@ def test_engine_control_and_weight_loads_skip_encoder_groups(monkeypatch):
         ("regular", "flush_cache"),
         ("regular", "continue_generation"),
     ]
+
+
+@pytest.mark.parametrize("method", ["release_memory", "resume_memory"])
+@pytest.mark.parametrize("fail_second", [False, True])
+def test_memory_handoff_waits_for_every_engine(monkeypatch, method, fail_second):
+    completed = []
+    engines = [object(), object()]
+
+    class EngineGroup:
+        def collective_rpc(self, operation, *, timeout):
+            assert operation == method + "_occupation"
+            for index in range(len(engines)):
+                if index == 1 and fail_second:
+                    raise TimeoutError("second engine acknowledgement lost")
+                completed.append(index)
+
+    def group(workers):
+        assert workers == engines
+        return EngineGroup()
+
+    receiver = SimpleNamespace(updatable_engines=lambda: engines)
+    monkeypatch.setattr(RayExecutor, "from_workers", group)
+    operations = SGLangInferenceBackend(UniProcExecutor.from_workers([receiver]))
+    handoff = operations.release_memory if method == "release_memory" else operations.resume_memory
+    if fail_second:
+        with pytest.raises(TimeoutError, match="acknowledgement lost"):
+            handoff()
+        assert completed == [0]
+    else:
+        handoff()
+        assert completed == [0, 1]
