@@ -138,7 +138,7 @@ Change the deployment's evaluation and add a ``pipeline`` section:
      config:
        evolution:
          evaluation:
-           task_store: imported-tasks
+           imported_tasks: true
            scorer: reef.evaluation.harness:VerifierRewardScorer
            policy: compare
    pipeline:
@@ -298,7 +298,7 @@ Offline runs on uploaded tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``reef.sample2job.traces:TrainTaskRollouts`` makes each step from the train
-split of the ``imported-tasks`` store:
+split of the scenario's imported tasks:
 
 - Each step runs the next ``tasks_per_step`` train tasks (default 8) on the
   head, and the method reads those rollouts.
@@ -319,7 +319,7 @@ Evaluation: the publication policy
 ``evolution.evaluation`` names the tasks, the ``scorer`` (an
 ``RolloutScorer``) and the ``policy``. The tasks come from ``tasks`` (prompts
 or task directories), ``task_manifest`` with ``tasks_root``, or
-``task_store``. A prompt rollout starts in an empty root, so a prompt must
+``imported_tasks``. A prompt rollout starts in an empty root, so a prompt must
 state the whole problem.
 
 .. list-table::

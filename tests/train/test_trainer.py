@@ -717,7 +717,15 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
             return WeightTrainingSpec(objective=_GROUPED_PG_OBJECTIVE)
 
         def build(
-            self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+            self,
+            scenario,
+            records,
+            *,
+            algorithm_state=None,
+            experiment_logger=None,
+            task_storage=None,
+            releases=None,
+            samples=None,
         ):
             return Trainer.build(
                 scenario,

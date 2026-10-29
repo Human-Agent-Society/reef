@@ -32,6 +32,7 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentReleases
@@ -293,6 +294,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,

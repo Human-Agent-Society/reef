@@ -467,7 +467,15 @@ class _SavedArtifactRecipe(Recipe):
     backend: CandidateBackend
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         del experiment_logger
         return Trainer.build(
@@ -571,7 +579,15 @@ class ProtectAllPipeline(TrainingPipeline):
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         component = self.training_component
         return Trainer.build(

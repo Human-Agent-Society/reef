@@ -383,6 +383,7 @@ class ScenarioFactory:
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
                 releases=ScenarioReleaseFiles(name=name, store=store, repository=repository, surface=surface),
+                samples=store.samples,
             )
             if any(
                 component_trainer.trainer.trains
@@ -449,7 +450,10 @@ class ScenarioFactory:
                     scenario.replay_retained(
                         up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
-                component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
+                # As the committer names it on a commit: the component with several trainers, none with one.
+                component_trainer.trainer.read_samples(
+                    store.samples, component_trainer.component if len(trainers) > 1 else None
+                )
             scenario.resume_training_starts()
             return scenario
         except BaseException:

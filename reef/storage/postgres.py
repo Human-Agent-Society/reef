@@ -45,14 +45,20 @@ from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
+from reef.storage.migrations import (
+    archive_imported_files,
+    legacy_model_configs,
+    migrate_imported_tasks,
+    migrate_record_storage,
+    migrate_uploaded_trajectories,
+)
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 logger = logging.getLogger(__name__)
@@ -169,7 +175,8 @@ class PostgresRecordDatabase:
         version = Table("schema_version", metadata, Column("version", Integer, primary_key=True))
         self.tables = _record_tables(metadata)
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
-        self.trajectory_table = trajectory_table(metadata, foreign_key="record_store.storage_id")
+        self.sample_table = sample_table(metadata, foreign_key="record_store.storage_id")
+        self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
@@ -186,22 +193,36 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8], [9]):
+                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8], [9], [10]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
                 # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
                 # generated_task with candidate_task and published_task, which keep each task by the digest
                 # of its directory, and no longer uses task_store. Version 8 adds task_trained and task_document, the
                 # trained marks and the stage documents of a task store. Version 9 adds artifact_evaluation, the
-                # evaluations that clients ask for. create_all adds them to an older schema.
+                # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample and
+                # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
+                # schema, migrate_uploaded_trajectories moves the uploaded trajectories, and migrate_imported_tasks
+                # moves the tasks of the imported-tasks task store.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
+                migrate_uploaded_trajectories(
+                    connection, self.sample_table, self.sample_train_count_table, self.commit_table
+                )
+                migrate_imported_tasks(
+                    connection,
+                    self.sample_table,
+                    self.sample_train_count_table,
+                    self.commit_table,
+                    self.task_tables.published,
+                    self.task_tables.trained,
+                )
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [9]:
-                    connection.execute(version.update().values(version=9))
+                if versions and versions != [10]:
+                    connection.execute(version.update().values(version=10))
                 elif not versions:
-                    connection.execute(version.insert().values(version=9))
+                    connection.execute(version.insert().values(version=10))
         except BaseException:
             self._engine.dispose()
             raise
@@ -371,10 +392,15 @@ class PostgresRecordStore(SQLRecordStore):
         tables = replace(self._database.task_tables, scope={"storage_id": self.storage_id})
         return SQLTaskStorage(self, tables, files, scenario)
 
-    def trajectory_store(self) -> SQLTrajectoryStore:
-        """Open the uploaded trajectories of this store generation."""
-        return SQLTrajectoryStore(
-            self, ScopedTable(self._database.trajectory_table, scope={"storage_id": self.storage_id})
+    def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
+        """Open the training samples of this store generation, with the task files of ``scenario`` in ``files``."""
+        scope = {"storage_id": self.storage_id}
+        return SQLSampleStore(
+            self,
+            ScopedTable(self._database.sample_table, scope=scope),
+            ScopedTable(self._database.sample_train_count_table, scope=scope),
+            files,
+            scenario,
         )
 
     def evaluation_store(self) -> SQLEvaluationStore:
@@ -388,6 +414,7 @@ class PostgresRecordStore(SQLRecordStore):
         return SQLCommitHistory(
             self,
             ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
+            ScopedTable(self._database.sample_train_count_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )
@@ -459,7 +486,7 @@ class PostgresScenarioStorage(ScenarioStorage):
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    trajectories=records.trajectory_store(),
+                    samples=records.sample_store(self.task_files, scenario),
                     evaluations=records.evaluation_store(),
                 )
             except BaseException:

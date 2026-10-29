@@ -32,6 +32,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, Multimod
 from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
@@ -253,6 +254,7 @@ class Recipe:
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -263,6 +265,7 @@ class Recipe:
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
         )
 
     def build_trainers(
@@ -275,6 +278,7 @@ class Recipe:
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
@@ -303,6 +307,7 @@ class Recipe:
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
                     releases=None if releases is None else ComponentReleases(releases, component),
+                    samples=samples,
                 ),
             ),
         )
@@ -568,6 +573,7 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.
 
@@ -581,6 +587,7 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
+            samples=samples,
         )
 
     def _build_trainer(
@@ -591,6 +598,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
@@ -619,6 +627,7 @@ class WeightTrainingRecipe(Recipe):
                 experiment_logger=experiment_logger,
                 training_mode=self.training_mode,
                 task_storage=task_storage,
+                samples=samples,
             )
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc

@@ -33,8 +33,9 @@ from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedArtifact
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
+from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
+from reef.storage.tasks import SplitName
 
 logger = logging.getLogger(__name__)
 
@@ -463,7 +464,7 @@ class Dispatcher(ScenarioLifecycle):
             if ingest.append_trajectories(current, trajectories):
                 self.process_accepted_records(current)
 
-    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
+    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's imported tasks, then wake
         their consumers. Return the published tasks (``ingest.append_tasks``)."""
         if not directories:
@@ -520,15 +521,13 @@ class Dispatcher(ScenarioLifecycle):
                 "effective_activation": self.registry.effective_activation(settings),
             }
 
-    def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
-        """The scenario's imported tasks in publication order, each with whether it trained."""
+    def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
+        """The scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            store = current.store.tasks.open(IMPORTED_TASK_STORE)
-            trained = store.trained_task_names()
-            return tuple((task, task.name in trained) for task in store.tasks())
+            return current.store.samples.tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""

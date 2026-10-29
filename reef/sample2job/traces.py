@@ -2,7 +2,7 @@
 
 ``TraceJobData`` puts the trace samples of the selected record sets into one
 job's data. ``TrainTaskRollouts`` also hands out job data of its own: the
-next train tasks of the scenario's ``imported-tasks`` store, which the
+next train tasks of the scenario's imported tasks, which the
 harness backend rolls out on the head tree as the step's material. That is
 offline harness evolution: a step needs no traffic, so uploaded train tasks
 start a run.
@@ -22,9 +22,9 @@ from reef.core.job_data import Sample, TaskSample
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
-from reef.sample2job.base import Sample2JobSettings, imported_task_sample
+from reef.sample2job.base import Sample2JobSettings
 from reef.sample2job.distill import DistillJobData
-from reef.storage.tasks import IMPORTED_TASK_STORE
+from reef.storage.samples import SampleStore
 
 #: The task store whose documents keep where the run of ``TrainTaskRollouts`` stands. A composite scenario opens
 #: it under each component, so each component's run keeps its own place.
@@ -106,12 +106,13 @@ class RolloutChunk:
 class TrainTaskRollouts(TraceJobData):
     """Hand out the scenario's imported train tasks, chunk by chunk and epoch by epoch, as offline steps' job data.
 
-    Values: ``store`` is the scenario's ``imported-tasks`` store and
-    ``progress_store`` the stage's ``harness-rollouts`` store; both are
-    ``None`` for a trainer without task storage, which hands out nothing.
+    Values: ``samples`` is the scenario's sample store, whose train tasks
+    are the imported train tasks, and ``progress_store`` the stage's
+    ``harness-rollouts`` task store; both are ``None`` for a trainer without
+    a scenario session, which hands out nothing.
     ``epoch_sizes`` maps each started epoch to the number of train tasks it
-    covers: the train tasks published when the epoch started, which are the
-    first ones in publication order. A task published later joins the next
+    covers: the train tasks stored when the epoch started, which are the
+    first ones in arrival order. A task stored later joins the next
     epoch. An epoch's order is its tasks shuffled with ``shuffle_seed`` and
     the epoch. ``epoch`` ≥ 0 and ``position`` ≥ 0 are where the run stands:
     the next chunk starts at ``position`` of epoch ``epoch``'s order, and the
@@ -147,8 +148,8 @@ class TrainTaskRollouts(TraceJobData):
         self.tasks_per_step = settings.tasks_per_step
         self.epochs = settings.epochs
         self.shuffle_seed = settings.shuffle_seed
+        self.samples: SampleStore | None = context.samples
         storage = context.task_storage
-        self.store = None if storage is None else storage.open(IMPORTED_TASK_STORE)
         self.progress_store = None if storage is None else storage.open(ROLLOUT_PROGRESS_STORE)
         self.epoch_sizes: dict[int, int] = {}
         self.epoch = 0
@@ -175,14 +176,16 @@ class TrainTaskRollouts(TraceJobData):
     def advance(self) -> None:
         """Hand out the next chunk when none is handed out and the run has train tasks left.
 
-        An epoch starts with the train tasks published by then, and saves its size first.
+        An epoch starts with the train tasks stored by then, and saves its size first.
         """
         super().advance()
         if self.handed_out is not None or self.epoch >= self.epochs:
             return
-        if self.store is None or self.progress_store is None:
+        if self.samples is None or self.progress_store is None:
             return
-        train = self.store.tasks(split="train")
+        train = [
+            stored.sample for stored in self.samples.tasks(split="train") if isinstance(stored.sample, TaskSample)
+        ]
         size = self.epoch_sizes.get(self.epoch)
         if size is None:
             if not train:
@@ -195,9 +198,7 @@ class TrainTaskRollouts(TraceJobData):
         order = list(train[:size])
         random.Random(f"{self.shuffle_seed}:{self.epoch}").shuffle(order)
         chunk = order[self.position : self.position + self.tasks_per_step]
-        self.handed_out = RolloutChunk(
-            self.epoch, self.position, tuple(imported_task_sample(self.store, stored) for stored in chunk)
-        )
+        self.handed_out = RolloutChunk(self.epoch, self.position, tuple(chunk))
 
     def own_job_data(self) -> tuple[Sample, ...] | None:
         return None if self.handed_out is None else self.handed_out.samples

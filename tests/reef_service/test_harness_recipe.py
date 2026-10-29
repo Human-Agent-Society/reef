@@ -72,7 +72,6 @@ from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskRollouts
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.trainer import Trainer
@@ -205,7 +204,7 @@ INVALID_SETTINGS = {
     ),
     "no-tasks": (
         {"evaluation": {"tasks": []}},
-        "needs tasks, a task_manifest or a task_store unless its policy is none",
+        "needs tasks, a task_manifest or imported_tasks unless its policy is none",
     ),
     "no-scorer": ({"evaluation": {"scorer": None}}, "requires a scorer unless the evaluation policy is none"),
 }
@@ -384,10 +383,10 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
         boot()
 
 
-def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads_it(
+def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step_reads_it(
     tmp_path: Path,
 ) -> None:
-    store_settings = {"tasks": [], "task_store": IMPORTED_TASK_STORE}
+    store_settings = {"tasks": [], "imported_tasks": True}
     built = from_config(
         evolution_config(evaluation=store_settings, state_dir=str(tmp_path / "state")),
         runtime=runtime(),
@@ -395,8 +394,8 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
     assert built.configured_tasks() == ()
     root = tmp_path / "tasks"
     with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
-        store = session.tasks.open(IMPORTED_TASK_STORE)
-        backend = built.build_backend("s", releases_for(built), session.tasks)
+        samples = session.samples
+        backend = built.build_backend("s", releases_for(built), samples)
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
         def task_count() -> int:
@@ -404,20 +403,20 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
 
         # The store opens empty; a task it gets after the build is in the next step's list, and a train task is not.
         assert task_count() == 0
-        first = store.add_task(directory=write_task(root, "held-1"), split="eval")
-        store.add_task(directory=write_task(root, "train-1"), split="train")
+        (first,) = samples.add_tasks((write_task(root, "held-1"),), "eval")
+        samples.add_tasks((write_task(root, "train-1"),), "train")
         assert task_count() == 1
-        second = store.add_task(directory=write_task(root, "held-2"), split="eval")
+        (second,) = samples.add_tasks((write_task(root, "held-2"),), "eval")
         assert task_count() == 2
-        assert backend.tasks.seed() == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
-        with pytest.raises(RecipeConfigError, match="needs the task storage"):
+        assert backend.tasks.seed() == tuple(str(task.sample.task_path) for task in (first, second))
+        with pytest.raises(RecipeConfigError, match="needs the sample store"):
             built.build_backend("s", releases_for(built), None)
 
 
 def test_offline_rollouts_need_task_directories_to_evaluate_on_and_a_scorer() -> None:
     """A prompt adapter's offline steps play train task directories, so its evaluation tasks are directories too."""
     offline = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskRollouts"}}}
-    store = {"tasks": [], "task_store": IMPORTED_TASK_STORE}
+    store = {"tasks": [], "imported_tasks": True}
     built = from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime())
     assert built.stages().sample2job.plugin_class is TrainTaskRollouts and built.runs_offline()
     with pytest.raises(RecipeConfigError, match="the evaluation tasks must be task directories too"):

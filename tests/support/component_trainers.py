@@ -175,7 +175,16 @@ class _TwoTrainerRecipe(Recipe):
         return threshold_pipeline(context)
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, releases=None
+        self,
+        scenario,
+        records,
+        *,
+        surface,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         def factory_for(component: str):
             return lambda context: self.pipeline_for(component, context)

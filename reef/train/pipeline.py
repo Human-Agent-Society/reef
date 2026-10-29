@@ -59,7 +59,7 @@ from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSet
 from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.trajectories import consumed_trajectory_id
+from reef.storage.samples import consumed_sample_id
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
@@ -417,7 +417,7 @@ class TrainingPipeline:
 
     def push_trajectory(self, trajectory_id: str, trajectory: TrajectorySample) -> None:
         """Read one uploaded trajectory as its training sample. It waits here for job data."""
-        if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
+        if consumed_sample_id(trajectory_id) not in self.consumed_trajectory_ids:
             self.uploaded_trajectories.setdefault(trajectory_id, self.uploaded_sample(trajectory))
 
     def job_ended(self, outcome: JobOutcome) -> None:
@@ -452,16 +452,18 @@ class TrainingPipeline:
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples.
 
-        The stage's own job data (``Sample2Job.own_job_data``) makes the pipeline ready, whatever its sample count.
-        With ``sample_count`` None, as for a stage that ``trains_own_job_data_only``, held samples never make
-        the pipeline ready.
+        The stage's own job data (``Sample2Job.own_job_data``) makes the pipeline ready, whatever its sample count;
+        in ``manual`` it also needs a queued instruction, which it consumes. With ``sample_count`` None, as for a
+        stage that ``trains_own_job_data_only``, held samples never make the pipeline ready.
         """
         self.advance()
         return self.holds_job_data(sample_count)
 
     def holds_job_data(self, sample_count: int | None) -> bool:
         """Whether the pipeline holds the next job's data now, as ``ready`` decides it, without advancing it."""
-        if self.pending is not None or self.sample2job.own_job_data() is not None:
+        if self.pending is not None:
+            return True
+        if self.sample2job.own_job_data() is not None and (self.training_mode == "auto" or self.training_requests):
             return True
         return self.held_data_ready(sample_count)
 
@@ -485,15 +487,15 @@ class TrainingPipeline:
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
             own = self.sample2job.own_job_data()
-            # Held samples go first; the stage's own samples wait while they are ready.
-            if own is not None and not self.held_data_ready(sample_count):
-                # The stage's own samples train as one job, however many they are.
-                self.pending = self.sample2job.make_job_data(own, f"{self.scenario}:data:{self.data_number}")
-                self.pending_is_own = True
-                return self.pending
             # Manual runs the oldest queued instruction with the samples that automatic job data would take;
             # auto leaves the queue to manual.
             request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
+            # Held samples go first; the stage's own samples wait while they are ready.
+            if own is not None and not self.held_data_ready(sample_count):
+                # The stage's own samples train as one job, however many they are.
+                self.pending = self.job_data_for(own, request)
+                self.pending_is_own = True
+                return self.pending
             selected_samples = 0 if sample_count is None else sample_count
             # Uploaded trajectories go first, in upload order. Whole record set units, in selection order, fill
             # the rest of the data until it holds ``selected_samples`` samples.
@@ -510,12 +512,15 @@ class TrainingPipeline:
                 *(self.uploaded_trajectories[trajectory_id] for trajectory_id in self.reserved_trajectory_ids),
                 *(sample for unit in selected for set_id in unit.set_ids() for sample in self.samples[set_id]),
             )
-            if request is None:
-                self.pending = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
-            else:
-                data = self.sample2job.make_job_data(samples, f"{self.scenario}:instruction:{request.id}")
-                self.pending = replace(data, request=request)
+            self.pending = self.job_data_for(samples, request)
         return self.pending
+
+    def job_data_for(self, samples: tuple[Sample, ...], request: TrainingRequest | None) -> JobData:
+        """The stage's job data of ``samples``: automatic data without ``request``, else the instruction's data."""
+        if request is None:
+            return self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
+        data = self.sample2job.make_job_data(samples, f"{self.scenario}:instruction:{request.id}")
+        return replace(data, request=request)
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         """The commit that submits the job data's job consumed it: end its units and uploaded trajectories, and
@@ -526,6 +531,9 @@ class TrainingPipeline:
             # The stage's own job data consumes no record: the stage names what the commit lists.
             own_ids = self.sample2job.own_job_data_submitted()
             self.consumed_own_ids |= own_ids
+            if self.pending.request is not None:
+                self.consume_request(self.pending.request.id)
+                own_ids = own_ids | {self.pending.request.id}
             self.pending = None
             self.pending_is_own = False
             return own_ids
@@ -534,8 +542,8 @@ class TrainingPipeline:
         self.forget_ended_sets()
         for trajectory_id in self.reserved_trajectory_ids:
             self.uploaded_trajectories.pop(trajectory_id)
-            self.consumed_trajectory_ids.add(consumed_trajectory_id(trajectory_id))
-        consumed = consumed | {consumed_trajectory_id(trajectory_id) for trajectory_id in self.reserved_trajectory_ids}
+            self.consumed_trajectory_ids.add(consumed_sample_id(trajectory_id))
+        consumed = consumed | {consumed_sample_id(trajectory_id) for trajectory_id in self.reserved_trajectory_ids}
         self.reserved_trajectory_ids = ()
         if self.pending.request is not None:
             self.consume_request(self.pending.request.id)

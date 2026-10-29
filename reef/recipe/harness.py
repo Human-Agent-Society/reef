@@ -69,7 +69,8 @@ from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sample2job.traces import TraceJobData, TrainTaskRollouts
 from reef.storage.records import RecordStore
-from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
+from reef.storage.samples import SampleStore
+from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
@@ -277,7 +278,7 @@ class HarnessEvolutionRecipe(Recipe):
             if offline and self.evaluation.tasks:
                 raise RecipeConfigError(
                     "offline rollouts play task directories, so the evaluation tasks must be task directories "
-                    "too: use evaluation.task_store or evaluation.task_manifest instead of evaluation.tasks"
+                    "too: use evaluation.imported_tasks or evaluation.task_manifest instead of evaluation.tasks"
                 )
         if self.evaluation.collect_failures and task_directories:
             raise RecipeConfigError("evaluation.collect_failures adds prompts, and these tasks are task directories")
@@ -295,12 +296,12 @@ class HarnessEvolutionRecipe(Recipe):
 
     def task_directories(self, descriptor: AdapterDescriptor) -> bool:
         """Whether the rollouts play Harbor task directories rather than prompts: always for an adapter whose
-        command takes a task directory, else when the evaluation reads a task manifest or a task store, or the
+        command takes a task directory, else when the evaluation reads a task manifest or the imported tasks, or the
         steps roll out the imported train tasks."""
         return (
             descriptor.is_prompt_task_directory
             or self.evaluation.task_manifest is not None
-            or self.evaluation.task_store is not None
+            or self.evaluation.imported_tasks
             or self.runs_offline()
         )
 
@@ -505,10 +506,11 @@ class HarnessEvolutionRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         if releases is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
-        backend = self.build_backend(scenario, releases, task_storage)
+        backend = self.build_backend(scenario, releases, samples)
         return Trainer.build(
             scenario,
             records,
@@ -520,9 +522,10 @@ class HarnessEvolutionRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
             default_job_samples=self.batch_size,
             # An evaluation on the eval split of the imported tasks reads them, so the scenario takes task uploads.
-            reads_imported_tasks=self.evaluation.task_store == IMPORTED_TASK_STORE,
+            reads_imported_tasks=self.evaluation.imported_tasks,
         )
 
     def build_policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:
@@ -534,9 +537,7 @@ class HarnessEvolutionRecipe(Recipe):
             return FloorPolicy(backend, floor_score=evaluation.floor_score)
         return NoEvaluationPolicy()
 
-    def build_backend(
-        self, scenario: str, releases: ComponentReleases, task_storage: TaskStorage | None
-    ) -> HarnessBackend:
+    def build_backend(self, scenario: str, releases: ComponentReleases, samples: SampleStore | None) -> HarnessBackend:
         """The scenario's backend: the binary installed, the history, the evaluator, the tasks, the records and the
         coding agent bound."""
         descriptor = get_adapter(self.evolution.adapter)
@@ -548,11 +549,8 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(f"evolution.state_dir cannot hold {root}: {exc}") from exc
         models = self.model_bindings(scenario)
         evaluator = None if self.scorer is None else self.build_evaluator(descriptor, models, history, self.scorer)
-        task_store = None
-        if self.evaluation.task_store is not None:
-            if task_storage is None:
-                raise RecipeConfigError("evolution.evaluation.task_store needs the task storage of a scenario session")
-            task_store = task_storage.open(self.evaluation.task_store)
+        if self.evaluation.imported_tasks and samples is None:
+            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the sample store of a scenario session")
         records = StepRecord(root / STEPS_DIR)
         return HarnessBackend(
             descriptor=descriptor,
@@ -563,7 +561,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
-                task_store=task_store,
+                imported_tasks=samples if self.evaluation.imported_tasks else None,
                 collect_failures=self.evaluation.collect_failures,
                 collector=self.collector,
                 max_collected=self.evaluation.max_collected_tasks,

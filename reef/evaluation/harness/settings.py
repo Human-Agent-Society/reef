@@ -27,7 +27,7 @@ class EvaluationSettings(Settings):
     """The parsed ``evolution.evaluation`` section of a harness evolution deployment.
 
     Values: at most one task source is set: ``tasks`` (prompts or task
-    directories), ``task_manifest`` with ``tasks_root``, or ``task_store``;
+    directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``;
     one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
     with ``module`` and ``config``); the recipe requires a scorer unless
@@ -44,7 +44,9 @@ class EvaluationSettings(Settings):
     tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: prompts, or task directories.")
     task_manifest: str | None = config_option(None, help="A split manifest whose eval side names the tasks.")
     tasks_root: str | None = config_option(None, help="The directory of the task manifest's task directories.")
-    task_store: str | None = config_option(None, help="A task store whose eval split each step evaluates.")
+    imported_tasks: bool = config_option(
+        False, help="Evaluate each step on the eval split of the scenario's imported tasks."
+    )
     scorer: str | Mapping[str, Any] | None = config_option(None, help="The RolloutScorer that scores each rollout.")
     policy: str = config_option("compare", help="The publication policy: compare, floor or none.")
     statistic: str = config_option("wins", help="What compare compares: wins (pairwise) or mean.")
@@ -71,7 +73,7 @@ class EvaluationSettings(Settings):
             for name, present in (
                 ("tasks", bool(self.tasks)),
                 ("task_manifest", self.task_manifest is not None),
-                ("task_store", self.task_store is not None),
+                ("imported_tasks", self.imported_tasks),
             )
             if present
         ]
@@ -84,7 +86,7 @@ class EvaluationSettings(Settings):
         if self.policy not in POLICIES:
             raise ValueError(f"evaluation.policy must be one of {', '.join(POLICIES)}")
         if self.policy != "none" and not sources:
-            raise ValueError("evaluation needs tasks, a task_manifest or a task_store unless its policy is none")
+            raise ValueError("evaluation needs tasks, a task_manifest or imported_tasks unless its policy is none")
         if self.statistic not in STATISTICS:
             raise ValueError(f"evaluation.statistic must be one of {', '.join(STATISTICS)}")
         for label, number in (

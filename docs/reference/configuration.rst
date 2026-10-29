@@ -850,6 +850,8 @@ It has two values:
   the method gets the instruction and up to ``job_samples`` traces (by default
   ``evolution.batch_size``), possibly none. The traces are scored traces, or
   unscored records when the ``pipeline`` section names the inference stages.
+  An RL task job of ``sft-then-rl``'s imported tasks also starts only for an
+  instruction.
 
 Records arrive and the buffer fills in both modes, so a switch from ``manual``
 to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
@@ -1090,8 +1092,8 @@ requests with unscored samples, set
 Reef refuses ``batch_size`` and ``batch_policy`` directly under
 ``recipe.config``.
 
-To evolve offline, on the train split of the scenario's ``imported-tasks``
-store instead of on traffic, set
+To evolve offline, on the train split of the scenario's imported tasks
+instead of on traffic, set
 ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskRollouts``. Each
 step then rolls out the next train tasks on the head tree as the method's
 traces. Startup refuses it without an adapter that plays task directories
@@ -1130,7 +1132,7 @@ traces. Startup refuses it without an adapter that plays task directories
 ``evolution.evaluation`` decides how Reef evaluates a candidate and when it
 publishes one: the tasks, the scorer, and the publication policy. It takes
 one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
-``task_store``. The task source and ``scorer`` are required unless
+``imported_tasks``. The task source and ``scorer`` are required unless
 ``policy`` is ``none``.
 
 .. code:: yaml
@@ -1147,7 +1149,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
    evolution.evaluation.tasks | the evaluation tasks: rollout prompts, or task directories for an adapter whose prompt is a task directory (``is_prompt_task_directory``)
    evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Each task runs in its own container, and the adapter needs an npm ``install`` (`Task directories <../user-guide/evolve-your-harness.rst#task-directories>`__); startup refuses a manifest that names no eval task
    evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
-   evolution.evaluation.task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. With ``imported-tasks``, the scenario takes task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter rule as ``task_manifest``
+   evolution.evaluation.imported_tasks | false; true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks as the step reads them, so tasks that the scenario gets later join the next step. The scenario then takes train task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter rule as ``task_manifest``
    evolution.evaluation.scorer | a ``RolloutScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory rollout by its Harbor verifier's reward
    evolution.evaluation.policy | compare | the publication policy: ``compare`` scores the candidate and the current tree (the training start) on the same tasks and repeats; ``floor`` scores the candidate alone and publishes it when every task has a rollout that ran and every rollout that ran scores at least ``floor_score``; ``none`` runs no rollout and publishes every candidate that passes validation
    evolution.evaluation.statistic | wins | what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses over the (task, repeat) pairs exceed ``min_margin``. ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``. A rollout that gave no answer scores 0. A rollout that the environment could not run (a failed rollout) drops its pair under ``wins`` and is left out of the mean under ``mean``
@@ -1521,9 +1523,9 @@ trains one scenario in two ways:
   uploaded ATIF trajectories (`Upload trajectories
   <http-api.rst#upload-trajectories>`__). They use ``SftObjective`` and
   ``recipe.config.job_parameters``.
-- RL task jobs on the train tasks of the scenario's ``imported-tasks`` store,
-  which `Upload Harbor tasks <http-api.rst#upload-harbor-tasks>`__ or the
-  ``task-import`` section fill. They use the ``task_group`` objective and
+- RL task jobs on the scenario's imported train tasks, which `Upload Harbor
+  tasks <http-api.rst#upload-harbor-tasks>`__ or the ``task-import`` section
+  add. A task trains in one task job, whichever component's trainer runs it. They use the ``task_group`` objective and
   ``recipe.config.task_job_parameters``. The training component rolls each
   job's tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
 
@@ -1627,7 +1629,7 @@ The ``task-import`` section
 ---------------------------
 
 Absent by default. When present, each scenario imports the Harbor tasks of a
-split manifest into its task store ``imported-tasks`` when it opens. See
+split manifest when it opens, as its imported tasks. See
 `Import Harbor tasks <../user-guide/operate.rst#import-harbor-tasks>`__.
 
 .. config::

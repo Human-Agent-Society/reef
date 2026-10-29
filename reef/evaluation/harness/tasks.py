@@ -2,7 +2,7 @@
 
 A step evaluates the candidate and the head tree on the same tasks: the
 configured tasks (``evolution.evaluation.tasks``, or a task manifest), or the
-eval split of a task store as the step reads it, then the prompts collected
+eval split of the scenario's imported tasks as the step reads it, then the prompts collected
 from failing traffic. Collection is off by default. When it is on, a
 ``TaskCollector`` picks the prompts (every trace's user prompt without one), and
 Reef screens out credentials and instruction overrides, skips duplicates, and
@@ -15,11 +15,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.storage.tasks import TaskStore
+from reef.storage.samples import SampleStore
 
 
 class TaskCollector(ConfiguredPlugin, ABC):
@@ -90,8 +90,9 @@ class StepTasks:
 class EvaluationTasks:
     """The source of every step's evaluation tasks.
 
-    ``seed_tasks`` are the configured tasks; with ``task_store`` set, each
-    step reads the store's eval split instead. With ``collect_failures``, a
+    ``seed_tasks`` are the configured tasks; with ``imported_tasks`` set, each
+    step reads the eval split of the scenario's imported tasks in that sample
+    store instead. With ``collect_failures``, a
     step collects up to ``max_collected`` prompts in total and
     ``max_collected_per_client`` per tagged client, chosen by ``collector``
     (every trace's prompt without one).
@@ -101,7 +102,7 @@ class EvaluationTasks:
         self,
         *,
         seed_tasks: tuple[str, ...],
-        task_store: TaskStore | None = None,
+        imported_tasks: SampleStore | None = None,
         collect_failures: bool = False,
         collector: TaskCollector | None = None,
         max_collected: int = 50,
@@ -110,17 +111,21 @@ class EvaluationTasks:
         if max_collected < 0 or max_collected_per_client < 0:
             raise ValueError("max_collected_tasks and max_collected_per_client must be at least 0")
         self.seed_tasks = seed_tasks
-        self.task_store = task_store
+        self.imported_tasks = imported_tasks
         self.collect_failures = collect_failures
         self.collector = collector
         self.max_collected = max_collected
         self.max_collected_per_client = max_collected_per_client
 
     def seed(self) -> tuple[str, ...]:
-        """The seed tasks as of now: the store's eval split when a store is set, in publication order."""
-        if self.task_store is None:
+        """The seed tasks as of now: the eval split of the imported tasks when they are set, in arrival order."""
+        if self.imported_tasks is None:
             return self.seed_tasks
-        return tuple(str(self.task_store.path(task.files_digest)) for task in self.task_store.tasks(split="eval"))
+        return tuple(
+            str(stored.sample.task_path)
+            for stored in self.imported_tasks.tasks(split="eval")
+            if isinstance(stored.sample, TaskSample)
+        )
 
     def for_step(
         self,

@@ -17,6 +17,7 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentReleases
 from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
@@ -56,6 +57,7 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,

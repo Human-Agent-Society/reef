@@ -17,14 +17,13 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, JobOutcome, Sample, TaskSample
+from reef.core.job_data import JobData, JobOutcome, Sample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
-from reef.storage.tasks import StoredTask, TaskStore
 
 #: The jobs whose data the sample buffer holds when ``pipeline.sample2job.config.buffer_size`` is not set.
 DEFAULT_BUFFER_JOBS = 4
@@ -34,15 +33,6 @@ def require_optional_positive(value: object, name: str) -> None:
     """Raise ``ValueError`` unless ``value`` is None or a positive int (not a bool)."""
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
         raise ValueError(f"{name} must be None or a positive int, got {value!r}")
-
-
-def imported_task_sample(store: TaskStore, stored: StoredTask) -> TaskSample:
-    """The task sample of the imported task ``stored``: its directory in ``store``, with its name, files digest and
-    split under the metadata key ``task``."""
-    return TaskSample(
-        store.path(stored.files_digest),
-        metadata={"task": {"name": stored.name, "files_digest": stored.files_digest, "split": stored.split}},
-    )
 
 
 @dataclass(frozen=True)
@@ -114,7 +104,7 @@ class Sample2Job(ABC, Plugin):
     #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
     #: when no trainer of the scenario accepts uploaded trajectories.
     accepts_trajectories: bool = False
-    #: Whether the recipe reads the scenario's imported tasks (the ``imported-tasks`` store). Admission refuses a
+    #: Whether the recipe reads the scenario's imported tasks (its sample store's tasks). Admission refuses a
     #: task upload (``POST /reef/scenarios/{scenario}/tasks``) when no trainer of the scenario reads them.
     accepts_imported_tasks: bool = False
     #: Whether every job of the stage trains only the samples it makes itself (``own_job_data``), so it has no

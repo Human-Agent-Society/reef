@@ -33,8 +33,8 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskStorage
-from reef.storage.trajectories import TrajectoryStore, consumed_trajectory_id
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import InstructionFailure, TrainingPipeline
@@ -113,6 +113,7 @@ class Trainer:
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
         task_storage: TaskStorage | None = None,
+        samples: SampleStore | None = None,
         default_job_samples: int | None = None,
         reads_imported_tasks: bool = False,
     ) -> Trainer:
@@ -143,6 +144,7 @@ class Trainer:
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
                 training_mode=training_mode,
                 task_storage=task_storage,
+                samples=samples,
                 # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
                 default_job_samples=default_job_samples if trains else None,
             )
@@ -220,10 +222,12 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
-        #: The uploaded trajectories of the scenario, after ``read_uploaded_trajectories``.
-        self.trajectory_store: TrajectoryStore | None = None
-        #: The sequence of the last uploaded trajectory that the trainer read.
-        self.trajectory_sequence = 0
+        #: The training samples of the scenario, after ``read_samples``.
+        self.sample_store: SampleStore | None = None
+        #: The component that this trainer's commits name, or None for a scenario's only trainer.
+        self.sample_component: str | None = None
+        #: The sequence of the last sample that the trainer read.
+        self.sample_sequence = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
@@ -316,7 +320,7 @@ class Trainer:
 
     @property
     def accepts_imported_tasks(self) -> bool:
-        """Whether the trainer reads the scenario's imported tasks (the ``imported-tasks`` store).
+        """Whether the trainer reads the scenario's imported tasks (its sample store's tasks).
 
         It reads them through its pipeline (``TrainingPipeline.accepts_imported_tasks``) or outside it
         (``reads_imported_tasks``). Admission refuses a task upload when no trainer of the scenario accepts them.
@@ -426,25 +430,28 @@ class Trainer:
                 or self._pipeline.holds_job_data(self.job_samples)
             ):
                 return True
-            trajectories = self.trajectory_store
+            samples = self.sample_store
             if (
-                trajectories is not None
+                samples is not None
                 and self._pipeline.accepts_trajectories
-                and trajectories.count(after_sequence=self.trajectory_sequence) > 0
+                and samples.count(after_sequence=self.sample_sequence, kind="trajectory") > 0
             ):
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
 
-    def read_uploaded_trajectories(self, store: TrajectoryStore) -> None:
-        """Read the uploaded trajectories of the scenario from ``store``, from the first one.
+    def read_samples(self, store: SampleStore, component: str | None) -> None:
+        """Read the training samples of the scenario from ``store``, from the first one.
 
-        The scenario factory calls this when it builds the trainer. An uploaded
-        trajectory that a commit consumed is in ``consumed_record_ids`` after
-        recovery, so the trainer skips it.
+        The scenario factory calls this when it builds the trainer.
+        ``component`` is the component that this trainer's commits name, or
+        ``None`` for the only trainer of a scenario. The trainer skips a sample
+        that one of its own committed jobs trained, so each trainer of a
+        scenario of several components trains each sample.
         """
         with self._lock:
-            self.trajectory_store = store
-            self.trajectory_sequence = 0
+            self.sample_store = store
+            self.sample_component = component
+            self.sample_sequence = 0
 
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
@@ -512,23 +519,24 @@ class Trainer:
 
     def _consume_data(self) -> None:
         # Uploaded trajectories go first in job data, so the trainer reads them before the records.
-        while self.trajectory_store is not None and self._pipeline.accepts_trajectories:
-            stored_trajectories = self.trajectory_store.page(
-                after_sequence=self.trajectory_sequence, limit=self._DATA_READ_BATCH_SIZE
+        while self.sample_store is not None and self._pipeline.accepts_trajectories:
+            stored_samples = self.sample_store.page(
+                after_sequence=self.sample_sequence, limit=self._DATA_READ_BATCH_SIZE, kind="trajectory"
             )
-            if not stored_trajectories:
+            if not stored_samples:
                 break
-            for stored in stored_trajectories:
-                self.trajectory_sequence = stored.sequence
-                if consumed_trajectory_id(stored.trajectory_id) in self.consumed_record_ids:
+            for stored in stored_samples:
+                self.sample_sequence = stored.sequence
+                trajectory = stored.sample
+                if not isinstance(trajectory, TrajectorySample) or stored.train_count(self.sample_component) > 0:
                     continue
                 try:
-                    self._pipeline.push_trajectory(stored.trajectory_id, stored.trajectory)
+                    self._pipeline.push_trajectory(stored.sample_id, trajectory)
                 except ValueError:
                     # Admission rendered it; a config that changed since, such as a lower max_tokens, can refuse it.
                     logger.warning(
                         "uploaded trajectory %s of scenario %s cannot train and is skipped",
-                        stored.trajectory_id,
+                        stored.sample_id,
                         self.scenario,
                         exc_info=True,
                     )

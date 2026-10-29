@@ -22,7 +22,6 @@ from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.train import JobData, Trainer
 from reef.train.pipeline import TrainingPipeline
 
@@ -47,7 +46,15 @@ class TaskRecipe(Recipe):
     batch_stage: type[Sample2Job] = TaskReadingJobData
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return Trainer.build(
             scenario,
@@ -58,6 +65,7 @@ class TaskRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
+            samples=samples,
         )
 
 
@@ -139,14 +147,14 @@ def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upl
             )
             assert response.status == 400
             assert "does not train on imported tasks" in await response.text()
-            store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
-            assert store.tasks() == ()
+            samples = dispatcher.get_or_create_scenario("s").store.samples
+            assert samples.tasks() == ()
             # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
             evaluated = await client.post(
                 "/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=archive(tmp_path, "t")
             )
             assert evaluated.status == 200
-            assert [task.name for task in store.tasks(split="eval")] == ["t"]
+            assert [task.sample_id for task in samples.tasks(split="eval")] == ["t"]
 
     try:
         asyncio.run(run())
@@ -156,7 +164,7 @@ def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upl
 
 @pytest.mark.parametrize(
     ("evaluation", "published"),
-    [({"tasks": [], "task_store": IMPORTED_TASK_STORE}, ["held-out"]), ({}, [])],
+    [({"tasks": [], "imported_tasks": True}, ["held-out"]), ({}, [])],
     ids=["evaluation-reads-imported-tasks", "nothing-reads-them"],
 )
 def test_a_harness_scenario_takes_a_train_upload_when_it_reads_imported_tasks(
@@ -175,8 +183,8 @@ def test_a_harness_scenario_takes_a_train_upload_when_it_reads_imported_tasks(
             body = archive(tmp_path, "held-out")
             response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=body)
             assert response.status == (200 if published else 400), await response.text()
-            store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
-            assert [task.name for task in store.tasks(split="train")] == published
+            samples = dispatcher.get_or_create_scenario("s").store.samples
+            assert [task.sample_id for task in samples.tasks(split="train")] == published
 
     try:
         asyncio.run(run())

@@ -518,6 +518,12 @@ The session contract is:
      - The ``TaskStorage`` that opens the task stores of the
        scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
+   * - ``samples``
+     - The ``SampleStore`` of the scenario's training samples, in arrival
+       order: the uploaded trajectories, and the imported Harbor tasks of the
+       ``train`` and ``eval`` splits. Each sample has ``train_counts``, the
+       number of committed jobs of each trainer that trained it. It closes with the session and
+       survives restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
        (including inactive releases), activations, and new training starts.
@@ -551,8 +557,10 @@ expected step, or a retry with conflicting content, raises
 ``SQLCommitHistory`` holds one write transaction of the record store, which
 SQLite locks with ``BEGIN IMMEDIATE`` and PostgreSQL with a row lock on the
 store generation. It reads the history and inserts the commit row in that
-transaction. The commit is durable when the transaction ends; an exception
-before then stores no commit. Direct writes through a ``CommitHistory``
+transaction. In the same transaction, it adds one to the train count of the
+commit's trainer for each sample whose ``sample:<sample_id>`` the commit lists. The commit is
+durable when the transaction ends; an exception before then stores no commit
+and counts no sample. Direct writes through a ``CommitHistory``
 bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
@@ -593,9 +601,10 @@ which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
 give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
 keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
-components never share a store, except ``imported-tasks``
-(``reef.storage.tasks.IMPORTED_TASK_STORE``): the scenario's imported tasks,
-which every component opens by that name and only the service writes.
+components never share a store. The scenario's imported tasks are not a task
+store: they are tasks in the scenario's ``SampleStore``, which the factory
+gives to ``Recipe.build_trainers`` as ``samples`` and every component reads
+from ``PipelineContext.samples``.
 
 The service takes a task upload (``POST /reef/scenarios/{scenario}/tasks``)
 only when a trainer of the scenario reads imported tasks

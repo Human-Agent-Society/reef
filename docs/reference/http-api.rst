@@ -390,12 +390,13 @@ Upload Harbor tasks
 -------------------
 
 Use this route to give a scenario your own Harbor tasks, for training or as
-held-out tasks. It adds the tasks to the scenario's task store
-``imported-tasks``, the same store that the `task-import section
-<../user-guide/operate.rst#import-harbor-tasks>`__ fills. An upload to the
-``train`` split needs a recipe that trains on imported tasks: the SFT-then-RL
-recipe (`SFT then RL <configuration.rst#sft-then-rl>`__), or harness evolution
-that runs offline (`Offline runs on uploaded tasks
+held-out tasks. It adds the tasks to the scenario's imported tasks, which the
+`task-import section <../user-guide/operate.rst#import-harbor-tasks>`__ also
+adds to. A task's name is its ID among the scenario's training samples, so it
+cannot be the ID of an uploaded trajectory. An upload to the ``train`` split
+needs a recipe that trains on imported tasks: the SFT-then-RL recipe (`SFT then
+RL <configuration.rst#sft-then-rl>`__), or harness evolution that runs offline
+(`Offline runs on uploaded tasks
 <../user-guide/evolve-your-harness.rst#offline-runs-on-uploaded-tasks>`__). If
 the recipe does not, Reef refuses the upload with 400. The ``eval`` split
 takes tasks for any recipe, because an `artifact evaluation
@@ -426,14 +427,15 @@ same receipt. Reef returns:
   that is not a task name, more than 1000 tasks or 10,000 entries, more than
   256 MiB unpacked, or a directory that Harbor's task loader refuses;
 - 413 for a body larger than 256 MiB;
-- 409 for a task name that the scenario holds with other files or in the other
-  split. The tasks before it in name order are added; to change a task, give
-  it a new name;
+- 409, and adds nothing, for a task name that the scenario holds with other
+  files, in the other split, or as an uploaded trajectory. To change a task,
+  give it a new name;
 - 415 for another content type.
 
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
 [{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
-added. ``trained`` is true once a task job trained the task.
+added. ``trained`` is true once a committed task job of any trainer of the
+scenario trained the task.
 
 Evaluate an artifact
 --------------------

@@ -470,7 +470,7 @@ Each name is a Harbor task directory under ``tasks-root``. A name starts
 with a lowercase letter or a digit, and holds only lowercase letters, digits,
 ``.``, ``_`` and ``-``. When a scenario
 opens, Reef checks each directory with Harbor's task loader, and adds it to the
-scenario's task store ``imported-tasks`` in its split. The task file store
+scenario's imported tasks in its split. The task file store
 keeps a copy of the files.
 
 The import runs again each time a scenario opens. To add tasks, add them to the
@@ -481,12 +481,13 @@ with ``POST /reef/scenarios/{scenario}/tasks`` (`Upload Harbor tasks
 not change. A scenario does not open, and the error says why, when:
 
 - a task directory is missing, or Harbor cannot load it;
-- an imported task now has other files, or it moved to the other split.
+- an imported task now has other files, or it moved to the other split;
+- a task has the name of an uploaded trajectory of the scenario.
 
 To change an imported task, give it a new name.
 
 A harness evolution recipe evaluates on the imported eval tasks with
-``evolution.evaluation.task_store: imported-tasks``. Each task runs in its own
+``evolution.evaluation.imported_tasks: true``. Each task runs in its own
 container (see `Task directories
 <evolve-your-harness.rst#task-directories>`__). Each step reads the eval split
 again, so a task that you import later joins the next step. See `Harness

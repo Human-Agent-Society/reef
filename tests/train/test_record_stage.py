@@ -11,6 +11,7 @@ import pytest
 from tests.support._threshold_processor import threshold_pipeline
 from tests.train.test_record_stage_job_data_parity import CountingBackend, inference, instruction, report
 
+from reef.artifact import ArtifactRef
 from reef.core import AgentRecord
 from reef.record2record import (
     GroupDecision,
@@ -25,7 +26,9 @@ from reef.record2record import (
 )
 from reef.record2sample import ImmediateRecord2Sample, Record2Sample, ReportSamples, SampleResult, SkippedReport
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.commits import CommitRecord
+from reef.storage.samples import consumed_sample_id
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
@@ -414,18 +417,58 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
     processor.release_job_data(batch.data_id)
     batch = processor.build_job_data(2)
     assert batch.samples == (TRAJECTORY, TRAJECTORY)
-    assert processor.acknowledge(batch.data_id) == {"trajectory:t1", "trajectory:t2"}
+    assert processor.acknowledge(batch.data_id) == {"sample:t1", "sample:t2"}
 
     # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
     processor.push_trajectory("t1", TRAJECTORY)
     processor.push_trajectory("t3", TRAJECTORY)
     batch = processor.build_job_data(2)
     assert batch.samples == (TRAJECTORY, TaskSample(Path("i1"), source_agent_record_ids=("i1",)))
-    assert processor.acknowledge(batch.data_id) == {"trajectory:t3", "i1"}
-    consumed = frozenset({"trajectory:t1", "trajectory:t2", "trajectory:t3"})
+    assert processor.acknowledge(batch.data_id) == {"sample:t3", "i1"}
+    consumed = frozenset({"sample:t1", "sample:t2", "sample:t3"})
     assert consumed <= processor.releasable_record_ids()
     processor.release_records(consumed)
     assert not processor.consumed_trajectory_ids
+
+
+def upload_pipeline(context: PipelineContext) -> TrainingPipeline:
+    return TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
+
+
+@pytest.mark.unit
+def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() -> None:
+    storage = SQLiteScenarioStorage(None)
+    session = storage.open("s")
+    session.samples.add_trajectories((("t1", TRAJECTORY), ("t2", TRAJECTORY)))
+    session.commit_step(
+        expected_step=0,
+        commit=CommitRecord(
+            scenario="s",
+            step=1,
+            artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+            checkpoint=True,
+            algorithm_state={},
+            high_water_sequence=0,
+            high_water_offset=0,
+            consumed_ids=frozenset({consumed_sample_id("t1")}),
+            component="a",
+        ),
+    )
+    consumed = {}
+    for component in ("a", "b"):
+        trainer = Trainer.build(
+            "s",
+            session.records,
+            pipeline_factory=upload_pipeline,
+            candidate_backend=CountingBackend(),
+            default_job_samples=1,
+        )
+        trainer.read_samples(session.samples, component)
+        consumed[component] = trainer.prepare_commit(trainer.run_once(0)).consumed_ids
+    # Component a trained t1, so its next job takes t2; component b has not trained t1 yet.
+    assert consumed == {"a": {consumed_sample_id("t2")}, "b": {consumed_sample_id("t1")}}
+    session.close()
+    storage.close()
 
 
 @pytest.mark.unit

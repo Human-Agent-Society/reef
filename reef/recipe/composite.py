@@ -50,7 +50,8 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
-from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
+from reef.storage.samples import SampleStore
+from reef.storage.tasks import TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, Surface
 from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.trainer import ComponentTrainer
@@ -111,7 +112,8 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
 class ComponentTaskStorage(TaskStorage):
     """Opens the task stores of one component under ``<component>/<name>``, so components never share a store.
 
-    The one exception is the scenario's ``imported-tasks`` store, which every component reads by its own name.
+    The scenario's imported tasks are not a task store: every component reads them from the scenario's sample
+    store.
     """
 
     def __init__(self, storage: TaskStorage, component: str) -> None:
@@ -119,9 +121,6 @@ class ComponentTaskStorage(TaskStorage):
         self.component = component
 
     def open(self, name: str) -> TaskStore:
-        # The scenario's imported tasks are the one store that the components share; only the service writes it.
-        if name == IMPORTED_TASK_STORE:
-            return self.storage.open(name)
         return self.storage.open(f"{self.component}/{name}")
 
 
@@ -304,6 +303,7 @@ class CompositeRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
         for component, recipe in self.components.items():
@@ -317,6 +317,7 @@ class CompositeRecipe(Recipe):
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
                 releases=None if releases is None else ComponentReleases(releases, component),
+                samples=samples,
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)
