@@ -348,7 +348,6 @@ class OrderedMixRecord2Record(ReportRecord2Record):
             context,
             AnyGroupReady(),
             exclusive_sources=True,
-            ordered_groups=True,
             max_staleness=settings.max_staleness,
         )
 
@@ -718,7 +717,7 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             StreamRun(SLOT_GROUP_STAGES),
             slot_steps(),
         ),
-        "ordered_groups": (
+        "keyed_groups": (
             StreamRun(ORDERED_MIX_STAGES, batch_size=3),
             ordered_steps(),
         ),

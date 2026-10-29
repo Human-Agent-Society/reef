@@ -18,11 +18,9 @@ from reef.record2record import (
     InferenceRecord2Record,
     NoRecordSets,
     RecordSet,
-    RecordSetUnit,
     ReportContext,
     ReportGrouping,
     ReportRecord2Record,
-    UnitDropReason,
 )
 from reef.record2sample import ImmediateRecord2Sample, Record2Sample, ReportSamples, SampleResult, SkippedReport
 from reef.sample2job import Sample2Job, Sample2JobSettings
@@ -489,22 +487,6 @@ def ready_tasks(*names: str) -> SampleResult:
     return SampleResult.ready(tuple(TaskSample(Path(name)) for name in names))
 
 
-class DropRecordingRecords(InferenceRecord2Record):
-    """Inference sets with an ordered history of units dropped without training.
-
-    ``dropped`` contains unit IDs and their supplied reasons, appended before
-    normal cleanup. Pipeline tests read it to check discard notifications.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.dropped: list[tuple[Hashable, UnitDropReason]] = []
-
-    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
-        self.dropped.append((unit.unit_id, reason))
-        super().drop_held_unit(unit, reason=reason)
-
-
 @pytest.mark.unit
 def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch() -> None:
     processor = WaitingPipeline(PipelineContext("s"))
@@ -512,7 +494,6 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
     processor.later_tasks.finish("i1", ready_tasks("a", "b"))
     processor.advance()
     assert processor.status()["ready_samples"] == 2
-    assert processor.record2record.pool.reserved is None
     assert not processor.ready(3)
     batch = processor.build_job_data(2)
 
@@ -526,9 +507,9 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
 
 
 @pytest.mark.unit
-def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer_without_a_drop() -> None:
+def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer() -> None:
     context = PipelineContext("s")
-    records = DropRecordingRecords()
+    records = InferenceRecord2Record()
     later_tasks = LaterSamples()
     processor = TrainingPipeline(
         context,
@@ -542,14 +523,14 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer_
     later_tasks.finish("i2", SampleResult.ready((TRAJECTORY,)))
     processor.advance()
     # Both units are stored and their records consumed; the buffer takes one sample, and the other waits.
-    assert records.dropped == []
     assert processor.status()["ready_samples"] == 1
+    assert processor.store.count() == 2
     assert processor.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing version become stale once the serving version is known.
     processor.observe_serving_runtime_load_id("e:1")
     processor.advance()
-    assert records.dropped == []
     assert processor.status()["ready_samples"] == 0
+    assert processor.store.count() == 2, "a stale sample stays in the store untrained"
     assert not processor.ready(1)
 
 
