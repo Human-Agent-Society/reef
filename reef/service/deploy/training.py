@@ -20,6 +20,7 @@ from reef.train.deployment import TrainingDeployment
 _BUILTINS = {
     "slime": "reef.train.slime_backend.launch:SlimeDeployment",
     "tinker": "reef.train.tinker_backend.launch:TinkerDeployment",
+    "spindle_full": "reef.train.tinker_backend.launch:SpindleFullDeployment",
 }
 
 
