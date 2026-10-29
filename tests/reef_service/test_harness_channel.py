@@ -364,7 +364,7 @@ def test_crlf_content_survives_the_manifest_byte_exact(tmp_path) -> None:
         await client.start_server()
         try:
             manifest = await evaluated_step(client)
-            assert "marker win\r\nrules" in manifest["files"]["pi-agent/AGENTS.md"]
+            assert "marker win\r\nrules" in manifest["files"]["plugin/rules.md"]
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["files"]["rules.md"] == "marker win\r\nrules\n"
         finally:
@@ -388,7 +388,7 @@ def test_a_seeded_recipe_serves_a_fresh_scenario_before_any_step(tmp_path) -> No
             assert response.status == 200
             files = (await response.json())["files"]
             # The seed skill's text plus the frontmatter pi requires, made from its first line.
-            assert files["pi-agent/skills/answer-style/SKILL.md"] == (
+            assert files["plugin/skills/answer-style/SKILL.md"] == (
                 "---\nname: answer-style\ndescription: seed skill\n---\n# seed skill\n"
             )
             assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
@@ -421,7 +421,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
                 if response.status == 200:
                     manifest = await response.json()
                     assert manifest["evaluation"]["selected"] is True
-                    assert "marker rules" in manifest["files"]["pi-agent/AGENTS.md"]
+                    assert "marker rules" in manifest["files"]["plugin/rules.md"]
                     break
                 assert response.status == 404
                 await response.read()
@@ -500,7 +500,6 @@ def test_descriptor_dirs_stay_in_managed_state(tmp_path, path: str) -> None:
     [
         ({"args": [["--key", "{token}"]]}, "must not hold {token}"),
         ({"register": [["login", "{token}"]]}, "must not hold {token}"),
-        ({"register": [["add", "{file:x}"]]}, "must not hold {file:...}"),
         ({"args": ["-e"]}, "a list of argument groups"),
         ({"files": {}}, "an object of args, env, register and unregister"),
     ],

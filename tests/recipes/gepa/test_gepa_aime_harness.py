@@ -316,7 +316,7 @@ def test_the_seed_tree_carries_the_quickstart_envelope():
     assert 'pi.on("before_provider_request"' in extension
     # The extension reads the rules file instead of embedding its text, so the
     # envelope stays fixed while the evolving rules underneath it change.
-    assert "AGENTS.md" in extension and "You are a helpful assistant" not in extension
+    assert "rules.md" in extension and "You are a helpful assistant" not in extension
 
 
 def test_episode_files_render_the_served_tree_with_the_transient_binding(load):
@@ -325,11 +325,10 @@ def test_episode_files_render_the_served_tree_with_the_transient_binding(load):
 
     merged = driver.episode_files(served, ModelBinding("http://service.test", "task-model", "k"), get_adapter("pi"))
 
-    assert merged["pi-agent/AGENTS.md"] == "rules\n"
-    settings = json.loads(merged["pi-agent/settings.json"])
-    # The served tree's own config survives the merge; the endpoint is added.
-    assert settings["defaultTools"] == []
-    assert settings["defaultModel"] == "reef/task-model"
+    assert merged["plugin/rules.md"] == "rules\n"
+    # The served tree's own settings stay in the package; the endpoint goes to pi's own directory.
+    assert json.loads(merged["plugin/settings.json"])["defaultTools"] == []
+    assert json.loads(merged["pi-agent/settings.json"])["defaultModel"] == "reef/task-model"
     assert json.loads(merged["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://service.test/v1"
 
 

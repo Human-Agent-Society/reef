@@ -115,6 +115,8 @@ def first_request(tmp_path: Path, form: str, tree: HarnessTree, prompt: str) -> 
         else:
             layer = layer_install(tree, descriptor, ModelBinding(base_url=url, model=MODEL), url, str(tmp_path))
             env = {**os.environ, **write_layer(tmp_path, layer), "PI_CODING_AGENT_DIR": str(tmp_path / "own")}
+            for command in layer.register:
+                subprocess.run([REAL_PI, *command], env=env, check=True, capture_output=True)
             argv = [REAL_PI, *layer.args, "--offline", "--mode", "json", "-p", prompt]
             done = subprocess.run(argv, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
             assert done.returncode == 0, done.stderr

@@ -53,7 +53,7 @@ import hashlib, json, os, sys
 from pathlib import Path
 
 prompt = sys.argv[sys.argv.index("-p") + 1]
-rules = (Path(os.environ["PI_CODING_AGENT_DIR"]) / "AGENTS.md").read_text().removesuffix("\\n")
+rules = (Path(sys.argv[sys.argv.index("-e") + 1]) / "rules.md").read_text().removesuffix("\\n")
 token = hashlib.sha256(f"{rules}|{prompt}".encode()).hexdigest()[:8]
 sessions = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 sessions.mkdir(parents=True, exist_ok=True)

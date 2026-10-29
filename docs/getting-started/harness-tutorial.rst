@@ -84,20 +84,22 @@ one harness.
    export SCENARIO=my-agent
    reef-client harness connect $SCENARIO --reef http://127.0.0.1:8901
 
-``connect`` prints ``Done. Open a new terminal and run pi.`` It installed
-the newest version under ``~/.local/share/reef-client/harness/my-agent``,
-installed pi if your machine lacked it, and made your ``pi`` command run
-through Reef. It did not touch your own pi configuration, and
-``reef-client harness disconnect`` undoes it. When the deployment needs a
-token, ``connect`` asks for it, or reads ``REEF_TOKEN``.
+``connect`` prints ``Done. Open a new terminal and run pi.`` It put the
+newest version under ``~/.local/share/reef-client/harness/my-agent``,
+installed it as a pi package with ``pi install``, installed pi if your
+machine lacked it, and made your ``pi`` command run through Reef. Your own
+rules and settings stay as they are; ``reef-client harness disconnect``
+removes the package. When the deployment needs a token, ``connect`` asks
+for it, or reads ``REEF_TOKEN``.
 
 Use the agent
 -------------
 
 Open a new terminal, run ``pi`` as you always do, and give it a task. pi
-loads your own configuration with Reef's version on top. Its model calls go
-through Reef, which records each one. After pi exits, the client sends back
-what the session changed in Reef's files.
+loads your own configuration and Reef's package. Every pi session loads the
+package, but only a session that starts through Reef sends its model calls
+to Reef, which records each one. After pi exits, the client sends back what
+the session changed in Reef's files.
 
 Tell Reef how it went
 ---------------------
@@ -146,7 +148,7 @@ When you and Reef change the same file
 --------------------------------------
 
 You can edit Reef's files too, for example the rules in
-``~/.local/share/reef-client/harness/my-agent/pi-agent/AGENTS.md``. The client
+``~/.local/share/reef-client/harness/my-agent/plugin/rules.md``. The client
 sends your edit with the next sync, and Reef merges it onto the head. Text
 files merge line by line:
 

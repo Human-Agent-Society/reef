@@ -26,7 +26,7 @@ How it works
 ------------
 
 .. diagram::
-   :caption: The client installs the head as a layer over the person's own configuration and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports or of uploaded train tasks, and publishes a selected candidate as the new head.
+   :caption: The client installs the head as the agent's own plugin, beside the person's own configuration, and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports or of uploaded train tasks, and publishes a selected candidate as the new head.
 
    <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
    <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
@@ -78,7 +78,7 @@ Both ways feed the same training step (4 to 8).
      - prompts in ``evolution.evaluation.tasks``, or none (``policy: none``)
      - the eval split of the uploaded tasks
    * - Agents
-     - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a layer)
+     - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a plugin)
      - every adapter with an npm ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
@@ -214,16 +214,16 @@ part:
      - Parts
    * - ``pi``
      - pi coding agent
-     - rules, skill, command, extension, config
+     - rules, skill, command, extension, config (an empty ``defaultTools``)
    * - ``opencode``
      - OpenCode
      - rules, skill, command, extension, config
    * - ``claude``
      - Claude Code
-     - rules, skill, command, extension, memory, config
+     - rules, skill, command, extension (with ``config/hooks.json``)
    * - ``codex``
      - Codex CLI
-     - rules, skill, command, config
+     - skill, command
    * - ``dsh``
      - DeepSeek Harness
      - rules, skill, command, extension, config
@@ -234,7 +234,9 @@ part:
      - Reef's own loop
      - rules, skill, config, and the five ``native_*`` parts
 
-Reef refuses a file at a path that no part takes. A tree never chooses where
+For the first four, the parts are what the agent's own plugin carries: the
+same plugin runs in the evaluation and on a person's machine. Reef refuses a
+file at a path that no part takes. A tree never chooses where
 model calls go: Reef writes the endpoint, key and model at render time. The
 adapter guide gives each adapter's `render paths
 <../developer-guide/harness-adapters.rst#render-paths>`__ and `model binding
@@ -401,10 +403,13 @@ History
 Use a published tree
 --------------------
 
-``reef-client harness`` runs the agent on your machine with the head as a
-layer over your own configuration, and routes its model calls to Reef. The
-deployment's ``evolution.adapter`` decides the agent; ``GET /reef/scenarios``
-lists each harness with its ``adapter``.
+``reef-client harness`` installs the head as your agent's own plugin, with
+the agent's own command, so every session of the agent loads it beside your
+own configuration. A session that starts through Reef also sends its model
+calls to Reef. To go back to an earlier release, roll the scenario back
+(``POST /reef/scenarios/<scenario>/rollback``); your next sync installs it.
+The deployment's ``evolution.adapter`` decides the agent; ``GET
+/reef/scenarios`` lists each harness with its ``adapter``.
 
 .. code:: bash
 
@@ -415,7 +420,7 @@ lists each harness with its ``adapter``.
    :loop: each run starts on the newest release
 
    connect :: sets the machine up, once
-   run :: syncs, starts the agent on the layer, and sends its changes when it exits
+   run :: syncs, starts the agent with its model calls on Reef, and sends its changes when it exits
    Reef* :: records each model call; steps publish releases
 
 .. list-table::
@@ -425,14 +430,14 @@ lists each harness with its ``adapter``.
    * - Command
      - What it does
    * - ``connect``
-     - Installs the head under ``~/.local/share/reef-client/harness/<scenario>``,
-       installs the pinned agent when the machine lacks it, and makes the
-       agent's own command run through Reef. It asks only for a token and a
-       harness when it must.
+     - Installs the head under ``~/.local/share/reef-client/harness/<scenario>``
+       and as the agent's plugin, installs the pinned agent when the machine
+       lacks it, and makes the agent's own command run through Reef. It asks
+       only for a token and a harness when it must.
    * - ``run``
-     - Syncs (waiting at most 2 s for Reef), starts the agent on the layer,
-       and sends the session's changes from the background when it exits.
-       Arguments after ``--`` go to the agent.
+     - Syncs (waiting at most 2 s for Reef), starts the agent with its model
+       calls on Reef, and sends the session's changes from the background when
+       it exits. Arguments after ``--`` go to the agent.
    * - ``sync``
      - Sends your changed files, then installs the head. Reef merges them by
        each part's ``merge``: text by line, code by file. ``--discard`` drops
@@ -440,34 +445,35 @@ lists each harness with its ``adapter``.
    * - ``status``
      - Shows the installed release, the head and the changed files.
    * - ``disconnect``
-     - Removes the install and the agent command.
+     - Removes the plugin, the install and the agent command.
 
 .. list-table::
    :header-rows: 1
    :widths: 12 88
 
    * - Agent
-     - How the release goes over your own configuration
+     - The release, as your agent's plugin
    * - ``claude``
-     - Skills and commands as the plugin ``reef`` (``reef:<name>``); rules
-       after your ``CLAUDE.md``; settings, extension hooks and automatic
-       memory from the release.
+     - The plugin ``reef``: skills and commands as ``reef:<name>``, the rules
+       as its output style, the extensions as its hooks.
    * - ``pi``
-     - Skills, prompts and extensions beside yours; rules after your
-       ``AGENTS.md``; settings as ``--thinking`` and ``--no-builtin-tools``.
+     - A pi package: skills, prompts and extensions beside yours, the rules
+       after your system prompt.
    * - ``opencode``
-     - Config, skills, commands and plugins merged over yours.
+     - A global plugin: rules, skills, commands and config merged over yours.
+       opencode has no command that removes a plugin, so its entry stays after
+       ``disconnect`` and loads nothing.
    * - ``codex``
-     - Skills and commands as the plugin ``reef``, which ``connect`` adds to
-       ``~/.codex``; rules and config keys as ``-c`` arguments.
+     - The plugin ``reef`` in ``~/.codex``: skills and commands as
+       ``$reef:<name>``.
 
 Reef never reads your own configuration, and evaluates each release without
 it. Your configuration still reaches the model calls that Reef records, such
 as your rules and the names of your skills.
 
 A client of its own uses ``GET /reef/harness`` (``?release_id=`` for an
-older release, ``?form=source``, or ``?form=client&service_url=&root=`` for a
-layer) and ``POST /reef/harness/import`` (see `HTTP API
+older release, ``?form=source``, or ``?form=client&service_url=&root=`` for
+the plugin and its commands) and ``POST /reef/harness/import`` (see `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__).
 
 Promote a pending release

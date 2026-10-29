@@ -698,7 +698,7 @@ def test_episode_settings_reach_the_episodes_and_interleave_the_sides(tmp_path: 
 
     def spy(descriptor, files, prompt, **kwargs):
         timeouts.append(kwargs["timeout"])
-        sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
+        sides.append("candidate" if "marker" in files.get("plugin/rules.md", "") else "current")
         return run_episode(descriptor, files, prompt, **kwargs)
 
     monkeypatch.setattr(RUN_EPISODE, spy)
@@ -722,7 +722,7 @@ def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: 
         PI_FAKE.replace(
             '(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")',
             '(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")\n'
-            '(agent_dir.parent / "junk.txt").write_text("litter")',
+            '(package.parent / "junk.txt").write_text("litter")',
         )
     )
     litterer.chmod(0o755)

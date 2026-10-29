@@ -225,8 +225,8 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
     assert seen["host"]["parts"]["rules"] == {
         "path": "rules.md",
         "format": "text",
-        "renders": "pi-agent/AGENTS.md",
-        "holds": "the instructions pi reads at the start of every session",
+        "renders": "plugin/rules.md",
+        "holds": "the instructions that Reef's extension adds to pi's system prompt in every session",
         "review": False,
     }
     step_dir = Path(result.metrics["step_record"])
@@ -544,7 +544,7 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
     original = harness_runner.run_episode
 
     def spy(descriptor, files, prompt, **kwargs):
-        sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
+        sides.append("candidate" if "marker" in files.get("plugin/rules.md", "") else "current")
         return original(descriptor, files, prompt, **kwargs)
 
     monkeypatch.setattr(harness_runner, "run_episode", spy)

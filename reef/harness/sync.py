@@ -2,7 +2,7 @@
 
 The ``evolve`` section of an adapter's ``adapter.yaml`` says where each file
 of a tree lands when the tree renders, such as ``rules.md`` at
-``claude/CLAUDE.md``; the kind of each file says how it merges. Its
+``plugin/rules.md``; the kind of each file says how it merges. Its
 ``run.layer`` says how a person's machine runs the agent with a release as a
 layer over the person's own configuration (``AdapterLayer``). The client copies files and runs one command; it knows no
 adapter, and this module does the mapping on the server.
@@ -40,8 +40,6 @@ no          no          ``c`` when ``c == h``, else the part's ``merge``
 
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
@@ -58,7 +56,6 @@ from reef.surface.files import TextFileTree
 HARNESS_COMPONENT = "harness"
 #: The text a client puts its Reef token in place of, in the files and variables ``layer_install`` makes.
 TOKEN_PLACEHOLDER = "REEF_TOKEN_PLACEHOLDER"
-FILE_TEMPLATE = re.compile(r"\{file:([^}]+)\}")
 
 
 class HarnessFiles(FileTree):
@@ -122,8 +119,6 @@ def layer_install(
         raise ValueError(f"adapter {descriptor.name!r} does not run on a person's machine: it declares no layer")
     binding = replace(served, base_url=scenario_url, api_key=TOKEN_PLACEHOLDER)
     rendered = render_tree(tree, descriptor, binding.config_overlays(descriptor), layer=True)
-    # The renderer's arguments read the rendered files before layer_files drops the ones no flag can name.
-    renderer_args = descriptor.renderer.layer_args(rendered)
     files = descriptor.place_root(descriptor.renderer.layer_files(rendered), root)
     values = {"{root}": root, "{model}": binding.model, "{base_url}": scenario_url, "{token}": TOKEN_PLACEHOLDER}
 
@@ -132,17 +127,10 @@ def layer_install(
             template = template.replace(placeholder, value)
         return template
 
-    args: list[str] = []
-    for group in layer.args:
-        named = [match.group(1) for arg in group for match in FILE_TEMPLATE.finditer(arg)]
-        if any(not files.get(path, "").strip() for path in named):
-            continue
-        args.extend(FILE_TEMPLATE.sub(lambda match: json.dumps(files[match.group(1)]), filled(arg)) for arg in group)
-    args.extend(arg for group in renderer_args for arg in group)
     synced = tuple(part.renders for part in descriptor.layout.parts.values() if part.renders is not None)
     return LayerInstall(
         files,
-        tuple(args),
+        tuple(filled(arg) for group in layer.args for arg in group),
         {name: filled(value) for name, value in layer.env.items()},
         tuple(tuple(filled(arg) for arg in command) for command in layer.register),
         tuple(tuple(filled(arg) for arg in command) for command in layer.unregister),

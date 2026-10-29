@@ -127,9 +127,10 @@ def headless_env(descriptor: AdapterDescriptor, root: Path) -> dict[str, str]:
     return env
 
 
-def headless_argv(descriptor: AdapterDescriptor, binary: str, prompt: str) -> list[str]:
-    """The descriptor's headless invocation of ``binary``, with ``prompt`` in its ``{prompt}`` slots."""
-    return [binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
+def headless_argv(descriptor: AdapterDescriptor, binary: str, prompt: str, root: Path) -> list[str]:
+    """The descriptor's headless invocation of ``binary``, with ``prompt`` in its ``{prompt}`` slots and ``root``,
+    the episode root, in its ``{root}`` slots, such as the path of the plugin a flag loads."""
+    return [binary, *(token.replace("{root}", str(root)).replace("{prompt}", prompt) for token in descriptor.argv)]
 
 
 def write_rendered(descriptor: AdapterDescriptor, files: Mapping[str, str], directory: Path, root: str) -> None:
@@ -259,7 +260,7 @@ def run_episode(
                 value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
                 if value:
                     env[key] = value
-        argv = headless_argv(descriptor, binary or descriptor.binary, prompt)
+        argv = headless_argv(descriptor, binary or descriptor.binary, prompt, root)
         try:
             outcome = launch_agent(
                 descriptor, executor, argv, files, env, root=root, home=root, cwd=root / "workspace", timeout=timeout

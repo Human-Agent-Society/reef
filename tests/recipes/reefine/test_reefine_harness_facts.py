@@ -27,6 +27,16 @@ RULES = {"rules.md": "While chat mode is on, only search the web.\n"}
 COMPLETE = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
 
 
+def tree_of(adapter: str) -> HarnessTree:
+    """The head tree a request starts from: the support tree, without the rules on codex, which takes none."""
+    return HarnessTree({}) if adapter == "codex" else TREE
+
+
+def chat_mode(adapter: str) -> str:
+    """An answer that builds the chat mode: the command, and the rules where the harness takes rules."""
+    return designed(CHAT) if adapter == "codex" else designed(CHAT, RULES)
+
+
 def review_prompt(model: Model) -> str:
     (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
     return text
@@ -35,22 +45,26 @@ def review_prompt(model: Model) -> str:
 @pytest.mark.parametrize(
     ("adapter", "rules_file", "typed"),
     [
-        ("claude", "CLAUDE.md", "/<name>"),
-        ("codex", "AGENTS.md", "$<name>"),
+        ("claude", "rules.md", "/reef:<name>"),
+        ("codex", None, "$reef:<name>"),
         ("opencode", "AGENTS.md", "/<name>"),
         ("hermes", "SOUL.md", "/<name>"),
         ("dsh", "AGENTS.md", "/<name>"),
     ],
 )
 def test_the_request_prompt_names_the_harness_its_rules_file_its_command_and_its_tools(
-    adapter: str, rules_file: str, typed: str
+    adapter: str, rules_file: str | None, typed: str
 ) -> None:
     model = Model(designed(RULES))
     answer(model, adapter)
     prompt = model.prompt
     facts = harness_facts(adapter)
     assert f"This harness is {facts.title}" in prompt and facts.command in prompt and facts.tools in prompt
-    assert f"the markdown every session reads ({rules_file})" in prompt and f"as {typed}" in prompt
+    if rules_file is None:  # Codex's plugin carries no rules, so a request there writes none.
+        assert "- rules.md:" not in prompt
+    else:
+        assert f"the markdown every session reads ({rules_file})" in prompt
+    assert f"as {typed}" in prompt
     assert "- extensions/<name>.ts:" not in prompt and "pi.registerCommand" not in prompt
     # Only an extension branches on the platform; the prompt still names what the user must set up.
     assert "process.platform" not in prompt and "name anything platform specific the user must set up" in prompt
@@ -98,8 +112,8 @@ def test_off_pi_a_step_the_harness_cannot_perform_is_named_undone_not_answered_w
 
 
 def test_the_review_judges_commands_by_the_harness_surface() -> None:
-    model = Model(designed(CHAT, RULES), COMPLETE)
-    answer(model, "codex")
+    model = Model(chat_mode("codex"), COMPLETE)
+    answer(model, "codex", tree=HarnessTree({}))
     text = review_prompt(model)
     assert harness_facts("codex").command in text and harness_facts("codex").mode in text
     assert "pi.registerCommand" not in text
@@ -144,8 +158,8 @@ def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_rest
     """On a harness whose command cannot take a tool away, the prompt says the mode is followed by the model while
     every tool stays offered, keeps the mode's state in the conversation (a marker file shared every session and
     made the rules call a tool on every turn), and the review lists a hard restriction under limits."""
-    model = Model(designed(CHAT, RULES), COMPLETE)
-    answer(model, adapter)
+    model = Model(chat_mode(adapter), COMPLETE)
+    answer(model, adapter, tree=tree_of(adapter))
     assert "every tool stays in its list" in model.prompt
     assert "never claim the other tools are unavailable" in model.prompt
     assert "never in a file or a marker a tool writes or reads" in model.prompt
@@ -161,24 +175,6 @@ def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_rest
     text = review_prompt(model)
     assert "the review lists that point under limits" in text and 'goes in a "limits" list' in text
     assert "it is the behavior itself, not a substitute" not in model.prompt
-
-
-def test_claude_permissions_from_a_request_may_only_pre_approve_web_tools() -> None:
-    """Every session of a release runs under its permissions: an answer that allows a shell, a wildcard or sets
-    another permissions key is written again, and the one that allows WebSearch is kept."""
-
-    def permissions(value: dict) -> dict[str, str]:
-        return {"config/primary.json": json.dumps({"permissions": value})}
-
-    widened = permissions({"allow": ["Bash(*)", "mcp__server"], "defaultMode": "bypassPermissions"})
-    model = Model(designed(CHAT, widened), designed(CHAT, permissions({"allow": ["WebSearch"]})), COMPLETE)
-    outcome = answer(model, "claude")
-    kept = json.loads(outcome.patch.changes["config/primary.json"])
-    assert kept == {"permissions": {"allow": ["WebSearch"]}}
-    (dropped,) = outcome.notes["dropped_attempts"]
-    assert "a request may not set permissions.defaultMode" in dropped
-    assert "not 'Bash(*)'" in dropped and "not 'mcp__server'" in dropped
-    assert "WebFetch(domain:<host>)" in model.prompt
 
 
 def test_dsh_tells_the_person_to_set_the_web_search_key_before_starting() -> None:
@@ -338,8 +334,8 @@ def test_the_review_object_has_a_limits_key_where_the_harness_notes_send_points_
 def test_off_pi_the_prompts_speak_of_files_not_of_extensions_and_process_env(adapter: str) -> None:
     """Only a pi extension reads process.env: off pi the request prompt and the review say how a file gets a value,
     and name no extension, no process.env and no pi variable."""
-    model = Model(designed(CHAT, RULES), COMPLETE)
-    answer(model, adapter)
+    model = Model(chat_mode(adapter), COMPLETE)
+    answer(model, adapter, tree=tree_of(adapter))
     for text in (model.prompt, review_prompt(model)):
         assert "process.env" not in text and "PI_OFFLINE" not in text and "the extension" not in text
     assert "reaches the harness's environment at run time" in model.prompt
@@ -358,15 +354,11 @@ def test_a_prompt_level_mode_names_its_off_command_and_no_route_around_it() -> N
     assert "Claude Code runs a line that starts with ! in the person's shell" in model.prompt
 
 
-def test_terminus_says_a_run_has_no_reply_and_codex_says_web_search_is_on_in_every_session() -> None:
-    """A terminus run's visible result is its files, reward and trajectory; codex's web search config is on in
-    every session of the release, which How to use and the review limits say."""
+def test_terminus_says_a_run_has_no_reply() -> None:
+    """A terminus run's visible result is its files, reward and trajectory."""
     model = Model(designed(RULES))
     answer(model, "terminus")
     assert "A run has no reply a person reads" in model.prompt and "the verifier's reward" in model.prompt
-    model = Model(designed(RULES))
-    answer(model, "codex")
-    assert "turns the hosted search on in every session of the release, not only while a mode is on" in model.prompt
 
 
 def test_the_step_names_the_earlier_answer_it_kept() -> None:

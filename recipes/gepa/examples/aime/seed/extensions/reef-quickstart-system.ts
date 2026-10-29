@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// The package's rules.md, beside this file's extensions/ directory.
+const RULES = join(dirname(fileURLToPath(import.meta.url)), "..", "rules.md");
 
 export default function reefQuickstartSystem(pi) {
   pi.on("before_agent_start", async () => {
-    const root = process.env.PI_CODING_AGENT_DIR;
-    const rules = readFileSync(join(root, "AGENTS.md"), "utf8").replace(/\n+$/, "");
+    const rules = readFileSync(RULES, "utf8").replace(/\n+$/, "");
     return { systemPrompt: rules };
   });
   pi.on("before_provider_request", async ({ payload }) => {

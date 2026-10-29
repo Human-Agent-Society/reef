@@ -138,7 +138,10 @@ class AdapterAgent(BaseInstalledAgent):
         await environment.upload_dir(self.files_dir, CONTAINER_ROOT)
         # The agent may run as a user other than root, and it writes its sessions under the root.
         await self.exec_as_root(environment, command=f"chmod -R a+rwX {CONTAINER_ROOT}")
-        arguments = " ".join(shlex.quote(token.replace("{prompt}", instruction)) for token in self.argv)
+        arguments = " ".join(
+            shlex.quote(token.replace("{root}", CONTAINER_ROOT).replace("{prompt}", instruction))
+            for token in self.argv
+        )
         assignments = " ".join(shlex.quote(f"{name}={value}") for name, value in self.env.items())
         # nvm loads from the user's own home before the episode environment moves HOME to the root.
         command = (

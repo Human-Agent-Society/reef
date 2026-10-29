@@ -54,8 +54,8 @@ FAKE_AGENT = textwrap.dedent(
         sys.exit(3)
     seen = {{
         "prompt": sys.argv[sys.argv.index("-p") + 1],
-        "rules": pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "AGENTS.md").read_text(),
-        "skill": pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "skills/plan/SKILL.md").is_file(),
+        "rules": pathlib.Path(sys.argv[sys.argv.index("-e") + 1], "rules.md").read_text(),
+        "skill": pathlib.Path(sys.argv[sys.argv.index("-e") + 1], "skills/plan/SKILL.md").is_file(),
         "tools": sorted(tool["name"] for tool in call("/tools")[1]["tools"]),
         "outside": call("/check", {{"tree": "../.."}}),
     }}

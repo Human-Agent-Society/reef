@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import threading
 from collections.abc import Mapping
@@ -35,7 +34,6 @@ REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
 pytestmark = pytest.mark.skipif(not REAL_CODEX, reason="REEF_REAL_CODEX_BINARY does not name a real Codex binary")
 
 MODEL = "smoke-model"
-RULES_MARKER = "The Reef Codex rules marker is TIDEPOOL-CODEX-41."
 SKILL_MARKER = "The Reef Codex skill marker is TIDEPOOL-SKILL-27."
 
 
@@ -154,32 +152,11 @@ def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
     return str(wrapper)
 
 
-def test_real_codex_accepts_every_admitted_tuning_key() -> None:
-    server, base_url = _server()
-    try:
-        tuning = {
-            "model_auto_compact_token_limit": 100_000,
-            "model_auto_compact_token_limit_scope": "total",
-            "model_context_window": 200_000,
-            "model_reasoning_effort": "low",
-            "model_reasoning_summary": "none",
-            "model_verbosity": "low",
-            "tool_output_token_limit": 1_000,
-        }
-        files = _bound_files({"config/primary.json": json.dumps(tuning)}, binding=model_binding(base_url))
-        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert result.exit_code == 0, result.stderr
-
-
 def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     server, base_url = _server()
     try:
         files = _bound_files(
             {
-                "rules.md": RULES_MARKER,
                 "skills/reef-smoke/SKILL.md": f"# Reef smoke skill\n\n{SKILL_MARKER}",
                 "commands/reef-command.md": "Reef smoke command",
             },
@@ -207,13 +184,11 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     path, authorization, body = server.requests[0]
     assert path == "/v1/responses"
     assert authorization == "Bearer reef-smoke-key"
-    assert RULES_MARKER in body
     # Codex advertises skill metadata first and reads the body only when the
-    # model chooses the skill; discovery is the adapter contract here. A
-    # command is a skill in the same root under $CODEX_HOME.
-    assert re.search(r"`r0` = `[^`]*/codex/skills`", body)
-    assert "reef-smoke: Reef smoke skill (file: r0/reef-smoke/SKILL.md)" in body
-    assert "reef-command: Reef smoke command (file: r0/reef-command/SKILL.md)" in body
+    # model chooses the skill; discovery is the adapter contract here. The
+    # skills come from the plugin reef, and a command is a skill there too.
+    assert "reef:reef-smoke: Reef smoke skill" in body
+    assert "reef:reef-command: Reef smoke command" in body
     # config.toml sets no approval_policy; the episode still runs with approval never, so it never waits.
     assert "Approval policy is currently never" in body and "# Escalation Requests" not in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
@@ -224,34 +199,12 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert capture.is_file() and capture.stat().st_size > 0
 
 
-def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> None:
-    """The tree's web_search holds for an interactive session on the rendered config; the episode argv turns it off
-    again, and without that override the same tree offers the model the hosted web_search tool."""
-    descriptor = get_adapter("codex")
-    pin = descriptor.argv.index('web_search="disabled"')
-    unpinned = replace(descriptor, argv=descriptor.argv[: pin - 1] + descriptor.argv[pin + 1 :])
-    tools: dict[str, list[str]] = {}
-    for label, adapter in (("pinned", descriptor), ("unpinned", unpinned)):
-        server, base_url = _server()
-        try:
-            files = _bound_files(
-                {"config/primary.json": json.dumps({"web_search": "live"})}, binding=model_binding(base_url)
-            )
-            result = run_episode(adapter, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
-        finally:
-            server.shutdown()
-            server.server_close()
-        assert result.exit_code == 0, result.stderr
-        tools[label] = [tool.get("type", "") for _, _, body in server.requests for tool in json.loads(body)["tools"]]
-    assert tools["pinned"] and "web_search" not in tools["pinned"]
-    assert "web_search" in tools["unpinned"]
-
-
 def test_real_codex_session_config_lets_the_model_ask_the_person_to_leave_the_sandbox(tmp_path: Path) -> None:
     """An interactive session on the rendered config.toml, which sets no approval_policy, keeps Codex's on-request
     default and tells the model how to ask the person before a command runs outside the sandbox. The rendered tree
     holds no rule that skips that ask."""
-    files = _bound_files(binding=model_binding("http://127.0.0.1:9"))
+    descriptor = get_adapter("codex")
+    files = descriptor.place_root(_bound_files(binding=model_binding("http://127.0.0.1:9")), str(tmp_path))
     assert not any(path.startswith("codex/rules/") for path in files)
     for relative, text in files.items():
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -428,12 +381,10 @@ def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: s
         server.server_close()
 
 
-#: A tree with a marker in each part codex's adapter evolves, and a config key the request shows.
+#: A tree with a marker in each part codex's adapter evolves.
 CODEX_PARTS = {
-    "rules.md": RULES_MARKER,
     "skills/probe/SKILL.md": f"---\nname: probe\ndescription: {SKILL_MARKER}\n---\nProbe.\n",
     "commands/ship.md": "---\ndescription: The Reef Codex command marker is TIDEPOOL-COMMAND-33.\n---\nShip.\n",
-    "config/primary.json": json.dumps({"model_verbosity": "high"}),
 }
 
 
@@ -442,11 +393,10 @@ def test_real_codex_takes_every_part_of_a_tree_in_an_episode_and_over_a_persons_
     tmp_path: Path, form: str
 ) -> None:
     """Every part an evolved tree may hold reaches the model, in an episode and on a person's machine, where Codex
-    keeps the person's own home, empty here, takes the skills from the plugin the layer registers, and takes the
-    rules and the config as arguments. Unregistering leaves the person's config without the plugin."""
+    keeps the person's own home, empty here, and takes the skills from the plugin the layer registers.
+    Unregistering leaves the person's config without the plugin."""
     server, base_url = _server()
     descriptor = get_adapter("codex")
-    # A native model, so the request carries the verbosity the config sets.
     binding = ModelBinding(base_url=base_url, model="gpt-6-astra", api_key="reef-smoke-key", api="responses")
     try:
         if form == "episode":
@@ -470,6 +420,5 @@ def test_real_codex_takes_every_part_of_a_tree_in_an_episode_and_over_a_persons_
         server.shutdown()
         server.server_close()
     request = server.requests[-1][2]
-    markers = ("TIDEPOOL-CODEX-41", "TIDEPOOL-SKILL-27", "TIDEPOOL-COMMAND-33")
+    markers = ("TIDEPOOL-SKILL-27", "TIDEPOOL-COMMAND-33")
     assert [marker for marker in markers if marker not in request] == []
-    assert json.loads(request)["text"]["verbosity"] == "high"

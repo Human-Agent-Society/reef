@@ -1,5 +1,12 @@
 # opencode, driven headless per episode.
 #
+# A release is an opencode plugin in plugin/. Reef's own plugin there
+# (index.ts) gives opencode the release's rules, skills, commands and config
+# through its config hook, and the hooks and tools of the release's
+# extensions. An episode loads it through OPENCODE_CONFIG_CONTENT; a person's
+# machine adds it to the global plugin list with opencode plugin -g, and
+# opencode loads it in place in every session.
+#
 # OPENCODE_CONFIG_DIR points config discovery at the rendered directory and
 # suppresses global config seeding; the XDG overrides relocate data, cache,
 # and state so sessions land inside the episode root, and npm_config_cache
@@ -23,10 +30,12 @@ renderer: reef.harness.adapters.opencode.render:OpencodeAdapterRenderer
 # What Reef may evolve: each kind of file, at the path where opencode reads it. A config/<target>.json
 # of the tree merges into that config file (config, below).
 evolve:
-  rules: opencode/AGENTS.md
-  skill: opencode/skill/{name}/SKILL.md
-  command: opencode/command/{name}.md
-  extension: opencode/plugin/{name}.ts
+  rules: plugin/AGENTS.md
+  skill: plugin/skill/{name}/SKILL.md
+  command: plugin/command/{name}.md
+  extension:
+    renders: plugin/extensions/{name}.ts
+    holds: an opencode plugin module, whose exported functions return hooks and tools that Reef's plugin merges
 # The agent's directories under the root, each with the variable that moves it there. What the agent writes
 # in them is its state, never residue, and a sandbox keeps them writable.
 dirs:
@@ -44,7 +53,7 @@ sessions: {format: opencode-session-sqlite, path: xdg-data/opencode}
 # provider.
 model:
   openai:
-    - target: primary
+    - target: agent
       data:
         provider:
           reef:
@@ -56,7 +65,7 @@ model:
               "{model}": {}
         model: "reef/{model}"
   anthropic:
-    - target: primary
+    - target: agent
       data:
         provider:
           reef:
@@ -72,19 +81,38 @@ model:
 run:
   episode:
     argv: ["run", "--format", "json", "--auto", "{prompt}"]
-  # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays,
-  # and OPENCODE_CONFIG_DIR adds the install's config, skills, commands and plugins over it; on a
-  # key or name both define, the release's wins. That directory's AGENTS.md takes the place of
-  # the person's, so the inline config reads the person's back as an instruction file.
+    env:
+      OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
+  # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays.
+  # register adds the plugin to its global plugin list, and opencode loads it in place in every
+  # session; on a key or name both define, the release's wins. opencode has no command that
+  # removes a plugin, and it skips a plugin path that no longer exists, so the entry stays after
+  # disconnect. A session that Reef starts also reads the config that binds the model.
   layer:
     env:
-      OPENCODE_CONFIG_DIR: "{root}/opencode"
-      OPENCODE_CONFIG_CONTENT: '{"instructions": ["~/.config/opencode/AGENTS.md"]}'
+      OPENCODE_CONFIG: "{root}/opencode/opencode.json"
+    register:
+      - ["plugin", "-g", "{root}/plugin"]
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.
 config:
+  # The release's config, which Reef's plugin merges over opencode's own at the config hook.
   primary:
+    path: "plugin/config.json"
+    checks:
+      # Each of these chooses a model or a provider beyond the binding, or loads another plugin.
+      - key: [
+          provider, model, small_model, enabled_providers, disabled_providers, plugin,
+          agent.*.model, mode.*.model, command.*.model,
+        ]
+        match: IsAbsent()
+        reason: Reef's model binding chooses the model
+      - key: [autoupdate, share]
+        match: IsAbsent()
+        reason: episodes keep autoupdate and sharing off
+  # opencode's own opencode.json: the episode's defaults and the model binding.
+  agent:
     path: "opencode/opencode.json"
     defaults:
       autoupdate: false
@@ -93,10 +121,9 @@ config:
       permission:
         "*": "allow"
     checks:
+      - key: "."
+        match: Each(Key(IsIn(["autoupdate", "share", "enabled_providers", "permission", "provider", "model"])))
+        reason: the release's config is config/primary.json
       # Keep a benchmark episode hermetic and on the binding's provider only.
-      - key: [autoupdate, share, enabled_providers]
+      - key: [autoupdate, share, enabled_providers, permission]
         match: IsDefault()
-      # Each of these chooses a model beyond the binding.
-      - key: [small_model, disabled_providers, agent.*.model, mode.*.model, command.*.model]
-        match: IsAbsent()
-        reason: Reef's model binding chooses the model

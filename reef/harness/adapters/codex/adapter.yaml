@@ -1,11 +1,13 @@
 # OpenAI Codex CLI, driven through its non-interactive exec mode.
 #
-# CODEX_HOME relocates user configuration, rules, hooks, skills, and session
-# rollouts into the episode root. Codex lists the skills below
-# $CODEX_HOME/skills in exec and in its TUI. On a person's machine the same
-# skills load from a plugin (run.layer). The CLI
-# keeps model-generated commands in a workspace-write sandbox and never waits
-# for an approval during a benchmark episode.
+# A release is a Codex plugin in plugin/, named reef, in the local marketplace
+# reef at the root: its skills and commands load as reef:<name>. A plugin
+# carries no rules and no config keys, so a tree holds neither. An episode's
+# render writes the plugin into CODEX_HOME as codex plugin add would; a
+# person's machine installs it with codex plugin add. CODEX_HOME relocates the
+# configuration and the session rollouts into the episode root. The CLI keeps
+# model-generated commands in a workspace-write sandbox and never waits for an
+# approval during a benchmark episode.
 name: codex
 binary: codex
 install:
@@ -14,16 +16,14 @@ install:
   version: "0.158.0"
   binary_path: "node_modules/.bin/codex"
 renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
-# What Reef may evolve: each kind of file, at the path where codex reads it. A config/<target>.json
-# of the tree merges into that config file (config, below).
+# What Reef may evolve: each kind of file, at its path in the plugin.
 evolve:
-  rules: codex/AGENTS.md
-  skill: codex/skills/{name}/SKILL.md
+  skill: plugin/skills/{name}/SKILL.md
   # Codex loads no custom prompts (the TUI of 0.153.4 refused /name), so a
-  # command is a skill that a person runs as $name. A skill and a command of
-  # one name render to one path and are refused.
+  # command is a skill that a person runs as $reef:name. A skill and a command
+  # of one name render to one path and are refused.
   command:
-    renders: codex/skills/{name}/SKILL.md
+    renders: plugin/skills/{name}/SKILL.md
     format: skill
 # The agent's directories under the root, each with the variable that moves it there. What the agent writes
 # in them is its state, never residue, and a sandbox keeps them writable.
@@ -64,15 +64,12 @@ run:
       - workspace-write
       - --skip-git-repo-check
       - "{prompt}"
-  # How a person's machine runs Codex on a release: the person's own ~/.codex stays, and -c
-  # arguments win over its config.toml key by key. They bind the model, with the key in an
-  # environment variable rather than on the command line, add the rules as
-  # developer_instructions after the person's AGENTS.md, and set each key of the release's
-  # config.toml (the renderer's layer_args). Codex reads skills from no directory a flag names,
-  # only from an installed plugin: register installs the install's codex/ as the plugin reef from
-  # the local marketplace reef at the install root, and again after each install, because Codex
-  # reads a copy in its plugin cache. The plugin then loads in each of the person's Codex sessions,
-  # and features.plugins turns plugins on for this one.
+  # How a person's machine runs Codex on a release: the person's own ~/.codex stays. register
+  # installs the plugin reef from the local marketplace reef at the install root, and again for
+  # each release, because Codex reads a copy in its plugin cache; the plugin then loads in every
+  # Codex session of the person. A session that Reef starts also takes -c arguments that bind the
+  # model, with the key in an environment variable rather than on the command line, and turn
+  # plugins on.
   layer:
     env:
       REEF_LAYER_TOKEN: "{token}"
@@ -81,7 +78,6 @@ run:
       - ["-c", 'model="{model}"']
       - ["-c", 'model_providers.reef={name="Reef", base_url="{base_url}/v1", wire_api="responses", env_key="REEF_LAYER_TOKEN", supports_websockets=false}']
       - ["-c", "features.plugins=true"]
-      - ["-c", "developer_instructions={file:codex/AGENTS.md}"]
     register:
       - ["plugin", "marketplace", "add", "{root}"]
       - ["plugin", "add", "reef@reef"]
@@ -105,7 +101,7 @@ config:
         apps: false
         enable_request_compression: false
         hooks: false
-        plugins: false
+        plugins: true
         shell_snapshot: false
         skill_mcp_dependency_install: false
       otel:
@@ -115,47 +111,21 @@ config:
         trace_exporter: none
       sandbox_workspace_write:
         network_access: false
-    # web_search may take any value Codex reads, because the episode argv
-    # pins it disabled and only a person's session reads the tree's value.
+    # A Codex plugin carries no config key, so the file holds the episode's
+    # defaults and the keys Reef's model binding writes, which the render
+    # refuses from a tree without the binding.
     checks:
-      # The episode argv pins never, and a person's session keeps Codex's
-      # on-request default, so the person approves each command that leaves
-      # the sandbox.
-      - key: approval_policy
-        match: IsAbsent()
-        reason: episodes pin never, and a reef-codex session keeps on-request
-      # The config.toml keys a tree may set, and the keys Reef's model
-      # binding writes, which the render refuses from a tree without it.
-      # The entire file is treated as a dict.
       - key: "."
         match: |-
           Each(Key(IsIn([
-            "analytics", "check_for_update_on_startup", "features", "feedback", "model_auto_compact_token_limit",
-            "model_auto_compact_token_limit_scope", "model_context_window", "model_reasoning_effort",
-            "model_reasoning_summary", "model_verbosity", "otel", "sandbox_workspace_write",
-            "tool_output_token_limit", "web_search",
-            "model", "model_provider", "model_providers"
+            "analytics", "check_for_update_on_startup", "features", "feedback", "otel", "sandbox_workspace_write",
+            "web_search", "model", "model_provider", "model_providers"
           ])))
-        reason: the other codex config keys are not admitted for benchmark episodes
-      - key: web_search
-        match: IsIn(["disabled", "cached", "indexed", "live"])
+        reason: a Codex plugin carries no config keys
       - key: [
-          check_for_update_on_startup, analytics.enabled, feedback.enabled, otel,
-          sandbox_workspace_write.network_access,
-          features.apps, features.hooks, features.plugins, features.shell_snapshot,
-          features.skill_mcp_dependency_install,
+          web_search, check_for_update_on_startup, analytics, feedback, otel, features, sandbox_workspace_write,
         ]
         match: IsDefault()
-      - key: features
-        match: |-
-          Each(Key(IsIn([
-            "apps", "enable_request_compression", "hooks", "plugins", "shell_snapshot",
-            "skill_mcp_dependency_install"
-          ])))
-      - key: sandbox_workspace_write
-        match: Each(Key(IsIn(["network_access", "writable_roots"])))
-      - key: sandbox_workspace_write.writable_roots
-        match: AnyOf(IsAbsent(), Eq([]))
       # The provider Reef's model binding writes, with only its keys.
       - key: model_provider
         match: AnyOf(IsAbsent(), Eq("reef"))

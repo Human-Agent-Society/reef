@@ -18,7 +18,7 @@ minibatch order) say so in `harness/aime.py`.
 
 | GEPA | Reef |
 | --- | --- |
-| Candidate prompt | a harness tree; the evolvable file here is `rules.md`, rendered as Pi's `AGENTS.md` |
+| Candidate prompt | a harness tree; the evolvable file here is `rules.md`, rendered into Pi's package as `plugin/rules.md` |
 | Pareto-sample a parent from the archive | `Archive.select_parent` over per-problem fronts, dominated candidates pruned |
 | Evaluate the parent on a train minibatch, with traces | the served tree's own recorded traffic: the driver runs the minibatch through the service, so the method gets the transcripts free; any other parent runs as episodes through `services.evaluate` |
 | Reflect on one component and propose a rewrite | `models["reflection"]` (gpt-5) with GEPA's own prompt, over `Inputs` / `Generated Outputs` / `Feedback` records |
@@ -27,13 +27,13 @@ minibatch order) say so in `harness/aime.py`.
 | Serve the argmax-mean candidate | the `compare` policy with `statistic: mean` publishes a strict mean improvement over the served tree's validation scores, which the score cache keeps, so the served tree stays the archive's best; it publishes the tree for `GET /reef/harness` |
 
 The request envelope is reproduced by seed files rather than by a custom Pi
-command line: `seed/config/primary.json` writes `defaultTools: []` into
-`settings.json`, and the fixed extension `seed/extensions/reef-quickstart-system.ts`
+command line: `seed/config/primary.json` sets `defaultTools: []`, which Reef's own
+extension applies, and the fixed extension `seed/extensions/reef-quickstart-system.ts`
 makes the rendered rules text Pi's entire system prompt at
 `before_agent_start` and flattens a single-part user message to the plain
 string upstream sends. Neither is evolvable (`components: [rules]`). The
-extension reads `AGENTS.md` at startup, so `rules.md` underneath it can
-evolve freely.
+extension reads the package's `rules.md` at startup, so `rules.md`
+underneath it can evolve freely.
 
 ## Setup and run
 

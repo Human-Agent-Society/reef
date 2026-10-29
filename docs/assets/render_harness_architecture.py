@@ -68,12 +68,12 @@ TITLE, BODY, MONO = 18, 14, 13
 # A line that starts with a backquote is code, in the mono face.
 BOXES = [
     (0, "A1", COL_W, "machine", None, "Agent command", "runs reef-client"),
-    (2, "A1", COL_W, "machine", None, "Layer install", "the head, rendered"),
+    (2, "A1", COL_W, "machine", None, "Plugin install", "the head, as the agent's plugin"),
     (3, "A1", COL_W, "machine", None, "Your own config", "Reef never reads it"),
     (0, "A2", WIDE, "machine", None, "reef-client", "`connect · run · sync"),
     (2, "A2", WIDE, "machine", 1, "Your agent", "`claude · pi · opencode · codex"),
     (4, "A2", COL_W, "store", None, "Model provider", "OpenAI or Anthropic API"),
-    (0, "B1", COL_W, "reef", None, "Client install", "the head as a layer"),
+    (0, "B1", COL_W, "reef", None, "Client install", "the head as a plugin"),
     (1, "B1", COL_W, "reef", None, "Client import", "merges onto the head"),
     (2, "B1", COL_W, "reef", 3, "Feedback", "a score per session"),
     (3, "B1", COL_W, "reef", 2, "Model proxy", "forwards and records"),
@@ -168,8 +168,8 @@ def render(theme: str, fonts) -> str:
     o = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
-            f"aria-label=\"Harness evolution in Reef. On the person's machine, reef-client installs the head as a "
-            f"layer over the person's own configuration and starts the agent. The agent's model calls go through "
+            f"aria-label=\"Harness evolution in Reef. On the person's machine, reef-client installs the head as the "
+            f"agent's own plugin, beside the person's own configuration, and starts the agent. The agent's model calls go through "
             f"Reef's model proxy, which records them, and a report scores a session. In a training step, the "
             f"workspace gets the head and a batch of raw traces, a method edits the copy, the check and the "
             f"evaluation test the candidate, and the release rule publishes a selected candidate as the new head. "
@@ -290,7 +290,7 @@ def render(theme: str, fonts) -> str:
             "Online: learn from sessions",
             [
                 "Steps 1 to 4: the person's sessions, scored by reports, are the traces.",
-                "Agents with a layer: claude, pi, opencode, codex.",
+                "Agents with a plugin: claude, pi, opencode, codex.",
                 "Recipes: ACE, ReasoningBank (policy: none); GEPA (compare on eval prompts).",
             ],
         )

@@ -242,12 +242,12 @@ def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_
     monkeypatch.setattr(run_module, "INSTALL_ROOT", tmp_path / "harness")
     assert run_module.install() == "r1" and paths == ["/reef/harness?form=source"]
     rendered = tmp_path / "harness" / "pi-agent"
-    assert "Answer briefly." in (rendered / "AGENTS.md").read_text()
+    assert "Answer briefly." in (tmp_path / "harness" / "plugin" / "rules.md").read_text()
     models = json.loads((rendered / "models.json").read_text())
     assert run_module.SERVICE_URL in models["providers"]["reef"]["baseUrl"]
     assert models["providers"]["reef"]["headers"] == {"x-reef-scenario": run_module.SCENARIO}
     record = json.loads((tmp_path / "harness" / run_module.RELEASE_FILE).read_text())
-    assert record["release_id"] == "r1" and "pi-agent/AGENTS.md" in record["files"]
+    assert record["release_id"] == "r1" and "plugin/rules.md" in record["files"]
     monkeypatch.delenv("REEF_DEMO_PHONE", raising=False)
     manifest["requires"] = [{"name": "REEF_DEMO_PHONE", "kind": "env", "prompt": "The phone number to text"}]
     assert run_module.install("r2") is None and paths[-1] == "/reef/harness?form=source&release_id=r2"

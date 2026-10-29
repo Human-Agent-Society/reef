@@ -446,9 +446,9 @@ def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> No
     binding = ModelBinding("http://up", "served", api_key="k")
     pi = dict(binding.config_overlays(get_adapter("pi"), models=("other/big", "served", "other/small")))
     assert [m["id"] for m in pi["models"]["providers"]["reef"]["models"]] == ["served", "other/big", "other/small"]
-    assert pi["primary"]["defaultModel"] == "reef/served"
+    assert pi["agent"]["defaultModel"] == "reef/served"
     ((target, data),) = binding.config_overlays(get_adapter("opencode"), models=("other/big",))
-    assert target == "primary"
+    assert target == "agent"
     assert list(data["provider"]["reef"]["models"]) == ["served", "other/big"] and data["model"] == "reef/served"
     assert binding.config_overlays(get_adapter("opencode")) == binding.config_overlays(
         get_adapter("opencode"), models=("served",)

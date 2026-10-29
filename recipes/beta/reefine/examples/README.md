@@ -106,8 +106,8 @@ curl -fsS -H 'x-reef-scenario: reefine-example' \
   http://127.0.0.1:8901/reef/harness
 ```
 
-`files` maps each path pi reads (`pi-agent/skills/<name>/SKILL.md` for a
-skill, `pi-agent/AGENTS.md` for the rules, and so on) to its text.
+`files` maps each path of the release's pi package (`plugin/skills/<name>/SKILL.md`
+for a skill, `plugin/rules.md` for the rules, and so on) to its text.
 `requires` lists what the release needs on your machine, each item with a
 `prompt` that says what to provide. The files carry no endpoint, key, or model: a client writes
 them where pi reads them and binds pi's model to this Reef, as

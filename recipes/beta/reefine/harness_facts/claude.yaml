@@ -1,9 +1,10 @@
 # What Reefine's prompts say about Claude Code: see recipes/beta/reefine/harness_facts/__init__.py.
 title: Claude Code
 command: >-
-  A person types a command file as /<name> in the session. Its text is a Claude Code command file: YAML
-  frontmatter with description (and allowed-tools, a list such as [WebSearch], which pre-approves those tools for
-  the command's own turn), then the prompt, where $ARGUMENTS stands for what the person typed after /<name>. Claude
+  A command file is a command of the plugin reef, which a person types as /reef:<name> in the session. Its text is a
+  Claude Code command file: YAML frontmatter with description (and allowed-tools, a list such as [WebSearch], which
+  pre-approves those tools for the command's own turn), then the prompt, where $ARGUMENTS stands for what the person
+  typed after /reef:<name>. Claude
   Code replaces every $ARGUMENTS in the file with that text, so write it once (The person typed: $ARGUMENTS) and
   describe the branches by what it holds.
 tools: >-
@@ -16,8 +17,3 @@ conversation_mode:
     Claude Code puts a typed skill's SKILL.md into the message, after the line 'Base directory for this skill:'
   escape: >-
     Claude Code runs a line that starts with ! in the person's shell
-config_keys: [permissions]
-config_example: >-
-  {"permissions": {"allow": ["WebSearch"]}} in config/primary.json lets WebSearch run without asking the
-  person each time. Every session of the release runs under it, so the allow list may name only WebSearch,
-  WebFetch or WebFetch(domain:<host>), and no other permissions key

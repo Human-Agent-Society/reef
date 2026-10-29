@@ -160,8 +160,8 @@ def adapter_modes(theme: str, fonts) -> str:
         "evaluation episode, the rendered tree is the agent's whole configuration in a fresh root, and run.episode "
         "runs one prompt. For a Harbor task, Reef installs the pinned agent in the task's container, copies the "
         "rendered tree in, runs run.episode with the task's instruction, and the task's verifier scores it. On a "
-        "person's machine, the client installs the rendered tree as a layer over the person's own configuration, "
-        "runs the agent with run.layer, and sends the changed files back.",
+        "person's machine, the agent's own command installs the rendered tree as its plugin, beside the person's own "
+        "configuration, the client runs the agent with run.layer, and sends the changed files back.",
         "One adapter.yaml, three ways an agent runs",
         "Reef renders the same tree for each; the adapter's sections say how the agent starts.",
         [("your machine", "machine"), ("Reef", "reef"), ("files", "store")],
@@ -209,7 +209,7 @@ def adapter_modes(theme: str, fonts) -> str:
             "machine",
             "a person's machine",
             [
-                ("Layer install", "the rendered tree, bound to Reef"),
+                ("Plugin install", "the agent's own command: run.layer register"),
                 ("Run", "`binary + run.layer args and env"),
                 ("Sync back", "changed files → the tree"),
             ],

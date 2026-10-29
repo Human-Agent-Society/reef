@@ -6,6 +6,8 @@ from tests.support.harness_steps import IdleMethod, evolution_config
 from reef.artifact import Artifact, ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import EvaluationSettings
+from reef.harness.adapters import get_adapter
+from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
@@ -13,8 +15,8 @@ from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 
-#: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its config files are empty.
-PI_RULES_RENDER = {"pi-agent/AGENTS.md": "rule\n", "pi-agent/models.json": "{}\n", "pi-agent/settings.json": "{}\n"}
+#: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its package and empty configs.
+PI_RULES_RENDER = render_tree(HarnessTree({"rules.md": "rule"}), get_adapter("pi"))
 #: A pi harness evolution recipe: what its surface serves is the subject here, so it never builds a backend.
 PI_RECIPE = HarnessEvolutionRecipe(
     method=IdleMethod(), evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none")

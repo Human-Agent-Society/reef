@@ -173,10 +173,8 @@ def test_incumbent_only_branches_from_the_served_tree_and_shows_the_refused_repl
 
 
 def test_a_proposal_keeps_the_parent_files_of_the_parts_it_may_not_change(tmp_path: Path) -> None:
-    seed = HarnessTree({**SEED.files, "config/primary.json": json.dumps({"defaultThinkingLevel": "off"}) + "\n"})
-    changed = HarnessTree(
-        {**IMPROVED.files, "config/primary.json": json.dumps({"defaultThinkingLevel": "high"}) + "\n"}
-    )
+    seed = HarnessTree({**SEED.files, "config/primary.json": json.dumps({}) + "\n"})
+    changed = HarnessTree({**IMPROVED.files, "config/primary.json": json.dumps({"defaultTools": []}) + "\n"})
     chat = QueueChat(proposal_reply(seed, changed))
     backend, releases = meta_harness_backend(tmp_path, chat, seed=seed, components=("rules",))
 
@@ -280,10 +278,10 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
         backend.prepare_step(JobData("demo:1", (SAMPLE,)), backend.initial_state(), 0)
 
 
-@pytest.mark.parametrize("adapter", ["pi", "codex"])
+@pytest.mark.parametrize("adapter", ["pi", "opencode"])
 def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: str) -> None:
     config = meta_harness_sections(tmp_path, adapter=adapter, mode="incumbent_only", components=["rules"])
-    api = "responses" if adapter == "codex" else "openai"
+    api = "openai"
     recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime(api))
 
     assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, MetaHarness)

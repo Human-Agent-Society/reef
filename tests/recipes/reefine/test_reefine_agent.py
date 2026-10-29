@@ -157,7 +157,7 @@ FAKE_PI = textwrap.dedent(
     sessions = pathlib.Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
     sessions.mkdir(parents=True, exist_ok=True)
     assert "PI_OFFLINE" not in os.environ, "an agent or a trial runs online"
-    assert pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "{tools}").exists() == (
+    assert pathlib.Path(sys.argv[sys.argv.index("-e") + 1], "{tools}").exists() == (
         "REEF_AGENT_URL" in os.environ)
     # The episode environment is minimal, so the test sets the mode in a file beside the binary.
     mode_file = pathlib.Path(sys.argv[0]).with_name("mode")

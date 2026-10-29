@@ -916,7 +916,7 @@ agent as the scenario's head, with ``x-reef-scenario``:
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
-     -d '{"files": {"pi-agent/AGENTS.md": "Run the tests first.\n"},
+     -d '{"files": {"plugin/rules.md": "Run the tests first.\n"},
           "base_release_id": "rel-12"}' \
      "$REEF_URL/reef/harness/import"
 

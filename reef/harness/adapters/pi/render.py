@@ -1,39 +1,63 @@
-"""pi adapter render steps: skill frontmatter, and the layer's files and arguments.
+"""pi adapter render steps: skill frontmatter, Reef's extension in the package, and the layer's files.
 
 pi follows the Agent Skills spec: a ``SKILL.md`` needs ``name`` and
 ``description`` frontmatter or the skill is reported as a conflict at startup
 and never offered. ``process_skill`` gives a skill node whose
 text carries none both, the description being the text's first line.
 
-On a person's machine, pi reads ``settings.json`` and ``models.json`` only
-from the person's own directory. ``layer_files`` adds an extension that
-registers the release's providers, and ``layer_args`` passes the settings the
-adapter's checks admit as pi's flags: the thinking level as ``--thinking``,
-and an empty ``defaultTools`` as ``--no-builtin-tools``.
+A release is a pi package in ``plugin/``. A package carries skills, prompts and
+extensions, but no rules file and no settings, so ``finalize_render`` adds
+Reef's extension, which adds ``plugin/rules.md`` to the system prompt and
+applies ``plugin/settings.json``. pi reads ``models.json`` only from its own
+directory, so ``layer_files`` adds an extension that registers the layer's
+provider on a person's machine.
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
-
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 
-SETTINGS_PATH = "pi-agent/settings.json"
+#: Reef's extension in every package: the release's rules after pi's system prompt, unless the prompt already
+#: holds them, and the release's defaultTools, which turns off pi's built-in tools and keeps the extensions' own.
+REEF_EXTENSION = """\
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
+const plugin = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const read = (name: string) => (existsSync(join(plugin, name)) ? readFileSync(join(plugin, name), "utf8") : "");
 
-#: The extension a pi layer loads: pi reads models.json only from its own directory, so this registers the
+export default function (pi: any) {
+  pi.on("before_agent_start", async (event: any) => {
+    const rules = read("rules.md").trim();
+    // Another extension may have put the rules in already, in either order.
+    if (!rules || event.systemPrompt.includes(rules)) return undefined;
+    return { systemPrompt: `${event.systemPrompt}\\n\\n${rules}` };
+  });
+  pi.on("session_start", async () => {
+    const settings = JSON.parse(read("settings.json") || "{}");
+    if (!Array.isArray(settings.defaultTools)) return;
+    const builtin = new Set(
+      pi.getAllTools().filter((tool: any) => tool.sourceInfo?.source === "builtin").map((tool: any) => tool.name),
+    );
+    pi.setActiveTools(pi.getActiveTools().filter((name: string) => !builtin.has(name)));
+  });
+}
+"""
+
+#: The extension a layer adds: pi reads models.json only from its own directory, so this registers the
 #: providers of the layer's, with the defaults pi gives a model there.
 PROVIDER_EXTENSION = """\
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export default function (pi: any) {
-  const path = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "models.json");
+  const path = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "pi-agent", "models.json");
+  if (!existsSync(path)) return;
   const { providers } = JSON.parse(readFileSync(path, "utf8"));
-  for (const [name, provider] of Object.entries<any>(providers)) {
+  for (const [name, provider] of Object.entries<any>(providers ?? {})) {
     const models = (provider.models ?? []).map((model: any) => ({
       name: model.id,
       reasoning: false,
@@ -51,18 +75,13 @@ export default function (pi: any) {
 
 class PiAdapterRenderer(AdapterRenderer):
     @staticmethod
-    def layer_files(files: dict[str, str]) -> dict[str, str]:
-        # --append-system-prompt reads a file only when it exists, so the rules file is always there. The extension
-        # sits where no part renders, in a directory -e loads, so the layer always holds one and pi loads it as a
-        # package rather than as one extension.
-        return {"pi-agent/AGENTS.md": "", **files, "pi-agent/extensions/reef/index.ts": PROVIDER_EXTENSION}
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        # A directory, not a file, so no extension part of the tree takes its path.
+        return {**files, "plugin/extensions/reef/index.ts": REEF_EXTENSION}
 
     @staticmethod
-    def layer_args(files: Mapping[str, str]) -> tuple[tuple[str, ...], ...]:
-        settings = json.loads(files[SETTINGS_PATH])
-        level = settings.get("defaultThinkingLevel")
-        thinking = () if level is None else (("--thinking", str(level)),)
-        return (*thinking, ("--no-builtin-tools",)) if settings.get("defaultTools") == [] else thinking
+    def layer_files(files: dict[str, str]) -> dict[str, str]:
+        return {**files, "plugin/extensions/reef-provider/index.ts": PROVIDER_EXTENSION}
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:

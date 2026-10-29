@@ -31,16 +31,17 @@ pytestmark = pytest.mark.skipif(not REAL_CLAUDE, reason="REEF_REAL_CLAUDE_BINARY
 
 MODEL = "claude-smoke"
 #: The hook runs the extension at session start; Claude Code adds what it prints to the model's context.
-HOOKS = {"SessionStart": [{"hooks": [{"type": "command", "command": 'node "{root}/claude/extensions/probe.mjs"'}]}]}
+HOOKS = {
+    "SessionStart": [{"hooks": [{"type": "command", "command": 'node "${CLAUDE_PLUGIN_ROOT}/extensions/probe.mjs"'}]}]
+}
 PARTS = {
     "rules.md": "The reef smoke rules marker is TIDEPOOL-RULES-41.\n",
     "skills/probe/SKILL.md": "---\nname: probe\ndescription: The reef smoke skill marker is TIDEPOOL-SKILL-23.\n---\n",
     "commands/ship.md": "The reef smoke command marker is TIDEPOOL-COMMAND-31.\n",
-    "memory/MEMORY.md": "- The reef smoke memory marker is TIDEPOOL-MEMORY-17.\n",
     "extensions/probe.mjs": 'console.log("The reef smoke hook marker is TIDEPOOL-HOOK-37.");\n',
-    "config/primary.json": json.dumps({"hooks": HOOKS}),
+    "config/hooks.json": json.dumps({"hooks": HOOKS}),
 }
-MARKERS = ("TIDEPOOL-RULES-41", "TIDEPOOL-SKILL-23", "TIDEPOOL-COMMAND-31", "TIDEPOOL-MEMORY-17", "TIDEPOOL-HOOK-37")
+MARKERS = ("TIDEPOOL-RULES-41", "TIDEPOOL-SKILL-23", "TIDEPOOL-COMMAND-31", "TIDEPOOL-HOOK-37")
 #: The variables an episode sets so Claude Code makes no network call of its own.
 QUIET = {
     "DISABLE_AUTOUPDATER": "1",
@@ -97,8 +98,8 @@ def test_real_claude_takes_every_part_of_a_tree_in_an_episode_and_over_a_persons
     tmp_path: Path, form: str
 ) -> None:
     """Every part an evolved tree may hold reaches the model, in an episode and on a person's machine, where Claude
-    Code loads the person's own config directory, empty here, and the release as the adapter's layer over it. The
-    prompt runs the command, whose name a plugin's command takes after reef:."""
+    Code loads the person's own config directory, empty here, and the plugin the layer installs. The prompt runs
+    the command, which the plugin names reef:ship."""
     server = StubMessages()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -107,13 +108,15 @@ def test_real_claude_takes_every_part_of_a_tree_in_an_episode_and_over_a_persons
     try:
         if form == "episode":
             files = render_tree(HarnessTree(PARTS), descriptor, binding.config_overlays(descriptor))
-            result = run_episode(descriptor, files, "/ship", binary=REAL_CLAUDE, timeout=120.0)
+            result = run_episode(descriptor, files, "/reef:ship", binary=REAL_CLAUDE, timeout=120.0)
             assert result.exit_code == 0, (result.stdout, result.stderr)
         else:
             layer = layer_install(HarnessTree(PARTS), descriptor, binding, url, str(tmp_path / "install"))
             own = tmp_path / "own"
             own.mkdir()
             env = {**os.environ, **QUIET, **write_layer(tmp_path / "install", layer), "CLAUDE_CONFIG_DIR": str(own)}
+            for command in layer.register:
+                subprocess.run([REAL_CLAUDE, *command], env=env, cwd=tmp_path, check=True, capture_output=True)
             argv = [REAL_CLAUDE, *layer.args, "-p", "/reef:ship", "--output-format", "json"]
             done = subprocess.run(
                 argv, env=env, cwd=tmp_path, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120

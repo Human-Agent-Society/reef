@@ -1,4 +1,11 @@
-"""Claude Code adapter render steps: the model a command or skill frontmatter names, and the layer's files.
+"""Claude Code adapter render steps: the plugin's own files, the model a frontmatter names, and the layer's files.
+
+A release is the plugin ``reef`` in ``plugin/``. ``finalize_render`` writes
+its manifest, and its output style from ``plugin/rules.md``, which Claude Code
+adds to its system prompt while the plugin is on (``force-for-plugin``). It
+drops ``plugin/hooks/hooks.json`` when the tree has no hooks. ``layer_files``
+adds the local marketplace at the install root that a person's machine
+installs the plugin from.
 
 Every model call stays on Reef's model binding, and a ``model`` in the
 frontmatter of a command or a skill is the tree choosing where calls go.
@@ -8,6 +15,7 @@ reads it, which no config check can.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -16,6 +24,15 @@ import yaml
 
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
+
+RULES = "plugin/rules.md"
+HOOKS = "plugin/hooks/hooks.json"
+#: The output style that holds the rules: Claude Code adds it to its own system prompt, which it keeps.
+OUTPUT_STYLE = "plugin/output-styles/reef.md"
+OUTPUT_STYLE_FRONTMATTER = (
+    "---\nname: Reef\ndescription: The rules of the Reef harness release\n"
+    "force-for-plugin: true\nkeep-coding-instructions: true\n---\n\n"
+)
 
 #: Claude Code's frontmatter block: after a byte order mark, an opening --- line, then the text up to the next ---.
 FRONTMATTER_BLOCK = re.compile(r"---\s*\n([\s\S]*?)---\s*\n?")
@@ -76,15 +93,18 @@ def frontmatter_chooses_model(text: str) -> bool:
 
 class ClaudeAdapterRenderer(AdapterRenderer):
     @staticmethod
-    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        # Automatic memory is the tree's memory part, for every working directory; the program that writes the
-        # files puts the root in place of {root}.
-        return {**config, "autoMemoryDirectory": "{root}/claude/memory"} if path == "claude/settings.json" else config
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        plugin = {**files, "plugin/.claude-plugin/plugin.json": '{"name": "reef"}\n'}
+        if not json.loads(plugin[HOOKS]):
+            plugin.pop(HOOKS)
+        if RULES in plugin:
+            plugin[OUTPUT_STYLE] = OUTPUT_STYLE_FRONTMATTER + plugin[RULES]
+        return plugin
 
     @staticmethod
     def layer_files(files: dict[str, str]) -> dict[str, str]:
-        # The install's claude/ loads as a plugin named reef, and its rules file is always there to append.
-        return {"claude/CLAUDE.md": "", **files, "claude/.claude-plugin/plugin.json": '{"name": "reef"}\n'}
+        marketplace = {"name": "reef", "owner": {"name": "Reef"}, "plugins": [{"name": "reef", "source": "./plugin"}]}
+        return {**files, ".claude-plugin/marketplace.json": json.dumps(marketplace, indent=2) + "\n"}
 
     @staticmethod
     def check_model_route(

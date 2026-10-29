@@ -135,16 +135,17 @@ FAILURES_PROMPT = prompt("failures")
 
 
 def request_parts(adapter: str) -> tuple[str, ...]:
-    """The parts a request may write on ``adapter``: skills, rules and commands everywhere, extensions on pi, and
+    """The parts a request may write on ``adapter``: the skills, rules and commands it takes, extensions on pi, and
     the primary config where the harness's own config can enforce a behavior (``HarnessFacts.config_keys``)."""
     facts = harness_facts(adapter)
+    taken = tuple(part for part in ("skill", "rules", "command") if part in get_adapter(adapter).layout.parts)
     if adapter == EXTENSION_ADAPTER:
         extra: tuple[str, ...] = ("extension",)
     elif facts is not None and facts.config_keys:
         extra = ("config",)
     else:
         extra = ()
-    return ("skill", "rules", "command", *extra)
+    return (*taken, *extra)
 
 
 def request_config_keys(adapter: str) -> tuple[str, ...]:
@@ -160,7 +161,8 @@ def file_name(path: str, fallback: str) -> str:
 def file_lines(adapter: str) -> str:
     """One prompt line per file a request may write on ``adapter``, with what it holds and where it lands."""
     descriptor = get_adapter(adapter)
-    rules = file_name(descriptor.layout.parts["rules"].renders or "", f"{adapter}'s rules file")
+    rules_part = descriptor.layout.parts.get("rules")
+    rules = file_name(rules_part.renders or "" if rules_part else "", f"{adapter}'s rules file")
     primary = descriptor.config_targets.get("primary")
     lines = {
         "skill": (

@@ -8,14 +8,17 @@ Harness adapters
 
 An adapter connects a harness tree to one agent. It is one file,
 ``reef/harness/adapters/<name>/adapter.yaml``, and an optional ``render.py``
-for what the file cannot state. Reef renders the same tree with it in three
+for what the file cannot state. For an agent that runs on a person's machine,
+the tree renders as the agent's own plugin in ``plugin/``: an evaluation
+episode loads that plugin, and a person's machine installs it with the
+agent's own command. Reef renders the same tree with the adapter in three
 places:
 
 .. diagram::
-   :caption: The adapter renders one harness tree three ways: as the whole configuration of an evaluation episode, inside the container of a Harbor task, and as a layer over a person's own configuration.
+   :caption: The adapter renders one harness tree three ways: as the whole configuration of an evaluation episode, inside the container of a Harbor task, and as the agent's plugin on a person's machine.
 
-   <img class="fig-light" src="../assets/harness-adapter-modes-light.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation episode in Reef, a Harbor task in its container, and a layer on a person's machine">
-   <img class="fig-dark" src="../assets/harness-adapter-modes-dark.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation episode in Reef, a Harbor task in its container, and a layer on a person's machine">
+   <img class="fig-light" src="../assets/harness-adapter-modes-light.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation episode in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
+   <img class="fig-dark" src="../assets/harness-adapter-modes-dark.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation episode in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
 
 The adapter file
 ----------------
@@ -28,22 +31,26 @@ pi's ``adapter.yaml``, shortened:
    binary: pi
    install: {kind: npm, package: "@earendil-works/pi-coding-agent", version: "0.84.2",
              binary_path: node_modules/.bin/pi}
-   evolve:                                  # what Reef may evolve, and where pi reads it
-     rules: pi-agent/AGENTS.md
-     skill: pi-agent/skills/{name}/SKILL.md
-     command: pi-agent/prompts/{name}.md
-     extension: pi-agent/extensions/{name}.ts
+   evolve:                                  # what Reef may evolve: its path in the release's pi package
+     rules: {renders: plugin/rules.md, holds: ...}
+     skill: plugin/skills/{name}/SKILL.md
+     command: plugin/prompts/{name}.md
+     extension: plugin/extensions/{name}.ts
    dirs:                                    # pi's directories, and the variable that moves each one
      pi-agent: PI_CODING_AGENT_DIR
      sessions: PI_CODING_AGENT_SESSION_DIR
    sessions: {format: pi-session-jsonl, path: sessions}
    model:                                   # per API dialect: the config that binds the model
-     openai: [{target: models, data: {...}}, {target: primary, data: {...}}]
+     openai: [{target: models, data: {...}}, {target: agent, data: {...}}]
    run:
-     episode: {argv: ["--mode", "json", "-p", "{prompt}"], env: {PI_OFFLINE: "1"}}
-     layer: {args: [["-e", "{root}/pi-agent"], ["--model", "reef/{model}"]]}
+     episode: {argv: ["--mode", "json", "-p", "{prompt}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
+     layer:                                 # a person's machine
+       args: [["--model", "reef/{model}"]]
+       register: [["install", "{root}/plugin"]]
+       unregister: [["remove", "{root}/plugin"]]
    config:                                  # the config files, with defaults and checks
-     primary: {path: pi-agent/settings.json, checks: [...]}
+     primary: {path: plugin/settings.json, checks: [...]}
+     agent: {path: pi-agent/settings.json, checks: [...]}
      models: {path: pi-agent/models.json, checks: [...]}
 
 .. list-table::
@@ -67,10 +74,11 @@ pi's ``adapter.yaml``, shortened:
      - config templates per dialect (``openai``, ``responses``,
        ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
    * - ``run.episode``
-     - the headless command (``{prompt}``) and its variables
+     - the headless command (``{prompt}``, ``{root}``) and its variables
    * - ``run.layer``
-     - how a person's machine runs the agent: ``args``, ``env``, and the
-       agent's own ``register``/``unregister`` commands (`A person's machine`_)
+     - a person's machine: the agent's own commands that install the plugin
+       and remove it (``register``, ``unregister``), and the ``args`` and
+       ``env`` of a session that Reef starts (`A person's machine`_)
    * - ``config``
      - each config file's ``path``, ``defaults`` and ``checks``
        (`Config checks`_); ``primary`` is required
@@ -97,7 +105,8 @@ How Reef runs an agent
    * - Evaluation episode
      - Renders the tree with the model binding into a new root, moves the
        agent's directories there, runs ``run.episode`` in an empty
-       ``workspace/``, reads the session log, and removes the root.
+       ``workspace/`` with the plugin loaded from ``{root}/plugin``, reads the
+       session log, and removes the root.
      - ``dirs``, ``model``, ``run.episode``, ``sessions``
    * - Harbor task
      - Starts the task's container, installs the pinned agent with npm,
@@ -105,8 +114,9 @@ How Reef runs an agent
        scores the tests' reward.
      - an npm ``install``
    * - A person's machine
-     - ``reef-client harness`` installs the tree as a layer and runs the
-       agent with it.
+     - ``reef-client harness`` installs the release as the agent's plugin,
+       with the agent's own command, and routes the sessions it starts to
+       Reef.
      - ``run.layer``
 
 Tree parts
@@ -159,7 +169,7 @@ Codex's commands are skills:
 
 .. code-block:: yaml
 
-   command: {renders: codex/skills/{name}/SKILL.md, format: skill}
+   command: {renders: plugin/skills/{name}/SKILL.md, format: skill}
 
 Each part also has ``holds``, one line on what the file holds, which a method
 reads in ``material/host.json``, and optionally ``review: true``, which makes
@@ -185,6 +195,12 @@ every change to it wait for a person.
 Render paths
 ~~~~~~~~~~~~
 
+The four agents that run on a person's machine render their parts into the
+plugin in ``plugin/``; the others into the agent's own directory. A part
+missing from a row is one the agent's plugin cannot carry, so a tree holds
+none: Codex's plugin carries no rules, and no plugin carries Claude Code's
+settings or memory.
+
 .. list-table::
    :header-rows: 1
 
@@ -194,24 +210,24 @@ Render paths
      - ``command``
      - ``extension``
    * - ``pi``
-     - ``pi-agent/AGENTS.md``
-     - ``pi-agent/skills/<name>/SKILL.md``
-     - ``pi-agent/prompts/<name>.md``
-     - ``pi-agent/extensions/<name>.ts``
+     - ``plugin/rules.md``, added to the system prompt by Reef's extension
+     - ``plugin/skills/<name>/SKILL.md``
+     - ``plugin/prompts/<name>.md``
+     - ``plugin/extensions/<name>.ts``
    * - ``opencode``
-     - ``opencode/AGENTS.md``
-     - ``opencode/skill/<name>/SKILL.md``
-     - ``opencode/command/<name>.md``
-     - ``opencode/plugin/<name>.ts``
+     - ``plugin/AGENTS.md``, an instruction file
+     - ``plugin/skill/<name>/SKILL.md``
+     - ``plugin/command/<name>.md``
+     - ``plugin/extensions/<name>.ts``, merged by Reef's plugin
    * - ``claude``
-     - ``claude/CLAUDE.md``
-     - ``claude/skills/<name>/SKILL.md``
-     - ``claude/commands/<name>.md``
-     - ``claude/extensions/<name>.mjs``
+     - ``plugin/rules.md``, the plugin's output style
+     - ``plugin/skills/<name>/SKILL.md``
+     - ``plugin/commands/<name>.md``, run as ``/reef:<name>``
+     - ``plugin/extensions/<name>.mjs``, run by ``config/hooks.json``
    * - ``codex``
-     - ``codex/AGENTS.md``
-     - ``codex/skills/<name>/SKILL.md``
-     - as a skill
+     - none
+     - ``plugin/skills/<name>/SKILL.md``
+     - as a skill, run as ``$reef:<name>``
      - none
    * - ``dsh``
      - ``dsh/AGENTS.md``
@@ -228,9 +244,6 @@ Render paths
      - ``native/skills/<name>/SKILL.md``
      - none
      - none
-
-``claude`` also takes ``memory``: ``claude/memory/<name>.md``, where its
-render points Claude Code's automatic memory.
 
 Config targets and a person's machine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -250,24 +263,26 @@ Reef's episodes.
      - Config targets, and what a tree may set in them
      - Person's machine
    * - ``pi``
-     - ``primary`` (``pi-agent/settings.json``): only
-       ``defaultThinkingLevel`` and an empty ``defaultTools``. ``models``
-       (``pi-agent/models.json``): nothing; the binding writes it.
+     - ``primary`` (``plugin/settings.json``): only an empty
+       ``defaultTools``. ``agent`` (``pi-agent/settings.json``) and
+       ``models`` (``pi-agent/models.json``): nothing; the binding writes
+       them.
      - yes
    * - ``opencode``
-     - ``primary`` (``opencode/opencode.json``): any key except a model
-       choice; ``autoupdate``, ``share`` and ``enabled_providers`` keep
-       their defaults.
+     - ``primary`` (``plugin/config.json``): any key except a model or
+       provider choice, ``autoupdate``, ``share`` and ``enabled_providers``.
+       ``agent`` (``opencode/opencode.json``): nothing; the binding writes
+       it.
      - yes
    * - ``claude``
-     - ``primary`` (``claude/settings.json``): any key except the model,
-       credential and login settings and the ``env`` names that choose an
-       endpoint or a model; the updater and telemetry stay off.
+     - ``primary`` (``claude/settings.json``): nothing; the binding and
+       Reef's defaults write it. ``hooks`` (``plugin/hooks/hooks.json``):
+       the plugin's hooks.
      - yes
    * - ``codex``
-     - ``primary`` (``codex/config.toml``): only the tuning keys its checks
-       list. ``models`` (``codex/models.json``): nothing; the binding
-       writes it.
+     - ``primary`` (``codex/config.toml``) and ``models``
+       (``codex/models.json``): nothing; the binding and Reef's defaults
+       write them.
      - yes
    * - ``dsh``
      - ``primary`` and ``web`` (each profile's ``cordis.patch.yml``): any
@@ -303,25 +318,26 @@ campaign adds ``terminus`` (`its README
      - What to know
    * - ``pi``
      - npm 0.84.2; ``pi --mode json -p``
-     - Settings admit only ``defaultThinkingLevel`` and an empty
-       ``defaultTools``. A skill without frontmatter gets ``name`` and
+     - A pi package. Its settings admit only an empty ``defaultTools``, which
+       Reef's extension applies. A skill without frontmatter gets ``name`` and
        ``description``.
    * - ``opencode``
      - npm 1.18.18; ``opencode run --format json --auto``
-     - Frontmatter must be a plain YAML mapping. A command's ``agent`` must
-       name an enabled agent. An episode's task never runs a command:
-       ``opencode run`` expands one only from ``--command``, so a command
-       takes effect when a person runs it.
+     - An opencode plugin, whose config hook adds the parts and merges
+       ``config/primary.json``. Frontmatter must be a plain YAML mapping. A
+       command's ``agent`` must name an enabled agent.
    * - ``claude``
      - npm 2.1.257; ``claude -p --output-format json``
-     - An extension is a script that a ``hooks`` entry of the settings runs.
-       Only the ``anthropic`` dialect.
+     - A Claude Code plugin. A tree sets no settings key; an extension is a
+       script that ``config/hooks.json`` runs. Only the ``anthropic`` dialect.
    * - ``codex``
      - npm 0.158.0; ``codex exec --json``
-     - No extension: Codex hooks run outside its sandbox. Episodes pin
-       ``approval_policy="never"`` and ``web_search="disabled"``. Only the
-       ``responses`` dialect. On a pin change, update ``bundled_models.json``
-       and ``default_instructions.md``.
+     - A Codex plugin of skills. A tree sets no rules and no config key. An
+       episode's render writes the plugin into ``CODEX_HOME`` as ``codex
+       plugin add`` does. Episodes pin ``approval_policy="never"`` and
+       ``web_search="disabled"``. Only the ``responses`` dialect. On a pin
+       change, update ``bundled_models.json`` and
+       ``default_instructions.md``.
    * - ``dsh``
      - npm 0.1.2-alpha.5; ``dsh --profile headless``
      - The config is keyed by plugin id; ``!!js `` strings become
@@ -426,8 +442,9 @@ method that returns its input unchanged by default and raises
    * - ``check_model_route``
      - the processed files; refuses a route no check can state
    * - ``finalize_render``
-     - every file; work across files (a last resort)
-   * - ``layer_args``, ``layer_files``
+     - every file; work across files, such as a plugin's manifest (a last
+       resort)
+   * - ``layer_files``
      - a layer's render (`A person's machine`_)
 
 Prefer a check to a step for a rule on config values.
@@ -437,23 +454,47 @@ Prefer a check to a step for a rule on config values.
 A person's machine
 ------------------
 
+On a person's machine, the release is the agent's own plugin, installed
+with the agent's own command. The agent then loads it in every session,
+beside the person's own configuration, which Reef never reads. A session
+that Reef starts also sends its model calls to Reef.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 50 36
+
+   * - Agent
+     - ``register``
+     - Loads a new release
+   * - ``claude``
+     - ``claude plugin marketplace add <install>``, ``claude plugin install
+       reef@reef``
+     - in place
+   * - ``pi``
+     - ``pi install <install>/plugin``
+     - in place
+   * - ``opencode``
+     - ``opencode plugin -g <install>/plugin``
+     - in place
+   * - ``codex``
+     - ``codex plugin marketplace add <install>``, ``codex plugin add
+       reef@reef``
+     - after ``register`` runs again
+
 ``reef-client harness`` asks ``GET /reef/harness?form=client&root=<install>``
-and gets the layer: the files, the command, and the agent's
-``register``/``unregister`` commands. The layer's render starts each config
-target from nothing and skips the checks. Then:
+and installs the files under ``<install>``. It runs ``register`` once per
+installed release, and ``unregister`` on ``disconnect``. A release that the
+deployment rolls back (``POST /reef/scenarios/<scenario>/rollback``) installs
+at the client's next sync. The layer's render starts each config target from
+nothing and skips the checks; ``layer_files`` adds what ``register`` names
+and the tree lacks, such as a marketplace, and drops files the install keeps
+no use for.
 
-- ``layer_args`` returns argument groups for what the agent reads from no
-  file of the layer, such as Codex's config keys as ``-c``.
-- ``layer_files`` adds what the arguments name, such as a plugin manifest,
-  and drops files the agent cannot read from the install.
-- The client runs ``register`` once per release, starts the binary with
-  ``args`` and ``env``, and runs ``unregister`` on ``disconnect``.
-
-Templates hold ``{root}``, ``{model}``, ``{base_url}``, ``{token}`` (``env``
-only) and ``{file:<path>}`` (``args`` only). Every part in ``evolve`` must
-take effect both in an episode and in the layer; refuse in the checks what
-the layer cannot carry. An adapter without ``layer`` does not run on a
-person's machine.
+Templates hold ``{root}``, ``{model}``, ``{base_url}`` and ``{token}``
+(``env`` only, so no command line shows it). Every part in ``evolve`` must
+take effect both in an episode and through the installed plugin: leave out
+of ``evolve``, or refuse in the checks, what the plugin cannot carry. An
+adapter without ``layer`` does not run on a person's machine.
 
 Connect a new agent
 -------------------

@@ -23,26 +23,25 @@ def test_the_adapters_that_sync_are_the_ones_whose_roots_are_known() -> None:
 @pytest.mark.parametrize("adapter", SYNCED)
 def test_a_rendered_tree_reads_back_as_the_tree(adapter: str) -> None:
     descriptor = get_adapter(adapter)
-    files = {"rules.md": "Answer briefly.\n", "skills/fix/SKILL.md": SKILL, "config/primary.json": "{}\n"}
+    files = {"skills/fix/SKILL.md": SKILL, "config/primary.json": "{}\n"}
+    if "rules" in descriptor.layout.parts:
+        files["rules.md"] = "Answer briefly.\n"
     command = descriptor.layout.parts["command"]
     # Codex renders a command where it renders a skill, so its command reads back as the skill below.
     if command.renders != descriptor.layout.parts["skill"].renders:
         files[command.tree_path("ship")] = COMMAND
     tree = HarnessTree(files)
-    rendered = render_tree(tree, descriptor)
-    imported = import_files(rendered, tree, descriptor)
-    assert imported.tree == tree
-    # Config files are the binding's: the import keeps the head's and ignores the rendered ones.
-    assert imported.ignored and set(imported.ignored) <= {target.path for target in descriptor.config_targets.values()}
+    # The config files, the plugin's manifests and Reef's own code read back as nothing.
+    assert import_files(render_tree(tree, descriptor), tree, descriptor).tree == tree
 
 
 def test_an_import_replaces_the_heads_files_and_ignores_what_no_part_renders_to() -> None:
     pi = get_adapter("pi")
-    config = json.dumps({"defaultThinkingLevel": "off"}) + "\n"
+    config = json.dumps({"defaultTools": []}) + "\n"
     head = HarnessTree({"config/primary.json": config, "rules.md": "Old.\n", "skills/fix/SKILL.md": SKILL})
     files = {
-        "pi-agent/AGENTS.md": "Mine.\n",
-        "pi-agent/prompts/ship.md": COMMAND,
+        "plugin/rules.md": "Mine.\n",
+        "plugin/prompts/ship.md": COMMAND,
         "pi-agent/auth.json": '{"anthropic": "a credential"}\n',
         "pi-agent/sessions/one.jsonl": "{}\n",
     }
@@ -55,7 +54,7 @@ def test_an_import_replaces_the_heads_files_and_ignores_what_no_part_renders_to(
 
 
 def test_codex_reads_a_file_where_a_skill_and_a_command_both_render_as_the_skill() -> None:
-    imported = import_files({"codex/skills/ship/SKILL.md": COMMAND}, HarnessTree({}), get_adapter("codex"))
+    imported = import_files({"plugin/skills/ship/SKILL.md": COMMAND}, HarnessTree({}), get_adapter("codex"))
     assert imported.tree == HarnessTree({"skills/ship/SKILL.md": COMMAND})
 
 
@@ -91,70 +90,43 @@ BINDINGS = {"claude": "anthropic", "codex": "responses", "opencode": "openai", "
 
 
 @pytest.mark.parametrize("adapter", sorted(BINDINGS))
-def test_a_layer_runs_the_agent_over_the_persons_own_config_with_the_token_off_the_command_line(adapter) -> None:
+def test_a_layer_installs_the_release_as_the_agents_plugin_with_the_token_off_the_command_line(adapter) -> None:
     descriptor = get_adapter(adapter)
     served = ModelBinding(base_url="http://upstream.invalid", model="m1", api=BINDINGS[adapter])
-    tree = HarnessTree({"rules.md": "Run the tests first.\n", "skills/fix/SKILL.md": SKILL})
+    tree = HarnessTree({"skills/fix/SKILL.md": SKILL})
     layer = layer_install(tree, descriptor, served, "http://reef.invalid/reef/scenarios/s", "/home/a/install")
-    assert all(TOKEN_PLACEHOLDER not in arg for arg in layer.args)
+    assert all(TOKEN_PLACEHOLDER not in arg for command in (layer.args, *layer.register) for arg in command)
     assert TOKEN_PLACEHOLDER in "".join(layer.files.values()) + "".join(layer.env.values())
     assert any("{name}" in template for template in layer.synced)
-    # The command each adapter's binary was checked with.
+    # The agent's own commands install the plugin, and the session that Reef starts binds the model; each was
+    # checked with the agent's binary.
     expected = {
-        "claude": ["--plugin-dir", "/home/a/install/claude", "--settings", "/home/a/install/claude/settings.json"],
-        "codex": ["-c", 'model_provider="reef"', "-c", 'model="m1"'],
-        "opencode": [],
-        "pi": ["-e", "/home/a/install/pi-agent", "--append-system-prompt", "/home/a/install/pi-agent/AGENTS.md"],
+        "claude": (
+            ["--settings", "/home/a/install/claude/settings.json"],
+            [("plugin", "marketplace", "add", "/home/a/install"), ("plugin", "install", "reef@reef")],
+        ),
+        "codex": (
+            ["-c", 'model_provider="reef"', "-c", 'model="m1"'],
+            [("plugin", "marketplace", "add", "/home/a/install"), ("plugin", "add", "reef@reef")],
+        ),
+        "opencode": ([], [("plugin", "-g", "/home/a/install/plugin")]),
+        "pi": (["--model", "reef/m1"], [("install", "/home/a/install/plugin")]),
     }[adapter]
-    assert list(layer.args[: len(expected)]) == expected
+    assert list(layer.args[: len(expected[0])]) == expected[0]
+    assert list(layer.register) == expected[1]
+    assert "plugin/skills/fix/SKILL.md" in layer.files or "plugin/skill/fix/SKILL.md" in layer.files
     if adapter == "claude":
-        assert json.loads(layer.files["claude/.claude-plugin/plugin.json"]) == {"name": "reef"}
-        assert (
-            json.loads(layer.files["claude/settings.json"])["autoMemoryDirectory"] == "/home/a/install/claude/memory"
-        )
+        marketplace = json.loads(layer.files[".claude-plugin/marketplace.json"])
+        assert marketplace["plugins"] == [{"name": "reef", "source": "./plugin"}]
     if adapter == "codex":
-        assert layer.args[-1] == f"developer_instructions={json.dumps('Run the tests first.' + chr(10))}"
-        empty = layer_install(HarnessTree({}), descriptor, served, "http://reef.invalid/reef/scenarios/s", "/r")
-        assert not any(arg.startswith("developer_instructions") for arg in empty.args)
-        # The skills load as a plugin whose root keeps no config file, so Codex's cache copies no credential.
-        assert "codex/config.toml" not in layer.files and "codex/skills/fix/SKILL.md" in layer.files
-        assert json.loads(layer.files["codex/.codex-plugin/plugin.json"])["name"] == "reef"
-        assert json.loads(layer.files[".agents/plugins/marketplace.json"])["plugins"][0]["source"]["path"] == "./codex"
-        assert layer.register == (("plugin", "marketplace", "add", "/home/a/install"), ("plugin", "add", "reef@reef"))
-        assert layer.unregister[0] == ("plugin", "remove", "reef@reef")
+        # Codex copies the whole plugin into its cache, so the install keeps no config file with the credential.
+        assert not any(path.startswith("codex/") for path in layer.files)
+        assert (
+            json.loads(layer.files[".agents/plugins/marketplace.json"])["plugins"][0]["source"]["path"] == "./plugin"
+        )
     if adapter == "opencode":
-        assert layer.env["OPENCODE_CONFIG_DIR"] == "/home/a/install/opencode"
+        assert layer.env["OPENCODE_CONFIG"] == "/home/a/install/opencode/opencode.json"
+    if adapter == "pi":
+        assert "plugin/extensions/reef-provider/index.ts" in layer.files
     # The episode defaults stay in episodes: a layer never opens every permission of the person's agent.
     assert "permission" not in "".join(layer.files.values())
-
-
-@pytest.mark.parametrize(
-    ("adapter", "config", "expected"),
-    [
-        # Each key of codex's config.toml as a -c argument; the binding's own keys stay out.
-        (
-            "codex",
-            {"model_reasoning_effort": "low", "features": {"enable_request_compression": True}},
-            ["-c", 'model_reasoning_effort="low"', "-c", "features.enable_request_compression=true"],
-        ),
-        # pi reads no settings.json of a layer: its settings come as flags.
-        ("pi", {"defaultThinkingLevel": "high"}, ["--thinking", "high"]),
-        ("pi", {"defaultThinkingLevel": "off", "defaultTools": []}, ["--thinking", "off", "--no-builtin-tools"]),
-    ],
-)
-def test_a_layer_passes_the_config_the_agent_reads_from_no_file_of_the_layer(adapter, config, expected) -> None:
-    served = ModelBinding(base_url="http://upstream.invalid", model="m1", api=BINDINGS[adapter])
-    tree = HarnessTree({"config/primary.json": json.dumps(config)})
-    layer = layer_install(tree, get_adapter(adapter), served, "http://reef.invalid/reef/scenarios/s", "/r")
-    assert list(layer.args[-len(expected) :]) == expected
-    assert not any(arg.startswith(("model_providers", "model=")) for arg in layer.args[-len(expected) :])
-
-
-def test_claude_keeps_its_memory_in_the_tree_under_the_root_that_writes_it() -> None:
-    claude = get_adapter("claude")
-    tree = HarnessTree({"rules.md": "Answer briefly.\n", "memory/MEMORY.md": "- [Tests](tests.md)\n"})
-    files = claude.place_root(render_tree(tree, claude), '/home/a "b"/install')
-    settings = json.loads(files["claude/settings.json"])
-    assert settings["autoMemoryDirectory"] == '/home/a "b"/install/claude/memory'
-    assert files["claude/memory/MEMORY.md"] == "- [Tests](tests.md)\n"
-    assert import_files(files, tree, claude).tree == tree

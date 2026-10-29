@@ -586,7 +586,8 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
     """Under review a release waits for a promote, and the promote row carries no request of its own: the manifest
     follows the promote to its target, so the served head lists what the pending release named and serves its
     tree."""
-    tuned = json.dumps({"defaultThinkingLevel": "high"}) + "\n"
+    # The seed holds defaultTools; the pending release's setting leaves the built-in tools on.
+    tuned = json.dumps({}) + "\n"
 
     def method(workspace, services):
         if workspace.request() is None:

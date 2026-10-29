@@ -707,7 +707,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         source = service.harness_manifest(headers, form="source")
         assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
         # The default form renders the source tree for the adapter.
-        assert service.harness_manifest(headers)["files"]["pi-agent/AGENTS.md"].startswith("evolved")
+        assert service.harness_manifest(headers)["files"]["plugin/rules.md"].startswith("evolved")
     finally:
         dispatcher.close()
 

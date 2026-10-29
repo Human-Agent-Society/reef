@@ -45,10 +45,10 @@ import json, os, sys
 from pathlib import Path
 
 prompt = sys.argv[sys.argv.index("-p") + 1]
-agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
+package = Path(sys.argv[sys.argv.index("-e") + 1])
 session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 session_dir.mkdir(parents=True, exist_ok=True)
-rules_path = agent_dir / "AGENTS.md"
+rules_path = package / "rules.md"
 event = {"type": "agent_end", "prompt": prompt, "rules": rules_path.read_text() if rules_path.exists() else ""}
 (session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
 """
@@ -59,7 +59,7 @@ MODEL = ModelBinding(base_url="http://localhost:8000", model="qwen3-8b", api_key
 #: A pi seed: one setting, and rules without the marker.
 PI_SEED = HarnessTree(
     {
-        "config/primary.json": json.dumps({"defaultThinkingLevel": "off"}) + "\n",
+        "config/primary.json": json.dumps({"defaultTools": []}) + "\n",
         "rules.md": "Answer briefly.\n",
     }
 )

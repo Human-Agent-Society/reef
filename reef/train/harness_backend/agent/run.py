@@ -235,7 +235,7 @@ def run_agent(
                 process = launch_agent(
                     descriptor,
                     run.session,
-                    headless_argv(descriptor, execution.binary, prompt),
+                    headless_argv(descriptor, execution.binary, prompt, home),
                     files,
                     env,
                     root=run.root,

@@ -41,7 +41,7 @@ prompt = args[args.index("-p") + 1]
 agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
 session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 session_dir.mkdir(parents=True, exist_ok=True)
-rules_path = agent_dir / "AGENTS.md"
+rules_path = Path(args[args.index("-e") + 1]) / "rules.md"
 events = [
     {
         "type": "session",
@@ -271,7 +271,7 @@ def test_opencode_episode_grades_the_final_answer_of_its_session(tmp_path: Path)
 
 
 def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
-    files = render_tree(HarnessTree({"rules.md": "Answer briefly."}), get_adapter("codex"))
+    files = render_tree(HarnessTree({"skills/fix/SKILL.md": "# Fix"}), get_adapter("codex"))
     result = run_episode(get_adapter("codex"), files, "list files", binary=fake_binary(tmp_path, CODEX_FAKE))
     assert result.exit_code == 0
     assert json.loads(result.stdout)["item"]["text"] == "done"

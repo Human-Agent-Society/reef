@@ -65,6 +65,13 @@ COMMON = {
     "commands/summarize.md": "Summarize $1.",
 }
 TRACER = "export default function tracer() {}"
+CLAUDE_HOOKS = {
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": 'node "${CLAUDE_PLUGIN_ROOT}/extensions/tracer.mjs"'}]}
+        ]
+    }
+}
 PYTHON_TRACER = "def register(ctx):\n    pass\n"
 SETTINGS = {"defaultModel": "qwen/qwen3-8b", "defaultProvider": "qwen"}
 QWEN_MODELS = {
@@ -87,18 +94,13 @@ GUARD_HOOK = "def listen(payload, next):\n    return next()\n\nNAME = 'guard'\nE
 
 #: The source tree each adapter's golden tree renders from.
 SOURCES = {
-    # pi keeps every model call on the binding, so its tree holds a setting and no provider or model choice.
-    "pi": {**COMMON, **config({"defaultThinkingLevel": "off"}), "extensions/tracer.ts": TRACER},
-    "opencode": {**COMMON, **config(SETTINGS), "extensions/tracer.ts": TRACER},
-    # claude's memory part holds the notes of its automatic memory.
-    "claude": {
-        **COMMON,
-        **config(SETTINGS),
-        "extensions/tracer.mjs": TRACER,
-        "memory/MEMORY.md": "- Run the tests before you report a fix.\n",
-    },
-    # codex refuses code extensions.
-    "codex": COMMON,
+    # pi keeps every model call on the binding, so its tree holds the one setting its package carries.
+    "pi": {**COMMON, **config({"defaultTools": []}), "extensions/tracer.ts": TRACER},
+    "opencode": {**COMMON, **config({"theme": "light"}), "extensions/tracer.ts": TRACER},
+    # claude's extensions run as the plugin's hooks.
+    "claude": {**COMMON, **config(CLAUDE_HOOKS, "hooks"), "extensions/tracer.mjs": TRACER},
+    # codex's plugin carries skills alone, a command among them.
+    "codex": {path: text for path, text in COMMON.items() if path != "rules.md"},
     # dsh's config is keyed by plugin id.
     "dsh": {**COMMON, **config({"agent-loop": {"config": {"maxSteps": 40}}}), "extensions/tracer.mjs": TRACER},
     # hermes's config is its config.yaml, and its extensions are Python plugins.
@@ -139,22 +141,10 @@ def test_config_merges_the_tree_over_the_defaults_and_each_overlay_over_the_tree
     tree = HarnessTree(config({"compaction": {"auto": True, "prune": False}, "theme": "light"}))
     files = render_tree(tree, OPENCODE, [("primary", {"compaction": {"prune": True}})])
     # Sibling keys survive the merge, and the overlay wins the key it writes.
-    assert json.loads(files["opencode/opencode.json"]) == {
-        "autoupdate": False,
-        "compaction": {"auto": True, "prune": True},
-        "enabled_providers": ["reef"],
-        "permission": {"*": "allow"},
-        "share": "disabled",
-        "theme": "light",
-    }
-    # claude's descriptor defaults sit below the tree's own keys.
-    settings = json.loads(render(config({"cleanupPeriodDays": 7}), CLAUDE)["claude/settings.json"])
-    assert settings == {
-        "autoMemoryDirectory": "{root}/claude/memory",
-        "cleanupPeriodDays": 7,
-        "disableDeepLinkRegistration": "disable",
-        "includeCoAuthoredBy": False,
-    }
+    assert json.loads(files["plugin/config.json"]) == {"compaction": {"auto": True, "prune": True}, "theme": "light"}
+    # hermes's descriptor defaults sit below the tree's own keys.
+    settings = yaml.safe_load(render(config({"agent": {"max_turns": 40}}), HERMES)["hermes/config.yaml"])
+    assert settings["agent"]["max_turns"] == 40 and settings["security"]["tirith_enabled"] is False
 
 
 def test_native_and_codex_take_no_part_their_harness_never_reads() -> None:
@@ -186,67 +176,54 @@ def test_codex_binding_uses_the_responses_api() -> None:
     }
 
 
-def test_codex_render_rejects_reopened_hermetic_switches() -> None:
-    for approval_policy in ("on-request", "never"):
-        with pytest.raises(RenderError, match=r"on approval_policy in codex/config\.toml: episodes pin never"):
-            render(config({"approval_policy": approval_policy}), CODEX)
-    with pytest.raises(RenderError, match=r"on web_search in codex/config\.toml: it must match IsIn\("):
-        render(config({"web_search": "always"}), CODEX)
-    for data, message in (
-        ({"features": {"apps": True}}, r"on features\.apps in"),
-        ({"features": {"hooks": True}}, r"on features\.hooks in"),
-        ({"features": {"plugins": True}}, r"on features\.plugins in"),
-        ({"features": {"skill_mcp_dependency_install": True}}, r"on features\.skill_mcp_dependency_install in"),
-        ({"sandbox_workspace_write": {"network_access": True}}, r"on sandbox_workspace_write\.network_access in"),
-        (
-            {"sandbox_workspace_write": {"writable_roots": ["/tmp/outside"]}},
-            r"on sandbox_workspace_write\.writable_roots in",
-        ),
-        ({"otel": {"exporter": "otlp-http"}}, "on otel in"),
-        ({"mcp_servers": {"untrusted": {"command": "tool"}}}, "config keys are not admitted for benchmark episodes"),
-        ({"hooks": {"SessionStart": []}}, "config keys are not admitted for benchmark episodes"),
-        ({"notify": ["untrusted-command"]}, "config keys are not admitted for benchmark episodes"),
-        ({"model_instructions_file": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
-        ({"experimental_compact_prompt_file": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
-        ({"model_catalog_json": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
-        (
-            {"agents": {"reviewer": {"config_file": "/etc/passwd"}}},
-            "config keys are not admitted for benchmark episodes",
-        ),
-    ):
-        with pytest.raises(RenderError, match=message):
-            render(config(data), CODEX)
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"approval_policy": "never"},
+        {"web_search": "live"},
+        {"model_reasoning_effort": "high"},
+        {"features": {"plugins": False}},
+        {"mcp_servers": {"untrusted": {"command": "tool"}}},
+        {"model_catalog_json": "/etc/passwd"},
+    ],
+)
+def test_codex_takes_no_config_key_from_a_tree(data: dict) -> None:
+    """A Codex plugin carries no config key, so config.toml holds the episode's defaults and the binding alone."""
+    with pytest.raises(RenderError, match=r"in codex/config\.toml"):
+        render(config(data), CODEX)
 
 
 def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_config() -> None:
-    """The rendered config.toml holds the tree's web_search and no approval_policy; the episode argv overrides both
-    before the prompt."""
-    config_toml = tomllib.loads(render(config({"web_search": "live"}), CODEX)["codex/config.toml"])
-    assert config_toml["web_search"] == "live" and "approval_policy" not in config_toml
+    """The rendered config.toml holds no approval_policy; the episode argv pins both before the prompt."""
+    config_toml = tomllib.loads(render({}, CODEX)["codex/config.toml"])
+    assert config_toml["web_search"] == "disabled" and "approval_policy" not in config_toml
     argv = list(CODEX.argv)
     overrides = [argv[index + 1] for index, token in enumerate(argv) if token == "--config"]
     assert overrides == ['approval_policy="never"', 'web_search="disabled"'] and argv[-1] == "{prompt}"
 
 
 def test_codex_renders_a_command_as_a_skill_and_refuses_one_that_shares_a_skills_name() -> None:
-    """Codex loads no custom prompts, so a command is a skill typed as $name, in the one skill root."""
+    """Codex loads no custom prompts, so a command is a skill of the plugin, typed as $reef:name."""
     command = {"commands/reefine.md": "File the text after $reefine as a request."}
     files = render(command, CODEX)
-    assert files["codex/skills/reefine/SKILL.md"] == (
+    assert files["plugin/skills/reefine/SKILL.md"] == (
         "---\nname: reefine\ndescription: File the text after $reefine as a request.\n---\n"
         "File the text after $reefine as a request.\n"
     )
-    assert not any(path.startswith(("codex/prompts/", ".agents/")) for path in files)
-    collision = "skills/reefine/SKILL.md and commands/reefine.md both render to 'codex/skills/reefine/SKILL.md'"
+    assert not any(path.startswith("codex/prompts/") for path in files)
+    collision = "skills/reefine/SKILL.md and commands/reefine.md both render to 'plugin/skills/reefine/SKILL.md'"
     with pytest.raises(RenderError, match=re.escape(collision + "; rename one")):
         render({**command, "skills/reefine/SKILL.md": "# reefine"}, CODEX)
 
 
-def test_codex_accepts_admitted_model_tuning() -> None:
-    files = render(config({"model_reasoning_effort": "high", "model_verbosity": "low"}), CODEX)
+def test_codex_episode_installs_the_plugin_as_codex_plugin_add_does() -> None:
+    """An episode's CODEX_HOME holds the plugin's copy and the two config entries that codex plugin add writes."""
+    files = render({"skills/fix/SKILL.md": "# Fix"}, CODEX)
+    assert files["codex/plugins/cache/reef/reef/0.0.0/skills/fix/SKILL.md"] == files["plugin/skills/fix/SKILL.md"]
+    assert json.loads(files["plugin/.codex-plugin/plugin.json"])["name"] == "reef"
     config_toml = tomllib.loads(files["codex/config.toml"])
-    assert config_toml["model_reasoning_effort"] == "high"
-    assert config_toml["model_verbosity"] == "low"
+    assert config_toml["marketplaces"]["reef"] == {"source_type": "local", "source": "{root}"}
+    assert config_toml["plugins"]["reef@reef"] == {"enabled": True}
 
 
 def test_codex_requires_the_responses_dialect() -> None:
@@ -637,7 +614,7 @@ def test_hermes_render_steps_add_the_commands_roots_after_the_external_dirs_a_tr
 
 
 def test_opencode_descriptor_lock_rejects_reopened_autoupdate() -> None:
-    with pytest.raises(RenderError, match=r"on autoupdate in opencode/opencode\.json: it must match IsDefault\(\)"):
+    with pytest.raises(RenderError, match=r"on autoupdate in plugin/config\.json: episodes keep autoupdate"):
         render(config({"autoupdate": True}), OPENCODE)
 
 
@@ -658,11 +635,11 @@ BINDING_COPY = {
 @pytest.mark.parametrize(
     ("data", "message"),
     [
-        ({"provider": EVIL_PROVIDER}, "must not set provider"),
-        ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "must not set provider"),
-        (BINDING_COPY, "must not set provider"),
-        ({"model": "reef/other"}, "must not set model"),
-        ({"small_model": "reef/served"}, r"on small_model in opencode/opencode\.json: Reef's model binding"),
+        ({"provider": EVIL_PROVIDER}, "on provider in"),
+        ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "on provider in"),
+        (BINDING_COPY, "on provider in"),
+        ({"model": "reef/other"}, "on model in"),
+        ({"small_model": "reef/served"}, r"on small_model in plugin/config\.json: Reef's model binding"),
         ({"disabled_providers": ["reef"]}, "on disabled_providers in"),
         ({"enabled_providers": ["reef", "opencode"]}, "on enabled_providers in"),
         ({"enabled_providers": []}, "on enabled_providers in"),
@@ -672,17 +649,9 @@ BINDING_COPY = {
     ],
 )
 def test_opencode_render_refuses_a_tree_that_chooses_the_model(data: dict, message: str) -> None:
-    """Only the binding's overlays write provider and model, so validation, which renders the tree alone, refuses a
-    tree that sets either or picks a model elsewhere; the descriptor locks the other model choices. With the
-    binding, the binding wins the keys it writes, and a provider or a model choice beyond them is still refused."""
-    with pytest.raises(RenderError, match=message):
-        render(config(data), OPENCODE)
-    binding = ModelBinding("http://127.0.0.1:8900", "served")
-    if set(data) <= {"provider", "model"} and set(data.get("provider", {})) <= {"reef"}:
-        bound = json.loads(render(config(data), OPENCODE, binding)["opencode/opencode.json"])
-        assert bound["provider"]["reef"]["options"]["baseURL"] == "http://127.0.0.1:8900/v1"
-        assert bound["model"] == "reef/served"
-    else:
+    """Reef's plugin merges the tree's config over opencode's own, after the binding, so the tree's config names no
+    provider and chooses no model, with the binding or without it."""
+    for binding in (None, ModelBinding("http://127.0.0.1:8900", "served")):
         with pytest.raises(RenderError, match=message):
             render(config(data), OPENCODE, binding)
 
@@ -706,7 +675,7 @@ def test_opencode_validation_refuses_a_tree_that_copies_the_binding() -> None:
         return problems(config({**BINDING_COPY, "provider": {"reef": reef}}), OPENCODE)
 
     (empty,) = copy_problems("")
-    assert "must not set provider" in empty
+    assert "on provider in" in empty
     (inline,) = copy_problems("sk-tree")
     assert "carries an inline credential" in inline
 
@@ -780,11 +749,11 @@ def test_opencode_gives_a_skill_without_frontmatter_the_name_and_description_it_
     """opencode lists no skill whose SKILL.md lacks name and description, so a bare one gets them: the directory and
     the first line, as strings to js-yaml too; a file with a block of its own is left as written."""
     for text, description in (("# Answer style\n\nBe brief.", "Answer style"), ("yes\n", "yes"), ("1e5", "1e5")):
-        rendered = render({"skills/answer-style/SKILL.md": text}, OPENCODE)["opencode/skill/answer-style/SKILL.md"]
+        rendered = render({"skills/answer-style/SKILL.md": text}, OPENCODE)["plugin/skill/answer-style/SKILL.md"]
         assert read_frontmatter("skill", rendered) == {"name": "answer-style", "description": description}
         assert rendered.rstrip("\n").endswith(text.rstrip("\n"))
     own = "---\nname: notes\ndescription: Notes.\n---\n"
-    assert render({"skills/notes/SKILL.md": own}, OPENCODE)["opencode/skill/notes/SKILL.md"] == own
+    assert render({"skills/notes/SKILL.md": own}, OPENCODE)["plugin/skill/notes/SKILL.md"] == own
     # A block of its own without both keys would never be listed: render refuses it rather than ship it unseen.
     for text in ("---\ndescription: Notes.\n---\n", "---\nname: notes\n---\n", "---\n---\nBe brief.\n"):
         with pytest.raises(RenderError, match="must set name and description"):
@@ -956,33 +925,37 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
     with pytest.raises(RenderError, match="names agent 'plan'"):
         render({**config({"agent": {"plan": {"disable": True}}}), **command("plan")}, OPENCODE)
     inline = {"command": {"hi": {"template": "Hi.", "agent": "ghost"}}}
-    with pytest.raises(RenderError, match=r"command 'hi' in opencode\.json names agent 'ghost'"):
+    with pytest.raises(RenderError, match=r"command 'hi' in config\.json names agent 'ghost'"):
         render(config(inline), OPENCODE)
     with pytest.raises(RenderError, match="command 'hi' must not choose a model"):
         render({"commands/hi.md": "---\nmodel: evil/m\n---\nSay hi."}, OPENCODE)
 
 
-def test_claude_render_rejects_reopened_hermetic_switches() -> None:
-    with pytest.raises(RenderError, match="includeCoAuthoredBy"):
-        render(config({"includeCoAuthoredBy": True}), CLAUDE)
-    with pytest.raises(RenderError, match="DISABLE_AUTOUPDATER"):
-        render(config({"env": {"DISABLE_AUTOUPDATER": "0"}}), CLAUDE)
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"includeCoAuthoredBy": True},
+        {"env": {"DISABLE_AUTOUPDATER": "0"}},
+        {"env": {"BASH_MAX_TIMEOUT_MS": "600000"}},
+        {"cleanupPeriodDays": 7},
+        {"hooks": {"SessionStart": []}},
+    ],
+)
+def test_claude_takes_no_setting_from_a_tree(data: dict) -> None:
+    """A Claude Code plugin carries no settings, so settings.json holds the episode's defaults and the binding."""
+    with pytest.raises(RenderError, match=r"in claude/settings\.json"):
+        render(config(data), CLAUDE)
 
 
-@pytest.mark.parametrize("key", ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "disable_updates"])
-@pytest.mark.parametrize("value", ["x", "maybe", "2", "1"])
-def test_claude_render_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
-    """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
-    yes or on, so a tree must not set them at all: the episode env owns them. Windows matches env names in any
-    case."""
-    with pytest.raises(RenderError, match=f"on env key {key!r} in claude/settings.json: the episode env"):
-        render(config({"env": {key: value}}), CLAUDE)
-
-
-def test_claude_render_renders_a_tree_env_without_the_updater_switches() -> None:
-    assert "env" not in json.loads(render({}, CLAUDE)["claude/settings.json"])
-    rendered = json.loads(render(config({"env": {"BASH_MAX_TIMEOUT_MS": "600000"}}), CLAUDE)["claude/settings.json"])
-    assert rendered["env"] == {"BASH_MAX_TIMEOUT_MS": "600000"}
+def test_claude_renders_the_plugin_with_its_rules_as_an_output_style_and_its_hooks() -> None:
+    hooks = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "node x.mjs"}]}]}}
+    files = render({"rules.md": "Run the tests first.\n", **config(hooks, "hooks")}, CLAUDE)
+    assert json.loads(files["plugin/.claude-plugin/plugin.json"]) == {"name": "reef"}
+    style = files["plugin/output-styles/reef.md"]
+    assert "force-for-plugin: true" in style and style.endswith("Run the tests first.\n")
+    assert json.loads(files["plugin/hooks/hooks.json"]) == hooks
+    # No hooks, no hooks file; no rules, no output style.
+    assert not {"plugin/hooks/hooks.json", "plugin/output-styles/reef.md"} & set(render({}, CLAUDE))
 
 
 @pytest.mark.parametrize("value", [None, "enable", False])
@@ -993,24 +966,24 @@ def test_claude_render_keeps_deep_link_registration_off(value: object) -> None:
         render(config({"disableDeepLinkRegistration": value}), CLAUDE)
 
 
-def test_pi_settings_admit_only_what_a_persons_machine_applies() -> None:
-    """pi reads settings.json from no directory a flag names, so a tree sets only what pi's flags carry."""
-    assert json.loads(render(config({"defaultThinkingLevel": "high"}), PI)["pi-agent/settings.json"]) == {
-        "defaultThinkingLevel": "high"
-    }
-    for data in ({"compaction": {"enabled": False}}, {"defaultThinkingLevel": "most"}, {"defaultTools": ["bash"]}):
-        with pytest.raises(RenderError, match=re.escape("pi-agent/settings.json")):
+def test_pi_settings_admit_only_what_reefs_extension_applies() -> None:
+    """A pi package carries no settings.json pi reads, so Reef's extension applies the one setting a tree may hold."""
+    files = render(config({"defaultTools": []}), PI)
+    assert json.loads(files["plugin/settings.json"]) == {"defaultTools": []}
+    assert "setActiveTools" in files["plugin/extensions/reef/index.ts"]
+    for data in ({"compaction": {"enabled": False}}, {"defaultThinkingLevel": "high"}, {"defaultTools": ["bash"]}):
+        with pytest.raises(RenderError, match=re.escape("plugin/settings.json")):
             render(config(data), PI)
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
     files = render({"skills/notes/SKILL.md": "# Notes skill\n\nKeep short notes.\n"}, PI)
     assert (
-        files["pi-agent/skills/notes/SKILL.md"]
+        files["plugin/skills/notes/SKILL.md"]
         == "---\nname: notes\ndescription: Notes skill\n---\n# Notes skill\n\nKeep short notes.\n"
     )
     own = "---\nname: own\ndescription: mine\n---\nBody.\n"
-    assert render({"skills/own/SKILL.md": own}, PI)["pi-agent/skills/own/SKILL.md"] == own
+    assert render({"skills/own/SKILL.md": own}, PI)["plugin/skills/own/SKILL.md"] == own
 
 
 def test_bundled_adapters_are_discoverable() -> None:
@@ -1048,28 +1021,32 @@ def test_adapter_renderer_steps_run_in_order_on_their_own_files() -> None:
     descriptor = replace(PI, renderer=RecordingRenderer)
     files = render(
         {
-            **config({"defaultThinkingLevel": "off"}),
+            **config({"defaultTools": []}),
             "skills/notes/SKILL.md": COMMON["skills/notes/SKILL.md"],
             "commands/summarize.md": COMMON["commands/summarize.md"],
         },
         descriptor,
     )
     # Every config first, in target order; then each skill and command file; the model route sees them processed.
-    assert calls[:2] == [("process_config", "pi-agent/settings.json"), ("process_config", "pi-agent/models.json")]
-    assert sorted(calls[2:4]) == [
-        ("process_command", "pi-agent/prompts/summarize.md"),
-        ("process_skill", "pi-agent/skills/notes/SKILL.md"),
+    assert calls[:3] == [
+        ("process_config", "plugin/settings.json"),
+        ("process_config", "pi-agent/settings.json"),
+        ("process_config", "pi-agent/models.json"),
     ]
-    assert calls[4:] == [
-        ("check_model_route", "# NOTES SKILL\n\nKEEP SHORT NOTES.\n pi-agent/prompts/summarize.md"),
+    assert sorted(calls[3:5]) == [
+        ("process_command", "plugin/prompts/summarize.md"),
+        ("process_skill", "plugin/skills/notes/SKILL.md"),
+    ]
+    assert calls[5:] == [
+        ("check_model_route", "# NOTES SKILL\n\nKEEP SHORT NOTES.\n plugin/prompts/summarize.md"),
         ("finalize_render", ""),
     ]
-    assert files["pi-agent/skills/notes/SKILL.md"] == "# NOTES SKILL\n\nKEEP SHORT NOTES.\n"
-    assert json.loads(files["pi-agent/settings.json"])["defaultThinkingLevel"] == "off"
+    assert files["plugin/skills/notes/SKILL.md"] == "# NOTES SKILL\n\nKEEP SHORT NOTES.\n"
+    assert json.loads(files["plugin/settings.json"])["defaultTools"] == []
 
     # The render refuses a key Reef's model binding writes whatever the adapter's renderer does.
     with pytest.raises(RenderError, match=re.escape("must not set defaultModel in pi-agent/settings.json")):
-        render(config({"defaultModel": "other/m"}), descriptor)
+        render(config({"defaultModel": "other/m"}, "agent"), descriptor)
 
 
 def test_with_skill_frontmatter_adds_the_header_only_to_bare_text() -> None:

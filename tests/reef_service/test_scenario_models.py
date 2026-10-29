@@ -80,7 +80,7 @@ def configure(platform, name, api, version="1"):
 
 
 FAKE_AGENT = """#!/usr/bin/env python3
-import json, os, urllib.request
+import json, os, sys, urllib.request
 from pathlib import Path
 assert not os.environ.get("OPENAI_API_KEY")
 assert not os.environ.get("ANTHROPIC_API_KEY")
@@ -96,7 +96,7 @@ with urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(body).en
     json.load(response)
 sessions = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 sessions.mkdir(parents=True, exist_ok=True)
-rules = root / "AGENTS.md"
+rules = Path(sys.argv[sys.argv.index("-e") + 1]) / "rules.md"
 (sessions / "session.jsonl").write_text(json.dumps({"type": "agent_end", "rules": rules.read_text() if rules.exists() else ""}) + "\\n")
 """
 

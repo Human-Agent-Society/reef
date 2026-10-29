@@ -151,11 +151,10 @@ def test_the_review_reads_the_whole_design_in_its_own_script_and_the_record_keep
     assert f"# {chat}" in review_prompt and "\\u804a" not in review_prompt
 
 
-#: A claude answer as a model writes it: the design, a command, the rules, the web permission and one requires item.
+#: A claude answer as a model writes it: the design, a command, the rules and one requires item.
 CLAUDE_FILES = {
     "commands/chat.md": "---\nallowed-tools: [WebSearch]\n---\nChat.",
     "rules.md": "While chat mode is on, only search the web.\n",
-    "config/primary.json": json.dumps({"permissions": {"allow": ["WebSearch", "WebFetch"]}}),
 }
 CLAUDE_REQUIRES = [{"name": "gh", "kind": "binary", "prompt": "Install the GitHub CLI"}]
 
@@ -207,15 +206,15 @@ def test_a_design_that_says_no_file_can_deliver_is_answered_with_no_change_and_i
 
 
 def test_an_answer_whose_files_were_all_dropped_is_written_again_with_the_reasons() -> None:
-    """A claude config file that sets hooks is dropped by the parser, the answer's only file: that answer is
-    written again with the reason, never recorded as a design that declined."""
+    """A claude config file is dropped by the parser, since a Claude Code plugin carries no settings, and it is the
+    answer's only file: that answer is written again with the reason, never recorded as a design that declined."""
     hooks = {"config/primary.json": json.dumps({"hooks": {"x": []}})}
     rules = {"rules.md": "While chat mode is on, only search the web.\n"}
     model = Model(designed(hooks), designed(rules), DELIVERED)
     outcome = answer(model, "claude")
     assert outcome.patch.changes == rules and "declined" not in outcome.notes
     retry = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
-    assert retry and "config/primary.json was dropped: it changes hooks; a request may change permissions" in retry[0]
+    assert retry and "config/primary.json was dropped: a request may write skills/{name}/SKILL.md" in retry[0]
 
 
 #: An opencode chat mode: the agent's config without a permission map, the command that enters it, and the fix.

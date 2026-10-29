@@ -1,10 +1,13 @@
 # The pi coding agent, driven headless per episode.
 #
-# PI_CODING_AGENT_DIR relocates the whole configuration directory (settings.json,
-# models.json, AGENTS.md, prompts/, skills/, extensions/), so nothing is
-# rendered into a project-local .pi/ and the trust gate never fires.
-# PI_OFFLINE kills all startup network work and PI_SKIP_VERSION_CHECK pins
-# the self-updater; both keep episodes deterministic and hermetic.
+# A release is a pi package in plugin/: its skills, prompts and extensions, and
+# the rules and settings that Reef's own extension (plugin/extensions/reef/)
+# applies. An episode loads the package with -e; a person's machine installs it
+# with pi install, so every pi session there loads it, in place.
+# PI_CODING_AGENT_DIR relocates pi's own directory, which holds the model
+# binding, so nothing is rendered into a project-local .pi/ and the trust gate
+# never fires. PI_OFFLINE kills all startup network work and
+# PI_SKIP_VERSION_CHECK pins the self-updater; both keep episodes hermetic.
 name: pi
 binary: pi
 # The vendor's install channel at the pinned version. Harness evolution startup
@@ -15,13 +18,15 @@ install:
   version: "0.84.2"
   binary_path: "node_modules/.bin/pi"
 renderer: reef.harness.adapters.pi.render:PiAdapterRenderer
-# What Reef may evolve: each kind of file, at the path where pi reads it. A config/<target>.json
-# of the tree merges into that config file (config, below).
+# What Reef may evolve: each kind of file, at its path in the package. A config/<target>.json of
+# the tree merges into that config file (config, below).
 evolve:
-  rules: pi-agent/AGENTS.md
-  skill: pi-agent/skills/{name}/SKILL.md
-  command: pi-agent/prompts/{name}.md
-  extension: pi-agent/extensions/{name}.ts
+  rules:
+    renders: plugin/rules.md
+    holds: the instructions that Reef's extension adds to pi's system prompt in every session
+  skill: plugin/skills/{name}/SKILL.md
+  command: plugin/prompts/{name}.md
+  extension: plugin/extensions/{name}.ts
 # The agent's directories under the root, each with the variable that moves it there. What the agent writes
 # in them is its state, never residue, and a sandbox keeps them writable.
 dirs:
@@ -45,7 +50,7 @@ model:
             models:
               - id: "{model}"
                 maxTokens: "{max_output_tokens}"
-    - target: primary
+    - target: agent
       data:
         defaultModel: "reef/{model}"
         defaultProvider: reef
@@ -60,7 +65,7 @@ model:
             models:
               - id: "{model}"
                 maxTokens: "{max_output_tokens}"
-    - target: primary
+    - target: agent
       data:
         defaultModel: "reef/{model}"
         defaultProvider: reef
@@ -75,7 +80,7 @@ model:
             models:
               - id: "{model}"
                 maxTokens: "{max_output_tokens}"
-    - target: primary
+    - target: agent
       data:
         defaultModel: "reef/{model}"
         defaultProvider: reef
@@ -83,48 +88,47 @@ model:
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
   episode:
-    argv: ["--mode", "json", "-p", "{prompt}"]
+    argv: ["--mode", "json", "-p", "{prompt}", "-e", "{root}/plugin"]
     env:
       PI_OFFLINE: "1"
       PI_SKIP_VERSION_CHECK: "1"
-  # How a person's machine runs pi on a release: the person's own ~/.pi/agent stays, and the
-  # release loads over it. -e loads the install's skills, prompts and extensions, and on a name
-  # both define the release's wins. The rules follow the person's AGENTS.md. pi reads models.json
-  # and settings.json only from its own directory, so an extension the render adds registers the
-  # release's providers, and the release's settings come as flags (the renderer's layer_args).
-  # pi still writes the person's settings.json when the person changes the model.
+  # How a person's machine runs pi on a release: the person's own ~/.pi/agent stays. pi install
+  # adds the package to it, and pi loads the package in place in every session; on a name both
+  # define, the release's wins. pi reads models.json only from its own directory, so an extension
+  # the layer adds registers the release's provider, and a session that Reef starts selects it.
   layer:
     args:
-      - ["-e", "{root}/pi-agent"]
-      - ["--append-system-prompt", "{root}/pi-agent/AGENTS.md"]
       - ["--model", "reef/{model}"]
+    register:
+      - ["install", "{root}/plugin"]
+    unregister:
+      - ["remove", "{root}/plugin"]
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.
 config:
+  # The release's settings. pi reads no settings.json from a package, so Reef's extension
+  # applies them at session start: only an empty defaultTools, which keeps the extensions'
+  # tools and turns the built-in ones off. Another setting has no extension API that leaves
+  # the person's own settings.json as it is.
   primary:
+    path: "plugin/settings.json"
+    defaults: {}
+    checks:
+      - key: "."
+        match: Each(Key(Eq("defaultTools")))
+        reason: a pi package carries no other setting
+      - key: defaultTools
+        match: AnyOf(IsAbsent(), Eq([]))
+        reason: Reef's extension turns off only all of the built-in tools
+  # pi's own settings.json, which the binding writes in an episode.
+  agent:
     path: "pi-agent/settings.json"
     defaults: {}
     checks:
-      # They choose the models a run may use or send every call through
-      # another host.
-      - key: [enabledModels, httpProxy]
-        match: IsAbsent()
-        reason: Reef's model binding chooses the endpoint and the model
-      # pi reads settings.json only from its own directory, and on a person's machine that is
-      # the person's own, so a person's machine takes a setting of a release only as a flag
-      # (the renderer's layer_args): the thinking level as --thinking, and no built-in tools
-      # as --no-builtin-tools. The binding writes defaultProvider and defaultModel.
       - key: "."
-        match: Each(Key(IsIn(["defaultThinkingLevel", "defaultTools", "defaultProvider", "defaultModel"])))
-        reason: a person's machine applies no other pi setting of a release
-      - key: defaultThinkingLevel
-        match: AnyOf(IsAbsent(), IsIn(["off", "minimal", "low", "medium", "high", "xhigh", "max"]))
-        reason: pi's --thinking takes only these levels
-      # A list of some built-in tools has no flag: --tools allows extension tools only by name.
-      - key: defaultTools
-        match: AnyOf(IsAbsent(), Eq([]))
-        reason: a person's machine takes only no built-in tools, as --no-builtin-tools
+        match: Each(Key(IsIn(["defaultModel", "defaultProvider"])))
+        reason: Reef's model binding chooses the endpoint and the model
   models:
     path: "pi-agent/models.json"
     defaults: {}

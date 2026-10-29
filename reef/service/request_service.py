@@ -705,7 +705,7 @@ class RequestService:
         merge = merge_trees(base_tree, head, imported.tree, backend.descriptor.layout)
         if merge.tree is None:
             located = [(path, backend.descriptor.layout.locate(path)) for path in merge.conflicts]
-            # The person knows each file at its render path, such as pi-agent/AGENTS.md for rules.md.
+            # The person knows each file at its render path, such as plugin/rules.md for rules.md.
             named = [
                 path if location is None or location.part.renders is None else location.part.render_path(location.name)
                 for path, location in located

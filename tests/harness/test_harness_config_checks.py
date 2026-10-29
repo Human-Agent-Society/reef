@@ -22,7 +22,7 @@ from reef.harness.adapters.descriptor import (
 from reef.harness.adapters.matchers import ABSENT, parse_matcher
 from reef.harness.tree import HarnessTree, RenderError, render_tree
 
-OPENCODE = "opencode/opencode.json"
+OPENCODE = "plugin/config.json"
 
 
 @pytest.mark.parametrize("adapter", BUILTIN_ADAPTERS)
@@ -150,7 +150,7 @@ def test_is_default_keeps_the_value_the_defaults_set(tmp_path: Path) -> None:
         {"autoupdate": False, "nested": {"key": 1}},
     )
     assert render_config(descriptor, {"autoupdate": False, "nested": {"key": 1}})["nested"] == {"key": 1}
-    with pytest.raises(RenderError, match=r"on autoupdate in opencode/opencode\.json: it must match IsDefault\(\)"):
+    with pytest.raises(RenderError, match=r"on autoupdate in plugin/config\.json: it must match IsDefault\(\)"):
         render_config(descriptor, {"autoupdate": True})
     # Booleans only match booleans: false refuses 0, which == false.
     with pytest.raises(RenderError, match="on autoupdate in"):
@@ -193,12 +193,12 @@ def test_a_refusal_names_the_failing_key_and_the_reason_but_not_the_value(tmp_pa
     with pytest.raises(RenderError) as refusal:
         render_config(descriptor, {"env": {"A": "1", "MY_TOKEN": "secret-value"}})
     assert str(refusal.value) == (
-        "opencode harness tree fails the check on env key 'MY_TOKEN' in opencode/opencode.json: "
+        "opencode harness tree fails the check on env key 'MY_TOKEN' in plugin/config.json: "
         "the binding owns credentials"
     )
     # Without a reason, the refusal gives the match expression, on one line however the descriptor wraps it.
     descriptor = checked(tmp_path, [{"key": ".", "match": "Each(Key(\n  IsIn(['a'])\n))"}], {})
-    with pytest.raises(RenderError, match=r"on key 'b' in opencode/opencode\.json: it must match Each\(Key\( IsIn"):
+    with pytest.raises(RenderError, match=r"on key 'b' in plugin/config\.json: it must match Each\(Key\( IsIn"):
         render_config(descriptor, {"b": 1})
 
 

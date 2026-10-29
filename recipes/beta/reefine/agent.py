@@ -182,7 +182,7 @@ def launch_pi(
     session_env = agent_env(descriptor, binary, home)
     # An agent and its trials run online: pi's offline switch is for benchmark episodes.
     session_env.pop("PI_OFFLINE", None)
-    argv = headless_argv(descriptor, binary, prompt_text)
+    argv = headless_argv(descriptor, binary, prompt_text, home)
     if script is not None:
         home.mkdir(parents=True, exist_ok=True)
         (home / "trial-script.json").write_text(json.dumps(script), encoding="utf-8")

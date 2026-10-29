@@ -1,4 +1,11 @@
-"""opencode adapter render steps: agent and command shapes, and frontmatter.
+"""opencode adapter render steps: agent and command shapes, frontmatter, and Reef's plugin.
+
+A release is an opencode plugin in ``plugin/``. ``finalize_render`` adds
+Reef's own plugin there (``index.ts`` and its ``package.json``), whose config
+hook merges the release's ``config.json`` over opencode's, adds
+``AGENTS.md`` to the instructions, the commands of ``commands.json`` (each
+command file, as opencode reads one) and the ``skill/`` directory, and which
+merges the hooks and tools of the modules in ``extensions/``.
 
 ``process_config`` checks what the declaration cannot state: an agent must
 keep its own name and carry the fields opencode's schema types, a command
@@ -55,9 +62,55 @@ from reef.harness.adapters.common.frontmatter import skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
-_CONFIG_PATH = "opencode/opencode.json"
-COMMAND_DIR = "opencode/command/"
-SKILL_DIR = "opencode/skill/"
+#: opencode's own opencode.json, which holds the model binding, and the release's config, which Reef's plugin merges.
+AGENT_CONFIG = "opencode/opencode.json"
+TREE_CONFIG = "plugin/config.json"
+COMMAND_DIR = "plugin/command/"
+SKILL_DIR = "plugin/skill/"
+#: Reef's plugin: the release's parts through the config hook, and the merged hooks and tools of its extensions.
+PLUGIN_ENTRY = """\
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const json = (name: string) => (existsSync(join(here, name)) ? JSON.parse(readFileSync(join(here, name), "utf8")) : {});
+
+function merge(base: any, overlay: any): any {
+  const objects = [base, overlay].every((value) => value && typeof value === "object" && !Array.isArray(value));
+  if (!objects) return overlay;
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(overlay)) merged[key] = key in base ? merge(base[key], value) : value;
+  return merged;
+}
+
+export const ReefHarness = async (input: any) => {
+  const directory = join(here, "extensions");
+  const files = existsSync(directory) ? readdirSync(directory).filter((name) => name.endsWith(".ts")).sort() : [];
+  const hooks: any[] = [];
+  for (const name of files) {
+    const module = await import(pathToFileURL(join(directory, name)).href);
+    for (const plugin of Object.values(module)) if (typeof plugin === "function") hooks.push(await plugin(input));
+  }
+  const merged: any = { tool: Object.assign({}, ...hooks.map((hook) => hook.tool ?? {})) };
+  for (const key of new Set(hooks.flatMap((hook) => Object.keys(hook)))) {
+    if (key === "tool" || key === "config") continue;
+    const values = hooks.map((hook) => hook[key]).filter((value) => value !== undefined);
+    merged[key] = values.every((value) => typeof value === "function")
+      ? async (...args: any[]) => { for (const value of values) await value(...args); }
+      : values[0];
+  }
+  merged.config = async (config: any) => {
+    Object.assign(config, merge(config, json("config.json")));
+    if (existsSync(join(here, "AGENTS.md"))) config.instructions = [...(config.instructions ?? []), join(here, "AGENTS.md")];
+    config.command = { ...(config.command ?? {}), ...json("commands.json") };
+    config.skills = { ...(config.skills ?? {}), paths: [...(config.skills?.paths ?? []), join(here, "skill")] };
+    for (const hook of hooks) if (typeof hook.config === "function") await hook.config(config);
+  };
+  return merged;
+};
+"""
+PLUGIN_PACKAGE = {"name": "reef-harness", "type": "module", "main": "index.ts"}
 
 #: What the model binding writes: one ``reef`` provider holding these keys, its options, and empty model entries.
 BINDING_PROVIDER = "reef"
@@ -307,6 +360,19 @@ def read_frontmatter(where: str, text: str) -> Mapping[object, object]:
     return data
 
 
+def command_entry(where: str, text: str) -> dict[str, object]:
+    """A command file as opencode reads one into its config: its frontmatter fields and the text after them as
+    the template."""
+    frontmatter = read_frontmatter(where, text)
+    body = text
+    if frontmatter or (text.startswith("---") and not text.startswith("----")):
+        closing = text.find("\n---", 3)
+        line_end = text.find("\n", closing + 4)
+        body = "" if line_end == -1 else text[line_end + 1 :]
+    fields = {field: frontmatter[field] for field in COMMAND_FIELD_TYPES if field in frontmatter}
+    return {**fields, "template": body.strip()}
+
+
 def configured_agents(config: Mapping[str, object]) -> tuple[dict[str, str], set[str]]:
     """Each agent opencode builds from ``config`` with its mode, and the names of the hidden agents.
 
@@ -356,13 +422,9 @@ def configured_agents(config: Mapping[str, object]) -> tuple[dict[str, str], set
 
 class OpencodeAdapterRenderer(AdapterRenderer):
     @staticmethod
-    def layer_files(files: dict[str, str]) -> dict[str, str]:
-        # The layer's AGENTS.md takes the global slot, so an empty one keeps opencode from falling back to
-        # ~/.claude/CLAUDE.md; the layer's inline config reads the person's own back.
-        return {"opencode/AGENTS.md": "", **files}
-
-    @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        if path != TREE_CONFIG:
+            return config
         agents, hidden = configured_agents(config)
         if "default_agent" in config:
             default_agent = config["default_agent"]
@@ -381,7 +443,7 @@ class OpencodeAdapterRenderer(AdapterRenderer):
         commands = config.get("command")
         for name, command in commands.items() if isinstance(commands, dict) else ():
             if isinstance(command, dict):
-                check_command(f"command {name!r} in opencode.json", command, agents)
+                check_command(f"command {name!r} in config.json", command, agents)
         return config
 
     @staticmethod
@@ -408,8 +470,7 @@ class OpencodeAdapterRenderer(AdapterRenderer):
     def check_model_route(
         configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
     ) -> None:
-        config = configs[_CONFIG_PATH]
-        check_binding_shape(config)
+        check_binding_shape(configs[AGENT_CONFIG])
         for path, text in commands.items():
             where = f"command {path[len(COMMAND_DIR) : -len('.md')]!r}"
             if "model" in read_frontmatter(where, text):
@@ -418,7 +479,8 @@ class OpencodeAdapterRenderer(AdapterRenderer):
     @staticmethod
     def finalize_render(files: dict[str, str]) -> dict[str, str]:
         # A command file names agents, which only the config defines.
-        agents, _ = configured_agents(json.loads(files[_CONFIG_PATH]))
+        agents, _ = configured_agents(json.loads(files[TREE_CONFIG]))
+        commands: dict[str, dict[str, object]] = {}
         for path, text in files.items():
             if path.startswith(COMMAND_DIR) and path.endswith(".md"):
                 command_name = path[len(COMMAND_DIR) : -len(".md")]
@@ -432,4 +494,10 @@ class OpencodeAdapterRenderer(AdapterRenderer):
                         "command under that name, in place of any command already named so"
                     )
                 check_command(where, frontmatter, agents)
-        return files
+                commands[command_name] = command_entry(where, text)
+        return {
+            **files,
+            "plugin/index.ts": PLUGIN_ENTRY,
+            "plugin/package.json": json.dumps(PLUGIN_PACKAGE, indent=2) + "\n",
+            "plugin/commands.json": json.dumps(commands, indent=2, sort_keys=True) + "\n",
+        }
