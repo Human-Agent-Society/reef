@@ -236,9 +236,11 @@ class SFTSamples(ReportSamples):
 
 
 class SFTJobData(DistillJobData):
-    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTSamples.uploaded_sample`` renders."""
+    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTSamples.uploaded_sample`` renders,
+    and imported train tasks, which train only for an instruction that gives their job's parameters."""
 
     accepts_trajectories = True
+    accepts_imported_tasks = True
 
 
 __all__ = ["SFT_TARGETS", "SFTJobData", "SFTRecord2Record", "SFTSamples", "SFTSettings"]
