@@ -209,14 +209,14 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
-        "reef.storage.trajectories": ("reef.core",),
+        "reef.storage.samples": ("reef.core",),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",
             "reef.storage.records",
             "reef.storage.commits",
             "reef.storage.tasks",
-            "reef.storage.trajectories",
+            "reef.storage.samples",
             "reef.storage.evaluations",
         ),
     }
