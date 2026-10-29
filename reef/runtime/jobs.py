@@ -360,10 +360,16 @@ class TrainingComponent(ABC):
 class ReleaseLayout(ArtifactLayout):
     """The layout of the releases of ``component``: an import of the component it trains must meet it.
 
-    ``check`` is ``component.check_release``. A weight recipe binds it on its ``weights`` component.
+    ``check`` is ``component.check_release``. The releases resolve a reference when they hold weight files
+    (``release_format``), which the serving runtimes read through ``ReleaseFiles``. A weight recipe binds it on its
+    ``weights`` component.
     """
 
     component: TrainingComponent
 
     def check(self, files: ArtifactFiles) -> None:
         self.component.check_release(files)
+
+    @property
+    def resolves_references(self) -> bool:
+        return self.component.release_format is not None

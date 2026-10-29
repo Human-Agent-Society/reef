@@ -821,7 +821,10 @@ Reef ships ``HuggingFaceReader`` (``hf``), ``FileReader`` (``file``) and
 of a scheme that it reads.
 
 ``HuggingFaceRevisionFiles`` has a reference when the URI names a full
-40-digit commit SHA: Reef stores only ``hf-reference.json``,
+40-digit commit SHA. Reef stores the reference instead of a copy only when the
+component's layout says that its readers resolve one
+(``ArtifactLayout.resolves_references``; ``ReleaseLayout`` does for releases
+that hold weight files). Then Reef stores only ``hf-reference.json``,
 ``{"uri": "hf://org/model", "version": "<commit>"}``, and
 ``reef.artifact.read_reference(directory)`` reads it back. The built-in
 serving runtimes load such a release from the revision's snapshot, which

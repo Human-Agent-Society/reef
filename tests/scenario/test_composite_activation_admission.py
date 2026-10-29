@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.sources import DirectorySource
+from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
@@ -276,6 +277,38 @@ class _ImportingRecipe(_LoadedRecipe):
         surface = super().build_surface(scenario)
         harness = replace(surface.components[HARNESS], layout=HarnessText())
         return replace(surface, components={**surface.components, HARNESS: harness})
+
+
+class PinnedSource(DirectorySource):
+    """A directory whose source keeps it fixed, as a Hugging Face commit does: it offers a reference."""
+
+    @property
+    def reference(self):
+        return {REFERENCE_FILE: json.dumps(HuggingFaceRevision("org/harness", "0" * 40).to_dict()).encode()}
+
+
+@pytest.mark.unit
+def test_a_component_whose_readers_resolve_no_reference_imports_a_copy(tmp_path: Path) -> None:
+    runtime = StubInferenceRuntime()
+    dispatcher = _dispatcher(tmp_path, _ImportingRecipe)
+    imported_dir = tmp_path / "imported"
+    imported_dir.mkdir()
+    (imported_dir / f"{HARNESS}.txt").write_text("harness imported", encoding="utf-8")
+    try:
+        scenario = _scenario(dispatcher, runtime)
+        _step(scenario, WEIGHTS, 1)
+        assert not HarnessText().resolves_references
+        imported = scenario.import_artifact(
+            PinnedSource(imported_dir, source_version="0" * 40, link=False),
+            HARNESS,
+            source={"uri": f"hf://org/harness@{'0' * 40}", "version": "0" * 40},
+            directory=store(tmp_path),
+        )
+        # The harness's readers read its files, so the import stores them, not the source's reference.
+        scenario.activate(imported.artifact_id, HARNESS)
+        assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness imported"
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit
