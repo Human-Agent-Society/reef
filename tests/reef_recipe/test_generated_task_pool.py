@@ -10,9 +10,9 @@ from typing import Any, Self
 import pytest
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import HarborTask
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskJobData
 from reef.recipe.generated_tasks.generator import (
