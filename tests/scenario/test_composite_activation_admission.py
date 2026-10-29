@@ -14,12 +14,13 @@ from tests.support.component_trainers import _TwoTrainerRecipe, component_files,
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.sources import DirectorySource
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
-
 from reef.surface.weights import WeightInferenceHooks, WeightLoader
 
 
@@ -250,11 +251,20 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         dispatcher.close()
 
 
+def store(tmp_path: Path) -> Path:
+    """A new empty directory for an import to store into."""
+    stores = tmp_path / "stores"
+    stores.mkdir(exist_ok=True)
+    directory = stores / str(len(list(stores.iterdir())))
+    directory.mkdir()
+    return directory
+
+
 class HarnessText(ArtifactLayout):
     """The harness layout of the two trainer recipe: one ``harness.txt``."""
 
-    def check(self, directory: Path) -> None:
-        if [path.name for path in directory.iterdir()] != [f"{HARNESS}.txt"]:
+    def check(self, files: ArtifactFiles) -> None:
+        if files.paths() != (f"{HARNESS}.txt",):
             raise ValueError(f"a harness artifact holds only {HARNESS}.txt")
 
 
@@ -282,7 +292,12 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
         tip = scenario.repository.checkpoint_artifact
 
         source = {"uri": imported_dir.as_uri(), "version": ""}
-        imported = scenario.import_artifact(imported_dir, HARNESS, source=source)
+        imported = scenario.import_artifact(
+            DirectorySource(imported_dir, source_version="", link=False),
+            HARNESS,
+            source=source,
+            directory=store(tmp_path),
+        )
 
         assert imported.artifact_id == f"{imported.release_id}:{HARNESS}"
         assert scenario.current_artifact_ref() == served
@@ -296,12 +311,27 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
             (imported.artifact_id, HARNESS, False)
         ]
         with pytest.raises(ValueError, match="name the component"):
-            scenario.import_artifact(imported_dir, None, source=source)
+            scenario.import_artifact(
+                DirectorySource(imported_dir, source_version="", link=False),
+                None,
+                source=source,
+                directory=store(tmp_path),
+            )
         with pytest.raises(ValueError, match="takes no imported artifact"):
-            scenario.import_artifact(imported_dir, WEIGHTS, source=source)
+            scenario.import_artifact(
+                DirectorySource(imported_dir, source_version="", link=False),
+                WEIGHTS,
+                source=source,
+                directory=store(tmp_path),
+            )
         (imported_dir / "extra.txt").write_text("x", encoding="utf-8")
         with pytest.raises(ValueError, match="holds only"):
-            scenario.import_artifact(imported_dir, HARNESS, source=source)
+            scenario.import_artifact(
+                DirectorySource(imported_dir, source_version="", link=False),
+                HARNESS,
+                source=source,
+                directory=store(tmp_path),
+            )
 
         # Activating it binds the imported harness to the weights that serve now.
         scenario.activate(imported.artifact_id, HARNESS)

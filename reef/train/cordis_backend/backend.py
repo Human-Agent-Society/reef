@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.files import DirectoryFiles
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
@@ -627,7 +628,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         """
         if artifact.local_path is None:
             raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
-        entries = read_entries(artifact.local_path)
+        entries = read_entries(DirectoryFiles(artifact.local_path))
         admitted, refusal = admit_mutations(entries, (), self._descriptor)
         if refusal is not None:
             raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
