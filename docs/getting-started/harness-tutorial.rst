@@ -13,8 +13,6 @@ stays as it is.
 
 In this tutorial you start Reef, connect the pi agent to it, use the agent,
 tell Reef how a session went, and see what Reef does with it.
-The last two sections point to the guides for writing your own method and
-for adding another agent.
 
 .. flow::
    :loop: your next session starts on the new version
@@ -70,10 +68,9 @@ deployment. It evolves the rules of the pi agent.
    export REEF_UPSTREAM_API_KEY=sk-...
    reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 
-When ``curl http://127.0.0.1:8901/healthz`` answers ``{"ok": true}``, Reef
-is ready. The deployment file names the agent, the method that changes the
-harness, and the tasks that every new version must pass. `Evolve your harness
-<../user-guide/evolve-your-harness.rst>`__ explains each of its settings.
+Reef is ready when ``curl http://127.0.0.1:8901/healthz`` answers
+``{"ok": true}``. The deployment names the agent, the method, and the tasks
+that every new version must pass.
 
 Connect your machine
 --------------------
@@ -87,35 +84,20 @@ one harness.
    export SCENARIO=my-agent
    reef-client harness connect $SCENARIO --reef http://127.0.0.1:8901
 
-``connect`` prints one line when it is done:
-
-.. code:: text
-
-   Done. Open a new terminal and run pi.
-
-It did three things:
-
-- It installed the newest version of the harness in
-  ``~/.local/share/reef-client/harness/my-agent``.
-- It installed pi, at the version Reef tests with, if your machine did not
-  have it.
-- It made your ``pi`` command run through Reef. It added a ``pi`` command in
-  ``~/.local/share/reef-client/bin`` and put that directory first on
-  ``PATH`` in your shell's startup file.
-
-It did not read or write your own pi configuration. ``reef-client harness
-disconnect`` undoes all three. When the deployment needs a token, ``connect``
-asks for it, or reads it from ``REEF_TOKEN``.
+``connect`` prints ``Done. Open a new terminal and run pi.`` It installed
+the newest version under ``~/.local/share/reef-client/harness/my-agent``,
+installed pi if your machine lacked it, and made your ``pi`` command run
+through Reef. It did not touch your own pi configuration, and
+``reef-client harness disconnect`` undoes it. When the deployment needs a
+token, ``connect`` asks for it, or reads ``REEF_TOKEN``.
 
 Use the agent
 -------------
 
-Open a new terminal and run ``pi`` as you always do, then give it a task.
-pi loads your own settings, rules and skills, and Reef's version on top of
-them. Its model calls go to Reef, which forwards them to your model and
-records each one. Before pi starts, the client installs the newest version.
-After pi exits, the client sends back what the session changed in Reef's
-files, such as a skill that pi wrote.
+Open a new terminal, run ``pi`` as you always do, and give it a task. pi
+loads your own configuration with Reef's version on top. Its model calls go
+through Reef, which records each one. After pi exits, the client sends back
+what the session changed in Reef's files.
 
 Tell Reef how it went
 ---------------------
@@ -132,14 +114,9 @@ that names its model calls: ``0`` for a failure, ``1`` for a success. The
      -H "x-reef-scenario: $SCENARIO" -H "Content-Type: application/json" \
      -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
 
-The calls of one report form one trace, in order. With a deployment token,
-add ``-H "Authorization: Bearer $REEF_TOKEN"`` to each ``curl``.
-
-A program that calls the model itself reads the record id from the
-``x-reef-agent-record-id`` header of each response. The fields of a report
-are the ones the deployment's method reads; `Use a published tree
-<../user-guide/evolve-your-harness.rst#use-a-published-tree>`__ lists other
-ways to give feedback, such as uploaded tasks.
+With a deployment token, add ``-H "Authorization: Bearer $REEF_TOKEN"`` to
+each ``curl``. A program that calls the model itself reads each call's
+record id from the ``x-reef-agent-record-id`` header.
 
 What Reef does next
 -------------------
@@ -155,18 +132,15 @@ change the head directly. It makes a candidate and tests it first.
    Evaluate :: candidate and head run the same tasks
    Decide :: the better one is the head
 
-When the candidate wins, it becomes the new head, and your next ``pi``
-session starts on it. When it loses or ties, the head stays. List the steps
-and their results:
+A winning candidate becomes the new head, and your next ``pi`` session
+starts on it. List the steps and their results:
 
 .. code:: bash
 
    curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/releases
 
-Each step also has a page, ``/reef/harness/releases/<step>/page``, that shows
-what changed, why, and the scores. A change to code, such as a pi extension,
-waits for you to promote it, because code runs in pi's process with your
-permissions.
+Each step has a page, ``/reef/harness/releases/<step>/page``. A change to
+code, such as a pi extension, waits for you to promote it.
 
 When you and Reef change the same file
 --------------------------------------
@@ -191,35 +165,16 @@ A conflict names the file. Make the line match one side and run
 to take Reef's version. Code files do not merge by line: a code file that
 both sides changed is a conflict.
 
-Write your own method
----------------------
-
-The method decides how the harness changes: a class with one operation,
-``step``, which Reef calls once per training step. This deployment names the
-tutorial's method, ``RulesMethod`` in
-``tutorials/evolve-your-harness/harness/plugins.py``, as
-``evolution.method``. It rewrites ``rules.md``, the tree path where every
-adapter keeps the agent's rules; pi's adapter renders it to
-``pi-agent/AGENTS.md``. The first head takes its ``rules.md`` from the seed,
-``tutorials/evolve-your-harness/seeds/pi/rules.md``. `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__ shows how to write your
-own.
-
-Add another agent
------------------
-
-Reef connects pi, Claude Code, opencode and codex. Each has an adapter: one
-``adapter.yaml`` that says which of the agent's files Reef may evolve, where
-the agent keeps them, and how it reaches a model. `Harness adapters
-<../developer-guide/harness-adapters.rst>`__ shows how to write one, with a
-checklist of what to test.
-
 Next steps
 ----------
 
+- `Write a harness method <../developer-guide/write-a-harness-method.rst>`__:
+  change more than the rules. This deployment's method, ``RulesMethod`` in
+  ``tutorials/evolve-your-harness/harness/plugins.py``, rewrites
+  ``rules.md`` only.
 - `Evolve your harness <../user-guide/evolve-your-harness.rst>`__: the
   deployment settings, offline runs on uploaded tasks, and reviews.
-- `Recipes <../user-guide/recipes.rst>`__: methods that come with Reef, such as
-  GEPA and Meta-Harness.
-- `HTTP API <../reference/http-api.rst>`__: every route the client and the
-  service use.
+- `Harness adapters <../developer-guide/harness-adapters.rst>`__: connect an
+  agent other than pi, Claude Code, opencode and codex.
+- `Recipes <../user-guide/recipes.rst>`__: GEPA, Meta-Harness and the other
+  methods that come with Reef.
