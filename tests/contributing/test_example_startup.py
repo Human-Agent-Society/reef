@@ -61,8 +61,10 @@ from pathlib import Path
 
 mode = os.environ['REEF_TEST_MODE']
 if mode == 'hanging-probe':
+    # A probe without a short --max-time hangs past the test's timeout; a bounded one times out at once.
     timeout = float(sys.argv[sys.argv.index('--max-time') + 1]) if '--max-time' in sys.argv else 120
-    time.sleep(timeout)
+    if timeout > 5:
+        time.sleep(timeout)
     raise SystemExit(28)
 if mode == 'stale-ready':
     # Answer only after Reef has exited, independent of process scheduling.
@@ -79,6 +81,10 @@ time.sleep(0.05)
 raise SystemExit(0 if mode in ('ready', 'workload-error') and Path('work/service-started').exists() else 7)
 """,
     )
+    # The launcher polls with `sleep 1`; a short sleep keeps its loop and the test fast.
+    sleep = commands / "sleep"
+    sleep.write_text("#!/bin/sh\nexec /bin/sleep 0.01\n")
+    sleep.chmod(0o755)
     env = {
         **os.environ,
         "PATH": f"{commands}{os.pathsep}{os.environ['PATH']}",

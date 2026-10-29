@@ -257,7 +257,7 @@ class ServiceConfig:
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
-        help="Split manifest of the Harbor tasks that each scenario imports into its task store imported-tasks.",
+        help="Split manifest of the Harbor tasks that each scenario imports into its sample store.",
     )
     task_import_tasks_root: str | None = config_option(
         None,

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from reef.record2sample.generator import HarborChecks, ReefGeneratorRollouts
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.service.deploy import generator_process as generator_main
 from reef.service.deploy.config_utils import DeployConfigError
@@ -135,7 +136,7 @@ def test_the_spade_example_selects_the_generated_task_recipe_and_the_spade_gener
     assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
     pipeline = settings.pipeline_settings
     assert pipeline is not None
-    assert pipeline["sample2job"]["config"]["tasks_per_step"] == 2
+    assert pipeline["sample2job"]["config"]["buffer_size"] == 2
     # Tinker rolls each task job out itself, with the recipe's rollout job parameter.
     assert settings.recipe_settings["job_parameters"]["rollout"]["rollouts_per_task"] == 4
     assert pipeline["record2sample"]["config"]["rounds"] == 20
@@ -167,3 +168,33 @@ def test_the_designer_asks_in_the_api_the_section_names_or_the_upstreams(
         settings, GeneratorSettings.from_config(settings.generator_settings, setting="generator")
     )
     assert built.designer.api == designer_api
+
+
+@pytest.mark.parametrize(
+    ("section", "environment", "needs"),
+    [
+        ({}, "docker", ["reef_eval", "harbor", "docker"]),
+        ({"environment": "e2b"}, "e2b", ["reef_eval", "harbor", "E2B_API_KEY", "e2b", "dockerfile_parse"]),
+    ],
+)
+def test_the_generator_environment_reaches_the_checks_the_rollouts_and_the_readiness(
+    tmp_path: Path, section: dict[str, str], environment: str, needs: list[str]
+) -> None:
+    deployment = {
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {"tasks-root": str(tmp_path / "tasks"), **section},
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(
+        settings, GeneratorSettings.from_config(settings.generator_settings, setting="generator")
+    )
+    assert isinstance(built.checks, HarborChecks) and isinstance(built.rollouts, ReefGeneratorRollouts)
+    assert built.checks.environment == built.rollouts.environment == environment
+    assert [probe.name for probe in built.probes] == needs
+
+
+def test_an_unknown_generator_environment_is_a_config_error() -> None:
+    with pytest.raises(DeployConfigError, match=r"generator\.environment must be docker or e2b"):
+        attach_generator_service(config(environment="singularity"))

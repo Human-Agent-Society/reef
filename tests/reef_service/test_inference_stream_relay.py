@@ -134,7 +134,7 @@ class _RecordingRequestService:
     """The parts of ``RequestService`` the inference relay touches, over a scripted upstream stream.
 
     ``dispatcher`` exposes only ``recipe.harness_adapter``, and ``routing`` is None, so no request is
-    routed. ``start_stream`` appends ``(record, evaluated, decision)`` to ``started`` and returns a new
+    routed. ``start_stream`` appends ``(record, evaluated, decision, artifact_id)`` to ``started`` and returns a new
     ``upstream`` stream of the ``OPENROUTER_SSE`` frames, with a pending value that holds ``record`` and a
     new ``reef-codex`` inference record. ``record_stream`` appends the relayed response to ``recorded`` and
     returns that record, ``persist`` awaits its write, and ``harness_head`` returns None. It writes no
@@ -143,8 +143,8 @@ class _RecordingRequestService:
 
     def __init__(self, harness_adapter: str | None) -> None:
         self.recorded: list[Mapping[str, Any]] = []
-        #: What each opened stream was asked for: whether it keeps a record, its evaluated component, its decision.
-        self.started: list[tuple[bool, str | None, RoutingDecision | None]] = []
+        #: What each stream was asked for: recording, evaluated component, routing decision, and served artifact.
+        self.started: list[tuple[bool, str | None, RoutingDecision | None, str | None]] = []
         self.dispatcher = SimpleNamespace(recipe=SimpleNamespace(harness_adapter=harness_adapter))
         self.routing = None
 
@@ -169,8 +169,9 @@ class _RecordingRequestService:
         record: bool = True,
         evaluated: str | None = None,
         decision: RoutingDecision | None = None,
+        artifact_id: str | None = None,
     ) -> tuple[InferenceStream, Any]:
-        self.started.append((record, evaluated, decision))
+        self.started.append((record, evaluated, decision, artifact_id))
         pending = SimpleNamespace(
             item=AgentRecord.create(scenario="reef-codex", request_type=RequestType.INFERENCE, payload=dict(payload)),
             record=record,
@@ -352,8 +353,33 @@ def test_evaluation_stream_names_its_component_and_carries_no_receipt() -> None:
             body = await response.text()
 
         # The stream opens without a record or a routing decision, for the evaluated component only.
-        assert request_service.started == [(False, "harness", None)]
+        assert request_service.started == [(False, "harness", None, None)]
         completed = next(payload for payload in _frames(body) if payload.get("type") == "response.completed")
         assert "reef" not in completed
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_artifact_stream_names_its_artifact_without_reading_the_active_release() -> None:
+    async def run() -> None:
+        request_service = HeaderLookupService(ValueError("an artifact URL does not read the active release"))
+        app = web.Application()
+        register_inference_routes(app, request_service=request_service, inference_handler=None)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/reef/scenarios/reef-codex/artifacts/older-release/v1/responses",
+                json={"stream": True, "model": "anthropic/claude", "input": []},
+            )
+            assert response.status == 200
+            assert "x-reef-release-id" not in response.headers
+            body = await response.text()
+
+        assert request_service.started == [(True, None, None, "older-release")]
+        assert not request_service.entered.is_set()
+        completed = next(payload for payload in _frames(body) if payload.get("type") == "response.completed")
+        assert completed["reef"]["agent_record_id"]
+        assert len(request_service.recorded) == 1 and request_service.recorded[0]["complete"] is True
+        assert request_service.closes == 1
 
     asyncio.run(run())

@@ -16,6 +16,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.sources import SourceFiles
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
@@ -29,10 +30,13 @@ from reef.runtime.deployment import close_runtimes
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
+from reef.scenario.releases import ServedArtifact
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
+from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
+from reef.storage.tasks import SplitName
+from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -342,17 +346,49 @@ class Dispatcher(ScenarioLifecycle):
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).activate(artifact_id, component)
 
+    def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Serve ``artifact_id`` of ``component`` beside the active release of ``scenario``; that release stays."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).serve(artifact_id, component)
+
+    def stop_serving(self, scenario: str, artifact_id: str) -> ServedArtifact:
+        """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).stop_serving(artifact_id)
+
     def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).train_from(artifact_id, component)
 
-    def import_artifact(
-        self, scenario: str, directory: Path, component: str | None, *, source: Mapping[str, str]
-    ) -> ComponentArtifact:
-        """Publish ``directory`` as a new artifact of ``component`` in ``scenario``; nothing serves or trains it yet."""
+    def import_target(self, scenario: str, component: str | None) -> str:
+        """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
+
+        Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an unknown component or one that
+        takes no import. An unknown scenario is refused before its lock is made, so a request for any name adds none.
+        """
+        if not self.registry.has(scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).import_artifact(directory, component, source=source)
+            return self.registry.require(scenario).import_target(component)
+
+    def import_artifact(
+        self,
+        scenario: str,
+        files: SourceFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
+        directory: Path,
+    ) -> ComponentArtifact:
+        """Publish ``files`` as a new artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
+
+        Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
+        """
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_artifact(
+                files, component, source=source, directory=directory
+            )
 
     def current_artifact(
         self,
@@ -418,7 +454,7 @@ class Dispatcher(ScenarioLifecycle):
             if ingest.append_trajectories(current, trajectories):
                 self.process_accepted_records(current)
 
-    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
+    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's imported tasks, then wake
         their consumers. Return the published tasks (``ingest.append_tasks``)."""
         if not directories:
@@ -430,6 +466,44 @@ class Dispatcher(ScenarioLifecycle):
             published = ingest.append_tasks(current, directories, split)
             self.local_workers.wake(current)
             return published
+
+    def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
+        """The buffer of the trainer of ``component`` (the only one when None): its mode and its samples."""
+        with self.registry.lock_for(scenario):
+            return self.trainer_of(self.require_scenario(scenario), component).buffer_listing()
+
+    def change_buffer(
+        self, scenario: str, sample_ids: tuple[str, ...], *, insert: bool, component: str | None = None
+    ) -> Mapping[str, Any]:
+        """Insert ``sample_ids`` into the manual buffer of the trainer of ``component``, or remove them.
+
+        Raise ``ManualBufferRefused`` in automatic mode and ``ValueError`` for an ID that the trainer cannot take.
+        """
+        with self.registry.lock_for(scenario):
+            current = self.require_scenario(scenario)
+            listing = self.trainer_of(current, component).change_buffer(sample_ids, insert=insert)
+            # A queued instruction may now have samples to train.
+            self.local_workers.wake(current)
+            return listing
+
+    def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
+        """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
+        with self.registry.lock_for(scenario):
+            return self.require_scenario(scenario).store.samples.page(after_sequence=after_sequence, limit=limit)
+
+    def require_scenario(self, scenario: str) -> Scenario:
+        """The scenario ``scenario``, loaded or created as ``get_or_create_scenario`` does; ``UnknownScenario`` if none."""
+        current = self.get_or_create_scenario(scenario)
+        if current is None:
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        return current
+
+    @staticmethod
+    def trainer_of(current: Scenario, component: str | None) -> Trainer:
+        """The trainer of ``component`` in ``current``; ``ValueError`` for None in a scenario of several."""
+        if component is None and len(current.trainers) > 1:
+            raise ValueError(f"scenario {current.name!r} has several components: name one with component")
+        return current.trainer_for(component)
 
     @contextmanager
     def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
@@ -475,15 +549,13 @@ class Dispatcher(ScenarioLifecycle):
                 "effective_activation": self.registry.effective_activation(settings),
             }
 
-    def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
-        """The scenario's imported tasks in publication order, each with whether it trained."""
+    def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
+        """The scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            store = current.store.tasks.open(IMPORTED_TASK_STORE)
-            trained = store.trained_task_names()
-            return tuple((task, task.name in trained) for task in store.tasks())
+            return current.store.samples.tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""

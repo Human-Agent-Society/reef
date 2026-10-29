@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
 from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import Context, FiberState
 from reef.harness.compose.loader import Loader
@@ -59,7 +61,6 @@ from reef.harness.tree.nodes import (
     validate_native_loop,
 )
 from reef.harness.tree.render import RenderError, render_composition, render_native_module, tree_files
-from reef.sandbox.process import LocalExecutor
 from reef.train.cordis_backend import CordisBackend, Mutation
 
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.
@@ -625,21 +626,14 @@ class _TeamModel(_FakeModel):
 
 @pytest.fixture
 def fake_model():
-    server = _FakeModel()
-    try:
+    with _FakeModel() as server:
         yield server
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 @pytest.fixture
 def reef():
-    server = _FakeReef()
-    try:
+    with contextlib.closing(_FakeReef()) as server:
         yield server
-    finally:
-        server.close()
 
 
 def _root(directory: Path, model: _FakeModel, nodes) -> Path:
@@ -729,12 +723,8 @@ def test_the_context_reads_the_turn_and_say_is_a_loop_message(tmp_path: Path) ->
         "    ctx.log('after', {'step': ctx.step, 'text': ctx.text(), 'messages': len(ctx.messages),\n"
         "                      'last': ctx.last['role'], 'roles': [m['role'] for m in ctx.messages]})\n"
     )
-    model = _TextModel()
-    try:
+    with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=3))
-    finally:
-        model.shutdown()
-        model.server_close()
     assert exit_code == 0 and events[-1]["data"]["reason"] == {"kind": "completed"}
     assert _typed(events, "loop/before") == [
         {
@@ -774,12 +764,8 @@ def test_log_events_are_namespaced_clipped_and_json(tmp_path: Path) -> None:
         "        except ValueError as exc:\n"
         "            ctx.log('refused', {'event': event, 'error': str(exc)})\n"
     )
-    model = _TextModel()
-    try:
+    with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code))
-    finally:
-        model.shutdown()
-        model.server_close()
     assert exit_code == 0
     assert _typed(events, "loop/note") == [{"n": 1, "path": "/x"}]
     big = _typed(events, "loop/big")[0]
@@ -798,12 +784,8 @@ def test_log_events_are_namespaced_clipped_and_json(tmp_path: Path) -> None:
 
 def test_a_loop_that_raises_ends_the_turn_with_loop_error(tmp_path: Path) -> None:
     code = "def run_turn(ctx):\n    ctx.model()\n    raise RuntimeError('boom')\n"
-    model = _TextModel()
-    try:
+    with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code))
-    finally:
-        model.shutdown()
-        model.server_close()
     assert exit_code == 1
     assert [event["type"] for event in events][-4:] == ["assistant/message", "step/end", "loop/exit", "turn/end"]
     assert _typed(events, "loop/exit") == [{"reason": "error"}]
@@ -817,12 +799,8 @@ def test_a_loop_that_raises_ends_the_turn_with_loop_error(tmp_path: Path) -> Non
 
 def test_a_loop_that_never_returns_hits_the_transition_cap(tmp_path: Path) -> None:
     code = "def run_turn(ctx):\n    while True:\n        ctx.run_tools()\n"
-    model = _TextModel()
-    try:
+    with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=2))
-    finally:
-        model.shutdown()
-        model.server_close()
     limit = 3 * TRANSITIONS_PER_STEP
     assert exit_code == 1 and not model.requests
     assert events[-1]["data"]["reason"]["error"] == {
@@ -840,26 +818,6 @@ def test_max_steps_ends_the_turn_as_a_graph_does(tmp_path: Path, fake_model) -> 
     assert events[-1]["data"]["reason"] == {"kind": "max-steps", "steps": 2}
 
 
-def test_the_turns_end_crosses_a_loops_except_exception(tmp_path: Path) -> None:
-    # Bounded: a handler that could catch the end would then fail on the events, not hold the test open.
-    code = (
-        "def run_turn(ctx):\n"
-        "    for _ in range(3):\n"
-        "        try:\n"
-        "            ctx.model()\n"
-        "        except Exception:\n"
-        "            ctx.log('swallowed', {})\n"
-    )
-    model = _TextModel()
-    try:
-        exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=1))
-    finally:
-        model.shutdown()
-        model.server_close()
-    assert exit_code == 0 and not _typed(events, "loop/swallowed")
-    assert events[-1]["data"]["reason"] == {"kind": "max-steps", "steps": 1}
-
-
 def test_agent_runs_an_agent_in_its_own_session_and_appends_its_text(tmp_path: Path) -> None:
     code = (
         "def run_turn(ctx):\n"
@@ -872,8 +830,7 @@ def test_agent_runs_an_agent_in_its_own_session_and_appends_its_text(tmp_path: P
         "    except ValueError as exc:\n"
         "        ctx.log('refused', {'error': str(exc)})\n"
     )
-    model = _TeamModel()
-    try:
+    with _TeamModel() as model:
         exit_code, events = _run(
             tmp_path,
             model,
@@ -881,9 +838,6 @@ def test_agent_runs_an_agent_in_its_own_session_and_appends_its_text(tmp_path: P
             _loop(code, max_steps=6),
             prompt="how many primes are below 100000?",
         )
-    finally:
-        model.shutdown()
-        model.server_close()
     assert exit_code == 0 and events[-1]["data"]["reason"] == {"kind": "completed"}
     assert [e["content"] for e in _typed(events, "assistant/message")] == [
         "the count is 9592",
@@ -933,8 +887,7 @@ def test_an_agents_abort_is_the_turns_end_for_the_loop(tmp_path: Path) -> None:
         "            ctx.end('completed')\n"
         "    ctx.model()\n"
     )
-    model = _CheckerFails()
-    try:
+    with _CheckerFails() as model:
         exit_code, events = _run(
             tmp_path,
             model,
@@ -942,9 +895,6 @@ def test_an_agents_abort_is_the_turns_end_for_the_loop(tmp_path: Path) -> None:
             _loop(code, max_steps=6),
             prompt="how many primes are below 100000?",
         )
-    finally:
-        model.shutdown()
-        model.server_close()
     assert exit_code == 1 and _ends(events) == [] and len(model.requests) == 2
     assert "loop/swallowed" not in {event["type"] for event in events}
     assert events[-1]["type"] == "assistant/message"
@@ -965,12 +915,8 @@ def test_end_ends_with_the_reason_and_refuses_an_unknown_one(tmp_path: Path) -> 
         "    ctx.end('gave_up')\n"
         "    ctx.log('unreachable', {})\n"
     )
-    model = _TextModel()
-    try:
+    with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code))
-    finally:
-        model.shutdown()
-        model.server_close()
     assert exit_code == 0 and not model.requests
     assert [event["type"] for event in events] == [
         "session",
@@ -1083,12 +1029,8 @@ def test_harness_try_refuses_a_native_loop_mutation(tmp_path: Path, reef: _FakeR
 
 def _text_turn(directory: Path, code: str, max_steps: int = 12) -> tuple[int, list[dict[str, Any]]]:
     """One turn of ``code`` against a model that answers in text; the exit status and the root session's events."""
-    model = _TextModel()
-    try:
+    with _TextModel() as model:
         return _run(directory, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=max_steps))
-    finally:
-        model.shutdown()
-        model.server_close()
 
 
 def _ends(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1096,45 +1038,46 @@ def _ends(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [event["data"]["reason"] for event in events if event["type"] == "turn/end"]
 
 
-def test_except_base_exception_cannot_act_past_the_turns_end(tmp_path: Path) -> None:
-    code = (
-        "def run_turn(ctx):\n"
-        "    for _ in range(3):\n"
-        "        try:\n"
-        "            ctx.model()\n"
-        "        except BaseException:\n"
-        "            pass\n"
-        "    ctx.log('after', {})\n"
-    )
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Bounded: a handler that could catch the end would then fail on the events, not hold the test open.
+        "def run_turn(ctx):\n    for _ in range(3):\n        try:\n            ctx.model()\n"
+        "        except Exception:\n            ctx.log('swallowed', {})\n    ctx.log('after', {})\n",
+        "def run_turn(ctx):\n    for _ in range(3):\n        try:\n            ctx.model()\n"
+        "        except BaseException:\n            pass\n    ctx.log('after', {})\n",
+        "def run_turn(ctx):\n    for i in range(2):\n        try:\n            ctx.model()\n"
+        "        except:\n            ctx.log('swallowed', {'i': i})\n",
+        "def run_turn(ctx):\n    try:\n        while True:\n            ctx.model()\n    finally:\n        return\n",
+    ],
+    ids=["except-exception", "except-base-exception", "bare-except", "return-in-finally"],
+)
+def test_loop_code_cannot_act_past_the_max_steps_end(tmp_path: Path, code: str) -> None:
+    """The end crosses every handler: whatever the code catches or returns, the end is the turn's, and the code
+    writes nothing after it."""
     exit_code, events = _text_turn(tmp_path, code, max_steps=1)
     assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
-    assert "loop/after" not in {event["type"] for event in events}
+    assert not _typed(events, "loop/swallowed") and not _typed(events, "loop/after")
+    assert len(_typed(events, "step/start")) == 1
     assert [event["type"] for event in events][-2:] == ["loop/exit", "turn/end"]
     assert stage_path(events) == {"stages": [], "reason": "max-steps"}
 
 
-def test_a_finally_cannot_replace_an_abort_with_its_own_end(tmp_path: Path) -> None:
-    code = (
-        "def run_turn(ctx):\n"
-        "    try:\n"
-        "        while True:\n"
-        "            ctx.run_tools()\n"
-        "    finally:\n"
-        "        ctx.log('late', {})\n"
-        "        ctx.end('gave_up')\n"
-    )
+@pytest.mark.parametrize(
+    "code",
+    [
+        "def run_turn(ctx):\n    try:\n        while True:\n            ctx.run_tools()\n"
+        "    finally:\n        ctx.log('late', {})\n        ctx.end('gave_up')\n",
+        "def run_turn(ctx):\n    try:\n        while True:\n            ctx.run_tools()\n"
+        "    finally:\n        ctx.end('gave_up')\n",
+    ],
+    ids=["log-then-end", "end-only"],
+)
+def test_a_finally_cannot_replace_an_abort_with_its_own_end(tmp_path: Path, code: str) -> None:
     exit_code, events = _text_turn(tmp_path, code, max_steps=2)
     error = {"code": "LOOP_ERROR", "message": f"loop 'main' took more than {3 * TRANSITIONS_PER_STEP} transitions"}
     assert exit_code == 1 and _ends(events) == [{"kind": "error", "error": error}]
     assert "loop/late" not in {event["type"] for event in events}
-    assert _typed(events, "loop/exit") == [{"reason": "error"}]
-
-
-def test_a_finally_that_only_ends_gets_the_abort_again(tmp_path: Path) -> None:
-    code = "def run_turn(ctx):\n    try:\n        while True:\n            ctx.run_tools()\n    finally:\n        ctx.end('gave_up')\n"
-    exit_code, events = _text_turn(tmp_path, code, max_steps=2)
-    error = {"code": "LOOP_ERROR", "message": f"loop 'main' took more than {3 * TRANSITIONS_PER_STEP} transitions"}
-    assert exit_code == 1 and _ends(events) == [{"kind": "error", "error": error}]
     assert _typed(events, "loop/exit") == [{"reason": "error"}]
 
 
@@ -1143,27 +1086,6 @@ def test_an_exception_after_the_end_keeps_the_end_and_is_named_on_stderr(tmp_pat
     exit_code, events = _text_turn(tmp_path, code, max_steps=1)
     assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
     assert "[reef-native] loop 'main' raised after the end: RuntimeError: late" in capfd.readouterr().err
-
-
-def test_a_return_in_finally_keeps_the_max_steps_end(tmp_path: Path) -> None:
-    code = "def run_turn(ctx):\n    try:\n        while True:\n            ctx.model()\n    finally:\n        return\n"
-    exit_code, events = _text_turn(tmp_path, code, max_steps=1)
-    assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
-    assert stage_path(events) == {"stages": [], "reason": "max-steps"}
-
-
-def test_a_bare_except_gets_the_end_again_and_writes_nothing(tmp_path: Path) -> None:
-    code = (
-        "def run_turn(ctx):\n"
-        "    for i in range(2):\n"
-        "        try:\n"
-        "            ctx.model()\n"
-        "        except:\n"
-        "            ctx.log('swallowed', {'i': i})\n"
-    )
-    exit_code, events = _text_turn(tmp_path, code, max_steps=1)
-    assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
-    assert not _typed(events, "loop/swallowed") and len(_typed(events, "step/start")) == 1
 
 
 def test_say_and_log_count_against_the_transition_cap(tmp_path: Path) -> None:

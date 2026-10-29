@@ -18,15 +18,16 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
+from reef.artifact.files import directory_content_id
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
-from reef.artifact.sources import directory_content_id
+from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.releases import ScenarioReleases
+from reef.scenario.releases import ScenarioReleases, ServedArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitOperation,
@@ -38,6 +39,7 @@ from reef.storage.commits import (
     to_json_value,
 )
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
+from reef.surface.base import ArtifactLayout
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainStepResult
 
@@ -291,6 +293,24 @@ class ScenarioCommitter:
             return None
         return self.release_manifest(artifact).artifact_ids(release_id)
 
+    def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
+        """The component an import into ``component`` lands in, and the layout that checks its directory.
+
+        ``component`` may be left out when the scenario has one component. Raise ``ValueError`` for an unknown
+        component or one that takes no import. Purpose: the import service calls it before it downloads anything.
+        """
+        names = self.component_names()
+        if component is None:
+            if len(names) > 1:
+                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
+            component = names[0]
+        if component not in names:
+            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+        component_surface = self._binding.surface.components.get(component)
+        if component_surface is None or component_surface.layout is None:
+            raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
+        return component, component_surface.layout
+
     def component_names(self) -> tuple[str, ...]:
         """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
         return self._binding.surface.names or (self.trainers[0].component,)
@@ -360,34 +380,118 @@ class ScenarioCommitter:
             if surface.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return replace(selected, release_id=current_ref.release_id)
             self.require_no_pending_commit("activate an artifact")
-            if surface.single:
-                # The release's own admission check, as at its publication.
-                surface.validate(release)
-                target, recorded_component, components = release, None, None
-            else:
-                staged = self.stage_combination(
-                    self._step + 1, served, selected.component, release.component(selected.component)
-                )
-                manifest = self.release_manifest(staged)
-                # Published beside the chain: the chain tip and the backend head stay.
-                published_ref = self._artifacts.publish(
-                    staged,
-                    expected_parent=self._artifacts.checkpoint,
-                    metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: manifest.to_dict()},
-                    advance_heads=False,
-                )
-                target, recorded_component, components = (
-                    self._artifacts.resolve(published_ref),
-                    selected.component,
-                    manifest.artifact_ids(published_ref.release_id),
-                )
+            target = self.release_with(served, selected, release)
             surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
-                "activate", target.ref, component=recorded_component, components=components
+                "activate",
+                target.ref,
+                component=None if surface.single else selected.component,
+                components=self.recorded_components(target, target.ref.release_id),
             )
             self._artifacts.activate(target.ref, expected=current_ref)
             self.advance_to(record.step)
             return replace(selected, release_id=target.ref.release_id)
+
+    def release_with(self, active: Artifact, selected: ComponentArtifact, release: Artifact) -> Artifact:
+        """The release ``active`` with ``selected.component`` bound to the artifact ``selected``.
+
+        ``release`` is the release that made the artifact. With one component,
+        the result is ``release``, after its own admission check, as at its
+        publication. With several, the result is a new release: ``active``
+        with the one component replaced. It is published beside the chain, so
+        the chain tip and the backend head stay.
+        """
+        surface = self._binding.surface
+        if surface.single:
+            surface.validate(release)
+            return release
+        staged = self.stage_combination(
+            self._step + 1, active, selected.component, release.component(selected.component)
+        )
+        published_ref = self._artifacts.publish(
+            staged,
+            expected_parent=self._artifacts.checkpoint,
+            metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict()},
+            advance_heads=False,
+        )
+        return self._artifacts.resolve(published_ref)
+
+    def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Serve ``artifact_id`` as ``component`` beside the active release; return it with the release that serves it.
+
+        The release that serves it is the active release with the artifact in
+        its component (:meth:`release_with`).
+        Then the ``"serve"`` record lands at the next step. The active
+        release, the chain tip and every training start stay. Serving a
+        served artifact changes nothing. An artifact of the active release can
+        be served too, so that it keeps serving after another activation.
+
+        Raise as :meth:`resolve_artifact` does, and ``CommitPending`` while a
+        training result waits for its commit. Raise ``ReefError`` when the
+        scenario keeps no durable commit history. Raise it also when the
+        runtime answers only from the release that it has loaded
+        (``InferenceRuntime.artifact_model`` is ``None``).
+        """
+        with self._lock, self._publication_lock:
+            if not self._store.durable:
+                raise ReefError(
+                    f"scenario {self._name!r} keeps no durable commit history, so it serves its active release alone"
+                )
+            selected, release = self.resolve_artifact(artifact_id, component)
+            served = self.release_queries.served_beside(self._step, self.component_names()).get(selected.artifact_id)
+            if served is not None:
+                return replace(selected, release_id=served.release.release_id)
+            self.require_no_pending_commit("serve an artifact")
+            surface = self._binding.surface
+            current = Artifact(self._artifacts.current, self._artifacts.repository)
+            loader = surface.loader_component
+            runtime = self._binding.runtime
+            if loader is not None and runtime is not None:
+                # The calls use the artifact's own weights, or the active release's weights for an artifact of
+                # another component. The runtime must answer each call from the release that the call names.
+                source = release if surface.single or selected.component == loader else current
+                if runtime.artifact_model(surface.component_artifact(source, loader)) is None:
+                    raise ReefError(
+                        f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
+                        f"cannot serve artifact {selected.artifact_id!r} beside the active release"
+                    )
+            target = self.release_with(current, selected, release)
+            record = self.append_operation_record(
+                "serve",
+                target.ref,
+                component=None if surface.single else selected.component,
+                components=self.recorded_components(target, target.ref.release_id),
+            )
+            self.advance_to(record.step)
+            return replace(selected, release_id=target.ref.release_id)
+
+    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+        """Stop serving ``artifact_id`` beside the active release; return it with the release that served it.
+
+        The ``"stop_serving"`` record names the release, the component and the
+        manifest of the ``"serve"`` record that it ends. The active release
+        stays, so an artifact that it binds still answers. Raise
+        ``ArtifactNotFound`` when the scenario does not serve ``artifact_id``
+        beside its active release. Raise ``CommitPending`` while a training
+        result waits for its commit.
+        """
+        with self._lock, self._publication_lock:
+            served = self.release_queries.served_beside(self._step, self.component_names()).get(artifact_id)
+            if served is None:
+                raise ArtifactNotFound(
+                    f"scenario {self._name!r} does not serve artifact {artifact_id!r} beside its active release"
+                )
+            self.require_no_pending_commit("stop serving an artifact")
+            if self._binding.surface.single:
+                recorded_component, components = None, None
+            else:
+                recorded_component = served.component
+                components = self.release_queries.manifests(self._step)[served.release.release_id]
+            record = self.append_operation_record(
+                "stop_serving", served.release, component=recorded_component, components=components
+            )
+            self.advance_to(record.step)
+            return served
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Set ``component``'s training start to ``artifact_id``; return the artifact.
@@ -416,39 +520,44 @@ class ScenarioCommitter:
             return selected
 
     def import_artifact(
-        self, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
     ) -> ComponentArtifact:
-        """Publish the files in ``directory`` as a new artifact of ``component``; return it (RFC #980).
+        """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
         ``component`` may be left out when the scenario has one component.
-        The component's layout (``ComponentSurface.layout``) checks the
-        directory first, outside the locks, since it can ask a remote service.
-        Then the release's own admission check runs, as at a training
-        publication. The artifact's content id is ``directory_content_id``.
-        The release binds the artifact as ``component`` and every other
+        The component's layout (``ComponentSurface.layout``) checks ``files``
+        first, outside the locks, since it can ask a remote service, and
+        before anything is copied. Then Reef stores the artifact in the empty
+        ``directory``: ``files.reference`` when the source keeps the files
+        fixed and the layout's readers resolve a reference (RFC #995,
+        ``ArtifactLayout.resolves_references``), else a copy of the files
+        (RFC #980). The release's
+        own admission check runs on what is stored, as at a training
+        publication. The artifact's content id is the content id of
+        ``files``: a copy's is computed from the copy, which has the same
+        bytes. The release binds the artifact as ``component`` and every other
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
-        directory was read from, as its metrics. The active release, the chain tip,
-        every training start and the activation rule are left alone. Raise
-        ``ValueError`` for an unknown component, a component that takes no
-        import, or a directory that the layout or the admission check refuses;
-        ``CommitPending`` while a training result waits for its commit.
-        Nothing changes then.
+        files were read from, as its metrics. The active release, the chain
+        tip, every training start and the activation rule are left alone.
+        Raise ``ValueError`` for an unknown component, a component that takes
+        no import, or files that the layout or the admission check refuses;
+        ``ArtifactSourceError`` when the copy fails; ``CommitPending`` while a
+        training result waits for its commit. Nothing changes then.
         """
-        names = self.component_names()
-        if component is None:
-            if len(names) > 1:
-                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
-            component = names[0]
-        if component not in names:
-            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+        component, layout = self.import_target(component)
         surface = self._binding.surface
-        component_surface = surface.components.get(component)
-        if component_surface is None or component_surface.layout is None:
-            raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
-        component_surface.layout.check(directory)
-        imported = Artifact.local(directory, content_id=directory_content_id(directory))
+        component_surface = surface.components[component]
+        layout.check(files)
+        if files.reference is None or not layout.resolves_references:
+            files.copy_into(directory)
+            content_id = directory_content_id(directory)
+        else:
+            for path, data in files.reference.items():
+                (directory / path).write_bytes(data)
+            content_id = files.content_id()
+        imported = Artifact.local(directory, content_id=content_id)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1
@@ -598,7 +707,7 @@ class ScenarioCommitter:
             if backend is not None:
                 backend_config: dict[str, Any] | None = dict(backend.experiment_config())
             elif job_loop is not None:
-                backend_config = dict(job_loop.plan.experiment_config())
+                backend_config = dict(trainer.pipeline.sample2job.experiment_config())
             else:
                 backend_config = None
         except Exception:
@@ -911,11 +1020,12 @@ class ScenarioCommitter:
         components: Mapping[str, str] | None = None,
         metrics: Mapping[str, Any] | None = None,
     ) -> CommitRecord:
-        """Append an ``"activate"``, ``"train_from"`` or ``"import"`` record at the next step; it carries no trainer
-        state.
+        """Append a record that carries no trainer state at the next step: an ``"activate"``, ``"train_from"``,
+        ``"import"``, ``"serve"`` or ``"stop_serving"`` record.
 
-        ``components`` is the manifest of a release that an activation or an import published, and ``component``
-        then names the activated or imported component. ``metrics`` is an import's source.
+        ``components`` is the manifest of a release that an activation, an import or a serve published.
+        ``component`` then names the component that it activated, imported or served. ``metrics`` is an import's
+        source.
         """
         record = CommitRecord(
             scenario=self._name,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -14,12 +15,15 @@ from tests.support.component_trainers import _TwoTrainerRecipe, component_files,
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.core.errors import CommitPending, TrainingStartRefused
+from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
+from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
+from reef.core.evaluation import PolicyModel
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
-
 from reef.surface.weights import WeightInferenceHooks, WeightLoader
 
 
@@ -250,11 +254,20 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         dispatcher.close()
 
 
+def store(tmp_path: Path) -> Path:
+    """A new empty directory for an import to store into."""
+    stores = tmp_path / "stores"
+    stores.mkdir(exist_ok=True)
+    directory = stores / str(len(list(stores.iterdir())))
+    directory.mkdir()
+    return directory
+
+
 class HarnessText(ArtifactLayout):
     """The harness layout of the two trainer recipe: one ``harness.txt``."""
 
-    def check(self, directory: Path) -> None:
-        if [path.name for path in directory.iterdir()] != [f"{HARNESS}.txt"]:
+    def check(self, files: ArtifactFiles) -> None:
+        if files.paths() != (f"{HARNESS}.txt",):
             raise ValueError(f"a harness artifact holds only {HARNESS}.txt")
 
 
@@ -266,6 +279,38 @@ class _ImportingRecipe(_LoadedRecipe):
         surface = super().build_surface(scenario)
         harness = replace(surface.components[HARNESS], layout=HarnessText())
         return replace(surface, components={**surface.components, HARNESS: harness})
+
+
+class PinnedSource(DirectorySource):
+    """A directory whose source keeps it fixed, as a Hugging Face commit does: it offers a reference."""
+
+    @property
+    def reference(self):
+        return {REFERENCE_FILE: json.dumps(HuggingFaceRevision("org/harness", "0" * 40).to_dict()).encode()}
+
+
+@pytest.mark.unit
+def test_a_component_whose_readers_resolve_no_reference_imports_a_copy(tmp_path: Path) -> None:
+    runtime = StubInferenceRuntime()
+    dispatcher = _dispatcher(tmp_path, _ImportingRecipe)
+    imported_dir = tmp_path / "imported"
+    imported_dir.mkdir()
+    (imported_dir / f"{HARNESS}.txt").write_text("harness imported", encoding="utf-8")
+    try:
+        scenario = _scenario(dispatcher, runtime)
+        _step(scenario, WEIGHTS, 1)
+        assert not HarnessText().resolves_references
+        imported = scenario.import_artifact(
+            PinnedSource(imported_dir, source_version="0" * 40, link=False),
+            HARNESS,
+            source={"uri": f"hf://org/harness@{'0' * 40}", "version": "0" * 40},
+            directory=store(tmp_path),
+        )
+        # The harness's readers read its files, so the import stores them, not the source's reference.
+        scenario.activate(imported.artifact_id, HARNESS)
+        assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness imported"
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit
@@ -282,7 +327,12 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
         tip = scenario.repository.checkpoint_artifact
 
         source = {"uri": imported_dir.as_uri(), "version": ""}
-        imported = scenario.import_artifact(imported_dir, HARNESS, source=source)
+        imported = scenario.import_artifact(
+            DirectorySource(imported_dir, source_version="", link=False),
+            HARNESS,
+            source=source,
+            directory=store(tmp_path),
+        )
 
         assert imported.artifact_id == f"{imported.release_id}:{HARNESS}"
         assert scenario.current_artifact_ref() == served
@@ -296,12 +346,27 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
             (imported.artifact_id, HARNESS, False)
         ]
         with pytest.raises(ValueError, match="name the component"):
-            scenario.import_artifact(imported_dir, None, source=source)
+            scenario.import_artifact(
+                DirectorySource(imported_dir, source_version="", link=False),
+                None,
+                source=source,
+                directory=store(tmp_path),
+            )
         with pytest.raises(ValueError, match="takes no imported artifact"):
-            scenario.import_artifact(imported_dir, WEIGHTS, source=source)
+            scenario.import_artifact(
+                DirectorySource(imported_dir, source_version="", link=False),
+                WEIGHTS,
+                source=source,
+                directory=store(tmp_path),
+            )
         (imported_dir / "extra.txt").write_text("x", encoding="utf-8")
         with pytest.raises(ValueError, match="holds only"):
-            scenario.import_artifact(imported_dir, HARNESS, source=source)
+            scenario.import_artifact(
+                DirectorySource(imported_dir, source_version="", link=False),
+                HARNESS,
+                source=source,
+                directory=store(tmp_path),
+            )
 
         # Activating it binds the imported harness to the weights that serve now.
         scenario.activate(imported.artifact_id, HARNESS)
@@ -309,5 +374,40 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
             WEIGHTS: "weights step 1",
             HARNESS: "harness imported",
         }
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_release(tmp_path: Path) -> None:
+    """A serve publishes the combination beside the chain, as an activation does, and moves no head."""
+    runtime = StubInferenceRuntime()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, runtime)
+        first = _step(scenario, HARNESS, 1)
+        _step(scenario, HARNESS, 2)
+        active = scenario.current_artifact_ref()
+        tip = scenario.repository.checkpoint_artifact
+        artifact_id = f"{first}:{HARNESS}"
+        with pytest.raises(ReefError, match="answers only from the release it has loaded"):
+            scenario.serve(artifact_id, HARNESS)
+
+        runtime.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+        served = scenario.serve(artifact_id, HARNESS)
+        assert served.artifact_id == artifact_id and served.release_id != first
+        release = scenario.served_release(artifact_id)
+        assert release.release_id == served.release_id
+        assert component_files(scenario, release) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
+        assert scenario.current_artifact_ref() == active
+        assert scenario.repository.checkpoint_artifact == tip
+        record = scenario.store.history()[-1]
+        assert (record.operation, record.component, record.components[HARNESS]) == ("serve", HARNESS, artifact_id)
+
+        stopped = scenario.stop_serving(artifact_id)
+        assert stopped.release == release
+        assert scenario.store.history()[-1].components == record.components
+        with pytest.raises(ArtifactNotFound):
+            scenario.served_release(artifact_id)
     finally:
         dispatcher.close()

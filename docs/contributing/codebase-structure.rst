@@ -87,7 +87,7 @@ import a concrete integration.
 |                         | pipeline, job data types, training components            | configuration parsing                      |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2record/`` | which records Reef uses and in what order: report        | sample and job data assembly, record       |
-|                         | grouping, judging, eligibility checks, selection order   | storage, task generation                   |
+|                         | grouping, judging, eligibility checks, staleness check   | storage, task generation                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2sample/`` | turning a record set into samples (``Record2Sample``,    | which records train, job data shape,       |
 |                         | ``ReportSamples``, ``JudgedSamples``), and the generator | training loops                             |
@@ -97,8 +97,8 @@ import a concrete integration.
 |                         | rollouts, built-in selection policies, and the           | artifact publication                       |
 |                         | ``evaluation`` plugin configuration                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sample2job/``    | shaping the samples of the selected record set units     | which records train, the training loop,    |
-|                         | into one job's data (``Sample2Job``)                     | step signals                               |
+| ``reef/sample2job/``    | shaping the samples of the buffer into one job's         | which records train, the training loop,    |
+|                         | data (``Sample2Job``), and the job size                  | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/runtime/``       | backend-neutral contracts: training components,          | concrete inference and training            |
 |                         | inference runtimes, saved-weight serving, executors      | integrations                               |
@@ -115,8 +115,8 @@ import a concrete integration.
 | ``reef/harness/``       | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
 |                         | rollouts, trajectories                                   |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
-|                         | and environment lifecycle through Harbor                 | policy                                     |
+| ``reef/execution/``     | job scheduling, process ownership, isolation,            | harness rendering, evaluation, recipe      |
+|                         | file transfer and environment lifecycle                  | policy                                     |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``recipes/``            | one method per package: recipe, processor, objective,    | shared machinery, or another method        |
 |                         | and its runnable examples                                |                                            |
@@ -157,24 +157,31 @@ package's own submodules and third-party libraries):
      - ``surface``, ``artifact``, ``core``
    * - ``inference``
      - ``runtime``, ``artifact``, ``core``
-   * - ``sandbox``
+   * - ``execution``
      - ``core``
    * - ``harness``
-     - ``sandbox``, ``runtime``, ``core``
+     - ``execution``, ``runtime``, ``core``
    * - ``evaluation``
-     - ``harness``, ``sandbox``, ``runtime``, ``core``
+     - ``harness``, ``execution``, ``runtime``, ``core``
    * - ``train``
-     - ``evaluation``, ``harness``, ``sandbox``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``harness``, ``execution``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``harness``, ``sandbox``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``harness``, ``execution``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``scenario``
      - ``recipe``, ``train``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``record2sample``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``cli``
      - ``service``, ``core``
+
+``execution/lifecycle.py`` defines the shared ``Execution`` interface using
+only the standard library. ``execution/processes.py`` adds local process
+ownership and depends only on that interface and the standard library.
+``execution/jobs.py`` depends only on these two modules and the standard library. Sandbox executors and generator checks also use
+``execution/processes.py`` for local child ownership. The shared worker must not import
+``execution.sandbox`` or its providers and executor adapters.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
@@ -220,7 +227,7 @@ Runtime contracts have no direct imports of concrete inference or training
 code; the deployment registry resolves the selected factory explicitly.
 
 In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
-``JobLoop``, the recipe's ``JobPlan`` and the committed ``JobLoopState``;
+``JobLoop`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
 definitions; and ``backend.py`` holds ``CandidateBackend``, the candidate
@@ -305,9 +312,9 @@ The extension points those packages expose are in `Python API
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations, and ``ScopedTable``, one table
   with the namespace of one store. ``sql_tasks.py``,
-  ``sql_trajectories.py``, ``sql_evaluations.py`` and ``sql_commits.py``
-  share the task, trajectory, artifact evaluation and commit tables and their
-  operations in the same database.
+  ``sql_samples.py``, ``sql_evaluations.py`` and ``sql_commits.py``
+  share the task, training sample, artifact evaluation and commit tables and
+  their operations in the same database.
   ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
   ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
   maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,

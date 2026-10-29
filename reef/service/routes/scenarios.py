@@ -63,8 +63,8 @@ def register_scenario_routes(
         payload = await read_object(request)
         if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation", "activation"}:
             raise ValueError("expected training_mode, model, artifact_evaluation or activation settings")
-        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual", "hybrid"):
-            raise ValueError("expected training_mode 'auto', 'manual' or 'hybrid'")
+        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
+            raise ValueError("expected training_mode 'auto' or 'manual'")
         name = request.match_info["scenario"]
         result: dict[str, object] = {"scenario": name}
         if "model" in payload:
@@ -139,7 +139,7 @@ def register_scenario_routes(
         )
 
     async def read_artifact_selection(request: web.Request) -> tuple[str, str | None]:
-        """The ``artifact_id`` and the optional ``component`` an activation or a new training start names."""
+        """The ``artifact_id`` and the optional ``component`` that an activation, a train-from or a serve names."""
         payload = await read_object(request)
         artifact_id = payload.get("artifact_id")
         component = payload.get("component")
@@ -163,6 +163,35 @@ def register_scenario_routes(
             }
         )
 
+    async def serve_artifact(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        artifact_id, component = await read_artifact_selection(request)
+        served = await asyncio.to_thread(request_service.dispatcher.serve, scenario, artifact_id, component)
+        return web.json_response(
+            {
+                "scenario": scenario,
+                "component": served.component,
+                "artifact_id": served.artifact_id,
+                "release_id": served.release_id,
+                "content_id": served.content_id,
+            }
+        )
+
+    async def stop_serving_artifact(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        artifact_id, component = await read_artifact_selection(request)
+        if component is not None:
+            raise ValueError("stop-serving takes the artifact_id alone: it names one artifact of one component")
+        stopped = await asyncio.to_thread(request_service.dispatcher.stop_serving, scenario, artifact_id)
+        return web.json_response(
+            {
+                "scenario": scenario,
+                "component": stopped.component,
+                "artifact_id": stopped.artifact_id,
+                "release_id": stopped.release.release_id,
+            }
+        )
+
     async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         artifact_id, component = await read_artifact_selection(request)
@@ -183,6 +212,8 @@ def register_scenario_routes(
     app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
     app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)
 
 
 __all__ = ["register_scenario_routes"]

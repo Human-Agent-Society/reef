@@ -23,12 +23,12 @@ from pathlib import Path
 
 import pytest
 
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.rollouts.run import RolloutError, run_rollout
 from reef.harness.runners.terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV
 from reef.harness.tree.render import render_composition
-from reef.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxExecutor
 
 # Stands in for the runner: prove the rollout reaches it with what it needs.
 STUB = """#!/usr/bin/env python3

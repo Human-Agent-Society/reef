@@ -8,6 +8,7 @@ import hashlib
 import importlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -22,13 +23,18 @@ import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 
+from reef.artifact.files import DirectoryFiles
 from reef.core.requirements import REQUIRE_KINDS
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.rollouts.model_binding import ModelBindingError
 from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tree.nodes import NODE_KINDS
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.cordis import CordisRecipe
+from reef.recipe.registry import build_named_recipe
+from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface.files import ENTRIES_FILE
@@ -147,18 +153,19 @@ def proposal(entry_id: str, name: str = "skill", *, config_name: str | None = No
 # -- propose: parsing, routing, refusal ----------------------------------
 
 
-def test_propose_updates_an_existing_skill_from_a_fenced_reply(evolution, monkeypatch) -> None:
-    model = canned(f"```json\n{proposal('answer-style')}\n```")
-    mutation = evolution.propose(NODES, SAMPLES, model)
+@pytest.mark.parametrize(
+    "reply, op, entry_id",
+    [
+        (f"```json\n{proposal('answer-style')}\n```", "update", "answer-style"),
+        (proposal("csv-median"), "create", "csv-median"),
+    ],
+    ids=["existing-fenced", "unknown"],
+)
+def test_propose_updates_an_existing_skill_and_creates_an_unknown_one(evolution, reply, op, entry_id) -> None:
+    mutation = evolution.propose(NODES, SAMPLES, canned(reply))
     assert isinstance(mutation, Mutation)
-    assert (mutation.op, mutation.id) == ("update", "answer-style")
-    assert mutation.options == {"name": "skill", "config": {"name": "answer-style", "text": "# improved\n\ntext"}}
-
-
-def test_propose_creates_a_new_skill_for_an_unknown_id(evolution, monkeypatch) -> None:
-    model = canned(proposal("csv-median"))
-    mutation = evolution.propose(NODES, SAMPLES, model)
-    assert (mutation.op, mutation.id) == ("create", "csv-median")
+    assert (mutation.op, mutation.id) == (op, entry_id)
+    assert mutation.options == {"name": "skill", "config": {"name": entry_id, "text": "# improved\n\ntext"}}
 
 
 def test_propose_refuses_non_skill_kinds(evolution) -> None:
@@ -166,7 +173,7 @@ def test_propose_refuses_non_skill_kinds(evolution) -> None:
     assert evolution.propose(NODES, SAMPLES, model) is None
 
 
-def test_propose_returns_none_on_garbage(evolution, monkeypatch) -> None:
+def test_propose_returns_none_on_garbage(evolution) -> None:
     for reply in (
         "no json here",
         '{"id": 1, "name": "skill", "config": {}}',
@@ -810,16 +817,11 @@ def pi_message(text: str) -> dict:
     return {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
 
 
-def test_evaluate_grades_exact_final_lines(evolution) -> None:
+def test_evaluate_grades_exact_final_lines_and_anything_else_as_zero(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
     assert evolution.evaluate(task, rollout((pi_message(f"Working...\n\n{answer}"),))) == 1.0
     assert evolution.evaluate(task, rollout(({"role": "assistant", "content": answer},))) == 1.0
-
-
-def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
-    prefix, answer = next(iter(evolution.ANSWERS.items()))
-    task = f"{prefix} the task"
     assert evolution.evaluate(task, rollout((pi_message(f"{answer}!"),))) == 0.0
     assert evolution.evaluate(task, rollout((pi_message(f"The answer is {answer}"),))) == 0.0
     assert evolution.evaluate(task, rollout(())) == 0.0
@@ -866,8 +868,6 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert "reef" not in settings and "services" not in settings
     assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["recipe"]["config"]["evolution"]["tasks"]
     # Boot the real recipe; a retained selector without its profile would fail here.
-    from reef.inference.http import InferenceProxyRuntime
-
     recipe = CordisRecipe.from_environment(
         {},
         config=recipe_config_from_file_layout(settings),
@@ -924,8 +924,6 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
         "dummy",
         "qwen3-8b",
     )
-    from reef.service.assembly import _upstream_runtime
-
     settings = load_recipe_config(materialized)
     built = CordisRecipe.from_environment({}, config=settings, runtime=_upstream_runtime(service))
     assert built.adapter == "pi"
@@ -1054,8 +1052,6 @@ MAIN_GRAPH = {
 def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_evolution) -> None:
     """An agent alone can never win: only a subagent stage runs one, and its text comes back as a user message
     the grader never reads. The proposal carries the graph edit: ask the agent, then a model stage answers."""
-    from reef.harness.tree.nodes import NODE_KINDS
-
     reply = native_proposal("native_agent", "helper", prompt="Solve the task alone.", tools=["read_file"])
     nodes = (*NATIVE_NODES, ("native_graph", MAIN_GRAPH))
     proposal = native_evolution.propose(nodes, SAMPLES, canned(reply))
@@ -1116,36 +1112,6 @@ def test_native_evaluate_reads_the_last_assistant_message_with_content(native_ev
     assert native_evolution.evaluate(task, rollout(())) == 0.0
 
 
-def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolution, tmp_path, monkeypatch) -> None:
-    """The run.sh native contract, hermetic: the native serve file materializes
-    like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
-    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    materialized = tmp_path / "harness_evolve.yaml"
-    _write_recipe_file(materialized, config, config["evolution"])
-    from reef.service.assembly import _upstream_runtime
-
-    service = service_config_from_mapping(config)
-    built = CordisRecipe.from_environment(
-        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
-    )
-    assert built.adapter == "native" and built.binary is None
-    # The same three tasks as the pi variant, so the two runs are comparable.
-    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
-    assert (built.batch_size, built.training_mode) == (1, "auto")
-    assert [entry["id"] for entry in built.seed] == [
-        "read_file",
-        "write_file",
-        "run_bash",
-        "execute",
-        "loop_guard",
-        "main",
-        "answer-style",
-    ]
-    assert "upstream" not in yaml.safe_dump(list(built.seed))
-    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no rollouts
-
-
 @pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])
 def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(
     monkeypatch, tmp_path, model_id
@@ -1154,11 +1120,6 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     directory the service's own env names, and the harness package is on the
     PYTHONPATH the same env sets; a stale directory name here fails at boot, so
     the file's own paths are checked against the checkout."""
-    import os
-
-    from reef.recipe.registry import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
-
     repo_root = EXAMPLE_DIR.parents[1]
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", model_id)
@@ -1189,11 +1150,11 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
-    # The person asks while it keeps learning from failures, so the tutorial proposer must take requests.
-    assert built.training_mode == "hybrid"
+    # Only a person's ask starts a step, so the tutorial proposer must take requests.
+    assert built.training_mode == "manual"
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
-    assert trainer.pipeline.training_mode == "hybrid"
+    assert trainer.pipeline.training_mode == "manual"
     # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
     assert trainer.job_samples == 1
     trainer.close()
@@ -1208,17 +1169,13 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     The two demo files run in auto, where an ask is refused, so they set none
     of the three. The ``evolution`` fixture puts the tutorial's harness package
     on the path the deployment's dotted references resolve through."""
-    import os
-
-    from reef.service.assembly import _serving_recipe
-
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     monkeypatch.setenv("REEF_PYTHON", sys.executable)
     monkeypatch.setenv("PWD", str(EXAMPLE_DIR.parents[1]))
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
-    assert config["data"]["training_mode"] == "hybrid"
+    assert config["data"]["training_mode"] == "manual"
     assert config["evolution"]["requests"] is True and config["evolution"]["version_check"] is True
     assert config["activation"] == {"module": "always", "config": {"review_kinds": ["code_extension"]}}
     for name in ("serve", "serve-native"):
@@ -1244,18 +1201,36 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     ]
 
 
-def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:
-    """The seed a deployment ships is what a fresh scenario serves, rendered once by the recipe."""
+def test_native_example_yaml_boots_the_recipe_and_renders_its_seed_as_the_base_files(
+    native_evolution, tmp_path, monkeypatch
+) -> None:
+    """The run.sh native contract, hermetic: the native serve file materializes like serve.yaml and boots with the
+    loop's own tools and hook seeded by reference. The seed a deployment ships is what a fresh scenario serves,
+    rendered once by the recipe."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
     materialized = tmp_path / "harness_evolve.yaml"
     _write_recipe_file(materialized, config, config["evolution"])
-    from reef.service.assembly import _upstream_runtime
-
     service = service_config_from_mapping(config)
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )
+    assert built.adapter == "native" and built.binary is None
+    # The same three tasks as the pi variant, so the two runs are comparable.
+    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
+    assert (built.batch_size, built.training_mode) == (1, "auto")
+    assert [entry["id"] for entry in built.seed] == [
+        "read_file",
+        "write_file",
+        "run_bash",
+        "execute",
+        "loop_guard",
+        "main",
+        "answer-style",
+    ]
+    assert "upstream" not in yaml.safe_dump(list(built.seed))
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no rollouts
+
     files = built.base_artifact_source().files
     assert {"native/tools/read_file.py", "native/graphs/main.json", "native/skills/answer-style/SKILL.md"} <= set(
         files
@@ -1273,19 +1248,19 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     for relative, text in files.items():
         (tree / relative).parent.mkdir(parents=True, exist_ok=True)
         (tree / relative).write_text(text, encoding="utf-8")
-    layout.check(tree)
+    layout.check(DirectoryFiles(tree))
     (tree / ENTRIES_FILE).write_text(json.dumps(base_entries), encoding="utf-8")
-    layout.check(tree)
+    layout.check(DirectoryFiles(tree))
     (tree / "notes.txt").write_text("extra", encoding="utf-8")
     with pytest.raises(ValueError, match=r"extra \['notes.txt'\]"):
-        layout.check(tree)
+        layout.check(DirectoryFiles(tree))
     (tree / "notes.txt").unlink()
     (tree / "native" / "models.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match=r"native/models\.json differs from the render"):
-        layout.check(tree)
+        layout.check(DirectoryFiles(tree))
     (tree / ENTRIES_FILE).write_text(json.dumps([{"id": "x", "name": "unknown_kind"}]), encoding="utf-8")
     with pytest.raises(ValueError, match="the harness entries are refused"):
-        layout.check(tree)
+        layout.check(DirectoryFiles(tree))
     assert CordisRecipe.from_environment(
         {},
         config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},

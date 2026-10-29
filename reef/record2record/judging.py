@@ -20,10 +20,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.records_types import AgentRecord
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.record2record.base import Record2Record
-from reef.record2record.selection import ArrivalOrder
 from reef.record2record.sets import RecordSet
 
 
@@ -81,7 +80,7 @@ class JudgingRecord2Record(Record2Record):
     """
 
     def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None, *, max_staleness: int = 0) -> None:
-        super().__init__(ArrivalOrder(), max_staleness=max_staleness)
+        super().__init__(max_staleness=max_staleness)
         self.judging = judging
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}
@@ -175,10 +174,8 @@ class JudgingRecord2Record(Record2Record):
             self.producing_runtime_load_ids.pop(agent_record_id, None)
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        reserved = len(self.pool.reserved_units())
         return {
             "tracked_records": len(self.tracked),
             "judging_records": len(self.in_flight),
-            "unreserved_candidates": len(self.pool) - reserved,
-            "reserved_candidates": reserved,
+            "waiting_candidates": len(self.pool),
         }

@@ -54,8 +54,8 @@ proposer, a rollout scorer, and a selection policy against a fixed model, see
 
 The shaded steps are the method's. A reported-feedback processor assembles
 valid reports and their already stored inference records into samples, then
-puts complete units into job data. The recipe's job plan gives the parameters of the
-training job for each job's ready data. The training component runs the job: the
+puts complete units into job data. The recipe gives the parameters of the
+training job for each kind of sample. The training component runs the job: the
 method's objective prepares the signal, and the backend trains it and saves
 checkpoints. The backend validates the required training fields. A contract
 failure raises an error; the backend does not silently drop reports. For each
@@ -78,7 +78,7 @@ A weight recipe is four pieces plus the class that binds them.
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
    pipeline stages | the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
-   recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``job_plan()`` returns the ``JobPlan`` that gives each training job's parameters
+   recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``parameters_by_kind()`` gives each training job's parameters by the kind of its samples
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
@@ -164,67 +164,51 @@ to ``from_resolved_config``. ``from_environment`` uses that same resolution
 path for standalone recipe construction. Custom construction hooks should
 consume the resolved values; ``_recipe_kwargs`` owns non-field sections.
 
-Switch methods within a run
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Train each kind of sample with its own method
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A weight trainer has one training component. By default, ``job_plan()``
-returns a ``FixedJobPlan``. It submits one job each time job data is ready.
-Every job trains ``training_spec().objective``. Its parameters are ``method``
-and the ``recipe.config.job_parameters`` setting, for example a
-``scheduling`` or a ``save_interval``. The component's defaults fill the
-rest, such as its configured learning rate.
+A weight trainer has one training component. Reef submits one job each time
+job data is ready. The pipeline's sample-to-job stage gives the job its data
+(``make_job_data``) and its parameters (``job_parameters``). A job holds
+samples of one kind: trajectories or tasks. By default, every job trains
+``training_spec().objective``. Its parameters are ``method`` and the
+``recipe.config.job_parameters`` setting, for example a ``scheduling`` or a
+``save_interval``. The component's defaults fill the rest, such as its
+configured learning rate.
 
-A recipe that trains in phases, such as SFT and then RL or OPD, overrides
-``job_plan`` and returns its own ``JobPlan``. Reef calls the plan's
-``next_job(context)`` when a job's data is ready and no job runs. The plan returns
-a ``JobRequest`` with the job's parameters. The ``method`` parameter is the
-``TrainingMethod`` of the job's phase. The same component switches the
-objective from one job to the next. The job's ``backend`` is always the
-component's name, so the request does not name it.
-
-This plan trains SFT for the first 200 jobs and then the policy objective.
-The first policy job restarts training:
+A recipe that trains each kind with its own method, such as SFT on
+trajectories and a policy objective on tasks, overrides
+``parameters_by_kind()``. It returns the parameters of a job by the kind of
+the job's samples. The ``method`` parameter is the ``TrainingMethod`` of that
+kind. The same component switches the objective from one job to the next. The
+job's ``backend`` is always the component's name, so the parameters do not
+name it.
 
 .. code:: python
 
    from reef.recipe import WeightTrainingRecipe
    from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
-   from reef.train.jobs import JobPlan, JobPlanContext, JobRequest
 
-   SUPERVISED_JOBS = 200
    POLICY = LearningRateSchedule("policy", 1e-6, warmup_steps=10)
 
 
-   class SupervisedThenPolicy(JobPlan):
-       def next_job(self, context: JobPlanContext) -> JobRequest:
-           if context.finished_jobs < SUPERVISED_JOBS:
-               method = TrainingMethod("reef.recipe.sft:SftObjective")
-           else:
-               method = TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
-           restart = context.finished_jobs == SUPERVISED_JOBS
-           return JobRequest({"method": method.to_dict()}, restart=restart)
-
-
    class MyMethodRecipe(WeightTrainingRecipe):
-       def job_plan(self) -> JobPlan:
-           return SupervisedThenPolicy()
+       def parameters_by_kind(self):
+           sft = TrainingMethod("reef.recipe.sft:SftObjective")
+           policy = TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
+           return {"trajectory": {"method": sft.to_dict()}, "task": {"method": policy.to_dict()}}
 
-- ``context`` holds the ready job ``data``, ``finished_jobs`` and ``last_job``.
-  ``finished_jobs`` counts the jobs that ended, finished or failed.
-  ``last_job`` is the outcome of the last job that ended, or ``None`` before
-  the first one.
-- ``next_job`` always returns a ``JobRequest``. It must depend only on its
-  argument. A retry after a restart calls it again, and the request is part
-  of the job's identity.
+- ``parameters_by_kind()`` must return the same parameters at every call. A
+  retry after a restart computes the job again, and the parameters are part of
+  the job's identity.
+- The stage refuses job data that holds both kinds, and a kind that the
+  result does not name.
 - The component resolves the objective in its own process. Use a dotted
   reference for an objective from another package, such as the built-in
   `SFT <../user-guide/recipes/sft.rst>`__ objective above.
-- ``restart=True`` starts the job from the same weights with no training
-  state: a new optimizer state, the learning-rate schedule at step 0, and an
-  empty objective state. Use it at a switch between phases. Reef asks the
-  component for this start with ``TrainingComponent.fresh_start``. Slime
-  supports it; Tinker refuses it, and the job is not submitted.
-- A request can also give the optional ``scheduling`` parameter, an object
+- To train again from the base weights with no training state, call
+  ``POST /reef/scenarios/{scenario}/train-from`` with the base artifact.
+- The parameters can also give the optional ``scheduling`` parameter, an object
   of ``epochs`` (a positive int, default 1), ``shuffle`` (default ``false``),
   ``remainder`` (``"partial"``, the default, ``"drop"`` or ``"error"``) and
   ``packing_length`` (default ``null``). It sets how the component trains the
@@ -245,7 +229,7 @@ active schedule continues it, also on a retry or after a restart. A job that
 selects another schedule starts that schedule at step 0. A job that selects no
 schedule keeps the active one. The component keeps the schedule's progress
 with each checkpoint it saves. Starting a schedule does not reset the
-optimizer state; only ``restart=True`` does. A job continues the objective
+optimizer state. A job continues the objective
 state of the previous job only when it trains the same objective. A job of
 another objective starts with an empty objective state. While a schedule is active, job metrics include
 ``learning_rate`` and ``learning_rate_schedule``.

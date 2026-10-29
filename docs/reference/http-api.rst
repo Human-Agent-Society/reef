@@ -50,6 +50,11 @@ Routes
 |                                                                                  | run (weights, request defaults), the named one's  |
 |                                                                                  | stay out; 404 for a component it does not serve   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``           | one of the inference routes above, answered and   |
+|                                                                                  | recorded by one artifact of the scenario: a       |
+|                                                                                  | served artifact or an artifact of the active      |
+|                                                                                  | release; 404 for any other artifact               |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/images``, ``/v1/embeddings``,                                         | multimodal call, relayed by the recipe to its     |
 | ``/v1/audio/speech``, ``/v1/decisions``                                          | gateway; not recorded, 501 when it offers none    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -89,9 +94,24 @@ Routes
 | ``POST /reef/scenarios/{scenario}/train-from``                                   | set the artifact a trainer starts its next job or |
 |                                                                                  | step from                                         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/serve``                                        | serve an artifact beside the active release       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/stop-serving``                                 | stop serving an artifact beside the active        |
+|                                                                                  | release                                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/tasks``                                         | imported tasks, their splits, which trained       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/buffer``                                        | the samples that the next job trains              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/buffer/insert``                                | add samples to the manual buffer; manual mode     |
+|                                                                                  | only                                              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/buffer/remove``                                | remove samples from the manual buffer; manual     |
+|                                                                                  | mode only                                         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                  | evaluate one artifact of a release                |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -503,22 +523,24 @@ renders each upload with every agent turn trained, except the steps marked
 <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
 
 Each uploaded trajectory counts as one sample toward the pipeline's
-``job_samples``. It does not count toward the pipeline's ``buffer_size``, so Reef never
-releases it to make room. Job data takes uploaded trajectories first, in
-upload order, and then the units of recorded traffic. Thus a large upload can delay the
-training of live traffic. The delay continues until the jobs use all of
-the upload. Archiving the scenario retires its uploaded trajectories with its
+``job_samples`` and ``buffer_size``. Reef keeps it in the scenario's sample
+store with the samples that it makes from recorded traffic, and job data takes
+the samples in store order. Thus an upload trains after the samples stored
+before it, and before the samples stored after it. A large upload delays the
+training of the traffic that arrives after it, until the jobs use all of the
+upload. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
 
 Upload Harbor tasks
 -------------------
 
 Use this route to give a scenario your own Harbor tasks, for training or as
-held-out tasks. It adds the tasks to the scenario's task store
-``imported-tasks``, the same store that the `task-import section
-<../user-guide/operate.rst#import-harbor-tasks>`__ fills. An upload to the
-``train`` split needs a recipe that trains on imported tasks, such as the
-SFT-then-RL recipe (`SFT then RL <configuration.rst#sft-then-rl>`__). If the
+held-out tasks. It adds the tasks to the scenario's imported tasks, which the
+`task-import section <../user-guide/operate.rst#import-harbor-tasks>`__ also
+adds to. A task's name is its ID among the scenario's training samples, so it
+cannot be the ID of an uploaded trajectory. An upload to the
+``train`` split needs a recipe that trains on imported tasks
+(``Sample2Job.accepts_imported_tasks``); no built-in recipe does. If the
 recipe does not, Reef refuses the upload with 400. The ``eval`` split takes
 tasks for any recipe, because an `artifact evaluation <#evaluate-an-artifact>`__
 runs them.
@@ -548,14 +570,70 @@ same receipt. Reef returns:
   that is not a task name, more than 1000 tasks or 10,000 entries, more than
   256 MiB unpacked, or a directory that Harbor's task loader refuses;
 - 413 for a body larger than 256 MiB;
-- 409 for a task name that the scenario holds with other files or in the other
-  split. The tasks before it in name order are added; to change a task, give
-  it a new name;
+- 409, and adds nothing, for a task name that the scenario holds with other
+  files, in the other split, or as an uploaded trajectory. To change a task,
+  give it a new name;
 - 415 for another content type.
 
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
 [{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
-added. ``trained`` is true once a task job trained the task.
+added. ``trained`` is true once a committed task job of any trainer of the
+scenario trained the task.
+
+Choose the samples that train
+-----------------------------
+
+Every training sample of a scenario is in its sample store: the uploaded
+trajectories, the imported tasks, and the samples that a trainer's record
+stages made. ``GET /reef/scenarios/{scenario}/samples`` lists them in store
+order, at most ``limit`` (default and maximum 1000) after the sequence
+``after`` (default 0):
+
+.. code:: json
+
+   {"scenario": "my-agent", "next": null, "samples": [
+     {"sample_id": "trajectory-0001", "sequence": 1, "kind": "trajectory", "split": "train",
+      "component": null, "group": null, "train_counts": {}},
+     {"sample_id": "report-17:0", "sequence": 2, "kind": "trajectory", "split": "train",
+      "component": "", "group": null, "train_counts": {"": 1}}]}
+
+``component`` is the trainer that made the sample from records (``""`` for the
+only trainer of a scenario), or ``null`` for an upload or an imported task.
+Samples that share a ``group`` train together. ``train_counts`` holds, for each
+trainer, the number of committed jobs that trained the sample. ``next`` is the
+``after`` of the next page, or ``null`` after the last one.
+
+``GET /reef/scenarios/{scenario}/buffer`` returns the buffer: the samples that
+the next job trains, in store order, with the trainer's ``training_mode``. In
+``auto`` it is the buffer that the pipeline computes; in ``manual`` it is the
+manual buffer. Each sample has ``sample_id``, ``kind``, ``group``,
+``component``, the trainer's ``train_count``, and ``stale``, true when the
+staleness check finds the data of a record sample too many versions behind.
+A scenario of several components needs ``?component=<name>``.
+
+In ``manual``, ``POST /reef/scenarios/{scenario}/buffer/insert`` adds samples
+to the manual buffer, and ``POST /reef/scenarios/{scenario}/buffer/remove``
+removes them. Both take ``{"sample_ids": [...]}``, 1 to 1000 IDs, and an
+optional ``component``, and return the buffer as the ``GET`` does:
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8900/reef/scenarios/my-agent/buffer/insert \
+     -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+     -d '{"sample_ids": ["trajectory-0001", "report-17:0"]}'
+
+- Both return 409 while the trainer trains in ``auto``.
+- An insert returns 400, and changes nothing, for an ID that the store does
+  not hold, a sample that the trainer cannot train (an eval or an imported
+  task, an upload that its recipe does not take, another trainer's sample),
+  or samples of another kind than the buffer's: the buffer holds trajectories
+  or tasks, not both.
+- A sample that trained before can be inserted again; it trains again.
+  Staleness does not remove a sample from the manual buffer: remove a stale
+  sample by hand.
+
+The next instruction trains the whole manual buffer, and its commit removes
+the trained samples from it in the same transaction.
 
 Evaluate an artifact
 --------------------
@@ -663,8 +741,8 @@ Manual training
 ---------------
 
 ``POST /reef/train`` queues one training instruction for a scenario in
-``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
-proposer that accepts ``requests``). It takes the user's ``text``,
+``data.training_mode: manual``. In a harness evolution scenario the proposer
+must accept ``requests``. It takes the user's ``text``,
 originating ``session`` and ``release_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
@@ -698,16 +776,19 @@ what the change added. Nothing on the service runs a check:
 the install script only reads the check offs, and the update notice prints
 the setup list instead of the update while an item is unmet.
 
-The three modes differ in what starts a step. ``auto``, the default,
-trains on traffic and refuses an instruction with HTTP 400. ``manual``
-runs instructions only and never trains on traffic; harness evolution
-runs an instruction alone, without samples. ``hybrid`` trains on traffic and
-runs instructions: a queued instruction goes first, oldest first, one per
-step, and the units that automatic job data would take next, up to
-``job_samples`` traces (by default ``evolution.batch_size``) and possibly none, ride beside it
-as the samples of its data (scored traces, or unscored records when the
-``pipeline`` section names the inference stages), so the proposer reads the
-request next to them; with none queued the step trains as ``auto`` does.
+The two modes differ in what starts a step and what it trains. ``auto``, the
+default, trains on traffic when the buffer holds ``job_samples`` samples, and
+refuses an instruction with HTTP 400. ``manual`` starts a step only for an
+instruction, oldest first, one per step. The step trains the manual buffer:
+the samples that a client chose (`Choose the samples that train
+<#choose-the-samples-that-train>`__), whatever ``job_samples``. New samples do
+not join the manual buffer by themselves, in any recipe:
+
+- A weight recipe waits until the manual buffer holds a sample, then trains
+  the whole buffer. The instruction is the request to train; its ``text``
+  goes into the commit's ``training_request`` metrics.
+- Harness evolution runs the instruction at once, with the traces of the
+  manual buffer, possibly none. The proposer reads the request next to them.
 
 .. code:: bash
 
@@ -727,7 +808,7 @@ instruction (a proposer error, for one) is not retried: the next step
 consumes the instruction with a committed row whose ``skipped`` reads
 ``instruction failed`` and whose ``error`` carries the failure, and the
 queue moves on. Send the instruction again to run it again. That row
-consumes the instruction alone: in ``hybrid`` the units that rode beside it
+consumes the instruction alone: the units that rode beside it
 stay held for the next job, so no failing trace is consumed unread. The
 ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
 every step, instruction steps included, and stop automatic steps only; an
@@ -877,13 +958,15 @@ changed. To change the data processor's mode:
    {"training_mode": "manual"}
 
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
-The values are ``auto``, ``manual`` and ``hybrid``: ``"auto"`` resumes recipe
-training alone, ``"hybrid"`` keeps it and takes instructions too. The change
-selects subsequent job data; job data already reserved or running completes
-in its original mode. The modes share buffered data, so auto and hybrid can
-train on traffic collected while manual was selected. Accepted instructions
-wait for a mode that takes them, including instructions not yet read when
-the selector changes to auto.
+The values are ``auto`` and ``manual``: ``"auto"`` starts a job whenever
+the buffer holds ``job_samples`` samples, and ``"manual"`` starts one only for
+an instruction, on the manual buffer. The change selects subsequent job data;
+job data already reserved or running completes in its original mode. A switch
+from ``auto`` to ``manual`` puts the samples that the next automatic job would
+take into the manual buffer. A switch back leaves the manual buffer stored, and
+automatic jobs train the samples that no job trained, including those collected
+while manual was selected. Accepted instructions wait for manual, including
+instructions not yet read when the selector changes to auto.
 
 A Reef process runs at most one scenario that trains full weights, on a single
 thread, so preparation, remote execution, and commit never interleave. It may
@@ -893,8 +976,8 @@ so record acceptance never waits for artifact evolution.
 
 Unknown scenarios return ``404`` without implicit creation; invalid payloads
 return ``400``. A processor that does not support the requested mode returns
-``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
-require a proposer that explicitly accepts ``requests``.
+``501`` without changing its state. Harness ``manual`` also
+requires a proposer that explicitly accepts ``requests``.
 
 ``GET /reef/status`` reports the selected ``training_mode``. Reef stores the
 mode with the scenario's settings, so a reload and a restart keep it.
@@ -1297,9 +1380,8 @@ Harness requests
 
 ``reef-<adapter> harness "<request>"`` and pi's ``/reefine <request>``
 submit the user's instruction through ``POST /reef/train``, described under
-`Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
-(the deployment keeps learning from failures) or ``manual``, or switch an
-existing scenario with ``POST /reef/scenarios/{scenario}/update``.
+`Manual training <#manual-training>`__. Set ``data.training_mode: manual``,
+or switch an existing scenario with ``POST /reef/scenarios/{scenario}/update``.
 The commands send ``text``, ``session`` and the installed ``release_id``;
 HTTP 200 acknowledges durable acceptance and returns ``agent_record_id``.
 They require no inference receipts and leave captured receipts available for
@@ -1364,6 +1446,10 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 +-----------------------+------------------------------------------------------+
 | ``activated``         | true when the artifact has been active at some time  |
 +-----------------------+------------------------------------------------------+
+| ``served``            | true when the scenario serves the artifact beside    |
+|                       | its active release (`Serve an artifact beside the    |
+|                       | active release`_)                                    |
++-----------------------+------------------------------------------------------+
 | ``metrics``,          | training rows only: the step's metrics and the       |
 | ``record_progress``   | record high-water mark that the step consumed        |
 +-----------------------+------------------------------------------------------+
@@ -1374,19 +1460,25 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 The list holds artifacts only. A training step that made no artifact, such
 as a rejected or skipped step, a job submission or a job's end, has no row;
 ``GET /reef/scenarios/{scenario}/commits`` holds its record (see `Record and
-commit history`_). Activations and train-from operations have no rows either.
+commit history`_). Activations, train-from operations and serves have no rows
+either.
 
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
 
 ``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
 artifact from the directory that a URI names. Leave out ``component`` when
-the scenario has one component. The body is ``{"source": "<uri>"}``. A source
-reader copies the directory from one of these URIs:
+the scenario has one component. The body is ``{"source": "<uri>"}``. Reef
+checks the layout below on the source, and then copies the directory from one
+of these URIs:
 
-- ``hf://org/model@revision``: a Hugging Face snapshot.
-- ``s3://bucket/prefix/``: every object under the prefix.
-- ``file:///absolute/path``: a directory on the service's file system.
+- ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
+  full 40-digit commit SHA and the component holds model weights, Reef keeps a
+  reference to the revision instead of a copy (see below).
+- ``s3://bucket/prefix/``: every object under the prefix. Empty folder
+  markers, keys that end in ``/``, are skipped.
+- ``file:///absolute/path``: a directory on the service's file system,
+  percent encoded as ``Path.as_uri()`` writes it. Its files are copied.
 - A scheme that ``storage.artifact-sources`` adds.
 
 To import a directory from your own machine, put it in one of these places
@@ -1403,6 +1495,17 @@ The answer is HTTP 201 with ``{scenario, component, artifact_id, release_id,
 content_id}``. ``content_id`` comes from the files: the SHA-256 of each file's
 path and SHA-256. The same files from two sources have the same
 ``content_id``, and each import is a new artifact.
+
+An import of ``hf://org/model@<commit>`` with a full commit SHA into a
+component of model weights stores only a reference, ``hf-reference.json``.
+Any other component, such as a harness, stores a copy, because its readers
+read the files themselves. Reef checks the layout from the revision's
+file list and its small files, and takes each weight file's SHA-256 from the
+Hub, so it downloads no weights. ``content_id`` is the value that a copy of
+the same files gets. The repo must stay on the Hub while Reef serves or trains
+the artifact. A private repo needs a token that the service reads in Hugging
+Face's standard way, such as ``HF_TOKEN``. A revision that does not resolve for
+that token answers HTTP 400.
 
 The directory must have the layout of the releases that the scenario's
 component makes. The training backend and its configuration decide it:
@@ -1449,8 +1552,8 @@ give a large import a long client timeout.
 | 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
 |        | to read; an unknown ``component``, or ``component`` is missing in  |
 |        | a scenario with several components; the component takes no         |
-|        | import; the directory does not have the component's layout, or its |
-|        | admission check refuses it                                         |
+|        | import (Reef reads nothing for these three); the directory does    |
+|        | not have the component's layout, or its admission check refuses it |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario; Reef reads nothing then                          |
 +--------+--------------------------------------------------------------------+
@@ -1553,6 +1656,79 @@ Both routes answer these statuses:
 explains when Reef activates a new artifact automatically. `Go back to an
 older artifact <../user-guide/operate.rst#go-back-to-an-older-artifact>`__
 explains how to go back to an older one for good.
+
+Serve an artifact beside the active release
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default inference routes answer from the active release. Serve an
+artifact beside the active release to:
+
+- keep an older artifact answering while a newer one is active;
+- try a new artifact before it is active.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"artifact_id": "<id>"}' \
+     "$REEF_URL/reef/scenarios/code-repair/serve"
+
+The body and the answer are as for ``activate``. In the answer,
+``release_id`` names the release that serves the artifact:
+
+- In a scenario of one component, it is the release that made the artifact.
+- In a scenario of several components, Reef publishes a release beside the
+  chain: the active release with ``component`` bound to the artifact. The
+  other components stay as they were at the serve, also after a later
+  activation.
+
+A served artifact answers at its own URL. Send an inference call to
+``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where
+``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
+``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
+never creates a scenario. Reef records it like a call to ``/v1/{route}``,
+and the record names the release that answered. The artifacts of the active
+release answer at their URLs too, without a serve.
+
+A serve appends a ``serve`` record, so the artifact stays served after a
+restart. It changes neither the active release, nor the chain tip, nor a
+training start. An activation does not change what is served: serve the
+active artifact first to keep it answering after you activate another one.
+Serving a served artifact changes nothing. Only the active release trains.
+The staleness check of a recipe counts only the versions of the active
+release, so it refuses the records of a served artifact.
+
+``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
+"<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers
+``{scenario, component, artifact_id, release_id}``. An artifact of the
+active release still answers at its URL afterwards.
+
+The runtime must answer each call from the release that the call names.
+The Tinker runtime does, so a Tinker scenario can serve any of its
+artifacts. A runtime that loads weights into engines answers only from the
+release it has loaded, so Reef refuses a serve there. A scenario whose
+surface loads nothing into a runtime, such as a harness scenario, can serve
+any of its artifacts. A store without a durable commit history also refuses
+a serve.
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 200    | the artifact is served (``serve``) or no longer served beside the  |
+|        | active release (``stop-serving``)                                  |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body; ``serve``: the artifact has no durable bytes, an |
+|        | unknown ``component`` or a missing one in a scenario of several    |
+|        | components, the runtime answers only from the release it has       |
+|        | loaded, or the store keeps no durable commit history;              |
+|        | ``stop-serving``: the body names a ``component``                   |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario or artifact; ``stop-serving``: the scenario does  |
+|        | not serve the artifact beside its active release                   |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
+|        | after the commit                                                   |
++--------+--------------------------------------------------------------------+
 
 Inactive artifacts
 ~~~~~~~~~~~~~~~~~~
@@ -1804,10 +1980,11 @@ failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 active artifact and its trainer's training start. A value is ``null`` when
 Reef does not know it. Both values start at the creation artifact.
 
-``processor`` includes ``ready_samples``, the samples of the held record sets
-and uploaded trajectories; ``job_samples``, the samples that automatic job
-data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
-the most samples the held record sets keep.
+``processor`` includes ``ready_samples``, the untrained samples that the next
+job takes (the buffer), from recorded traffic and uploaded trajectories;
+``job_samples``, the samples that automatic job data needs
+(``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most
+samples that one job takes from the buffer, beside the rest of a group.
 
 A scenario that trains weights also reports its training job.
 ``training_job`` is the job that the scenario's training component runs. It

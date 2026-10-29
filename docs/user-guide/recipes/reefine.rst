@@ -103,7 +103,11 @@ Behavior and configuration
 --------------------------
 
 * ``training-mode: manual`` runs one step for each accepted instruction on
-  ``POST /reef/train``. Use ``hybrid`` to also learn from failing reports.
+  ``POST /reef/train``. Each step also reads the failing reports in the manual
+  buffer, which a client fills (`Choose the samples that train
+  <../../reference/http-api.rst#choose-the-samples-that-train>`__); new reports
+  do not join it by themselves. Use ``auto`` to learn from failing reports
+  without instructions.
 * The agent proposer, or the served model where the host cannot isolate the
   agent, proposes skills, rules, agent commands, or pi extensions.
   Requests and update notices are enabled in the seed by default.

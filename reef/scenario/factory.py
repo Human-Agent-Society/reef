@@ -75,7 +75,9 @@ def recovered_trainer_states(
     The only trainer of a one-component (or record-only) scenario owns every
     training commit and consumption receipt, which name no component.
     Activations and new training starts carry no trainer state, so no
-    trainer recovers from them. A drop is a step without
+    trainer recovers from them. The records that a trainer's stored samples
+    consumed (``SampleStore.consumed_record_ids``) count as consumed too, so a
+    replay never makes their samples again. A drop is a step without
     a commit that an earlier Reef version recorded as a consumption receipt:
     its rows count as consumed, and the state and the cursor stay the last
     commit's.
@@ -105,10 +107,13 @@ def recovered_trainer_states(
             and (record.component == component or (alone and record.component is None))
         )
         last = own[-1] if own else None
+        # The records that the trainer's stored samples consumed: its sample store key is "" when it is alone.
+        stored = store.samples.consumed_record_ids("" if alone else component)
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
-            consumed_ids=(
+            consumed_ids=stored
+            | (
                 frozenset().union(*consumed_by_component.values())
                 if alone
                 else frozenset(consumed_by_component.get(component, ()))
@@ -381,6 +386,7 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
+                samples=store.samples,
             )
             if any(
                 component_trainer.trainer.trains
@@ -447,7 +453,6 @@ class ScenarioFactory:
                     scenario.replay_retained(
                         up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
-                component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
             scenario.resume_training_starts()
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.

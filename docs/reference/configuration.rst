@@ -306,6 +306,10 @@ trains LoRA adapters remotely without local GPUs. Tinker's sampler serves
 them by default. Reef's SGLang engines serve them instead when the
 ``inference`` section configures engines: the control plane downloads each
 release's adapter from its sampler path; see `Train with Tinker <../user-guide/tinker.rst>`__.
+The ``spindle_full`` backend trains all the parameters of one Hugging Face
+revision on a Spindle deployment, and exports each release's weights to a
+Hugging Face repo; see `Train all the parameters on Spindle
+<../user-guide/tinker.rst#train-all-the-parameters-on-spindle>`__.
 ``training.backend`` also accepts an installed ``reef.training_backends``
 entry-point name or an importable ``package.module:Deployment`` class. The
 selected definition validates its settings. It names the services that the
@@ -942,7 +946,7 @@ persistent.
 .. config::
 
    storage.artifact-backend | git_lfs | where releases are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
-   storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``
+   storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``. A Hugging Face repository needs the factory's ``refs`` and ``token_env`` options (`Choose the artifact backend <../user-guide/operate.rst#choose-the-artifact-backend>`__)
    storage.artifact-work-dir | .reef/artifact-work | materialization scratch
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache; artifact imports run under ``imports/`` in it
    storage.artifact-sources | [] | ``ArtifactSourceReader`` plugin references that read artifact import URIs, beside the built-in ``hf``, ``file`` and ``s3`` readers
@@ -1008,54 +1012,60 @@ the runtime under ``recipe.runtime``. Harness settings live in
 ``recipe.config.evolution``.
 
 ``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
-In ``auto``, the recipe's processor decides when its data can form a job,
-and ``POST /reef/train`` is refused. In ``manual``, inference and reports
-cannot authorize training by themselves; ``POST /reef/train`` supplies the
-user instruction, and harness evolution runs it alone. In ``hybrid``, the
-processor makes job data as in ``auto`` and runs instructions too, a queued
-instruction first; harness evolution hands the proposer, beside the
-instruction, the units that automatic job data would take next, up to
-``job_samples`` traces (by default ``evolution.batch_size``) and possibly none: scored traces, or
-unscored records when the ``pipeline`` section names the inference stages. The processor defines
-what an instruction's data carries, independently of its automatic
-policy.
+It has two values:
 
-The training pipeline receives ``PipelineContext.training_mode`` as its
-initial training mode. The modes share record push and retention. In ``manual``
-an instruction's data has no record set units; in ``hybrid`` it takes the units that
-automatic job data would. A recipe's ``Sample2Job`` declares
-``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
-Harness evolution supports the three modes and requires a proposer that
-explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
-on an inference-only recipe does not create a training backend.
+- ``auto``: a job starts when the `buffer
+  <../developer-guide/processors.rst#the-buffer>`__ holds ``job_samples``
+  samples: the untrained samples that the next job takes.
+  ``POST /reef/train`` is refused.
+- ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
+  job trains the manual buffer: the samples that a client chose with the
+  buffer routes (`Choose the samples that train
+  <http-api.rst#choose-the-samples-that-train>`__). New samples do not join it
+  by themselves, in any recipe. A weight recipe waits until the manual buffer
+  holds a sample, then trains the whole buffer; the instruction text goes into
+  the commit's ``training_request`` metrics. Harness evolution runs the
+  instruction at once: the proposer gets the instruction and the traces of the
+  manual buffer, possibly none.
+
+Records arrive and the sample store fills in both modes, so a switch from
+``manual`` to ``auto`` can train on data already collected. A switch from
+``auto`` to ``manual`` puts the samples that the next automatic job would take
+into the manual buffer. A recipe's ``Sample2Job``
+declares ``supported_training_modes``; an unsupported mode raises
+``NotImplementedError``. Harness evolution requires a proposer
+that explicitly accepts ``requests`` for ``manual``. Setting ``manual`` on an
+inference-only recipe does not create a training backend.
 
 .. code:: yaml
 
    recipe:
      config:
-       training_mode: hybrid
+       training_mode: manual
 
+The ``reef serve`` option ``--recipe.config.training-mode manual`` sets the same field at deployment.
 The mode controls training initiation, independently of the `activation
-rule <#the-activation-section>`__. It supplies the initial processor mode.
-Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
-at runtime. This changes subsequent job data; reserved job data completes under
-its original mode. Mode changes are not persisted: a service restart uses the
-recipe's configured mode again, while a scenario reload after a failed step
-keeps the selected mode. In every mode the held record sets keep at most
-``pipeline.sample2job.config.buffer_size`` samples. As records arrive, the
-pipeline releases the oldest sets beyond that limit and logs one warning.
+rule <#the-activation-section>`__. Use ``POST /reef/scenarios/{scenario}/update``
+to select another mode at runtime. This changes subsequent job data; reserved
+job data completes under its original mode. Reef stores the selected mode in
+the scenario's settings, so reloads and restarts apply it again, and it takes
+precedence over the configured mode. A stored mode that the recipe does not
+support keeps the configured mode and logs a warning. In every mode, the
+samples of ready record sets wait in the scenario's sample store until a job
+trains them.
 
 .. config::
 
-   recipe.config.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of training by the recipe's rules; ``hybrid`` trains by the recipe's rules and runs a queued instruction first
+   recipe.config.training_mode | auto | ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` instruction
 
-``recipe.config.job_parameters`` is an object that a weight recipe's default
-job plan sends with every job, beside ``method``. The training component
+``recipe.config.job_parameters`` is an object that a weight recipe sends with
+every job, beside ``method``. The training component
 reads it: for example ``scheduling`` (`Step scheduling
 <python-api.rst#training-objective>`__) or ``save_interval``. The component
 refuses a parameter that it does not take, and the job is not submitted. The
 recipe refuses a ``method`` key, because the recipe's objective is the
-method. A recipe with its own ``job_plan`` does not read the setting.
+method. A recipe that overrides ``parameters_by_kind`` decides where the setting
+goes.
 
 .. code:: yaml
 
@@ -1261,13 +1271,13 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 .. config::
 
    evolution.propose | a ``Proposer`` class: ``package.module:ClassName``, or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives
-   evolution.evaluate | an ``RolloutScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory rollout by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest`` or ``evolution.eval_task_store``
+   evolution.evaluate | an ``RolloutScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory rollout by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest`` or ``evolution.eval_imported_tasks``
    evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every evaluation task; the training start is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a ``SelectionPlugin`` class in the same form as ``evolution.propose``
    evolution.floor_score | 1.0 | the score every evaluation task must reach under ``selection: floor``; a positive number, refused with any other selection, as ``min_win_margin`` is outside ``score_comparison``
    evolution.tasks | non-empty list of rollout prompts, scored once per tree per step
    evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the evaluation's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it
    evolution.tasks_root | the directory the manifest's task names live under
-   evolution.eval_task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. Set instead of ``evolution.tasks`` and ``evolution.task_manifest``, with the same adapter and ``promote_failures`` limits as ``evolution.task_manifest``. The eval split must hold a task when the scenario loads.
+   evolution.eval_imported_tasks | false; true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks as the step reads them, so tasks that the scenario gets later join the next step. Set instead of ``evolution.tasks`` and ``evolution.task_manifest``, with the same adapter and ``promote_failures`` limits as ``evolution.task_manifest``. The eval split must hold a task when the scenario loads. The former ``evolution.eval_task_store`` is refused with a message that names this key
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node or, as code, a ``native_loop`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
    evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
@@ -1291,7 +1301,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
-   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and an ``always`` activation rule whose ``review_kinds`` is ``[code_extension]``
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and an ``always`` activation rule whose ``review_kinds`` is ``[code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``rollouts/<side>-<task index>/`` (each evaluation rollout's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``rollout.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``rollouts/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
@@ -1483,10 +1493,10 @@ job is one optimizer step:
        config:
          job_samples: ${training.config.global_batch_size}
 
-The two values can differ. Job data takes whole record sets until it holds at
-least ``job_samples``, so it can hold more: a group of rollouts is one unit,
-and a job with more samples than the batch size trains more than one
-optimizer step. A job with fewer samples than the batch size trains one
+The two values can differ. Job data takes up to ``buffer_size`` samples and
+the rest of each group that those samples touch, so it can hold more than
+``job_samples``: a group of rollouts trains in one job, and a job with more
+samples than the batch size trains more than one optimizer step. A job with fewer samples than the batch size trains one
 partial step. The ``remainder`` field of a job's optional ``scheduling``
 parameter decides what happens to a shorter last step; by default, the
 component trains it as a smaller step. See `Job size
@@ -1498,7 +1508,7 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
 .. config::
 
    pipeline.sample2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
-   pipeline.sample2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job; at least ``job_samples``. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
+   pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes from the buffer, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait in the sample store for later jobs.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1553,7 +1563,7 @@ parameter.
              state_dir: ${REEF_STATE_DIR}/generations
      sample2job:
        config:
-         tasks_per_step: 2
+         buffer_size: 2
 
 ``GeneratedTaskRecord2Record`` paces the rounds and holds their source
 sessions. It trains on no report: the recipe trains on the rollouts that the
@@ -1564,7 +1574,7 @@ training component runs, which are not records.
    pipeline.record2record.config.jobs_per_round | 1 | trained jobs after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
-   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
+   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
 
 ``GeneratedTaskSamples`` runs the generations and sends their results to the
 generator:
@@ -1593,13 +1603,15 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskJobData`` hands saved tasks to the training component as one
-task job, whatever Tinker's batch size (``training.options.batch-size``) is,
-so the stage has no ``buffer_size`` and no ``job_samples``:
+The saved train tasks go to the scenario's sample store, as samples
+``generated-tasks/<task name>``, and train from the buffer like every other
+sample. ``GeneratedTaskJobData`` makes one task job of the buffer's tasks,
+whatever Tinker's batch size (``training.options.batch-size``) is:
 
 .. config::
 
-   pipeline.sample2job.config.tasks_per_step | 4 | saved tasks of one task job
+   pipeline.sample2job.config.job_samples | 1 | the fewest saved tasks of one task job
+   pipeline.sample2job.config.buffer_size | 4 | the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights. The ``rollout`` job parameter configures them:
@@ -1625,58 +1637,6 @@ records all carry ``source_tag``. The generator service accepts at most
 512 KiB of records and files in one request, so keep
 ``source_records_per_round`` small when the sessions are long.
 
-SFT then RL
-~~~~~~~~~~~
-
-The built-in SFT-then-RL recipe, ``reef.recipe.sft_then_rl:SFTThenRLRecipe``,
-trains one scenario in two ways:
-
-- SFT jobs, as the SFT recipe trains them, on demonstration reports and on
-  uploaded ATIF trajectories (`Upload trajectories
-  <http-api.rst#upload-trajectories>`__). They use ``SftObjective`` and
-  ``recipe.config.job_parameters``.
-- RL task jobs on the train tasks of the scenario's ``imported-tasks`` store,
-  which `Upload Harbor tasks <http-api.rst#upload-harbor-tasks>`__ or the
-  ``task-import`` section fill. They use the ``task_group`` objective and
-  ``recipe.config.task_job_parameters``. The training component rolls each
-  job's tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
-
-Held SFT samples train first: while ``job_samples`` of them wait, the next job
-is an SFT job. Each job starts from the last checkpoint of the job before it,
-so the RL jobs start from the SFT weights. Each train task trains in one task
-job; eval tasks never train. The training component must run task jobs, so the
-recipe requires the ``tinker`` training backend with a sampler.
-
-The eval tasks never train. The recipe does not evaluate the artifacts that
-its trainer publishes: a client asks Reef to evaluate one on the eval tasks
-(`Evaluate an artifact <http-api.rst#evaluate-an-artifact>`__). The
-``evaluation`` section decides which release serves.
-
-.. code:: yaml
-
-   recipe:
-     implementation: reef.recipe.sft_then_rl:SFTThenRLRecipe
-     config:
-       task_job_parameters:
-         rollout:
-           rollouts_per_task: 4
-           environment: e2b
-   pipeline:
-     record2sample:
-       config:
-         tokenizer_path: Qwen/Qwen3-8B
-     sample2job:
-       config:
-         job_samples: 64
-         tasks_per_job: 8
-
-.. config::
-
-   recipe.config.job_parameters | none | parameters of every SFT job beside ``method``, such as ``save_interval``
-   recipe.config.task_job_parameters | required | parameters of every RL task job beside ``method``: ``rollout``, as for the generated-task recipe above, and the component's own parameters, such as ``learning_rate``
-   pipeline.sample2job.config.job_samples | required | the fewest SFT samples of one SFT job
-   pipeline.sample2job.config.tasks_per_job | 8 | the most imported train tasks of one RL task job
-
 The ``generator`` section
 -------------------------
 
@@ -1685,9 +1645,20 @@ Absent by default. When present, ``reef serve`` starts the generator service
 it, and publishes its address as ``${endpoints.generator}`` for the
 generated-task stages to consume. The generator writes and checks Harbor tasks and runs their rollouts for the
 generated-task recipe and for a task generator such as SPADE, under the same
-interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
-``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
-place it on the host that has Docker. The generator runs its proposals, checks and rollouts at the same time.
+interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
+host needs the ``harbor`` command line and the Harbor environment that
+``generator.environment`` selects; the Reef service itself needs neither. The
+default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
+in an E2B cloud sandbox, so a host without Docker, such as a cluster node with
+only Apptainer, uses it. It needs ``E2B_API_KEY`` exported where ``reef serve``
+starts and ``reef-infra[e2b]`` in the generator's interpreter; the readiness
+check looks there, so ``generator.harbor`` must come from the same Python
+environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
+compose services), an agent inside the sandbox cannot reach a
+``generator.agent-host`` on a private host, and E2B builds a template for each
+new task image. ``execution.generator`` selects the generator's executor, so a
+deployment can place it on another host. The generator runs its proposals,
+checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
 
 .. config::
@@ -1699,6 +1670,7 @@ place it on the host that has Docker. The generator runs its proposals, checks a
    generator.agent | terminus-2 | the Harbor agent each rollout runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores a rollout whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
+   generator.environment | docker | the Harbor environment of the oracle and nop checks and of the rollouts: ``docker`` or ``e2b``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker
    generator.concurrency | 2 | rollouts in flight across all rollout requests of the generator service
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``
@@ -1729,7 +1701,7 @@ The ``task-import`` section
 ---------------------------
 
 Absent by default. When present, each scenario imports the Harbor tasks of a
-split manifest into its task store ``imported-tasks`` when it opens. See
+split manifest when it opens, as its imported tasks. See
 `Import Harbor tasks <../user-guide/operate.rst#import-harbor-tasks>`__.
 
 .. config::
@@ -1864,25 +1836,26 @@ The following names are relative to ``operations/``:
    * - ``records/oldest_unread_age_seconds``
      - Age of the first unread record, measured from its recorded creation
        time; zero when none remain.
-   * - ``processor/unreserved_reports``, ``processor/reserved_reports``
-     - Reported-feedback records waiting outside, or held inside, the reserved
-       job data. An incomplete group still counts as waiting.
+   * - ``processor/waiting_reports``
+     - Reported-feedback reports that wait for their group or for the sample
+       store. An incomplete group still counts as waiting.
    * - ``processor/oldest_report_wait_seconds``
-     - Age of the oldest unreserved report; zero when none remain.
+     - Age of the oldest waiting report; zero when none remain.
    * - ``processor/tracked_records``, ``processor/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
-   * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
-     - Computed-feedback candidates outside or inside the reserved job data.
+   * - ``processor/waiting_candidates``
+     - Computed-feedback candidates that wait for the sample store.
    * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
-     - Samples that job data can take now, samples that automatic job data
-       needs, and the most samples that the held record sets keep.
+     - Samples that job data can take now (the buffer), samples that
+       automatic job data needs, and the most samples that one job takes
+       from the buffer.
    * - ``processor/buffered_requests``
      - Explicit training instructions already buffered by the processor.
    * - ``training/reserved_job_data``
      - Zero or one. A reservation can be executing or waiting for settlement;
        it is not necessarily queued job data.
    * - ``training/auto_enabled``
-     - One for auto/hybrid training, zero for manual training. Waiting data in
+     - One for auto training, zero for manual training. Waiting data in
        manual mode does not by itself indicate a stalled worker.
    * - ``training/error``, ``training/failed_attempts_total``
      - Current recorded training error (zero/one) and cumulative failures

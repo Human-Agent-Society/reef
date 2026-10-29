@@ -7,16 +7,24 @@ toy recipe, where recipe policy cannot blur the state machine.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
+import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, JobContext, SupportsReceipt
+from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, RecordJudging
 from reef.record2sample import JudgedSamples
@@ -171,7 +179,7 @@ def test_refused_submission_retires_immediately() -> None:
     assert "r1" in processor.releasable_record_ids()
 
 
-def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
+def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_batch() -> None:
     processor, worker = _engine()
     processor.observe_serving_runtime_load_id("v1")
     processor.push(_record("old", track=True, version="v1"))
@@ -181,9 +189,9 @@ def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
-    assert not processor.ready(2)  # the stale candidate was dropped
-    assert "old" in processor.releasable_record_ids()
-    assert "new" not in processor.releasable_record_ids()
+    assert not processor.ready(2)  # the stale sample is not in the buffer
+    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
 def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
@@ -195,8 +203,8 @@ def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
         processor.push(_record(f"done-{name}", completes=name))
         worker.push(_Judgment(name))
     assert not processor.ready(3)  # e:3 is two versions behind e:5
-    assert "v3" in processor.releasable_record_ids()
-    assert {"v4", "v5"}.isdisjoint(processor.releasable_record_ids())
+    assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
+    assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]
 
 
 def test_correlate_only_mode_without_a_worker() -> None:
@@ -247,3 +255,216 @@ def test_real_worker_resolves_a_crashing_judge_as_failed() -> None:
         time.sleep(0.01)
     assert judgments == [Failed("r1")]
     worker.close()
+
+
+class BlockingJobRunner(BackgroundJobRunner):
+    """A runner with a cooperative or deliberately delayed cancellation path."""
+
+    def __init__(self, *, defer_cancellation: bool = False) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.cancelled = threading.Event()
+        self.defer_cancellation = defer_cancellation
+        self.calls: list[str] = []
+
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+        self.calls.append(job.receipt)
+        self.started.set()
+        try:
+            while not self.release.is_set():
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            if self.defer_cancellation:
+                while not self.release.is_set():
+                    await asyncio.sleep(0.01)
+            raise
+        return SupportsReceipt(job.receipt)
+
+
+def test_worker_cancels_queued_jobs_without_running_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
+    runner = BlockingJobRunner()
+    worker = BackgroundJobWorker(runner, thread_name="queue-close", concurrency=1)
+    assert worker.submit(SupportsReceipt("running"))
+    assert runner.started.wait(5)
+    assert worker.submit(SupportsReceipt("queued"))
+    worker.close()
+    assert runner.calls == ["running"]
+    results = worker.poll()
+    assert sorted(result.receipt for result in results) == ["queued", "running"]
+    assert all(isinstance(result, Failed) for result in results)
+    assert worker.poll() == []
+    assert worker.wait_closed(0)
+
+
+def test_worker_reports_incomplete_close_until_runner_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
+    runner = BlockingJobRunner(defer_cancellation=True)
+    worker = BackgroundJobWorker(runner, thread_name="deferred-close")
+    worker.submit(SupportsReceipt("job"))
+    assert runner.started.wait(5)
+    try:
+        worker.request_stop()
+        assert runner.cancelled.wait(5)
+        assert not worker.wait_closed(0.01)
+        assert worker.poll() == []
+        assert not worker.submit(SupportsReceipt("late"))
+    finally:
+        runner.release.set()
+        worker.close()
+    assert worker.poll() == [Failed("job")]
+    assert worker.wait_closed(0)
+
+
+class ProcessJobRunner(BackgroundJobRunner):
+    """Run a local process through the executor adapter inside a worker job."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+        pending = asyncio.create_task(
+            asyncio.to_thread(
+                LocalExecutor().launch,
+                [
+                    sys.executable,
+                    "-c",
+                    "import os,pathlib,time; pathlib.Path('pid').write_text(str(os.getpid())); time.sleep(60)",
+                ],
+                root=self.root,
+                workspace=self.root,
+                env={},
+                timeout=60,
+            )
+        )
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            with contextlib.suppress(RolloutLaunchError):
+                await pending
+            raise
+        return SupportsReceipt(job.receipt)
+
+
+def test_worker_reaps_executor_process_before_publishing_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
+    worker = BackgroundJobWorker(ProcessJobRunner(tmp_path), thread_name="process-close")
+    worker.submit(SupportsReceipt("job"))
+    deadline = time.monotonic() + 5
+    while not (tmp_path / "pid").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        assert (tmp_path / "pid").exists()
+        pid = int((tmp_path / "pid").read_text())
+    finally:
+        worker.close()
+    assert worker.poll() == [Failed("job")]
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+class SaturatedJobRunner(BackgroundJobRunner):
+    """A one-thread executor held by a job until cancellation releases it."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        pending = asyncio.create_task(asyncio.to_thread(self.release.wait))
+        self.started.set()
+        try:
+            await asyncio.shield(pending)
+        finally:
+            self.release.set()
+            await pending
+        return SupportsReceipt(job.receipt)
+
+
+def test_worker_shutdown_does_not_need_an_available_executor_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
+    runner = SaturatedJobRunner()
+    worker = BackgroundJobWorker(runner, thread_name="saturated-worker", concurrency=1)
+    worker.submit(SupportsReceipt("job"))
+    assert runner.started.wait(5)
+    try:
+        worker.request_stop()
+        assert worker.wait_closed(3)
+        assert worker.poll() == [Failed("job")]
+    finally:
+        runner.release.set()
+        worker.close()
+
+
+def test_repeated_receipts_are_distinct_submissions() -> None:
+    worker = BackgroundJobWorker(_Answers(), thread_name="repeated-receipts")
+    assert worker.submit(_Job("same"))
+    assert worker.submit(_Job("same"))
+    results: list[SupportsReceipt] = []
+    deadline = time.monotonic() + 5
+    try:
+        while len(results) < 2 and time.monotonic() < deadline:
+            results.extend(worker.poll())
+            time.sleep(0.01)
+        assert results == [_Judgment("same"), _Judgment("same")]
+        assert worker.poll() == []
+    finally:
+        worker.close()
+
+
+def test_worker_lifecycle_wait_can_start_before_stop() -> None:
+    from reef.execution.lifecycle import Execution
+
+    worker = BackgroundJobWorker(_Answers(), thread_name="lifecycle-wait")
+    lifecycle: Execution = worker
+    assert not lifecycle.wait_closed(0)
+    with ThreadPoolExecutor() as pool:
+        waiting = pool.submit(lifecycle.wait_closed, None)
+        lifecycle.request_stop()
+        lifecycle.request_stop()
+        assert waiting.result(timeout=5)
+    assert not worker.submit(SupportsReceipt("closed"))
+
+
+class ContextJobRunner(BlockingJobRunner):
+    """Expose a running job's context to test cancellation through Execution."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.context: JobContext | None = None
+
+    async def run_in_context(self, job: SupportsReceipt, context: JobContext) -> SupportsReceipt:
+        self.context = context
+        return await self.run(job)
+
+
+def test_job_execution_can_stop_without_stopping_its_worker() -> None:
+    from reef.execution.lifecycle import Execution
+
+    runner = ContextJobRunner()
+    worker = BackgroundJobWorker(runner, thread_name="individual-job")
+    try:
+        assert worker.submit(SupportsReceipt("first"))
+        assert runner.started.wait(5)
+        assert runner.context is not None
+        execution: Execution = runner.context
+        execution.request_stop()
+        assert execution.wait_closed(5)
+        assert runner.cancelled.is_set()
+        assert not worker.closed
+        runner.release.set()
+        assert worker.submit(SupportsReceipt("second"))
+        deadline = time.monotonic() + 5
+        while "second" not in runner.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "second" in runner.calls
+    finally:
+        worker.close()
+    results = worker.poll()
+    assert Failed("first") in results
+    assert SupportsReceipt("second") in results

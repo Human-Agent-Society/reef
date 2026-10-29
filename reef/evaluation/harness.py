@@ -49,6 +49,7 @@ from reef.core.evaluation import (
 from reef.core.plugins import ConfiguredPlugin, PluginConfigError
 from reef.core.tasks import primary_reward
 from reef.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin, check_floor, compare_scores
+from reef.execution.sandbox.process import ROLLOUT_OWNER_LEASE, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.rollouts.run import RolloutError, RolloutResult, TrajectoryKeepError, run_rollout
@@ -74,7 +75,6 @@ from reef.runtime.executor.config import (
 )
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
-from reef.sandbox.process import ROLLOUT_OWNER_LEASE, ProgramExecutor
 
 #: The record file beside one evaluation rollout's kept trajectory.
 RECORD_ROLLOUT_FILE = "rollout.json"

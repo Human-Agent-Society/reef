@@ -42,13 +42,13 @@ from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.evaluation.evaluators import BackendEvaluateMixin
 from reef.evaluation.harness import RolloutScorer
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.rollouts.run import RolloutError, RolloutResult, run_rollout
 from reef.harness.rollouts.trajectory import TrajectoryError
 from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.render import render_composition
-from reef.sandbox.process import ProgramExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.types import TrajectorySample

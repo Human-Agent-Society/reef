@@ -543,11 +543,13 @@ def test_cancelled_scenario_initialization_remains_in_finalization(
     finish = threading.Event()
     original = RequestService.inference_scenario
 
-    def initialize(service: RequestService, parsed: RequestHeaders, *, record: bool) -> Scenario:
+    def initialize(
+        service: RequestService, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None
+    ) -> Scenario:
         started.set()
         if not finish.wait(5):
             raise TimeoutError("test initialization was not released")
-        return original(service, parsed, record=record)
+        return original(service, parsed, record=record, artifact_id=artifact_id)
 
     monkeypatch.setattr(RequestService, "inference_scenario", initialize)
     dispatcher = routing_dispatcher(tmp_path)

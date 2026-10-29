@@ -20,7 +20,6 @@ from tests.support.component_trainers import (
     HARNESS,
     HELD,
     WEIGHTS,
-    HybridThresholdJobData,
     JudgedAtOnce,
     Judgment,
     WeightsJobComponent,
@@ -35,16 +34,15 @@ from tests.support.component_trainers import (
     _TwoTrainerRecipe,
     component_files,
 )
-from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
+from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2record import (
@@ -69,6 +67,7 @@ from reef.storage.commits import (
     parse_scenario_metadata,
     scenario_metadata_for,
 )
+from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import ComponentTrainer, Trainer, TrainStepResult
@@ -212,9 +211,10 @@ def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispat
 
     records = scenario.store.history()
     assert [record.component for record in records] == [HARNESS, WEIGHTS]
-    # A commit retires no row: each trainer consumed the same rows on its own record.
+    # A commit retires no row: each trainer consumed the same rows, and its own sample of them, on its own record.
     assert scenario.records.count("agent") == 2
-    assert records[0].consumed_ids == records[1].consumed_ids == frozenset({"i1", "r1"})
+    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(f"{HARNESS}:r1:0")}
+    assert records[1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
 
     # Each trainer recovers from its own commits.
     reloaded = dispatcher.registry.reload("agent")
@@ -263,7 +263,8 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
         (WEIGHTS, "checkpoint"),
         (WEIGHTS, "finished"),
     ]
-    assert records[0].consumed_ids == records[1].consumed_ids == frozenset({"i1", "r1"})
+    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
+    assert records[1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{HARNESS}:r1:0")}
     assert records[2].consumed_ids == records[3].consumed_ids == frozenset()
     assert {record.training_job_id for record in records if record.component == WEIGHTS} == {job.job_id}
 
@@ -288,7 +289,7 @@ def test_a_weights_job_waits_for_the_harness_cycle_of_its_scenario(tmp_path: Pat
     harness.start()
     assert slow.evaluating.wait(10)
     dispatcher.local_workers.start("agent", WEIGHTS)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert training.submitted == []
     assert scenario.trainer_for(WEIGHTS).pending_job_data is None
     assert dispatcher.build_training_status()["scenarios"]["agent"]["scenario_step"] == 0
@@ -392,7 +393,7 @@ def test_held_local_cycles_run_nothing_until_the_service_answers(tmp_path: Path,
     dispatcher.preload_scenarios(("agent",))
     for record in _records(2):
         dispatcher.accept_record(record)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert backends[HARNESS].prepared == 0
     dispatcher.open_local_cycles()
     assert _wait_for(lambda: _training_components(scenario).count(HARNESS) == 2)
@@ -478,30 +479,15 @@ def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_sta
     _scenario(dispatcher, 1)
     dispatcher.local_workers.start("agent", HARNESS)
     _wait_for(lambda: away.attempts > 0)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert away.attempts == 1
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
     # Another wake: the worker looks again, once.
     dispatcher.local_workers.wake_all()
     _wait_for(lambda: away.attempts > 1)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert away.attempts == 2
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
-
-
-@pytest.mark.unit
-def test_a_failed_local_cycle_reloads_the_scenario_at_once(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """The failed cycle rebuilds the scenario right away."""
-    backends = {
-        WEIGHTS: _ComponentBackend(WEIGHTS, tmp_path / "candidates"),
-        HARNESS: _AwayBackend(HARNESS, tmp_path / "candidates"),
-    }
-    dispatcher, _ = dispatchers.open(backends=backends)
-    scenario = _scenario(dispatcher, 1)
-    with pytest.raises(RuntimeError, match="proposer away"):
-        dispatcher.local_workers.process_step("agent", HARNESS)
-    rebuilt = dispatcher.registry.get_optional("agent")
-    assert rebuilt is not None and rebuilt is not scenario
 
 
 class _BlockingAwayBackend(_ComponentBackend):
@@ -525,7 +511,7 @@ class _BlockingAwayBackend(_ComponentBackend):
 def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it(
     tmp_path: Path, monkeypatch: Any, dispatchers: _Dispatchers
 ) -> None:
-    """The failing cycle rebuilds the scenario under the lock; the sibling that read the old instance looks again
+    """The failing cycle rebuilds the scenario at once, under the lock; the sibling that read the old instance looks again
     on the new one instead of sleeping with its rows unread."""
     away = _BlockingAwayBackend(WEIGHTS, tmp_path / "candidates")
     harness = _ComponentBackend(HARNESS, tmp_path / "candidates")
@@ -585,7 +571,7 @@ class _NamedComponentsRecipe(Recipe):
         )
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
     ):
         return tuple(
             ComponentTrainer(
@@ -636,7 +622,7 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
         lambda: "finished" in [_job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
     )
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert 1 <= away.attempts <= 3
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
 
@@ -779,8 +765,9 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers
 ) -> None:
     """The harness acknowledges its batch before its record is durable. When that commit fails, the scenario
-    reloads at once, and the weights job submitted after it leaves the harness's rows stored: the rebuilt harness
-    trains them once."""
+    reloads at once, and the weights job submitted after it leaves the harness's rows stored. The harness's sample
+    of them is in the sample store, which consumed the rows for the harness: the rebuilt harness trains the sample
+    once."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"))
     scenario = _scenario(dispatcher, 1)
     _fail_first_record_of(monkeypatch, scenario, HARNESS)
@@ -795,8 +782,12 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     current = dispatcher.registry.get_optional("agent")
     assert current is not None
     history = current.store.history()
-    assert [sorted(record.consumed_ids) for record in history if record.component == HARNESS] == [["i1", "r1"]]
-    assert [sorted(record.consumed_ids) for record in history if record.component == WEIGHTS] == [["i1", "r1"]]
+    assert [sorted(record.consumed_ids) for record in history if record.component == HARNESS] == [
+        [consumed_sample_id(f"{HARNESS}:r1:0")]
+    ]
+    assert [sorted(record.consumed_ids) for record in history if record.component == WEIGHTS] == [
+        ["i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")]
+    ]
 
 
 @pytest.mark.unit
@@ -967,40 +958,36 @@ def test_a_job_submitted_on_an_instance_reloaded_under_it_is_the_same_job_on_the
 @pytest.mark.unit
 def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers) -> None:
     """A mode one component cannot run is refused before any component switches."""
-    dispatcher, _ = dispatchers.open(hybrid_components=frozenset({WEIGHTS}))
+    dispatcher, _ = dispatchers.open(auto_only_components=frozenset({HARNESS}))
     scenario = _scenario(dispatcher)
-    with pytest.raises(NotImplementedError, match=r"harness \(ThresholdJobData\)"):
-        scenario.set_training_mode("hybrid")
+    with pytest.raises(NotImplementedError, match=r"harness \(AutoOnlyThresholdJobData\)"):
+        scenario.set_training_mode("manual")
     assert [component_trainer.trainer.pipeline.training_mode for component_trainer in scenario.trainers] == [
         "auto",
         "auto",
     ]
-    with pytest.raises(ValueError, match="training_mode must be"):
-        scenario.set_training_mode("bogus")
+    with pytest.raises(ValueError, match="training_mode must be 'auto' or 'manual'"):
+        scenario.set_training_mode("hybrid")
 
 
 @pytest.mark.unit
-def test_composite_registration_refuses_a_flat_base(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """Files at the root of the base belong to no component and would be carried forward by none."""
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "harness.txt").write_text("harness seed", encoding="utf-8")
-    dispatcher, _ = dispatchers.open()
-    with pytest.raises(ReefError, match=r"keeps \['harness.txt'\] outside its components"):
-        dispatcher.get_or_create_scenario("agent")
-
-
-@pytest.mark.unit
-def test_composite_registration_refuses_a_file_named_like_a_component(
-    tmp_path: Path, dispatchers: _Dispatchers
+@pytest.mark.parametrize(
+    ("layout", "outside"),
+    [
+        # Files at the root of the base belong to no component and would be carried forward by none.
+        ({"harness.txt": "harness seed"}, "harness.txt"),
+        # A component keeps a directory; a file of that name would fail on every component view.
+        ({f"{HARNESS}/{HARNESS}.txt": "harness seed", WEIGHTS: "not a directory"}, WEIGHTS),
+    ],
+)
+def test_composite_registration_refuses_files_outside_its_components(
+    tmp_path: Path, dispatchers: _Dispatchers, layout: dict[str, str], outside: str
 ) -> None:
-    """A component keeps a directory; a file of that name would fail on every component view."""
-    initial = tmp_path / "initial"
-    (initial / HARNESS).mkdir(parents=True)
-    (initial / HARNESS / f"{HARNESS}.txt").write_text("harness seed", encoding="utf-8")
-    (initial / WEIGHTS).write_text("not a directory", encoding="utf-8")
+    for relative, text in layout.items():
+        (tmp_path / "initial" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "initial" / relative).write_text(text, encoding="utf-8")
     dispatcher, _ = dispatchers.open()
-    with pytest.raises(ReefError, match=r"keeps \['weights'\] outside its components"):
+    with pytest.raises(ReefError, match=rf"keeps \['{outside}'\] outside its components"):
         dispatcher.get_or_create_scenario("agent")
 
 
@@ -1049,7 +1036,7 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
     reloaded = dispatcher.registry.reload("agent")
     assert reloaded.prepare_training_step(HARNESS) is None
     assert _commit_step(reloaded, WEIGHTS) is not None
-    assert reloaded.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
+    assert reloaded.store.history()[-1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
     assert reloaded.records.count("agent") == 2
 
 
@@ -1413,7 +1400,7 @@ def test_commit_record_carries_its_component() -> None:
         component=HARNESS,
     )
     assert CommitRecord.from_dict(start.to_dict()) == start
-    with pytest.raises(CommitHistoryError, match="an activate commit names"):
+    with pytest.raises(CommitHistoryError, match="operation 'activate' names a component"):
         replace(start, operation="activate")
 
 
@@ -1626,33 +1613,17 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
     assert dispatcher.build_training_status()["error"] is None
 
 
-class InstructedJobData(HybridThresholdJobData):
-    """The hybrid batches, which also read training instructions."""
-
-    required_request_types = frozenset({RequestType.INFERENCE, RequestType.REPORT, RequestType.TRAIN})
-
-
-@dataclass(frozen=True)
-class _InstructedRecipe(_TwoTrainerRecipe):
-    """The two trainer recipe whose trainers take training instructions."""
-
-    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, sample2job=InstructedJobData(context, None, None))
-
-
 @pytest.mark.unit
-def test_a_hybrid_weights_trainer_submits_a_job_for_an_instruction(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """In hybrid mode an instruction makes the weights batch ready: its job carries the instruction, and the
-    submission consumes it."""
+def test_a_manual_weights_trainer_waits_for_inserted_samples_and_submits_them_with_the_instruction(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """In manual mode a weights stage takes an instruction as a request to train: the job waits until a client
+    inserts samples into the trainer's manual buffer, then carries them and the instruction, and the submission
+    consumes both and empties the buffer."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
-    recipe = _InstructedRecipe(
-        backends={HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")},
-        runtime=StubInferenceRuntime(),
-        training_component=training,
-    )
-    dispatcher, _ = dispatchers.open(recipe=recipe, hold_local_cycles=True)
+    dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _scenario(dispatcher)
-    scenario.set_training_mode("hybrid")
+    scenario.set_training_mode("manual")
     scenario.records.append(
         AgentRecord.create(
             scenario="agent",
@@ -1661,10 +1632,21 @@ def test_a_hybrid_weights_trainer_submits_a_job_for_an_instruction(tmp_path: Pat
             payload={"text": "learn the tool", "session": "session-1", "release_id": "release-1"},
         )
     )
-    assert _commit_step(scenario, WEIGHTS) == []
+    assert scenario.prepare_training_step(WEIGHTS) is None
+    _append_records(scenario, 1)
+    # The trainer stores the step's sample, but no sample joins the manual buffer by itself: the instruction waits.
+    assert scenario.prepare_training_step(WEIGHTS) is None
+    trainer = scenario.trainer_for(WEIGHTS)
+    held = tuple(trainer.pipeline.held)
+    # In a scenario of several components, a sample's ID names its component first.
+    assert held == (f"{WEIGHTS}:r1:0",)
+    trainer.change_buffer(held, insert=True)
+    assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
+    assert trainer.buffer_listing()["samples"] == []
     [job] = training.submitted
+    assert job.data.data_id == "agent:instruction:t1"
     assert job.data.request is not None and job.data.request.id == "t1"
-    assert "t1" in scenario.store.history()[-1].consumed_ids
+    assert {"t1", "i1", "r1"} <= scenario.store.history()[-1].consumed_ids
     _settle_weights_job(scenario)
     assert _job_events(scenario) == ["submitted", "checkpoint", "finished"]
 

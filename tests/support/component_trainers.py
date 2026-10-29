@@ -12,23 +12,24 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate
+from reef.execution.jobs import SupportsReceipt
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
+from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.base import ServingRuntime
 from reef.surface.weights import WeightLoader
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
-from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 
 WEIGHTS = "weights"
@@ -136,10 +137,10 @@ class JudgedAtOnce:
         return None
 
 
-class HybridThresholdJobData(ThresholdJobData):
-    """The same batches, taking instructions too."""
+class AutoOnlyThresholdJobData(ThresholdJobData):
+    """The same batches, without ``manual``: the stage takes no instruction."""
 
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    supported_training_modes = frozenset({"auto"})
 
 
 #: The node kind of a held artifact: the test recipe's activation rule does not activate it.
@@ -151,7 +152,7 @@ class _TwoTrainerRecipe(Recipe):
     """A scenario serving weights and a harness tree, each evolved by its own local backend."""
 
     backends: Mapping[str, CandidateBackend]
-    hybrid_components: frozenset[str] = frozenset()
+    auto_only_components: frozenset[str] = frozenset()
 
     def activation_rule(self) -> ActivationRule:
         return AlwaysActivate(frozenset({HELD}))
@@ -170,15 +171,21 @@ class _TwoTrainerRecipe(Recipe):
         )
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        if component in self.hybrid_components:
-            return threshold_pipeline(context, sample2job=HybridThresholdJobData(context, None, None))
+        if component in self.auto_only_components:
+            return threshold_pipeline(context, sample2job=AutoOnlyThresholdJobData(context, None, None))
         return threshold_pipeline(context)
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
     ):
         def factory_for(component: str):
             return lambda context: self.pipeline_for(component, context)
+
+        # Each trainer reads the samples as the component that its commits name; the only trainer names none.
+        alone = len(self.backends) + (self.training_component is not None) == 1
+
+        def samples_for(component: str) -> TrainerSamples | None:
+            return None if samples is None else TrainerSamples(samples, "" if alone else component)
 
         trainers = tuple(
             ComponentTrainer(
@@ -191,6 +198,7 @@ class _TwoTrainerRecipe(Recipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     default_job_samples=1,
+                    samples=samples_for(component),
                 ),
             )
             for component, backend in self.backends.items()
@@ -203,14 +211,11 @@ class _TwoTrainerRecipe(Recipe):
             scenario,
             records,
             pipeline_factory=factory_for(WEIGHTS),
-            job_loop=JobLoop(
-                training,
-                FixedJobPlan(JobRequest()),
-                scenario=scenario,
-            ),
+            job_loop=JobLoop(training, scenario=scenario),
             algorithm_state=algorithm_states.get(WEIGHTS),
             experiment_logger=experiment_logger,
             default_job_samples=1,
+            samples=samples_for(WEIGHTS),
         )
         return (ComponentTrainer(WEIGHTS, weights), *trainers)
 
@@ -318,7 +323,7 @@ def _dispatcher(
     *,
     backends: dict[str, _ComponentBackend] | None = None,
     recipe: Recipe | None = None,
-    hybrid_components: frozenset[str] = frozenset(),
+    auto_only_components: frozenset[str] = frozenset(),
     training: StubTrainingComponent | None = None,
     records_dir: Path | None = None,
     backend_factory: Any = None,
@@ -331,14 +336,14 @@ def _dispatcher(
         backends = {} if backends is None else backends
     elif training is None:
         backends = _local_pair(tmp_path) if backends is None else backends
-        recipe = _TwoTrainerRecipe(backends=backends, hybrid_components=hybrid_components)
+        recipe = _TwoTrainerRecipe(backends=backends, auto_only_components=auto_only_components)
     else:
         # A training component binds the scenario: a process trains one scenario on it. It trains the weights; the
         # harness keeps its local backend.
         backends = {HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")} if backends is None else backends
         recipe = _TwoTrainerRecipe(
             backends=backends,
-            hybrid_components=hybrid_components,
+            auto_only_components=auto_only_components,
             runtime=StubInferenceRuntime(),
             training_component=training,
         )

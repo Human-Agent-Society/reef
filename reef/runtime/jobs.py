@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.job_data import JobData
 from reef.core.weight_layout import ADAPTER_DIR, WEIGHT_LAYOUTS, WeightLayout
@@ -271,29 +272,31 @@ class TrainingComponent(ABC):
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
-    def check_release(self, directory: Path) -> None:
-        """Raise ``ValueError`` unless ``directory`` holds a release in the layout of this component's releases.
+    def check_release(self, files: ArtifactFiles) -> None:
+        """Raise ``ValueError`` unless ``files`` are a release in the layout of this component's releases.
 
-        An artifact import calls it (RFC #980). The default reads ``release_format``: ``"full"`` needs
-        ``config.json`` and weight files at the root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank
-        is at most ``adapter_rank`` and whose target modules are within ``adapter_target_modules``. ``None``
-        refuses every directory. A component whose releases name weights on a service overrides it and also
-        checks that each path resolves there.
+        An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
+        (RFC #995). The default reads ``release_format``: ``"full"`` needs ``config.json`` and weight files at the
+        root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most ``adapter_rank`` and whose
+        target modules are within ``adapter_target_modules``. It reads only file names and
+        ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
+        refuses every release. A component whose releases name weights on a service overrides it and also checks
+        that each path resolves there.
         """
         release_format = self.release_format
         if release_format is None:
             raise ValueError(f"the {self.name} training component takes no imported releases")
+        paths = set(files.paths())
         if release_format.layout == "full":
-            if not (directory / "config.json").is_file() or not any(
-                path.suffix in (".safetensors", ".bin") for path in directory.iterdir() if path.is_file()
+            if "config.json" not in paths or not any(
+                "/" not in path and path.endswith((".safetensors", ".bin")) for path in paths
             ):
                 raise ValueError("a full-weight release holds config.json and weight files at its root")
             return
-        adapter = directory / ADAPTER_DIR
-        if not any((adapter / name).is_file() for name in ("adapter_model.safetensors", "adapter_model.bin")):
+        if not paths & {f"{ADAPTER_DIR}/adapter_model.safetensors", f"{ADAPTER_DIR}/adapter_model.bin"}:
             raise ValueError(f"an adapter release holds a PEFT adapter in {ADAPTER_DIR}/")
         try:
-            config = json.loads((adapter / "adapter_config.json").read_text(encoding="utf-8"))
+            config = json.loads(files.read_bytes(f"{ADAPTER_DIR}/adapter_config.json"))
         except (OSError, ValueError) as exc:
             raise ValueError(f"{ADAPTER_DIR}/adapter_config.json is no readable JSON object: {exc}") from exc
         rank = config.get("r") if isinstance(config, dict) else None
@@ -317,19 +320,6 @@ class TrainingComponent(ABC):
         component cannot start from these weights; a component may refuse
         every release.
         """
-
-    def fresh_start(self, start: str) -> str:
-        """A start with the weights of ``start`` and no training state; Reef calls it when a plan restarts training.
-
-        The returned start holds the same weights as ``start``. A job from it trains with a new optimizer
-        state, its learning-rate schedule from step 0, and an empty objective
-        state. The component writes it durably. The same ``start`` always
-        gives the same result, so a resubmission after the service restarts
-        names the same job. Raise ``ValueError`` when the component cannot
-        drop the training state of these weights. The default refuses every
-        start.
-        """
-        raise ValueError(f"the {self.name} training component cannot restart training from {start!r}")
 
     @abstractmethod
     def submit(self, job: TrainingJob) -> None:
@@ -357,10 +347,16 @@ class TrainingComponent(ABC):
 class ReleaseLayout(ArtifactLayout):
     """The layout of the releases of ``component``: an import of the component it trains must meet it.
 
-    ``check`` is ``component.check_release``. A weight recipe binds it on its ``weights`` component.
+    ``check`` is ``component.check_release``. The releases resolve a reference when they hold weight files
+    (``release_format``), which the serving runtimes read through ``ReleaseFiles``. A weight recipe binds it on its
+    ``weights`` component.
     """
 
     component: TrainingComponent
 
-    def check(self, directory: Path) -> None:
-        self.component.check_release(directory)
+    def check(self, files: ArtifactFiles) -> None:
+        self.component.check_release(files)
+
+    @property
+    def resolves_references(self) -> bool:
+        return self.component.release_format is not None

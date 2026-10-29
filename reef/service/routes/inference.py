@@ -95,10 +95,21 @@ async def _relay_inference_stream(
     inference_handler: InferenceHandler | None,
     evaluated: str | None = None,
     decision: RoutingDecision | None = None,
+    artifact_id: str | None = None,
 ) -> web.StreamResponse:
-    """Stream one upstream inference to the client and, unless it is an evaluation call, record what it sent."""
+    """Stream one upstream inference to the client and, unless it is an evaluation call, record what it sent.
+
+    ``artifact_id`` names the served artifact that answers at its own URL; ``None`` is the active release.
+    """
     upstream, pending = await request_service.start_stream(
-        headers, payload, path, inference_handler, record=record, evaluated=evaluated, decision=decision
+        headers,
+        payload,
+        path,
+        inference_handler,
+        record=record,
+        evaluated=evaluated,
+        decision=decision,
+        artifact_id=artifact_id,
     )
     body = bytearray()
     complete = False
@@ -112,8 +123,8 @@ async def _relay_inference_stream(
             for name, value in upstream.headers.items()
             if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
         }
-        if record:
-            # Only a resident harness reads the head; an evaluation rollout runs a candidate, not the served tree.
+        if record and artifact_id is None:
+            # Only a resident harness reads the head. An artifact URL serves its named artifact.
             response_headers.update(await _release_header(request_service, headers))
         content_type = next(
             (value for name, value in response_headers.items() if name.lower() == "content-type"),
@@ -214,7 +225,13 @@ def register_inference_routes(
     inference_handler: InferenceHandler | None,
 ) -> None:
     async def serve(
-        request: web.Request, headers: Mapping[str, str], path: str, *, record: bool, evaluated: str | None = None
+        request: web.Request,
+        headers: Mapping[str, str],
+        path: str,
+        *,
+        record: bool,
+        evaluated: str | None = None,
+        artifact_id: str | None = None,
     ) -> web.StreamResponse:
         # Read before the first await. A managed deployment captured the policy when it admitted the request.
         routing = request.get(ADMITTED_ROUTING, request_service.routing) if record else None
@@ -225,10 +242,10 @@ def register_inference_routes(
             payload = await read_object(request)
             if payload.get("stream") is not True:
                 response_payload, item = await request_service.infer_with_data(
-                    headers, payload, path, handler, record=record, evaluated=evaluated
+                    headers, payload, path, handler, record=record, evaluated=evaluated, artifact_id=artifact_id
                 )
                 response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
-                if record:
+                if record and artifact_id is None:
                     response_headers.update(await _release_header(request_service, headers))
                 return web.json_response(response_payload, headers=response_headers)
         else:
@@ -255,6 +272,7 @@ def register_inference_routes(
             inference_handler=handler,
             evaluated=evaluated,
             decision=decision,
+            artifact_id=artifact_id,
         )
 
     async def inference(request: web.Request) -> web.StreamResponse:
@@ -290,6 +308,14 @@ def register_inference_routes(
         headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
         return await serve(request, headers, path, record=False, evaluated=request.match_info.get("component"))
 
+    async def served_artifact(request: web.Request) -> web.StreamResponse:
+        """A recorded call to one served artifact's URL: the artifact answers, not the active release."""
+        path = "/v1/" + request.match_info["route"]
+        if path not in INFERENCE_PATHS:
+            raise web.HTTPNotFound(text=f"{path} is not an inference route")
+        headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
+        return await serve(request, headers, path, record=True, artifact_id=request.match_info["artifact_id"])
+
     async def multimodal(request: web.Request) -> web.StreamResponse:
         """Relay a multimodal call through the scenario's recipe; the answer streams back unchanged, unrecorded."""
         payload = await read_object(request)
@@ -311,6 +337,7 @@ def register_inference_routes(
     app.router.add_post("/v1/messages/count_tokens", inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
+    app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", served_artifact)
     for path in MULTIMODAL_ROUTES:
         app.router.add_post(path, multimodal)
 

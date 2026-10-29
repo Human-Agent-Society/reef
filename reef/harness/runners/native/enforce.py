@@ -11,8 +11,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.sandbox.process import TOOL_ISOLATION as ISOLATION
-from reef.sandbox.process import RolloutLaunchError, run_process
+from reef.execution.sandbox.process import TOOL_ISOLATION as ISOLATION
+from reef.execution.sandbox.process import RolloutLaunchError, run_process
 
 ENFORCE_ENV = "REEF_NATIVE_ENFORCE"
 #: What a profile can withhold; ``read`` is not here because every tool sees the workspace, read only at least.

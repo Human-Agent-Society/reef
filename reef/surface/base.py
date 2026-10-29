@@ -12,11 +12,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.files import ArtifactFiles
 from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 from reef.core.model_metadata import ModelMetadata
@@ -146,14 +146,25 @@ class HarnessInfo:
 class ArtifactLayout(ABC):
     """The directory layout of one component's artifacts, which an artifact import must meet (RFC #980).
 
-    ``check(directory)`` returns when ``directory`` holds an artifact of the component, in the layout of the
-    component's releases, and every remote path it names resolves on the component's service. Otherwise it raises
-    ``ValueError`` naming what does not hold. Purpose: a recipe binds it on ``ComponentSurface.layout``; the
-    committer checks an import's directory with it.
+    ``check(files)`` returns when ``files`` are an artifact of the component, in the layout of the component's
+    releases, and every remote path they name resolves on the component's service. Otherwise it raises
+    ``ValueError`` naming what does not hold. ``files`` is the source's files, wherever the source keeps them, so a
+    check reads files through it and reads no more of them than it needs.
+
+    ``resolves_references`` is true when every reader of the component's artifacts resolves a reference
+    (``REFERENCE_FILE``, RFC #995) to the revision's files; then an import from a source that keeps its files fixed
+    stores the reference instead of a copy. The default is false: an import always stores a copy.
+
+    Purpose: a recipe binds it on ``ComponentSurface.layout``; the committer checks an import with it and decides
+    what the import stores.
     """
 
     @abstractmethod
-    def check(self, directory: Path) -> None: ...
+    def check(self, files: ArtifactFiles) -> None: ...
+
+    @property
+    def resolves_references(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True)

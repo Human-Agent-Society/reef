@@ -55,8 +55,8 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
     storage.write_settings("math", settings)
     assert open_storage().read_settings("math") == settings
     assert open_storage().read_settings("code") == ScenarioSettings()
-    storage.write_settings("math", ScenarioSettings(training_mode="hybrid"))
-    assert open_storage().read_settings("math") == ScenarioSettings(training_mode="hybrid")
+    storage.write_settings("math", ScenarioSettings(training_mode="auto"))
+    assert open_storage().read_settings("math") == ScenarioSettings(training_mode="auto")
 
 
 def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_config, tmp_path):

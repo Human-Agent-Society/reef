@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.files import DirectoryFiles
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.job_data import TaskSample
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.evaluation.harness import (
@@ -33,6 +35,7 @@ from reef.evaluation.harness import (
     RolloutScorer,
     evaluation_selection,
 )
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
@@ -51,8 +54,7 @@ from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import LocalExecutor, ProgramExecutor
-from reef.storage.tasks import TaskStore
+from reef.storage.samples import TrainerSamples
 from reef.surface.files import entries_file, read_entries
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
@@ -335,9 +337,11 @@ def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBinding
     )
 
 
-def eval_task_paths(store: TaskStore) -> tuple[str, ...]:
-    """Return the local directory of each task in the eval split of ``store``, in publication order."""
-    return tuple(str(store.path(task.files_digest)) for task in store.tasks(split="eval"))
+def eval_task_paths(samples: TrainerSamples) -> tuple[str, ...]:
+    """Return the local directory of each task in the eval split of ``samples``, in arrival order."""
+    return tuple(
+        str(stored.sample.task_path) for stored in samples.tasks(split="eval") if isinstance(stored.sample, TaskSample)
+    )
 
 
 class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgressReader):
@@ -359,9 +363,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     construction so an invalid seed refuses boot. A recovered state brings
     its own entries and therefore always wins over the seed.
 
-    With ``eval_task_store``, each step evaluates on the eval split of that
-    task store as the step reads it (:func:`eval_task_paths`), and ``tasks``
-    is the split when the backend was built. A step fixes its list, so both
+    With ``eval_samples``, each step evaluates on the eval split of the
+    scenario's imported tasks in that sample store as the step reads it
+    (:func:`eval_task_paths`), and ``tasks`` is the split when the backend
+    was built. A step fixes its list, so both
     sides of a comparison run the same tasks.
     """
 
@@ -396,7 +401,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_executor: ProgramExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
-        eval_task_store: TaskStore | None = None,
+        eval_samples: TrainerSamples | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -411,7 +416,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._descriptor = descriptor
         self._propose = propose
         self._tasks = tasks
-        self._eval_task_store = eval_task_store
+        self._eval_samples = eval_samples
         self._models = models
         self._model_resolver = model_resolver
         if (
@@ -627,7 +632,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         """
         if artifact.local_path is None:
             raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
-        entries = read_entries(artifact.local_path)
+        entries = read_entries(DirectoryFiles(artifact.local_path))
         admitted, refusal = admit_mutations(entries, (), self._descriptor)
         if refusal is not None:
             raise ValueError(f"the entries of release {artifact.ref.release_id!r} are refused: {refusal}")
@@ -741,7 +746,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
         # Failing traces become permanent evaluation tasks; off by default. The method picks which, Reef screens them.
         # An instruction step consumes the failures it carries, so it promotes them too or they are lost.
-        tasks = self._tasks if self._eval_task_store is None else eval_task_paths(self._eval_task_store)
+        tasks = self._tasks if self._eval_samples is None else eval_task_paths(self._eval_samples)
         if self._promote_failures:
             if self._promote_task is None:
                 candidates: Sequence[str] = _default_promote(samples)
@@ -765,7 +770,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 1 for prompt in candidates if isinstance(prompt, str) and _screened(prompt)
             )
         evaluation_tasks = (*tasks, *(task for task in promoted if task not in frozenset(tasks)))
-        if self._promote_failures or self._eval_task_store is not None:
+        if self._promote_failures or self._eval_samples is not None:
             metrics["evaluation_task_count"] = len(evaluation_tasks)
         if self._promote_failures:
             metrics["promoted_tasks"] = len(evaluation_tasks) - len(tasks)

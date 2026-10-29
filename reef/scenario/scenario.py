@@ -7,9 +7,10 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
@@ -21,6 +22,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
+from reef.scenario.releases import ServedArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -190,16 +192,19 @@ class Scenario:
         stepping = tuple(component_trainer for component_trainer in self.trainers if component_trainer.trainer.trains)
         return stepping or self.trainers[:1]
 
-    def set_training_mode(self, training_mode: str) -> None:
+    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
         """Select future job data without waiting for a running backend step.
+
+        ``fill_manual_buffer`` is for a person's switch: a switch from ``auto`` to ``manual`` then starts each
+        trainer's manual buffer from what auto would train next (``TrainingPipeline.set_training_mode``).
 
         Every trainer that runs a step switches or none does: a scenario whose
         components run in different modes would accept instructions for some
         and drop them for others. A trainer without a step builds no job data,
         so it has no mode to switch.
         """
-        if training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         stepping = self.stepping_trainers()
         unsupported = [
             f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.sample2job).__name__})"
@@ -209,7 +214,7 @@ class Scenario:
         if unsupported:
             raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
         for component_trainer in stepping:
-            component_trainer.trainer.set_training_mode(training_mode)
+            component_trainer.trainer.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.
@@ -275,15 +280,46 @@ class Scenario:
         """Make ``artifact_id`` serve as ``component``; see :meth:`ScenarioCommitter.activate`."""
         return self._committer.activate(artifact_id, component)
 
+    def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""
+        return self._committer.serve(artifact_id, component)
+
+    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+        """Stop serving ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.stop_serving`."""
+        return self._committer.stop_serving(artifact_id)
+
+    def served_release(self, artifact_id: str) -> ArtifactRef:
+        """The release that answers a call to the URL of ``artifact_id``.
+
+        When the scenario serves the artifact beside its active release, it is
+        the release that serves it there. Else it is the active release, when
+        that release binds the artifact. Raise ``ArtifactNotFound`` when
+        neither serves it.
+        """
+        with self.release_queries.publication_lock:
+            step = self._committer.step
+            names = self._committer.component_names()
+            served = self.release_queries.served_beside(step, names).get(artifact_id)
+            if served is not None:
+                return served.release
+            current = self._artifact_chain.current
+            if artifact_id in self.release_queries.bound_artifact_ids(current.release_id, names, step).values():
+                return current
+        raise ArtifactNotFound(f"scenario {self._name!r} serves no artifact {artifact_id!r}")
+
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
 
+    def import_target(self, component: str | None) -> str:
+        """The component an import into ``component`` lands in; see :meth:`ScenarioCommitter.import_target`."""
+        return self._committer.import_target(component)[0]
+
     def import_artifact(
-        self, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
     ) -> ComponentArtifact:
-        """Publish ``directory`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
-        return self._committer.import_artifact(directory, component, source=source)
+        """Publish ``files`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
+        return self._committer.import_artifact(files, component, source=source, directory=directory)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""

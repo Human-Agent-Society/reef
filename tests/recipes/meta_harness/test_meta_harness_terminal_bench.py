@@ -11,12 +11,15 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.support.git_lfs import fake_git_lfs
 
 from recipes.meta_harness.population import content_id
 from recipes.meta_harness.recipe import scenario_population_path
+from reef.execution.sandbox.process import SandboxExecutor
 from reef.harness import RolloutResult
 from reef.harness.rollouts.model_binding import ModelBinding
-from reef.sandbox.process import SandboxExecutor
+
+__all__ = ["fake_git_lfs"]
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/meta_harness/examples/terminal_bench"
 
@@ -132,7 +135,8 @@ class Proposals(ModelBinding):
 
 
 @pytest.fixture
-def campaign(driver, monkeypatch, tmp_path):
+def campaign(driver, monkeypatch, tmp_path, fake_git_lfs):
+    # The campaign's commits, not Git LFS, are under test here; tests/artifact covers real LFS.
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     launches = []
 

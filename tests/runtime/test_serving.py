@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.artifact import REFERENCE_FILE, DownloadedSnapshot, HuggingFaceRevision, HuggingFaceSource
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.weight_layout import ADAPTER_DIR
@@ -250,6 +251,28 @@ def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothin
     assert len(engines.events) == calls
     rolled_back = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-0"), "w0"))
     assert rolled_back not in (initial, version)
+
+
+def test_a_release_that_refers_to_a_revision_loads_the_revisions_snapshot(engines, tmp_path, monkeypatch):
+    revision = HuggingFaceRevision("org/model", "0123456789abcdef0123456789abcdef01234567")
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    (reference / REFERENCE_FILE).write_text(json.dumps(revision.to_dict()))
+    snapshot = saved_full_weights(tmp_path / "snapshots" / revision.commit)
+    downloaded = []
+
+    def download(source):
+        downloaded.append(source)
+        return DownloadedSnapshot(snapshot, revision.commit)
+
+    monkeypatch.setattr("reef.runtime.serving.download_huggingface_snapshot", download)
+    serving = FullWeightServingRuntime(engines, Handler())
+    version = serving.activate_checkpoint(release(reference, "hf"))
+    assert engines.events[-2] == ("load", "full", None, version, snapshot)
+    assert downloaded == [HuggingFaceSource(revision.repo, revision.commit)]
+    (reference / REFERENCE_FILE).write_text("{}")
+    with pytest.raises(ReefError, match="no readable reference"):
+        serving.activate_checkpoint(release(reference, "bad"))
 
 
 def test_engines_that_report_another_version_after_a_full_load_fail_it_and_keep_the_served_version(engines, tmp_path):
