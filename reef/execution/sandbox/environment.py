@@ -9,12 +9,14 @@ import shlex
 import shutil
 from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
+from threading import Event, Lock
 from typing import TypeVar
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
+from reef.execution.lifecycle import Execution, validate_wait_timeout
 from reef.execution.sandbox.process import (
     PROCESS_OWNER,
     ProcessOutcome,
@@ -112,6 +114,8 @@ class ExecutorEnvironment(BaseEnvironment):
             opened = await asyncio.shield(opening)
         except asyncio.CancelledError:
             opened = await asyncio.shield(opening)
+            self.executor = opened
+            self.owns_session = opened is not executor
             if opened is not executor:
                 await asyncio.to_thread(opened.close)
             self.closed = True
@@ -180,13 +184,14 @@ class ExecutorEnvironment(BaseEnvironment):
                 outcome = await asyncio.shield(pending)
             except asyncio.CancelledError:
                 self.process_owner.stop()
-                self.closed = True
                 self.started = False
+                self.owns_session = True
                 try:
                     await asyncio.to_thread(self.executor.close)
                 finally:
                     with contextlib.suppress(RolloutLaunchError, RolloutTimeout):
                         await asyncio.shield(pending)
+                self.closed = True
                 raise
         finally:
             PROCESS_OWNER.reset(token)
@@ -227,6 +232,96 @@ class ExecutorEnvironment(BaseEnvironment):
         await asyncio.to_thread(copy_path, source, target, directory=True)
 
 
+class ProgramExecution(Execution):
+    """One program run with its own environment lifecycle and concrete ProcessOutcome.
+
+    environment is an unstarted ExecutorEnvironment supplied by the caller;
+    this run exclusively owns that view. argv is a nonempty tuple of NUL-free
+    strings with a nonempty executable. run or run_async may start it once.
+    A stop before start closes admission without opening the environment.
+    A stop during the run cancels its task; the environment reaps local work
+    and closes the remote session according to its ownership contract.
+
+    gate protects started, stopped, loop and task. finished starts unset and
+    is set after cleanup settles. cleanup_error is None unless cleanup raised;
+    wait_closed raises that error rather than claiming successful closure.
+    run returns ProcessOutcome after cleanup, or propagates launch, timeout,
+    cancellation or cleanup errors. The executor itself remains a factory or
+    session resource, not an Execution.
+    """
+
+    def __init__(self, environment: ExecutorEnvironment, argv: Sequence[str]) -> None:
+        if not isinstance(environment, ExecutorEnvironment) or environment.started or environment.closed:
+            raise ValueError("program execution requires an unstarted environment")
+        if isinstance(argv, str):
+            raise ValueError("argv must be a sequence of arguments, not text")
+        self.argv = tuple(argv)
+        if not self.argv or not all(isinstance(arg, str) and "\0" not in arg for arg in self.argv) or not self.argv[0]:
+            raise ValueError("argv must contain a nonempty executable and NUL-free arguments")
+        self.environment = environment
+        self.gate = Lock()
+        self.started = False
+        self.stopped = False
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.task: asyncio.Task[object] | None = None
+        self.finished = Event()
+        self.cleanup_error: Exception | None = None
+
+    def request_stop(self) -> None:
+        """Cancel this run once; cancellation completes only after environment cleanup."""
+        with self.gate:
+            if self.stopped or self.finished.is_set():
+                return
+            self.stopped = True
+            if not self.started:
+                self.finished.set()
+            elif self.loop is not None and self.task is not None:
+                self.loop.call_soon_threadsafe(self.task.cancel)
+
+    def wait_closed(self, timeout_seconds: float | None = None) -> bool:
+        """Wait for this run's cleanup, raising any failure to release its resources."""
+        validate_wait_timeout(timeout_seconds)
+        if not self.finished.wait(timeout_seconds):
+            return False
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+        return True
+
+    def run(self) -> ProcessOutcome:
+        """Start this run synchronously and return its concrete result after cleanup."""
+        return run_sync(self.run_async())
+
+    async def run_async(self) -> ProcessOutcome:
+        """Start this run on the current loop; callers on that loop must not block in wait_closed."""
+        with self.gate:
+            if self.started or self.stopped:
+                raise RolloutLaunchError("the program execution was already started or stopped")
+            self.started = True
+            self.loop = asyncio.get_running_loop()
+            self.task = asyncio.current_task()
+        try:
+            await self.environment.start(force_build=False)
+            result = await self.environment.exec_argv(self.argv)
+            return ProcessOutcome(result.return_code, result.stdout or "", result.stderr or "")
+        finally:
+            # A stop during cleanup must not abandon the cleanup coroutine.
+            cleanup = asyncio.create_task(self.environment.stop(delete=True))
+            try:
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                    raise
+            except Exception as exc:
+                self.cleanup_error = exc
+                raise
+            finally:
+                with self.gate:
+                    self.loop = None
+                    self.task = None
+                    self.finished.set()
+
+
 def execute(
     executor: ProgramExecutor,
     argv: Sequence[str],
@@ -249,15 +344,7 @@ def execute(
         readonly_paths=readonly_paths,
     )
 
-    async def _execute() -> ProcessOutcome:
-        try:
-            await environment.start(force_build=False)
-            result = await environment.exec_argv(argv)
-            return ProcessOutcome(result.return_code, result.stdout or "", result.stderr or "")
-        finally:
-            await environment.stop(delete=True)
-
-    return run_sync(_execute())
+    return ProgramExecution(environment, argv).run()
 
 
 def download_directory(executor: ProgramExecutor, root: Path, relative: str) -> None:

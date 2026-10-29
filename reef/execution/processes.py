@@ -21,6 +21,8 @@ from threading import Condition, RLock
 from types import MappingProxyType
 from typing import Literal
 
+from reef.execution.lifecycle import Execution, validate_wait_timeout
+
 
 class ProcessSetup(ABC):
     """A child-side setup operation with no input or result, used only by local process adapters.
@@ -176,7 +178,7 @@ class RunningProcess:
 SCOPE_TOPOLOGY_LOCK = RLock()
 
 
-class ProcessScope:
+class ProcessScope(Execution):
     """A thread-safe owner of local executions; initially open and empty.
 
     live maps each unique child PID to its RunningProcess until run has reaped
@@ -222,7 +224,7 @@ class ProcessScope:
         with self.condition:
             return tuple(self.live)
 
-    def request_stop(self, *, grace_seconds: float | None = None) -> tuple[int, ...]:
+    def request_stop(self, *, grace_seconds: float | None = None) -> None:
         """Refuse launches and stop current children using their grace, or a nonnegative override."""
         if grace_seconds is not None and (
             isinstance(grace_seconds, bool)
@@ -239,17 +241,10 @@ class ProcessScope:
             for child_scope in self.children:
                 child_scope.request_stop(grace_seconds=grace_seconds)
             self.condition.notify_all()
-            return tuple(self.live)
 
     def wait_closed(self, timeout_seconds: float | None = None) -> bool:
         """Wait for closure and reaping; None waits without a deadline, otherwise return False on timeout."""
-        if timeout_seconds is not None and (
-            isinstance(timeout_seconds, bool)
-            or not isinstance(timeout_seconds, int | float)
-            or not math.isfinite(timeout_seconds)
-            or timeout_seconds < 0
-        ):
-            raise ValueError("timeout_seconds must be finite and nonnegative")
+        validate_wait_timeout(timeout_seconds)
         with self.condition:
             deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
             if not self.condition.wait_for(lambda: self.closed and not self.live, timeout=timeout_seconds):

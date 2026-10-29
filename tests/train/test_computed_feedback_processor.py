@@ -23,7 +23,7 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
-from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, JobContext, SupportsReceipt
 from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, RecordJudging
@@ -415,3 +415,56 @@ def test_repeated_receipts_are_distinct_submissions() -> None:
         assert worker.poll() == []
     finally:
         worker.close()
+
+
+def test_worker_lifecycle_wait_can_start_before_stop() -> None:
+    from reef.execution.lifecycle import Execution
+
+    worker = BackgroundJobWorker(_Answers(), thread_name="lifecycle-wait")
+    lifecycle: Execution = worker
+    assert not lifecycle.wait_closed(0)
+    with ThreadPoolExecutor() as pool:
+        waiting = pool.submit(lifecycle.wait_closed, None)
+        lifecycle.request_stop()
+        lifecycle.request_stop()
+        assert waiting.result(timeout=5)
+    assert not worker.submit(SupportsReceipt("closed"))
+
+
+class ContextJobRunner(BlockingJobRunner):
+    """Expose a running job's context to test cancellation through Execution."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.context: JobContext | None = None
+
+    async def run_in_context(self, job: SupportsReceipt, context: JobContext) -> SupportsReceipt:
+        self.context = context
+        return await self.run(job)
+
+
+def test_job_execution_can_stop_without_stopping_its_worker() -> None:
+    from reef.execution.lifecycle import Execution
+
+    runner = ContextJobRunner()
+    worker = BackgroundJobWorker(runner, thread_name="individual-job")
+    try:
+        assert worker.submit(SupportsReceipt("first"))
+        assert runner.started.wait(5)
+        assert runner.context is not None
+        execution: Execution = runner.context
+        execution.request_stop()
+        assert execution.wait_closed(5)
+        assert runner.cancelled.is_set()
+        assert not worker.closed
+        runner.release.set()
+        assert worker.submit(SupportsReceipt("second"))
+        deadline = time.monotonic() + 5
+        while "second" not in runner.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "second" in runner.calls
+    finally:
+        worker.close()
+    results = worker.poll()
+    assert Failed("first") in results
+    assert SupportsReceipt("second") in results

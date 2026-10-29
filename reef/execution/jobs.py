@@ -3,19 +3,20 @@
 Pipeline stages use the worker for slow work that must not block the trainer,
 such as judge calls or task-generation rounds. The generator service runs its
 proposals, checks and rollouts on one worker. Its process ownership uses the
-standard-library-only reef.execution.processes module.
+reef.execution.processes module and shared lifecycle contract.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import queue
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 
+from reef.execution.lifecycle import Execution, validate_wait_timeout
 from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessScope
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,16 @@ class Failed(SupportsReceipt):
     """The worker's result for a job that never finished."""
 
 
-class JobContext:
+class JobContext(Execution):
     """Resources and cancellation state of one accepted execution.
 
     processes is a fresh ProcessScope; cancelled is an initially unset Event.
     request_stop sets cancelled and closes processes, idempotently. finish
-    waits for process reaping. The worker creates one context per running
+    waits for process reaping after the runner exits, then sets finished.
+    finished is an initially unset Event; wait_closed waits for that event.
+    cleanup_error records a cleanup exception, which wait_closed re-raises.
+    gate protects the optional loop and task, bound once by the worker.
+    A stop cancels that task on its owning loop. The worker creates one context per running
     submission and binds its scope across async calls and asyncio.to_thread.
     Runners must await their own asynchronous cleanup and cannot detach work.
     """
@@ -54,20 +59,58 @@ class JobContext:
     def __init__(self) -> None:
         self.processes = ProcessScope()
         self.cancelled = Event()
+        self.finished = Event()
+        self.cleanup_error: Exception | None = None
+        self.gate = Lock()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.task: asyncio.Task[object] | None = None
+        self.bound = False
+
+    def bind_task(self) -> None:
+        """Bind the current worker task once so another thread can request its cancellation."""
+        with self.gate:
+            if self.bound or self.finished.is_set():
+                raise RuntimeError("job context was already bound or finished")
+            self.bound = True
+            self.loop = asyncio.get_running_loop()
+            self.task = asyncio.current_task()
 
     def request_stop(self) -> None:
-        self.cancelled.set()
+        with self.gate:
+            if self.finished.is_set() or self.cancelled.is_set():
+                return
+            self.cancelled.set()
+            if self.loop is not None and self.task is not None:
+                self.loop.call_soon_threadsafe(self.task.cancel)
         self.processes.request_stop(grace_seconds=PROCESS_CLOSE_GRACE_S)
+
+    def wait_closed(self, timeout_seconds: float | None = None) -> bool:
+        """Wait until the runner and its owned processes have finished cleanup."""
+        validate_wait_timeout(timeout_seconds)
+        if not self.finished.wait(timeout_seconds):
+            return False
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+        return True
 
     async def finish(self) -> None:
         """Close and reap owned processes before the worker publishes the result."""
+        with self.gate:
+            self.loop = None
+            self.task = None
         self.processes.request_stop(grace_seconds=PROCESS_CLOSE_GRACE_S)
         cleanup = asyncio.create_task(asyncio.to_thread(self.processes.wait_closed))
         try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await cleanup
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+        except Exception as exc:
+            self.cleanup_error = exc
             raise
+        finally:
+            self.finished.set()
 
 
 class BackgroundJobRunner(ABC):
@@ -88,7 +131,7 @@ class BackgroundJobRunner(ABC):
         return await self.run(job)
 
 
-class BackgroundJobWorker:
+class BackgroundJobWorker(Execution):
     """A queue of submissions, at most concurrency runners, and a queue of results.
 
     runner implements BackgroundJobRunner; thread_name is nonempty text and
@@ -97,6 +140,8 @@ class BackgroundJobWorker:
     Exceptions and cancellation yield Failed. poll consumes results once in
     completion order. closed means admission stopped; broken means the worker
     loop is retiring or has exited. Neither alone proves cleanup: wait_closed checks thread exit.
+    stopping is set when admission closes. cleanup_error is None or a reported
+    job cleanup failure; wait_closed re-raises it after thread exit.
     A runner that refuses cancellation can keep wait_closed returning False.
     """
 
@@ -118,6 +163,8 @@ class BackgroundJobWorker:
         self.gate = Lock()
         self.broken = False
         self.closed = False
+        self.stopping = Event()
+        self.cleanup_error: Exception | None = None
 
     def submit(self, job: SupportsReceipt) -> bool:
         """Accept one submission unless closing or broken; repeated receipts are independent submissions."""
@@ -147,27 +194,28 @@ class BackgroundJobWorker:
             if self.closed:
                 return
             self.closed = True
+            self.stopping.set()
             self.jobs.put(None)
             if self.loop is not None and self.wake is not None:
                 self.loop.call_soon_threadsafe(self.wake.set)
 
-    def wait_closed(self, timeout_seconds: float) -> bool:
-        """Return True only if admission stopped and the worker thread exited within the finite timeout."""
-        if (
-            not isinstance(timeout_seconds, int | float)
-            or isinstance(timeout_seconds, bool)
-            or not math.isfinite(timeout_seconds)
-            or timeout_seconds < 0
-        ):
-            raise ValueError("timeout_seconds must be finite and nonnegative")
+    def wait_closed(self, timeout_seconds: float | None = None) -> bool:
+        """Wait for admission to stop and the worker thread to exit, sharing one deadline."""
+        validate_wait_timeout(timeout_seconds)
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        if not self.stopping.wait(timeout_seconds):
+            return False
         with self.gate:
-            if not self.closed:
-                return False
             thread = self.thread
         if thread is None:
             return True
-        thread.join(timeout=timeout_seconds)
-        return not thread.is_alive()
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        thread.join(timeout=remaining)
+        if thread.is_alive():
+            return False
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+        return True
 
     def close(self) -> None:
         """Stop and wait; raise TimeoutError if a runner or its cleanup is still active.
@@ -187,6 +235,8 @@ class BackgroundJobWorker:
         finally:
             with self.gate:
                 self.broken = True
+                self.closed = True
+                self.stopping.set()
             while True:
                 try:
                     job = self.jobs.get_nowait()
@@ -204,7 +254,9 @@ class BackgroundJobWorker:
         tasks: dict[asyncio.Task[SupportsReceipt], tuple[SupportsReceipt, JobContext]] = {}
 
         def _complete(task: asyncio.Task[SupportsReceipt]) -> None:
-            submitted = tasks.pop(task)[0]
+            submitted, context = tasks.pop(task)
+            if context.cleanup_error is not None:
+                self.cleanup_error = context.cleanup_error
             try:
                 result = task.result()
             except asyncio.CancelledError:
@@ -240,9 +292,9 @@ class BackgroundJobWorker:
                 self.loop = None
                 self.wake = None
             remaining = tuple(tasks)
-            for task in remaining:
-                tasks[task][1].request_stop()
-                task.cancel()
+            executions: tuple[Execution, ...] = tuple(tasks[task][1] for task in remaining)
+            for execution in executions:
+                execution.request_stop()
             if remaining:
                 await asyncio.gather(*remaining, return_exceptions=True)
 
@@ -250,10 +302,11 @@ class BackgroundJobWorker:
         self, job: SupportsReceipt, semaphore: asyncio.Semaphore, context: JobContext
     ) -> SupportsReceipt:
         result: SupportsReceipt = Failed(job.receipt)
+        context.bind_task()
         token = CURRENT_PROCESS_SCOPE.set(context.processes)
         try:
             async with semaphore:
-                if not self.closed:
+                if not self.closed and not context.cancelled.is_set():
                     result = await self.runner.run_in_context(job, context)
                     if result.receipt != job.receipt:
                         raise ValueError("a job result must preserve its receipt")

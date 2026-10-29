@@ -176,10 +176,11 @@ package's own submodules and third-party libraries):
    * - ``cli``
      - ``service``, ``core``
 
-``execution/jobs.py`` depends only on the standard library and
-``execution/processes.py``. Sandbox executors and generator checks also use
-``execution/processes.py`` for local child ownership. That module uses only the standard
-library and imports no Reef modules. The shared worker must not import
+``execution/lifecycle.py`` defines the shared ``Execution`` interface using
+only the standard library. ``execution/processes.py`` adds local process
+ownership and depends only on that interface and the standard library.
+``execution/jobs.py`` depends only on these two modules and the standard library. Sandbox executors and generator checks also use
+``execution/processes.py`` for local child ownership. The shared worker must not import
 ``execution.sandbox`` or its providers and executor adapters.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``

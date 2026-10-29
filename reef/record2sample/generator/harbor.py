@@ -366,7 +366,8 @@ class HarborRuns:
         return self.scope.pids()
 
     def terminate_all(self, *, grace_s: float = STOP_GRACE_S) -> tuple[int, ...]:
-        pids = self.scope.request_stop(grace_seconds=grace_s)
+        pids = self.scope.pids()
+        self.scope.request_stop(grace_seconds=grace_s)
         self.scope.wait_closed()
         return pids
 

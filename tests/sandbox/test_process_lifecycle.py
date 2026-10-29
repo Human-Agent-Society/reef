@@ -68,7 +68,8 @@ def test_stop_waits_for_cleanup_and_rejects_new_launches(tmp_path: Path) -> None
     with ThreadPoolExecutor() as pool:
         pending = pool.submit(scope.run, request(tmp_path, source, grace_seconds=1.0))
         wait_for_file(tmp_path / "ready")
-        (pid,) = scope.request_stop()
+        (pid,) = scope.pids()
+        scope.request_stop()
         assert not scope.wait_closed(0)
         with pytest.raises(ProcessScopeClosed):
             scope.run(request(tmp_path, "raise SystemExit(0)"))
@@ -87,7 +88,8 @@ def test_ignoring_term_forces_group_kill_after_grace(tmp_path: Path) -> None:
     with ThreadPoolExecutor() as pool:
         pending = pool.submit(scope.run, request(tmp_path, source, grace_seconds=0.15))
         wait_for_file(tmp_path / "ready")
-        (pid,) = scope.request_stop()
+        (pid,) = scope.pids()
+        scope.request_stop()
         assert not scope.wait_closed(0.02)
         assert scope.wait_closed(5)
         result = pending.result(timeout=5)
@@ -148,3 +150,29 @@ def test_launch_failure_leaves_no_registered_process(tmp_path: Path) -> None:
 def test_request_rejects_invalid_values(tmp_path: Path, changes: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         request(tmp_path, "pass", **changes)
+
+
+def test_execution_contract_controls_different_owners(tmp_path: Path) -> None:
+    import asyncio
+
+    from reef.execution.jobs import JobContext
+    from reef.execution.lifecycle import Execution
+    from reef.execution.sandbox.environment import ExecutorEnvironment, ProgramExecution
+    from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
+
+    context = JobContext()
+    program = ProgramExecution(ExecutorEnvironment(LocalExecutor(), root=tmp_path, workspace=tmp_path), ["true"])
+    executions: tuple[Execution, ...] = (ProcessScope(), context, program)
+    for execution in executions:
+        assert not execution.wait_closed(0)
+        with pytest.raises(ValueError):
+            execution.wait_closed(-1)
+        execution.request_stop()
+        execution.request_stop()
+    assert not context.wait_closed(0)  # Cancellation does not complete runner cleanup.
+    asyncio.run(context.finish())
+    for execution in executions:
+        assert execution.wait_closed(0)
+        assert execution.wait_closed(None)
+    with pytest.raises(RolloutLaunchError, match="stopped"):
+        program.run()

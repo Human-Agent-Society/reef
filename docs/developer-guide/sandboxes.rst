@@ -47,6 +47,31 @@ Checks share local process management with the executors through
 remain in the generator. The Terminus harness layers the two: an executor
 launches its runner, which then drives a Harbor task environment.
 
+Shared execution control
+------------------------
+
+``reef.execution.lifecycle.Execution`` controls a run or an owner of several
+runs without specifying its result type. ``ProcessScope``, ``JobContext``,
+``BackgroundJobWorker`` and ``ProgramExecution`` implement this interface.
+
+``request_stop()`` is thread-safe and idempotent. It requests cancellation but
+does not wait for cleanup. ``wait_closed(timeout_seconds)`` returns true only
+after work and owned cleanup finish. It returns false when the timeout expires,
+and raises a reported cleanup failure. ``None`` waits without a deadline;
+zero polls. Do not block the thread or event loop needed to finish the execution.
+Closure does not imply that the work succeeded.
+
+``reef.execution.sandbox.environment.ProgramExecution(environment, argv)`` owns
+one run through an unstarted ``ExecutorEnvironment``. Use ``run()`` from synchronous
+code or await ``run_async()``. Both return ``ProcessOutcome`` after cleanup.
+Another thread can request cancellation through ``Execution``. A stopped run
+cannot start again. ``ProgramExecutor`` remains the executor or session resource;
+it is not an execution lifetime. Existing ``execute(...)`` callers use this run object.
+
+Results stay on concrete interfaces: ``ProcessScope.run`` returns ``ProcessResult``,
+and the worker's ``poll`` consumes job results. The shared interface has no
+result field, generic parameter or untyped result container.
+
 Local process ownership
 -----------------------
 

@@ -390,7 +390,12 @@ def test_core_storage_and_sandbox_only_depend_on_lower_layers() -> None:
     allowed = {
         "core": ("reef.core",),
         "storage": ("reef.core", "reef.storage"),
-        "execution/sandbox": ("reef.core", "reef.execution.processes", "reef.execution.sandbox"),
+        "execution/sandbox": (
+            "reef.core",
+            "reef.execution.lifecycle",
+            "reef.execution.processes",
+            "reef.execution.sandbox",
+        ),
     }
     for owner, prefixes in allowed.items():
         for path in sorted((REPO_ROOT / "reef" / owner).rglob("*.py")):
@@ -537,18 +542,25 @@ def test_execution_package_has_no_legacy_entry_points() -> None:
     assert _imported_modules(tree, package="reef.execution") == []
 
 
-def test_execution_jobs_depend_only_on_the_standard_library_and_processes() -> None:
+def test_execution_jobs_depend_only_on_processes_and_lifecycle() -> None:
     # Keep the shared worker independent of the sandbox subsystem.
     tree = ast.parse((REPO_ROOT / "reef/execution/jobs.py").read_text(encoding="utf-8"))
     targets = _imported_modules(tree, package="reef.execution")
     assert all(
-        target.split(".")[0] in sys.stdlib_module_names or target.startswith("reef.execution.processes.")
+        target.split(".")[0] in sys.stdlib_module_names
+        or target.startswith(("reef.execution.processes.", "reef.execution.lifecycle."))
         for target in targets
     )
 
 
-def test_processes_depend_only_on_the_standard_library() -> None:
+def test_processes_depend_only_on_the_standard_library_and_lifecycle() -> None:
     tree = ast.parse((REPO_ROOT / "reef/execution/processes.py").read_text(encoding="utf-8"))
+    imports = _imported_modules(tree, package="reef.execution")
+    assert all(
+        target.split(".")[0] in sys.stdlib_module_names or target.startswith("reef.execution.lifecycle.")
+        for target in imports
+    )
+    tree = ast.parse((REPO_ROOT / "reef/execution/lifecycle.py").read_text(encoding="utf-8"))
     imports = _imported_modules(tree, package="reef.execution")
     assert all(target.split(".")[0] in sys.stdlib_module_names for target in imports)
 
