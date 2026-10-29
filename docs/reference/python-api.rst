@@ -231,8 +231,8 @@ default class of each pipeline stage (see `Pipeline stages
 
 - ``training_spec()`` binds the registered or dotted training objective.
   The objective declares the backend loss family.
-- ``job_plan()`` returns the ``JobPlan`` that chooses the parameters of each
-  training job (see `Training objective`_).
+- ``parameters_by_kind()`` returns the parameters of each training job by the
+  kind of its samples (see `Training objective`_).
 
 Every recipe's ``activation_rule()`` returns the rule that decides whether an
 artifact that its trainers make serves; the deployment's ``activation``
@@ -1444,34 +1444,25 @@ the packing: best-fit decreasing, which puts each rollout, longest first, into
 the pack whose free tokens it fills most closely. The packs decide only which
 rollouts share a step. The loss and the micro-batches stay the component's.
 
-``WeightTrainingRecipe.job_plan()`` returns the recipe's ``JobPlan``
-(``reef.train.jobs``). When a job's data is ready and no job runs, the weight
-trainer calls ``next_job(context)``. ``context`` is a ``JobPlanContext`` with
-three fields:
+``WeightTrainingRecipe.parameters_by_kind()`` returns the parameters of each
+training job by the kind of the job's samples: ``trajectory`` or ``task``.
+The trainer gives them to its pipeline (``PipelineContext.job_parameters``).
+When a job's data is ready and no job runs, the pipeline's sample-to-job stage
+gives the job's parameters, ``Sample2Job.job_parameters(data)``: those of the
+kind of the data's samples. It refuses data that holds both kinds, and a kind
+that the recipe does not name. Reef reads none of the parameters; it submits
+them to the deployment's training component, whose name is the job's
+``backend``. ``TrainingMethod`` (``reef.runtime.interfaces``) is an objective
+reference and an optional ``LearningRateSchedule``.
 
-- ``data``: the ready job data that the job trains.
-- ``finished_jobs``: the number of this trainer's jobs that ended, finished
-  or failed.
-- ``last_job``: the ``JobOutcome`` (``reef.core.job_data``) of the last job
-  that ended, or ``None`` before the first one. A ``JobOutcome`` holds
-  ``job_id``, ``backend``, ``event`` (``finished`` or ``failed``),
-  ``metrics``, and ``error``, which is set exactly when the job failed.
+By default, the parameters of both kinds are ``method``
+(``TrainingMethod(objective).to_dict()``) and the recipe's ``job_parameters``
+config, such as ``scheduling`` or ``save_interval``.
 
-The plan always returns a ``JobRequest(parameters, restart=False)``. Reef reads
-none of the ``parameters``; it submits them to the deployment's training
-component, whose name is the job's ``backend``. With ``restart=True``, the job
-starts from the component's ``fresh_start`` of the trainer's start. ``TrainingMethod`` (``reef.runtime.interfaces``)
-is an objective reference and an optional ``LearningRateSchedule``.
-
-The default ``FixedJobPlan`` submits one job each time job data is ready. Its
-parameters are ``method`` (``TrainingMethod(objective).to_dict()``) and the
-recipe's ``job_parameters`` config, such as ``scheduling`` or
-``save_interval``.
-
-``next_job`` must be a function of its argument. The request is part of the
-job's ID, so a retry after a restart must get the same request. See `Write a
-recipe <../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__
-for a plan that changes the method between jobs.
+The parameters are part of the job's ID, so ``parameters_by_kind()`` must
+return the same value at every call. See `Write a recipe
+<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__
+for a recipe that trains each kind with its own method.
 
 ``TrainingSignal`` carries:
 
@@ -1889,7 +1880,8 @@ loop:
        new optimizer state, the learning-rate schedule at step 0, and an
        empty objective state. The same ``start`` always gives the same
        result. Raise ``ValueError`` when the component cannot do this; the
-       default refuses. Slime implements it; Tinker does not.
+       default refuses. Slime implements it; Tinker does not. Reef does not
+       call it now.
    * - ``close()``
      - Release the component's resources; safe to call repeatedly.
 
@@ -1907,11 +1899,11 @@ call ``start_jobs()`` once it can train. Until then no job runs, including
 the jobs that a restart left.
 
 ``reef.train.jobs.JobLoop`` is the control plane's side. It holds the weight
-trainer's one training component and the recipe's ``JobPlan``. It returns the
-result that the trainer commits:
+trainer's one training component. It returns the result that the trainer
+commits:
 
-1. When no job runs, the trainer reserves ready job data. The plan names the
-   job, the loop submits it, and the trainer commits the submission, which
+1. When no job runs, the trainer reserves ready job data. The pipeline's
+   sample-to-job stage gives the job's parameters, the loop submits it, and the trainer commits the submission, which
    consumes the records of the job's data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
    ``release_path`` becomes a new artifact, with the checkpoint's training

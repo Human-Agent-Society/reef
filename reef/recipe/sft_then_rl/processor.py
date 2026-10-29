@@ -1,4 +1,4 @@
-"""The job data and the job plan of the SFT-then-RL recipe: SFT jobs on held samples, RL task jobs on imported tasks.
+"""The job data of the SFT-then-RL recipe: SFT jobs on held samples, RL task jobs on imported tasks.
 
 ``SFTThenRLJobData`` holds two kinds of job data:
 
@@ -9,8 +9,8 @@
    trains on their rollouts.
 
 The training pipeline gives held samples priority, so a scenario trains the trajectories it holds before it
-trains tasks. ``SFTThenRLJobPlan`` gives a job of trajectories the SFT parameters and a task job the RL
-parameters. Each job starts from the last checkpoint of the job before it, so an RL job starts from the weights
+trains tasks. The recipe gives a job of trajectories the SFT parameters and a task job the RL parameters
+(``SFTThenRLRecipe.parameters_by_kind``). Each job starts from the last checkpoint of the job before it, so an RL job starts from the weights
 that SFT trained. A task trains in one task job of any trainer of the scenario: the commit that submits the job
 lists ``sample:<task name>`` for each task, and the sample store counts it in the transaction of that commit.
 Eval tasks never train.
@@ -32,7 +32,6 @@ from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.sample2job import Sample2JobSettings
 from reef.storage.samples import SampleStore, consumed_sample_id
-from reef.train.jobs import JobPlan, JobPlanContext, JobRequest
 
 #: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
 DEFAULT_TASKS_PER_JOB = 8
@@ -136,35 +135,4 @@ class SFTThenRLJobData(SFTJobData):
             **super().status(),
             "imported_task_pool": len(self.task_pool),
             "handed_out_tasks": 0 if handed_out is None else len(handed_out.tasks),
-        }
-
-
-class SFTThenRLJobPlan(JobPlan):
-    """Give a job of trajectories the ``sft`` request and a task job the ``rl`` request.
-
-    Values: ``sft`` and ``rl`` are ``JobRequest`` values. Operation: ``next_job(context)`` is ``rl`` when
-    ``context.data`` holds one or more items and every item is a ``TaskSample``, and ``sft`` when no item is a
-    ``TaskSample``; data that holds both kinds raises ``ValueError``. Purpose: ``SFTThenRLRecipe.job_plan`` makes
-    it, and the weight trainer's job loop asks it for each job.
-    """
-
-    def __init__(self, sft: JobRequest, rl: JobRequest) -> None:
-        if not isinstance(sft, JobRequest) or not isinstance(rl, JobRequest):
-            raise TypeError("SFTThenRLJobPlan takes two JobRequest values")
-        self.sft = sft
-        self.rl = rl
-
-    def next_job(self, context: JobPlanContext) -> JobRequest:
-        tasks = sum(isinstance(item, TaskSample) for item in context.data.samples)
-        if tasks == 0:
-            return self.sft
-        if tasks == len(context.data.samples):
-            return self.rl
-        raise ValueError(f"job data {context.data.data_id!r} holds both trajectories and tasks")
-
-    def experiment_config(self) -> Mapping[str, Any]:
-        return {
-            "job_plan": "sft-then-rl",
-            "sft_parameters": dict(self.sft.parameters),
-            "rl_parameters": dict(self.rl.parameters),
         }

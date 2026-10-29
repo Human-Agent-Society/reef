@@ -28,7 +28,7 @@ from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.base import ServingRuntime
 from reef.surface.weights import WeightLoader
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
-from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 
 WEIGHTS = "weights"
@@ -203,11 +203,7 @@ class _TwoTrainerRecipe(Recipe):
             scenario,
             records,
             pipeline_factory=factory_for(WEIGHTS),
-            job_loop=JobLoop(
-                training,
-                FixedJobPlan(JobRequest()),
-                scenario=scenario,
-            ),
+            job_loop=JobLoop(training, scenario=scenario),
             algorithm_state=algorithm_states.get(WEIGHTS),
             experiment_logger=experiment_logger,
             default_job_samples=1,

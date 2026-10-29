@@ -55,8 +55,7 @@ model. Reef reads none of the parameters. The component contract is:
    when the component cannot start from those weights.
 ``fresh_start(start)``
    Return a start with the weights of ``start`` and no training state. Reef
-   calls this for a ``JobRequest`` with ``restart=True``. The default raises
-   ``ValueError``.
+   does not call it now. The default raises ``ValueError``.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``
@@ -69,8 +68,8 @@ Each ``SavedCheckpoint`` has a ``path`` (what a later job starts from) and a
 A weight trainer has one training component, and it drives the component
 through ``reef.train.jobs.JobLoop``:
 
-#. When no job runs, the trainer reserves ready job data. The recipe's
-   ``JobPlan`` gives the job's parameters. The job's backend is the
+#. When no job runs, the trainer reserves ready job data. The pipeline's
+   sample-to-job stage gives the job's parameters, by the kind of its samples. The job's backend is the
    component's name. The job ID is a hash of the scenario, the backend, the
    start, the records of the job's data and the parameters. A resubmission after a
    crash therefore names the same job. Reef consumes those records when
@@ -261,9 +260,9 @@ rollout but before the component recorded it. The job then records that
 checkpoint and does not train the rollout's data twice.
 
 The optimizer state stays in the workers from one job to the next. A job
-from a ``fresh_start`` first clears the actor's and the critic's optimizer
-state and sets Megatron's scheduler back to step 0. The weights stay as they
-are.
+from a ``fresh_start``, which Reef does not request now, first clears the
+actor's and the critic's optimizer state and sets Megatron's scheduler back to
+step 0. The weights stay as they are.
 
 `Slime worker executors <#slime-worker-executors>`__ describes how the
 component launches its workers.
