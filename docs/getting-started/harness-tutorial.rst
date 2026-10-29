@@ -218,6 +218,15 @@ operation, ``step``, which Reef calls once per training step:
 calls with their scores and feedback. ``context.services`` are what Reef does
 for the method: model calls, a check of a tree, and runs of the evaluation
 tasks. The tree that the method leaves in the workspace is the candidate.
+
+The method writes the text of ``rules.md``, not its path. ``rules.md`` is
+where every adapter keeps the agent's rules in the tree, and pi's adapter
+renders it to ``pi-agent/AGENTS.md``, where pi reads them. The first head
+takes its ``rules.md`` from the deployment's seed,
+``tutorials/evolve-your-harness/seeds/pi/rules.md``. Each release and each
+merged edit of yours changes it after that. The method above replaces the
+whole file with the model's reply.
+
 Name the class in the deployment file as ``evolution.method``. `Write a
 harness method <../developer-guide/write-a-harness-method.rst>`__ covers the
 workspace, the services, and how to keep state between steps.
