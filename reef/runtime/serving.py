@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapshot, read_reference
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
 from reef.core.plugins import ConfiguredPlugin
@@ -68,9 +69,19 @@ class ReleaseWeights(ConfiguredPlugin, ABC):
 
 
 class ReleaseFiles(ReleaseWeights):
-    """The release's own files: the release directory for ``"full"``, its ``adapter/`` for ``"adapter"``."""
+    """The release's own files: the release directory for ``"full"``, its ``adapter/`` for ``"adapter"``.
+
+    The files of a release that refers to a Hugging Face revision (``read_reference``, RFC #995) are that
+    revision's snapshot, which Hugging Face downloads once into its cache.
+    """
 
     def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles:
+        try:
+            revision = read_reference(release)
+        except ValueError as exc:
+            raise ReefError(f"the release in {release} holds no readable reference: {exc}") from exc
+        if revision is not None:
+            release = download_huggingface_snapshot(HuggingFaceSource(revision.repo, revision.commit)).local_path
         if layout == "full":
             return WeightFiles(release, "full")
         adapter = release / ADAPTER_DIR
