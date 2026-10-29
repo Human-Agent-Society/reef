@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef, is_local_release
+from reef.artifact.files import DirectoryFiles
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core.components import made_artifact_id
 from reef.storage.commits import CommitRecord, active_record
@@ -336,7 +337,7 @@ class ScenarioReleases:
         tree = (release if component is None else release.component(component)).local_path
         if tree is None or not (tree / ENTRIES_FILE).is_file():
             return None
-        return read_entries(tree)
+        return read_entries(DirectoryFiles(tree))
 
     def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a scenario release for a read-only content serve.

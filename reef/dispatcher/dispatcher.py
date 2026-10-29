@@ -16,6 +16,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.sources import SourceFiles
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
@@ -359,11 +360,22 @@ class Dispatcher(ScenarioLifecycle):
             return self.registry.require(scenario).import_target(component)
 
     def import_artifact(
-        self, scenario: str, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self,
+        scenario: str,
+        files: SourceFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
+        directory: Path,
     ) -> ComponentArtifact:
-        """Publish ``directory`` as a new artifact of ``component`` in ``scenario``; nothing serves or trains it yet."""
+        """Publish ``files`` as a new artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
+
+        Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
+        """
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).import_artifact(directory, component, source=source)
+            return self.registry.require(scenario).import_artifact(
+                files, component, source=source, directory=directory
+            )
 
     def current_artifact(
         self,

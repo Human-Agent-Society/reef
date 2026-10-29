@@ -1,8 +1,9 @@
-"""Transport-independent handling of artifact imports (RFC #980).
+"""Transport-independent handling of artifact imports (RFC #980, RFC #995).
 
 A client imports one artifact into one component of a scenario by naming its directory with a URI. A source reader
-(``ArtifactSources``) copies the directory into a temporary directory under ``ArtifactImports.work_dir``, and the
-dispatcher checks and publishes it (``Dispatcher.import_artifact``). No aiohttp types appear here.
+(``ArtifactSources``) opens the files there, and the dispatcher checks them against the component's layout and
+stores a copy, or a reference to a revision that cannot change, in a temporary directory under
+``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). No aiohttp types appear here.
 ``reef.service.routes.artifact_imports`` adapts it to HTTP.
 """
 
@@ -21,9 +22,10 @@ from reef.dispatcher import Dispatcher
 class ArtifactImports:
     """How the service imports artifacts: the source readers, and the directory that holds each import while it runs.
 
-    Values: ``sources`` reads the URIs of imports. ``work_dir`` is a directory on the service's file system, made
-    when the first import runs; each import copies into its own temporary directory under it and removes that
-    directory when it ends. An import of a full model needs its size there, and again in the artifact store.
+    Values: ``sources`` opens the URIs of imports. ``work_dir`` is a directory on the service's file system, made
+    when the first import runs; each import stores into its own temporary directory under it and removes that
+    directory when it ends. A copied import of a full model needs its size there, and again in the artifact store;
+    an import by reference needs neither.
     Purpose: the service builds it from ``storage.artifact_sources`` and ``storage.artifact_cache_dir``, and the
     import route calls ``import_source``.
     """
@@ -32,20 +34,19 @@ class ArtifactImports:
     work_dir: Path
 
     def import_source(self, dispatcher: Dispatcher, scenario: str, component: str | None, uri: str) -> dict[str, Any]:
-        """Copy the directory ``uri`` names with ``sources`` and import it into ``component`` of ``scenario``.
+        """Import the files ``uri`` names into ``component`` of ``scenario``, by reference or as a copy.
 
-        Return ``{scenario, component, artifact_id, release_id, content_id}``. Before the copy, which can download
-        many gigabytes, raise ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that
-        cannot take the import (``Dispatcher.import_target``); otherwise raise as ``ArtifactSources.fetch`` and
-        ``Dispatcher.import_artifact`` do.
+        Return ``{scenario, component, artifact_id, release_id, content_id}``. Before any file is read, raise
+        ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that cannot take the import
+        (``Dispatcher.import_target``). The layout check then runs on the source, before anything is copied;
+        otherwise raise as ``ArtifactSources.open`` and ``Dispatcher.import_artifact`` do.
         """
         component = dispatcher.import_target(scenario, component)
+        files = self.sources.open(uri)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="import-", dir=self.work_dir) as work:
-            directory = Path(work)
-            version = self.sources.fetch(uri, directory)
             imported = dispatcher.import_artifact(
-                scenario, directory, component, source={"uri": uri, "version": version}
+                scenario, files, component, source={"uri": uri, "version": files.version}, directory=Path(work)
             )
         return {
             "scenario": scenario,

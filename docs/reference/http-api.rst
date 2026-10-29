@@ -1241,10 +1241,13 @@ Import an artifact
 
 ``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
 artifact from the directory that a URI names. Leave out ``component`` when
-the scenario has one component. The body is ``{"source": "<uri>"}``. A source
-reader copies the directory from one of these URIs:
+the scenario has one component. The body is ``{"source": "<uri>"}``. Reef
+checks the layout below on the source, and then copies the directory from one
+of these URIs:
 
-- ``hf://org/model@revision``: a Hugging Face snapshot.
+- ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
+  full 40-digit commit SHA, Reef keeps a reference to the revision instead of
+  a copy (see below).
 - ``s3://bucket/prefix/``: every object under the prefix. Empty folder
   markers, keys that end in ``/``, are skipped.
 - ``file:///absolute/path``: a directory on the service's file system,
@@ -1265,6 +1268,15 @@ The answer is HTTP 201 with ``{scenario, component, artifact_id, release_id,
 content_id}``. ``content_id`` comes from the files: the SHA-256 of each file's
 path and SHA-256. The same files from two sources have the same
 ``content_id``, and each import is a new artifact.
+
+An import of ``hf://org/model@<commit>`` with a full commit SHA stores only a
+reference, ``hf-reference.json``. Reef checks the layout from the revision's
+file list and its small files, and takes each weight file's SHA-256 from the
+Hub, so it downloads no weights. ``content_id`` is the value that a copy of
+the same files gets. The repo must stay on the Hub while Reef serves or trains
+the artifact. A private repo needs a token that the service reads in Hugging
+Face's standard way, such as ``HF_TOKEN``. A revision that does not resolve for
+that token answers HTTP 400.
 
 The directory must have the layout of the releases that the scenario's
 component makes. The training backend and its configuration decide it:

@@ -18,8 +18,9 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
+from reef.artifact.files import directory_content_id
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
-from reef.artifact.sources import directory_content_id
+from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
@@ -435,31 +436,42 @@ class ScenarioCommitter:
             return selected
 
     def import_artifact(
-        self, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
     ) -> ComponentArtifact:
-        """Publish the files in ``directory`` as a new artifact of ``component``; return it (RFC #980).
+        """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
         ``component`` may be left out when the scenario has one component.
-        The component's layout (``ComponentSurface.layout``) checks the
-        directory first, outside the locks, since it can ask a remote service.
-        Then the release's own admission check runs, as at a training
-        publication. The artifact's content id is ``directory_content_id``.
-        The release binds the artifact as ``component`` and every other
+        The component's layout (``ComponentSurface.layout``) checks ``files``
+        first, outside the locks, since it can ask a remote service, and
+        before anything is copied. Then Reef stores the artifact in the empty
+        ``directory``: ``files.reference`` when the source keeps the files
+        fixed (RFC #995), else a copy of the files (RFC #980). The release's
+        own admission check runs on what is stored, as at a training
+        publication. The artifact's content id is the content id of
+        ``files``: a copy's is computed from the copy, which has the same
+        bytes. The release binds the artifact as ``component`` and every other
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
-        directory was read from, as its metrics. The active release, the chain tip,
-        every training start and the activation rule are left alone. Raise
-        ``ValueError`` for an unknown component, a component that takes no
-        import, or a directory that the layout or the admission check refuses;
-        ``CommitPending`` while a training result waits for its commit.
-        Nothing changes then.
+        files were read from, as its metrics. The active release, the chain
+        tip, every training start and the activation rule are left alone.
+        Raise ``ValueError`` for an unknown component, a component that takes
+        no import, or files that the layout or the admission check refuses;
+        ``ArtifactSourceError`` when the copy fails; ``CommitPending`` while a
+        training result waits for its commit. Nothing changes then.
         """
         component, layout = self.import_target(component)
         surface = self._binding.surface
         component_surface = surface.components[component]
-        layout.check(directory)
-        imported = Artifact.local(directory, content_id=directory_content_id(directory))
+        layout.check(files)
+        if files.reference is None:
+            files.copy_into(directory)
+            content_id = directory_content_id(directory)
+        else:
+            for path, data in files.reference.items():
+                (directory / path).write_bytes(data)
+            content_id = files.content_id()
+        imported = Artifact.local(directory, content_id=content_id)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1

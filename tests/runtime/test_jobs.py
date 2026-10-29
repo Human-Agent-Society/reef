@@ -7,6 +7,7 @@ import json
 import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
+from reef.artifact.files import DirectoryFiles
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob, job_id_for
 from reef.train.algos.signals import PreparedJob
@@ -147,14 +148,14 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     (adapter / ADAPTER_DIR).mkdir(parents=True)
     full_weights = StubTrainingComponent(release_format=ReleaseFormat("full"))
     with pytest.raises(ValueError, match=r"config\.json and weight files"):
-        full_weights.check_release(full)
+        full_weights.check_release(DirectoryFiles(full))
     (full / "config.json").write_text("{}")
     (full / "model-00001-of-00002.safetensors").write_bytes(b"w")
-    full_weights.check_release(full)
+    full_weights.check_release(DirectoryFiles(full))
 
     rank_8 = StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("q_proj", "v_proj")))
     with pytest.raises(ValueError, match="holds a PEFT adapter in adapter/"):
-        rank_8.check_release(adapter)
+        rank_8.check_release(DirectoryFiles(adapter))
     (adapter / ADAPTER_DIR / "adapter_model.safetensors").write_bytes(b"a")
     for config, message in (
         ({"r": 16, "target_modules": ["q_proj"]}, "at most 8"),
@@ -163,10 +164,10 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     ):
         (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps(config))
         with pytest.raises(ValueError, match=message):
-            rank_8.check_release(adapter)
+            rank_8.check_release(DirectoryFiles(adapter))
     (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps({"r": 4, "target_modules": ["q_proj"]}))
-    rank_8.check_release(adapter)
+    rank_8.check_release(DirectoryFiles(adapter))
     # ``("all",)`` takes any target modules.
-    StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("all",))).check_release(adapter)
+    StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("all",))).check_release(DirectoryFiles(adapter))
     with pytest.raises(ValueError, match="takes no imported releases"):
-        StubTrainingComponent(release_format=None).check_release(full)
+        StubTrainingComponent(release_format=None).check_release(DirectoryFiles(full))
