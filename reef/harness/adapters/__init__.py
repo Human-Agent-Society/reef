@@ -1,10 +1,10 @@
 """Adapter registry: bundled descriptors plus entry-point discovery.
 
 Bundled adapters are directories beside this file, each holding a
-``descriptor.yaml`` and a ``quirks`` module; external distributions add
+``descriptor.yaml`` and, when it names one, a ``render`` module; external distributions add
 theirs through the ``reef.harness_adapters`` entry point group (see
 ``reef.harness.adapters.descriptor``). Descriptors load lazily and cache per process:
-loading imports the quirks module, and a registry import must stay cheap.
+loading imports the classes a descriptor names, and a registry import must stay cheap.
 """
 
 from __future__ import annotations

@@ -313,8 +313,8 @@ fields are:
 - ``writable_paths`` lists state directories that a hosted sandbox makes
   writable. Rendered inputs within them stay read-only.
 - ``self_isolating`` (optional) is ``true`` when the adapter runs episodes in
-  its own container. Reef then refuses to nest it in its jail, unless the
-  quirks module's ``validate_execution`` accepts the configuration.
+  its own container. Reef then refuses to nest it in its jail, unless its
+  ``execution_validator`` accepts the configuration.
 - ``is_prompt_task_directory`` (optional) is ``true`` when ``{prompt}``
   names a Harbor task directory instead of text the model reads.
 - ``cleanup_whitelist`` lists the paths the agent may write during boot or a
@@ -322,10 +322,12 @@ fields are:
   subtree. Any other entry is a glob against the root-relative path, so name
   a single file with its full path, such as ``pi-agent/auth.json``. A bare
   directory name matches nothing below it.
-- ``quirks`` (optional) names a module with the adapter's own render steps
-  (see `Adapter steps`_). It may also extend ``cleanup_whitelist`` and define
-  ``validate_execution``, an ``ExecutionValidator`` that checks the rendered
-  tree and the executor before launch.
+- ``renderer`` (optional) names the class with the adapter's own render
+  steps, ``package.module:ClassName``, the form a deployment names a method
+  in (see `Adapter steps`_). Each bundled adapter keeps it in ``render.py``.
+- ``execution_validator`` (optional) names an ``ExecutionValidator`` class in
+  the same form. Reef builds it with no arguments, and calls it with the
+  rendered tree and the executor before launch.
 
 Config checks
 ^^^^^^^^^^^^^
@@ -479,7 +481,7 @@ that builds its own request can still name another model.
 Adapter steps
 ^^^^^^^^^^^^^
 
-A ``quirks`` module defines one subclass of ``AdapterRenderer``
+The ``renderer`` is a subclass of ``AdapterRenderer``
 (``reef.harness.adapters.descriptor``). After the shared checks, the render
 calls its steps in this order:
 
@@ -511,7 +513,7 @@ example, ``with_skill_frontmatter(path, text)`` adds the ``name`` and
 
 A step sees paths, text, and config objects only, not the tree file that
 produced them. Restrictions that depend on how an episode runs are checked
-at launch by the quirks module's ``validate_execution`` instead.
+at launch by the ``execution_validator`` instead.
 
 Run a rendered tree
 ^^^^^^^^^^^^^^^^^^^
@@ -659,7 +661,7 @@ DeepSeek Harness
 ``DSH_HOME`` relocates the agent's home. dsh reads a user patch layer: a
 YAML list of entries addressed by plugin id. The ``primary`` target is an
 object keyed by plugin id, such as ``{"agent-loop": {"config": {...}}}`` or
-``{"disabled": true}``, and the quirks write it as that list. A string that
+``{"disabled": true}``, and the renderer writes it as that list. A string that
 starts with ``!!js `` becomes a JavaScript expression.
 
 - The defaults keep the session log uncompressed and turn off telemetry and
@@ -698,12 +700,12 @@ reads).
 
 - ``rules`` becomes ``SOUL.md`` after Hermes's default identity, because
   rules written alone would replace that identity.
-- The quirks write ``.no-bundled-skills``, so episodes use only the tree's
+- The renderer writes ``.no-bundled-skills``, so episodes use only the tree's
   skills.
-- A command is a skill under ``hermes-commands``, which the quirks add to
+- A command is a skill under ``hermes-commands``, which the renderer adds to
   ``skills.external_dirs``. Hermes runs it as ``/name``.
 - An extension (``extensions/<name>.py``) is a plugin that defines
-  ``register(ctx)``. The quirks write its manifest, its ``plugins.enabled``
+  ``register(ctx)``. The renderer writes its manifest, its ``plugins.enabled``
   entry, and its ``tools.override`` permission, because Hermes loads no
   plugin without that consent.
 - The tree's own entries in ``skills.external_dirs``, ``plugins.enabled``,
@@ -1104,7 +1106,7 @@ To connect an agent that has no adapter yet, write a ``tree.yaml`` (see
    #. ``model_binding`` writes the endpoint, model, and credential for each
       dialect the agent supports.
 
-Add a ``quirks`` module only for what the declaration cannot state. The
+Add a ``renderer`` only for what the declaration cannot state. The
 bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. External adapters
 register through the ``reef.harness_adapters`` entry-point group, as an

@@ -1,10 +1,4 @@
-"""pi adapter quirks: what the declarative descriptor cannot state.
-
-pi is the friendlier of the two bundled harnesses - one environment variable
-relocates its whole configuration and it never mutates rendered files at boot -
-so the quirks reduce to the files it may create beside the rendered files:
-``trust.json`` (trust decisions) and ``auth.json`` (provider auth caches) can
-appear in the agent directory even for an offline run.
+"""pi adapter render steps: skill frontmatter, the settings pi migrates, and the layer's files.
 
 pi follows the Agent Skills spec: a ``SKILL.md`` needs ``name`` and
 ``description`` frontmatter or the skill is reported as a conflict at startup
@@ -26,11 +20,6 @@ from typing import Any
 
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
-
-cleanup_whitelist = (
-    "pi-agent/trust.json",
-    "pi-agent/auth.json",
-)
 
 SETTINGS_PATH = "pi-agent/settings.json"
 

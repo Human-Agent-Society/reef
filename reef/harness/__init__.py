@@ -10,9 +10,9 @@ The map, one subpackage per job:
     one directory per agent, the mapping only: a ``tree.yaml`` (schema in
     ``parts``) that says which parts a tree of the agent holds and where each
     lands, a ``descriptor.yaml`` (schema in ``descriptor``) that says how its
-    binary runs headless and binds a model, and its quirks. pi, opencode,
-    claude, codex, dsh, hermes, and the two programs Reef ships, native and
-    terminus.
+    binary runs headless and binds a model, and a ``render.py`` with its own
+    render steps. pi, opencode, claude, codex, dsh, hermes, and the two
+    programs Reef ships, native and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root through any
     ``reef.sandbox`` executor (``run``), the adapter as the program that

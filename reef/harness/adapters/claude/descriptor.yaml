@@ -121,7 +121,10 @@ cleanup_whitelist:
   - "claude/statsig/**"
   - "claude/todos/**"
   - "claude/shell-snapshots/**"
-quirks: reef.harness.adapters.claude.quirks
+  - "claude/statsig"
+  - "claude/todos"
+  - "claude/shell-snapshots"
+renderer: reef.harness.adapters.claude.render:ClaudeAdapterRenderer
 # How to point Claude Code at a model endpoint. Claude Code speaks the
 # Anthropic Messages API natively, so only the anthropic dialect is bound:
 # settings.json's `env` block redirects the client at Reef's endpoint, which

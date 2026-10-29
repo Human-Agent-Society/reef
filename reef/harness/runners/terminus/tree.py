@@ -88,7 +88,7 @@ def load_tree(root: Path | str) -> dict[str, str]:
 def terminus_kwargs(files: Mapping[str, str]) -> dict[str, Any]:
     """Constructor arguments from ``terminus/config.json``.
 
-    The render quirk already rejected keys that are not Terminus 2 arguments,
+    The renderer already rejected keys that are not Terminus 2 arguments,
     so this only has to parse; a tree that reaches here with a broken config
     was not rendered by Reef.
     """

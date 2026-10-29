@@ -156,9 +156,9 @@ def run_episode(
     # Adapters can validate a conditional boundary (for example, remote task
     # containers with a sandboxed runner). Otherwise keep the default refusal
     # to nest an adapter's local container inside bubblewrap.
-    if descriptor.validate_execution is not None:
+    if descriptor.execution_validator is not None:
         try:
-            descriptor.validate_execution(files, executor)
+            descriptor.execution_validator(files, executor)
         except EpisodeLaunchError as exc:
             raise EpisodeError(str(exc)) from exc
     elif descriptor.self_isolating and not executor.runs_on_host:

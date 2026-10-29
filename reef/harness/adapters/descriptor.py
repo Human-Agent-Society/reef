@@ -28,27 +28,28 @@ drive one harness binary:
   pinned version, which Reef installs on the host that runs the episodes;
   Reef never hosts or proxies binary bytes.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
-  container, so nesting in Reef's jail is refused unless its execution quirk
-  validates a compatible configuration (such as a remote task environment).
+  container, so nesting in Reef's jail is refused unless its
+  ``execution_validator`` accepts the configuration (such as a remote task
+  environment).
 - ``host_env`` (optional): service environment variables a local episode
   keeps, for a host tool the relocated ``HOME`` would otherwise hide.
 - ``is_root_bind_mounted`` (optional): the binary bind-mounts paths below the
   episode root into a container, so on macOS a local episode makes its root
   under the home directory, which Docker's VM shares with the host.
 
-A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
-the declared one and the :class:`AdapterRenderer` subclass it defines adds the
-adapter's own render steps (the seam that enforces what the declaration cannot
-state, such as opencode's agent and command shapes; what a config must keep or
-must not set is declared under ``config.<target>.checks`` and checked by
-the shared render). External adapters register through the
+A descriptor may name a ``renderer``, an :class:`AdapterRenderer` subclass
+that adds the adapter's own render steps (the seam that enforces what the
+declaration cannot state, such as opencode's agent and command shapes; what a
+config must keep or must not set is declared under ``config.<target>.checks``
+and checked by the shared render), and an ``execution_validator``, an
+:class:`ExecutionValidator` subclass. Each is a ``package.module:ClassName``
+reference, the form a deployment names a method in. External adapters register through the
 ``reef.harness_adapters`` entry point group, each entry resolving to an
 ``AdapterDescriptor`` or a zero-argument callable returning one.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import re
 from abc import ABC, abstractmethod
@@ -60,19 +61,23 @@ from typing import Any
 import yaml
 
 from reef.core.errors import ReefError
+from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
 from reef.harness.adapters.parts import TREE_FILE, TreeLayout, TreeLayoutError, load_tree_layout
 from reef.sandbox.process import EpisodeExecutor
 
 
-class ExecutionValidator(ABC):
-    """Adapter-specific constraints checked by the shared episode lifecycle."""
+class ExecutionValidator(Plugin, ABC):
+    """Adapter-specific constraints checked by the shared episode lifecycle.
+
+    A descriptor names the class in ``execution_validator``; the loader builds it with no arguments.
+    """
 
     @abstractmethod
     def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
 
 
-class AdapterRenderer:
+class AdapterRenderer(Plugin):
     """An adapter's own render steps, each given only the files of its concern.
 
     The shared render runs them in a fixed order: ``process_config`` for each config file, ``process_skill`` and
@@ -304,9 +309,9 @@ class AdapterDescriptor:
     #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
     #: then makes its root under ``~/.reef/episodes``; on other platforms the root stays in the temp directory.
     is_root_bind_mounted: bool = False
-    #: Optional quirk that validates the executor against the rendered tree,
-    #: replacing the blanket self_isolating restriction before launch.
-    validate_execution: ExecutionValidator | None = None
+    #: Checks the executor against the rendered tree before launch, in place of the blanket self_isolating
+    #: refusal; ``None`` keeps that refusal.
+    execution_validator: ExecutionValidator | None = None
     #: How a person's machine runs the agent with a release over its own configuration; ``None`` when the adapter
     #: does not run on a person's machine.
     layer: AdapterLayer | None = None
@@ -342,7 +347,7 @@ def _relative_paths(value: Any, where: str) -> tuple[str, ...]:
 
 
 def load_descriptor(path: Path) -> AdapterDescriptor:
-    """Load and validate one ``descriptor.yaml`` and the ``tree.yaml`` beside it, resolving its quirks module."""
+    """Load and validate one ``descriptor.yaml`` and the ``tree.yaml`` beside it, importing the classes it names."""
     try:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
@@ -383,7 +388,18 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_root_bind_mounted = data.get("is_root_bind_mounted", False)
     if not isinstance(is_root_bind_mounted, bool):
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
-    renderer, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
+    renderer = AdapterRenderer
+    if data.get("renderer") is not None:
+        renderer = AdapterRenderer.referenced_class(
+            _reference(data["renderer"], AdapterRenderer, f"{where} 'renderer'")
+        )
+    execution_validator = None
+    if data.get("execution_validator") is not None:
+        setting = f"{where} 'execution_validator'"
+        validator_class = ExecutionValidator.referenced_class(
+            _reference(data["execution_validator"], ExecutionValidator, setting)
+        )
+        execution_validator = validator_class()
     model_binding = _parse_model_binding(data.get("model_binding"), config_targets, where)
     layer = _parse_layer(data.get("layer"), where)
     return AdapterDescriptor(
@@ -395,7 +411,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         layout=layout,
         trajectory_format=_require_str(trajectory, "format", f"{where} trajectory"),
         trajectory_path=_require_str(trajectory, "path", f"{where} trajectory"),
-        cleanup_whitelist=whitelist + quirk_whitelist,
+        cleanup_whitelist=whitelist,
         writable_paths=writable_paths,
         renderer=renderer,
         install=_parse_install(data.get("install"), where),
@@ -404,7 +420,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,
-        validate_execution=validate_execution,
+        execution_validator=execution_validator,
         layer=layer,
     )
 
@@ -551,34 +567,15 @@ def _parse_install(raw: Any, where: str) -> InstallSpec | None:
     )
 
 
-def _load_quirks(
-    module_name: Any, where: str
-) -> tuple[type[AdapterRenderer], tuple[str, ...], ExecutionValidator | None]:
-    if module_name is None:
-        return AdapterRenderer, (), None
-    if not isinstance(module_name, str):
-        raise DescriptorError(f"{where} 'quirks' must be a dotted module name")
+def _reference(value: Any, base: type[Plugin], where: str) -> PluginReference:
+    """The plugin reference that ``value``, a ``package.module:ClassName`` string, makes; DescriptorError unless
+    its class inherits ``base``."""
+    if not isinstance(value, str):
+        raise DescriptorError(f"{where} must be 'package.module:ClassName'")
     try:
-        module = importlib.import_module(module_name)
-    except ImportError as exc:
-        raise DescriptorError(f"{where} cannot import quirks module {module_name!r}: {exc}") from exc
-    # The renderer is the one AdapterRenderer subclass the module defines.
-    renderers = [
-        value
-        for value in vars(module).values()
-        if isinstance(value, type) and issubclass(value, AdapterRenderer) and value.__module__ == module.__name__
-    ]
-    if len(renderers) > 1:
-        names = ", ".join(sorted(renderer.__name__ for renderer in renderers))
-        raise DescriptorError(f"{where} quirks module defines more than one AdapterRenderer subclass: {names}")
-    renderer = renderers[0] if renderers else AdapterRenderer
-    whitelist = tuple(getattr(module, "cleanup_whitelist", ()))
-    if not all(isinstance(item, str) and item for item in whitelist):
-        raise DescriptorError(f"{where} quirks cleanup_whitelist must contain non-empty strings")
-    validate_execution = getattr(module, "validate_execution", None)
-    if validate_execution is not None and not isinstance(validate_execution, ExecutionValidator):
-        raise DescriptorError(f"{where} quirks validate_execution must inherit ExecutionValidator")
-    return renderer, whitelist, validate_execution
+        return base.reference(value, setting=where)
+    except PluginConfigError as exc:
+        raise DescriptorError(str(exc)) from exc
 
 
 def external_descriptors() -> dict[str, AdapterDescriptor]:

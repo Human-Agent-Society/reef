@@ -274,8 +274,9 @@ under ``recipes/<name>/examples/`` or in the external harness.
 
 - For a bundled adapter, add ``reef/harness/adapters/<name>/descriptor.yaml``,
   the ``tree.yaml`` beside it that declares the parts of the agent's tree,
-  and its package initializer. Use a ``quirks.py`` module only for behavior
-  the declarative files cannot express.
+  and its package initializer. Add a ``render.py`` with an
+  ``AdapterRenderer`` subclass, named by the descriptor's ``renderer``, only
+  for behavior the declarative files cannot express.
 - Add an asset, such as Codex's ``bundled_models.json``, only when the
   adapter needs it, then include the asset in the package-data rules in
   ``pyproject.toml``.

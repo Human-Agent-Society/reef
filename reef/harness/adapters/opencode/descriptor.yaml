@@ -63,7 +63,15 @@ cleanup_whitelist:
   - "xdg-cache/**"
   - "xdg-state/**"
   - "xdg-config/**"
-quirks: reef.harness.adapters.opencode.quirks
+  # opencode's boot writes a .gitignore and npm-installs @opencode-ai/plugin with a node_modules tree and
+  # lockfiles beside the rendered config. It also adds a $schema key to a config file that lacks one, an edit
+  # in place that the residue scan does not see. Episode state, not residue.
+  - "opencode/.gitignore"
+  - "opencode/package.json"
+  - "opencode/package-lock.json"
+  - "opencode/bun.lock"
+  - "opencode/node_modules/**"
+renderer: reef.harness.adapters.opencode.render:OpencodeAdapterRenderer
 # How to point opencode at a model endpoint, per API dialect (its
 # custom-provider config shape). Reef renders the set matching its model
 # binding's api into evaluation episodes; the served tree never carries a

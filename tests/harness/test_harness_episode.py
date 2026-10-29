@@ -117,7 +117,7 @@ for turn, (message_id, message, parts) in enumerate(turns):
         database.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", row)
 database.commit()
 database.close()
-# Boot mutations of the rendered config dir, whitelisted by the quirks, and the npm cache of the boot install,
+# Boot mutations of the rendered config dir, whitelisted by the descriptor, and the npm cache of the boot install,
 # which npm keeps in npm_config_cache when it is set and in ~/.npm otherwise.
 (config_dir / ".gitignore").write_text("node_modules\\n")
 (config_dir / "node_modules").mkdir()

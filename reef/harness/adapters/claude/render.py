@@ -1,10 +1,4 @@
-"""Claude Code adapter quirks: boot artifacts and the model a command or skill frontmatter names.
-
-Claude Code's boot writes local state beside the rendered config under
-CLAUDE_CONFIG_DIR: a top-level ``.claude.json`` state file, a ``statsig/``
-feature-gate cache, per-session ``todos/`` lists, and ``shell-snapshots/``.
-The descriptor whitelists those so the episode inverse tolerates them and
-reports anything else as residue.
+"""Claude Code adapter render steps: the model a command or skill frontmatter names, and the layer's files.
 
 Every model call stays on Reef's model binding, and a ``model`` in the
 frontmatter of a command or a skill is the tree choosing where calls go.
@@ -28,13 +22,6 @@ FRONTMATTER_BLOCK = re.compile(r"---\s*\n([\s\S]*?)---\s*\n?")
 #: A plain ``key: value`` line and the value characters Claude Code quotes when its YAML reader refuses the block.
 PLAIN_LINE = re.compile(r"^([a-zA-Z_-]+):\s+(.+)$")
 YAML_SYNTAX = re.compile(r"[{}[\]*&#!|>%@`]|: ")
-
-cleanup_whitelist = (
-    "claude/.claude.json",
-    "claude/statsig",
-    "claude/todos",
-    "claude/shell-snapshots",
-)
 
 
 def quoted_values(block: str) -> str:

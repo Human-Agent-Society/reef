@@ -17,11 +17,11 @@ from tests.support.harness_render import descriptor_data, write_descriptor
 
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.adapters.codex.quirks import bundled_model_catalog
+from reef.harness.adapters.codex.render import bundled_model_catalog
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
-from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
-from reef.harness.adapters.opencode.quirks import read_frontmatter
+from reef.harness.adapters.hermes.render import DEFAULT_IDENTITY
+from reef.harness.adapters.opencode.render import read_frontmatter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree import HarnessTree, RenderError, render_tree, validate_tree
 
@@ -185,7 +185,7 @@ def test_codex_binding_uses_the_responses_api() -> None:
     }
 
 
-def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
+def test_codex_render_rejects_reopened_hermetic_switches() -> None:
     for approval_policy in ("on-request", "never"):
         with pytest.raises(RenderError, match=r"on approval_policy in codex/config\.toml: episodes pin never"):
             render(config({"approval_policy": approval_policy}), CODEX)
@@ -328,7 +328,7 @@ def test_codex_overrides_native_capabilities_and_keeps_instructions(
 
 def test_terminus_folds_commands_into_a_second_skill_root() -> None:
     files = render(SOURCES["terminus"], TERMINUS)
-    # Both roots carry a SKILL.md, and the quirk synthesized frontmatter on each.
+    # Both roots carry a SKILL.md, and the renderer synthesized frontmatter on each.
     assert files["terminus/skills/notes/SKILL.md"].startswith("---\nname: notes\n")
     assert files["terminus-commands/summarize/SKILL.md"].startswith("---\nname: summarize\n")
 
@@ -373,7 +373,7 @@ DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
 DSH_WEB_PATCH = "dsh/profiles/web/cordis.patch.yml"
 
 
-def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() -> None:
+def test_dsh_render_steps_emit_the_patch_layer_the_env_file_and_skill_frontmatter() -> None:
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
     files = render(SOURCES["dsh"], DSH, binding)
     patch = yaml.safe_load(files[DSH_PATCH].replace("!!js ", ""))
@@ -493,15 +493,15 @@ def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
 def test_dsh_command_frontmatter_that_cannot_be_written_again_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A header that loaded can still fail to be written again (nesting the writer recurses on); that is a refusal
     of the tree, never an exception out of render."""
-    import reef.harness.adapters.dsh.quirks as dsh_quirks
+    import reef.harness.adapters.dsh.render as dsh_render
 
     def deep(*args: object, **kwargs: object) -> str:
         raise RecursionError("maximum recursion depth exceeded")
 
-    monkeypatch.setattr(dsh_quirks.yaml, "dump", deep)
+    monkeypatch.setattr(dsh_render.yaml, "dump", deep)
     text = "---\nname: chat\ndescription: Chat\n---\nBody\n"
     with pytest.raises(RenderError, match="cannot write again"):
-        dsh_quirks._with_frontmatter("dsh-agents/skills/chat/SKILL.md", text, True)
+        dsh_render._with_frontmatter("dsh-agents/skills/chat/SKILL.md", text, True)
 
 
 @pytest.mark.parametrize(
@@ -557,7 +557,7 @@ def test_dsh_locks_refuse_a_patch_that_breaks_the_episode() -> None:
 HERMES_CONFIG = "hermes/config.yaml"
 
 
-def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter() -> None:
+def test_hermes_render_steps_emit_the_config_the_plugin_grants_and_skill_frontmatter() -> None:
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
     files = render(SOURCES["hermes"], HERMES, binding)
     config_yaml = yaml.safe_load(files[HERMES_CONFIG])
@@ -657,7 +657,7 @@ def test_hermes_validation_refuses_plugin_names_that_are_not_a_list_of_strings()
     }
 
 
-def test_hermes_quirks_add_the_commands_roots_after_the_external_dirs_a_tree_sets() -> None:
+def test_hermes_render_steps_add_the_commands_roots_after_the_external_dirs_a_tree_sets() -> None:
     """A tree's list replaces the default one, so a tree that sets skills.external_dirs would drop the commands
     roots and every agent command would be unknown to hermes; the roots follow the tree's own entries, a root the
     tree lists already is not added twice, and a string is one entry, as hermes reads it. A value hermes cannot
@@ -713,7 +713,7 @@ BINDING_COPY = {
         ({"command": {"hi": {"template": "Hi.", "model": "evil/m"}}}, r"on command\.hi\.model in"),
     ],
 )
-def test_opencode_quirk_refuses_a_tree_that_chooses_the_model(data: dict, message: str) -> None:
+def test_opencode_render_refuses_a_tree_that_chooses_the_model(data: dict, message: str) -> None:
     """Only the binding's overlays write provider and model, so validation, which renders the tree alone, refuses a
     tree that sets either or picks a model elsewhere; the descriptor locks the other model choices. With the
     binding, the binding wins the keys it writes, and a provider or a model choice beyond them is still refused."""
@@ -730,8 +730,8 @@ def test_opencode_quirk_refuses_a_tree_that_chooses_the_model(data: dict, messag
 
 
 @pytest.mark.parametrize("api", ["openai", "anthropic"])
-def test_opencode_quirk_admits_the_model_binding(api: str) -> None:
-    """The binding's own provider and model pass the quirk, with the further models listed beside the served one."""
+def test_opencode_render_admits_the_model_binding(api: str) -> None:
+    """The binding's own provider and model pass the renderer, with the further models listed beside the served one."""
     binding = ModelBinding(base_url="http://127.0.0.1:8900", model="served", api_key="k", api=api)
     files = render_tree(HarnessTree({}), OPENCODE, binding.config_overlays(OPENCODE, models=("other/big",)))
     config_json = json.loads(files["opencode/opencode.json"])
@@ -1004,7 +1004,7 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
         render({"commands/hi.md": "---\nmodel: evil/m\n---\nSay hi."}, OPENCODE)
 
 
-def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
+def test_claude_render_rejects_reopened_hermetic_switches() -> None:
     with pytest.raises(RenderError, match="includeCoAuthoredBy"):
         render(config({"includeCoAuthoredBy": True}), CLAUDE)
     with pytest.raises(RenderError, match="DISABLE_AUTOUPDATER"):
@@ -1013,7 +1013,7 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
 
 @pytest.mark.parametrize("key", ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "disable_updates"])
 @pytest.mark.parametrize("value", ["x", "maybe", "2", "1"])
-def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
+def test_claude_render_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
     """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
     yes or on, so a tree must not set them at all: the episode env owns them. Windows matches env names in any
     case."""
@@ -1021,14 +1021,14 @@ def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, va
         render(config({"env": {key: value}}), CLAUDE)
 
 
-def test_claude_quirk_renders_a_tree_env_without_the_updater_switches() -> None:
+def test_claude_render_renders_a_tree_env_without_the_updater_switches() -> None:
     assert "env" not in json.loads(render({}, CLAUDE)["claude/settings.json"])
     rendered = json.loads(render(config({"env": {"BASH_MAX_TIMEOUT_MS": "600000"}}), CLAUDE)["claude/settings.json"])
     assert rendered["env"] == {"BASH_MAX_TIMEOUT_MS": "600000"}
 
 
 @pytest.mark.parametrize("value", [None, "enable", False])
-def test_claude_quirk_keeps_deep_link_registration_off(value: object) -> None:
+def test_claude_render_keeps_deep_link_registration_off(value: object) -> None:
     """A run must not register the pinned binary as the person's claude-cli:// handler."""
     assert json.loads(render({}, CLAUDE)["claude/settings.json"])["disableDeepLinkRegistration"] == "disable"
     with pytest.raises(RenderError, match="disableDeepLinkRegistration"):
@@ -1143,16 +1143,17 @@ def test_an_adapter_renderer_step_must_be_a_static_method() -> None:
                 return text
 
 
-def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch) -> None:
-    module_name = "two_renderer_quirks"
-    (tmp_path / f"{module_name}.py").write_text(
-        "from reef.harness.adapters.descriptor import AdapterRenderer\n"
-        "class FirstRenderer(AdapterRenderer):\n    pass\n"
-        "class SecondRenderer(AdapterRenderer):\n    pass\n"
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    target = write_descriptor(tmp_path, "native", {**descriptor_data("native"), "quirks": module_name})
-    with pytest.raises(DescriptorError, match="more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer"):
+@pytest.mark.parametrize(
+    ("reference", "message"),
+    [
+        ("reef.harness.adapters.pi.render", "must be 'package.module:ClassName'"),
+        ("reef.harness.adapters.pi.render:Missing", "cannot import"),
+        ("reef.harness.adapters.terminus.execution:TerminusExecutionValidator", "must name a class that inherits"),
+    ],
+)
+def test_a_renderer_must_name_an_adapter_renderer_class(tmp_path, reference: str, message: str) -> None:
+    target = write_descriptor(tmp_path, "native", {**descriptor_data("native"), "renderer": reference})
+    with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
 
 

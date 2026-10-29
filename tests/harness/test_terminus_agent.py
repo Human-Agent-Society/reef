@@ -3,7 +3,7 @@
 Skipped unless the ``terminus`` extra is installed. These are the contract
 checks no hermetic mapping can make: that Harbor accepts the agent spec and
 the trial overrides the runner builds, that the constructor arguments the
-render quirk admits are real Terminus 2 parameters, that Terminus 2 sends the
+renderer admits are real Terminus 2 parameters, that Terminus 2 sends the
 bound model name to the bound endpoint and reads that model's context limit.
 They need Harbor, but not
 Docker and not a model (a local endpoint stands in), so they run in any job
@@ -154,7 +154,7 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
 
 
 #: Provider fields a tree may pass through llm_call_kwargs, for example OpenRouter's routing and sampling fields; its
-#: fallback ``models`` names another model, which the quirk refuses.
+#: fallback ``models`` names another model, which the renderer refuses.
 CALL_KWARGS = {
     "provider": {"sort": "price"},
     "reasoning": {"effort": "low"},

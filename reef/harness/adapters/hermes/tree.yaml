@@ -17,14 +17,14 @@ parts:
     holds: an Agent Skill, which hermes loads when its description fits the task
   # Every skill is also a /name command in the interactive CLI, and hermes has
   # no other command surface, so a command is a skill under a second root.
-  # The quirks module adds that root to skills.external_dirs, beside the home
+  # The renderer adds that root to skills.external_dirs, beside the home
   # for an episode and at the install root for a reef-hermes session.
   command:
     path: commands/{name}.md
     format: command
     renders: hermes-commands/{name}/SKILL.md
     holds: a prompt template that a person runs as /name, rendered as a skill under a second root
-  # A hermes plugin: register(ctx) in the package init; the quirks module adds
+  # A hermes plugin: register(ctx) in the package init; the renderer adds
   # the manifest and the config grants.
   extension:
     path: extensions/{name}.py

@@ -8,7 +8,7 @@
 # telemetry. The default workspace-write permission runs tools inside the
 # working directory with no approval prompt, so no danger mode is needed.
 # The profile patch is a YAML list of plugin entries; config nodes write it
-# as an object keyed by plugin id and the quirks module emits the list.
+# as an object keyed by plugin id and the renderer emits the list.
 name: dsh
 binary: dsh
 # The vendor's install channel at the pinned version. Harness evolution startup
@@ -158,7 +158,21 @@ trajectory:
 cleanup_whitelist:
   - "dsh/sessions/**"
   - "dsh/storages/**"
-quirks: reef.harness.adapters.dsh.quirks
+  # dsh's boot scaffolds each profile beside the rendered patch: the empty root
+  # entry list, node_modules symlinks into the installation, and the module
+  # fallback links, plus a package manifest and the pnpm workspace file for a
+  # profile without a manifest (the headless one; the web one is rendered).
+  # Episode state, not residue.
+  - "dsh/profiles/headless/package.json"
+  - "dsh/profiles/headless/cordis.yml"
+  - "dsh/profiles/headless/pnpm-workspace.yaml"
+  - "dsh/profiles/headless/node_modules/**"
+  - "dsh/profiles/headless/.dsh-module-fallback/**"
+  - "dsh/profiles/web/cordis.yml"
+  - "dsh/profiles/web/node_modules/**"
+  - "dsh/profiles/web/.dsh-module-fallback/**"
+  - "dsh/profiles/node_modules/**"
+renderer: reef.harness.adapters.dsh.render:DshAdapterRenderer
 # How to point dsh at a model endpoint, per API dialect: a hand declared
 # llm-pi-ai route selected by agent-default-model, its key named by
 # apiKeyEnv and supplied through the .env file. Each profile's patch carries

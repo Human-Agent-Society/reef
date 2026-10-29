@@ -1,11 +1,4 @@
-"""opencode adapter quirks: boot mutations, agent and command shapes, and frontmatter.
-
-opencode's boot mutates its own configuration directories: it injects a
-``$schema`` key into config files that lack one (an in-place edit of a
-rendered file, invisible to the residue scan), writes a ``.gitignore``, and
-npm-installs ``@opencode-ai/plugin`` with a ``node_modules`` tree and
-lockfiles. The whitelist below names exactly those artifacts so the episode
-inverse tolerates them and nothing else.
+"""opencode adapter render steps: agent and command shapes, and frontmatter.
 
 ``process_config`` checks what the declaration cannot state: an agent must
 keep its own name and carry the fields opencode's schema types, a command
@@ -126,14 +119,6 @@ JS_SPACE = f"[{re.escape(JS_WHITESPACE)}]"
 #: where JavaScript's ``.`` stops at any line end.
 REWRITE_BLOCK = re.compile(r"---\r?\n(.*?)\r?\n---", re.DOTALL)
 REWRITE_LINE = re.compile(rf"([a-zA-Z_][a-zA-Z0-9_]*){JS_SPACE}*:{JS_SPACE}*([^\n\r\u2028\u2029]*)")
-
-cleanup_whitelist = (
-    "opencode/.gitignore",
-    "opencode/package.json",
-    "opencode/package-lock.json",
-    "opencode/bun.lock",
-    "opencode/node_modules/**",
-)
 
 
 class RefusedValueError(yaml.MarkedYAMLError):

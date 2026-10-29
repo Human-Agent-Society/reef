@@ -69,7 +69,9 @@ cleanup_whitelist:
   # in tests/smoke/test_real_pi.py guards this): episode state, not residue.
   - "pi-agent/auth.json"
   - "pi-agent/models-store.json"
-quirks: reef.harness.adapters.pi.quirks
+  # pi writes its trust decisions beside the rendered files, even in an offline run.
+  - "pi-agent/trust.json"
+renderer: reef.harness.adapters.pi.render:PiAdapterRenderer
 # How to point pi at a model endpoint, per API dialect. Reef renders the set
 # matching its model binding's api into evaluation episodes; the served tree
 # never carries a provider. maxTokens is Reef's reply budget rather than pi's

@@ -115,9 +115,10 @@ cleanup_whitelist:
 writable_paths:
   - "terminus/sessions"
   - "terminus/trials"
-# The execution quirk permits nesting only with remote task environments.
+# The execution validator permits nesting only with remote task environments.
 self_isolating: true
-quirks: reef.harness.adapters.terminus.quirks
+renderer: reef.harness.adapters.terminus.render:TerminusAdapterRenderer
+execution_validator: reef.harness.adapters.terminus.execution:TerminusExecutionValidator
 # Terminus 2 reaches the model through litellm, so the binding is the provider
 # base URL, key, and model name. The served tree never carries a provider.
 # litellm_proxy sends the model to api_base as it is named whatever vendor

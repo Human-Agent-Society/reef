@@ -241,9 +241,9 @@ def test_real_hermes_reads_the_curator_off(tmp_path) -> None:
 
 
 def test_the_identity_the_rules_follow_is_the_one_the_real_hermes_seeds() -> None:
-    """The hermes quirks put hermes's own first run identity ahead of the rules; it must stay the text the pinned
+    """The hermes render steps put hermes's own first run identity ahead of the rules; it must stay the text the pinned
     hermes writes, read here with the interpreter the real binary runs on."""
-    from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
+    from reef.harness.adapters.hermes.render import DEFAULT_IDENTITY
 
     interpreter = Path(REAL_HERMES).read_text(encoding="utf-8").splitlines()[0].removeprefix("#!").strip()
     seeded = subprocess.run(

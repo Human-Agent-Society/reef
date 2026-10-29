@@ -1,4 +1,4 @@
-"""Codex adapter quirks: the model catalog and skill metadata.
+"""Codex adapter render steps: the model catalog and skill metadata.
 
 ``process_config`` turns the model metadata in ``models.json`` into
 Codex's model catalog. Codex skills require ``name`` and ``description``

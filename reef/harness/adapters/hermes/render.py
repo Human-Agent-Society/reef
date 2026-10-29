@@ -1,4 +1,4 @@
-"""hermes adapter quirks: the config file, skill frontmatter, plugin manifests, and the boot scaffold.
+"""hermes adapter render steps: the config file, skill frontmatter, and plugin manifests.
 
 Config nodes write ``config.yaml`` as a JSON object and the render
 emits it as YAML by its suffix, and the ``env`` target as ``.env`` lines, where hermes
@@ -52,22 +52,6 @@ DEFAULT_IDENTITY = (
     "not because the user said it. Depth is earned \u2014 give it when the "
     "user asks for detail, teaches, or the stakes demand it, not by "
     "default."
-)
-
-# hermes's boot scaffolds the home on every start: state directories, the
-# runtime and cache files, lock files beside the state store, and the seed
-# skill it always writes. Episode state, not residue.
-cleanup_whitelist = (
-    "hermes/cron/**",
-    "hermes/sessions/**",
-    "hermes/pairing/**",
-    "hermes/hooks/**",
-    "hermes/image_cache/**",
-    "hermes/audio_cache/**",
-    "hermes/sandboxes/**",
-    "hermes/terminal-sessions/**",
-    "hermes/bin/**",
-    "hermes/models_dev_cache.json*",
 )
 
 

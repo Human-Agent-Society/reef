@@ -164,7 +164,20 @@ cleanup_whitelist:
   - ".cache/pip/**"
   - ".local/**"
   - ".rustup/**"
-quirks: reef.harness.adapters.hermes.quirks
+  # hermes's boot scaffolds the home on every start: state directories, the
+  # runtime and cache files, lock files beside the state store, and the seed
+  # skill it always writes. Episode state, not residue.
+  - "hermes/cron/**"
+  - "hermes/sessions/**"
+  - "hermes/pairing/**"
+  - "hermes/hooks/**"
+  - "hermes/image_cache/**"
+  - "hermes/audio_cache/**"
+  - "hermes/sandboxes/**"
+  - "hermes/terminal-sessions/**"
+  - "hermes/bin/**"
+  - "hermes/models_dev_cache.json*"
+renderer: reef.harness.adapters.hermes.render:HermesAdapterRenderer
 # How to point hermes at a model endpoint: a custom provider with its key in
 # config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
 # hermes reads the key under model for a loopback or an unknown host, and

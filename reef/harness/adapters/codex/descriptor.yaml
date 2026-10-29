@@ -122,7 +122,7 @@ config:
         reason: Reef's model binding chooses the model provider
   models:
     path: "codex/models.json"
-    # Model metadata by model name, which the quirks module turns into
+    # Model metadata by model name, which the renderer turns into
     # Codex's model catalog.
     checks:
       # The entire file is treated as a dict.
@@ -155,7 +155,7 @@ cleanup_whitelist:
   - "codex/state_5.sqlite*"
   - "codex/thread-writer-locks/**"
   - "codex/thread_history_1.sqlite*"
-quirks: reef.harness.adapters.codex.quirks
+renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
 model_binding:
   responses:
     - target: primary

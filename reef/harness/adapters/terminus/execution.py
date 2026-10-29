@@ -1,14 +1,8 @@
-"""Terminus adapter quirks: constructor knobs, skill frontmatter, one context module.
+"""Where a terminus episode may run.
 
-Skills carry the ``name`` and ``description`` frontmatter the instruction
-builder reads. ``process_skill`` and ``process_command`` add it
-when an evolved file ships bare text, under both skill roots. Terminus 2 has no slash-command surface, so a command
-renders under the second root, and Harbor lists those skills beside the
-others, with nothing that marks them as commands.
-
-One extension can define an Agent subclass of Harbor's Terminus2.
-Rendering only checks its syntax. Execution requires Reef's sandbox around
-the runner and a remote Harbor environment for the terminal task
+One extension can define an Agent subclass of Harbor's Terminus2, which runs
+as Python in the outer runner. Execution requires Reef's sandbox around the
+runner and a remote Harbor environment for the terminal task
 (``REMOTE_TASK_ENVIRONMENTS``): the task container alone does not isolate
 evolved Python in the outer runner.
 """
@@ -17,31 +11,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
-from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
+from reef.harness.adapters.descriptor import ExecutionValidator
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
-from reef.harness.tree.render import RenderError
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-
-
-class TerminusAdapterRenderer(AdapterRenderer):
-    @staticmethod
-    def process_skill(path: str, text: str) -> str:
-        return with_skill_frontmatter(path, text)
-
-    @staticmethod
-    def process_command(path: str, text: str) -> str:
-        # A command is a skill under the second root, so it needs the same frontmatter.
-        return with_skill_frontmatter(path, text)
-
-    @staticmethod
-    def finalize_render(files: dict[str, str]) -> dict[str, str]:
-        try:
-            extension_source(files)
-        except TerminusTreeError as exc:
-            raise RenderError(str(exc)) from exc
-        return files
 
 
 class TerminusExecutionValidator(ExecutionValidator):
@@ -69,6 +42,3 @@ class TerminusExecutionValidator(ExecutionValidator):
             raise EpisodeLaunchError(
                 f"terminus extension requires evolution.executor: sandbox with remote tasks ({remote})"
             )
-
-
-validate_execution = TerminusExecutionValidator()

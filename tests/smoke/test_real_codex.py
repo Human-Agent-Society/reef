@@ -341,7 +341,7 @@ def model_request_config(request_json: str) -> dict[str, object]:
 
 
 def test_codex_bundled_model_catalog_matches_the_pin() -> None:
-    from reef.harness.adapters.codex.quirks import bundled_model_catalog
+    from reef.harness.adapters.codex.render import bundled_model_catalog
 
     descriptor = get_adapter("codex")
     result = run_episode(

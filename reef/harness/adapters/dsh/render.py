@@ -1,4 +1,4 @@
-"""dsh adapter quirks: the patch layers, the credential file, skill frontmatter, and the boot scaffold.
+"""dsh adapter render steps: the patch layers, the credential file, and skill frontmatter.
 
 dsh composes its plugin tree from bundle layers plus one user patch layer
 per profile, ``profiles/<profile>/cordis.patch.yml``: a YAML list of entries
@@ -67,23 +67,6 @@ YAML_1_2_RESOLVERS = (
         r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)[eE][-+]?[0-9]+|[-+]?(?:\.[0-9]+|[0-9]+\.[0-9]*))$",
         list("-+.0123456789"),
     ),
-)
-
-# dsh's boot scaffolds each profile beside the rendered patch: the empty root
-# entry list, node_modules symlinks into the installation, and the module
-# fallback links, plus a package manifest and the pnpm workspace file for a
-# profile without a manifest (the headless one; the web one is rendered).
-# Episode state, not residue.
-cleanup_whitelist = (
-    "dsh/profiles/headless/package.json",
-    "dsh/profiles/headless/cordis.yml",
-    "dsh/profiles/headless/pnpm-workspace.yaml",
-    "dsh/profiles/headless/node_modules/**",
-    "dsh/profiles/headless/.dsh-module-fallback/**",
-    "dsh/profiles/web/cordis.yml",
-    "dsh/profiles/web/node_modules/**",
-    "dsh/profiles/web/.dsh-module-fallback/**",
-    "dsh/profiles/node_modules/**",
 )
 
 
