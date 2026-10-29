@@ -175,7 +175,7 @@ The band marks a task after the recipe trained on it. The calibration measures t
 
 Upstream also gives a task below the band one rollout with hints from the reference solution. Only its proposer revision feedback reads that reward. This generator has no such feedback, so the calibration runs no hint rollout.
 
-The calibration is the last task check in `validate`, so it runs only when the oracle check, a refusing contamination check and a refusing test review all pass. It asks the generator service (`POST /rollouts`) for rollouts of the task's copy on the arm `calibration`, with `calibration_model`. Without it, the rollouts use the generator service's default model: its deployment's `inference.upstream-model`, else its `model-path`. In the example's Tinker deployment, that is the policy in training, `Qwen/Qwen3-8B`. In the pool build below, on [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml), it is that provider's `gpt-4o`, so the calibration measures `gpt-4o` and not the policy; name the solver in `calibration_model` when that deployment's Reef can serve it. The agent is the generator service's own (`generator.agent`). Reef keeps no record of these rollouts, and nothing trains on them.
+The calibration is the last task check in `validate`, so it runs only when the oracle check, a refusing contamination check and a refusing test review all pass. It asks the generator service (`POST /rollouts`) for rollouts of the task's copy on the arm `calibration`, with `calibration_model`. Without it, the rollouts use the generator service's default model: its deployment's `inference.upstream-model`, else its `model-path`. In the example's Tinker deployment, that is the policy in training, `Qwen/Qwen3-8B`. When you save the tasks first, as below, on [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml), it is that provider's `gpt-4o`, so the calibration measures `gpt-4o` and not the policy; name the solver in `calibration_model` when that deployment's Reef can serve it. The agent is the generator service's own (`generator.agent`). Reef keeps no record of these rollouts, and nothing trains on them.
 
 The calibration has a mode:
 
@@ -354,13 +354,13 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
 
 Optional, for an upstream that serves only the Responses API (a ChatGPT plan): set `agent_api: responses` for the agent, and `model_name: "openai/responses/{model}"` in `generator.agent` for the Reasoning Agent's Harbor agent.
 
-## Time per session, and training from a task pool
+## Time per session, and training from saved tasks
 
 With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a generation of 5 sessions takes about 2 to 3 hours before its tasks run. Prompt mode takes about 1 to 2 minutes per session.
 
-The built-in generated-task recipe rolls a generation's tasks out only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, build the task pool first, then train from it:
+The built-in generated-task recipe trains a generation's tasks only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, save the tasks first, then train from them:
 
-1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no training rollouts. With `calibration` on, `validate` runs the calibration rollouts on the generator service, with `calibration_model` or that deployment's model (see [solver calibration](#solver-calibration)). Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
+1. **Save the tasks.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for job data, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskSamples.run` generates, validates and saves one generation with no trainer, and runs no training rollouts. With `calibration` on, `validate` runs the calibration rollouts on the generator service, with `calibration_model` or that deployment's model (see [solver calibration](#solver-calibration)). Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
 
    ```python
    import os
@@ -370,16 +370,17 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
    from reef.pipeline_context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
    from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings, next_generation
+   from reef.storage.samples import TrainerSamples
    from reef.storage.sqlite import SQLiteScenarioStorage
    from reef.storage.tasks import LocalTaskFileStore
 
 
-   async def build_pool(generator_config: dict[str, object], rounds: int, state_dir: str) -> None:
+   async def save_tasks(generator_config: dict[str, object], rounds: int, state_dir: str) -> None:
        """Run the generator's generations with no trainer: generate, validate, and save the tasks."""
        task_files = LocalTaskFileStore(Path(state_dir) / "task-files")
        storage = SQLiteScenarioStorage(Path(state_dir) / "agent-record", task_files=task_files)
        session = storage.open("autoenvscaling")
-       context = PipelineContext("autoenvscaling", task_storage=session.tasks)
+       context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
        generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
        settings = RoundSettings(
            rounds=rounds,
@@ -399,7 +400,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
 
    `generator_config` is the generator's `config` from the example, with its environment references filled in. `state_dir` is the deployment's state directory, so the generations save each valid task in the task store that the example's `storage` uses. The band is only recorded in the generation report. A restart continues with the next generation.
 
-2. **Train from the pool.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it stores their train tasks in the scenario's sample store and trains them, up to `buffer_size` tasks in one job.
+2. **Train from the saved tasks.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it stores their train tasks in the scenario's sample store and trains them, up to `buffer_size` tasks in one job.
 
    ```bash
    reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2sample.config.rounds 4

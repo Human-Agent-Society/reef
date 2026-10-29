@@ -137,13 +137,13 @@ def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upl
             assert response.status == 400
             assert "does not train on imported tasks" in await response.text()
             samples = dispatcher.get_or_create_scenario("s").store.samples
-            assert samples.tasks() == ()
+            assert samples.imported_tasks() == ()
             # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
             evaluated = await client.post(
                 "/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=archive(tmp_path, "t")
             )
             assert evaluated.status == 200
-            assert [task.sample_id for task in samples.tasks(split="eval")] == ["t"]
+            assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["t"]
 
     try:
         asyncio.run(run())
@@ -179,8 +179,8 @@ def test_an_invalid_upload_is_refused_and_publishes_nothing(tmp_path: Path) -> N
                 response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=body)
                 assert response.status == 400, reason
                 assert reason in await response.text()
-            listing = await (await client.get("/reef/scenarios/s/tasks", headers=AUTH)).json()
-            assert listing == {"scenario": "s", "tasks": []}
+            listing = await client.get("/reef/scenarios/s/tasks", headers=AUTH)
+            assert listing.status == 404, "a refused upload creates no scenario"
 
     try:
         asyncio.run(run())

@@ -1249,7 +1249,7 @@ def test_every_mode_keeps_the_samples_beyond_the_buffer_for_later_jobs(caplog, m
         for index in range(20):
             fail(index)
     # Every ready unit goes to the sample store, which consumes its records; nothing is released untrained.
-    assert len(processor.record2record.pool) == 0
+    assert processor.record2record.ready_units == {}
     retention = processor.releasable_record_ids()
     assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
     assert not caplog.records

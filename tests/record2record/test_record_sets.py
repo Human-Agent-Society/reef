@@ -1,4 +1,4 @@
-"""Record sets, record set units and their pool: the type definitions, selection order, reservations, and staleness."""
+"""Record sets and record set units: the type definitions, the one-set-per-record rule, ready units, and staleness."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from reef.record2record import (
     Record2RecordSettings,
     RecordSet,
     RecordSetUnit,
-    RecordSetUnitPool,
     ReportGrouping,
     ReportRecord2Record,
     SampleStatus,
@@ -55,44 +54,37 @@ class ManySetUnit(RecordSetUnit):
         return self.held
 
 
-def single(record_id: str, arrival_index: int) -> SingleRecordSet:
-    return SingleRecordSet(set_id=record_id, arrival_index=arrival_index, record=inference(record_id))
-
-
-def named(unit_id: str, arrival_index: int, group_key: int | None = None) -> RecordSetUnit:
-    """A unit of one inference record whose ID is ``unit_id``."""
-    return ManySetUnit(
-        unit_id=unit_id, arrival_index=arrival_index, group_key=group_key, held=(single(unit_id, arrival_index),)
-    )
+def single(record_id: str) -> SingleRecordSet:
+    return SingleRecordSet(set_id=record_id, record=inference(record_id))
 
 
 def test_a_record_set_holds_one_or_more_records_and_every_record_they_reference() -> None:
-    assert RecordsSet(set_id="r", arrival_index=1, held=(inference("i"), report("r", "i"))).record_ids() == ("i", "r")
+    assert RecordsSet(set_id="r", held=(inference("i"), report("r", "i"))).record_ids() == ("i", "r")
     with pytest.raises(ValueError, match="one or more records"):
-        RecordsSet(set_id="empty", arrival_index=1, held=())
+        RecordsSet(set_id="empty", held=())
     with pytest.raises(ValueError, match=r"does not hold the referenced records \['i'\]"):
-        RecordsSet(set_id="r", arrival_index=1, held=(report("r", "i"),))
+        RecordsSet(set_id="r", held=(report("r", "i"),))
 
 
 def test_a_record_set_unit_holds_one_or_more_record_sets_and_consumes_all_their_records() -> None:
-    unit = ManySetUnit(unit_id="u", arrival_index=1, held=(single("a", 1), single("b", 2)))
+    unit = ManySetUnit(unit_id="u", held=(single("a"), single("b")))
     assert unit.set_ids() == ("a", "b")
     assert unit.consumed_ids() == frozenset({"a", "b"})
-    record_set = single("c", 3)
-    assert SingleSetUnit.of(record_set) == SingleSetUnit(unit_id="c", arrival_index=3, record_set=record_set)
+    record_set = single("c")
+    assert SingleSetUnit.of(record_set) == SingleSetUnit(unit_id="c", record_set=record_set)
     with pytest.raises(ValueError, match="one or more record sets"):
-        ManySetUnit(unit_id="empty", arrival_index=1, held=())
+        ManySetUnit(unit_id="empty", held=())
 
 
 def test_a_stage_puts_a_record_in_one_record_set_only() -> None:
     stage = InferenceRecord2Record()
-    stage.form(RecordsSet(set_id="first", arrival_index=1, held=(inference("i"), report("r1", "i"))))
+    stage.form(RecordsSet(set_id="first", held=(inference("i"), report("r1", "i"))))
     # A retry of a set takes its records again.
-    stage.form(RecordsSet(set_id="first", arrival_index=1, held=(inference("i"), report("r1", "i"))))
+    stage.form(RecordsSet(set_id="first", held=(inference("i"), report("r1", "i"))))
     with pytest.raises(ValueError, match=r"records \['i'\] are in another record set"):
-        stage.form(RecordsSet(set_id="second", arrival_index=2, held=(inference("i"), report("r2", "i"))))
+        stage.form(RecordsSet(set_id="second", held=(inference("i"), report("r2", "i"))))
     stage.release_records(frozenset({"i", "r1"}))
-    stage.form(RecordsSet(set_id="second", arrival_index=2, held=(inference("i"), report("r2", "i"))))
+    stage.form(RecordsSet(set_id="second", held=(inference("i"), report("r2", "i"))))
 
 
 def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() -> None:
@@ -103,16 +95,12 @@ def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() ->
             SampleResult(status, samples)
 
 
-def test_the_pool_holds_ready_units_in_the_order_they_came_and_replaces_one_by_its_id() -> None:
-    pool = RecordSetUnitPool()
-    for name in ("a", "b", "c"):
-        pool.put(named(name, pool.next_arrival_index()))
-    assert pool.remove("b") is not None and pool.remove("missing") is None
-    replacement = named("a", pool.next_arrival_index())
-    pool.put(replacement)
-    pool.put(named("d", pool.next_arrival_index()))
-    assert [unit.unit_id for unit in pool.units()] == ["a", "c", "d"]
-    assert pool.units()[0] is replacement and len(pool) == 3
+def test_a_stage_hands_out_each_ready_unit_once_in_the_order_it_first_became_ready() -> None:
+    stage = InferenceRecord2Record()
+    for name in ("a", "b", "a"):
+        stage.settle(single(name), SampleStatus.READY)
+    assert [unit.unit_id for unit in stage.take_ready_units()] == ["a", "b"]
+    assert stage.take_ready_units() == ()
 
 
 def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:

@@ -26,6 +26,7 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     archive_imported_files,
     legacy_model_configs,
+    migrate_generated_task_marks,
     migrate_imported_tasks,
     migrate_record_storage,
     migrate_sample_columns,
@@ -204,8 +205,8 @@ class SQLiteRecordStore(SQLRecordStore):
                     SAMPLE_TRAIN_COUNT_TABLE.table,
                     COMMIT_TABLE.table,
                     TASK_TABLES.published,
-                    TASK_TABLES.trained,
                 )
+                migrate_generated_task_marks(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -366,7 +367,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
     """Open hashed SQLite database paths and manage their lifecycle.
 
     Each scenario has one database file for its records, commits, settings,
-    generated tasks and uploaded trajectories. Without a directory, all state is in memory. Records, commits and task
+    generated tasks, training samples and evaluations. Without a directory, all state is in memory. Records, commits and task
     states then last for one session, and settings last for the storage.
     ``task_files`` keeps the files of published tasks.
     The default is a ``LocalTaskFileStore`` in ``directory/task-files``. If

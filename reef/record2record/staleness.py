@@ -9,22 +9,22 @@ from reef.core.job_data import Sample, TrajectorySample
 from reef.runtime.interfaces import RuntimeLoadId
 
 
-def producing_runtime_load_ids(tasks: Sequence[Sample]) -> frozenset[str | None]:
-    """Return the runtime load IDs that produced the training data of ``tasks``.
+def producing_runtime_load_ids(samples: Sequence[Sample]) -> frozenset[str | None]:
+    """Return the runtime load IDs that produced the training data of ``samples``.
 
     A sample whose tokens came from several versions gives each version of its
     token spans. A sample without a recorded version gives None. A ``TaskSample``
     gives nothing: the algorithm rolls it out with the weights it trains.
     """
     versions: set[str | None] = set()
-    for task in tasks:
-        if not isinstance(task, TrajectorySample):
+    for sample in samples:
+        if not isinstance(sample, TrajectorySample):
             continue
-        spans = parse_runtime_load_spans(task.training.get("runtime_load_spans", []))
+        spans = parse_runtime_load_spans(sample.training.get("runtime_load_spans", []))
         if spans:
             versions.update(span.runtime_load_id for span in spans)
         else:
-            version = task.training.get("runtime_load_id")
+            version = sample.training.get("runtime_load_id")
             versions.add(version if isinstance(version, str) and version else None)
     return frozenset(versions)
 
