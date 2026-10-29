@@ -21,12 +21,12 @@ The three stages
    record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data ─► trainer
 
 - The **record-to-record stage** (``Record2Record``, ``reef.record2record``)
-  decides which records train, in which record sets and units, and in
-  what order (see `Record sets and their units <#record-sets-and-their-units>`__).
+  decides which records train, and in which record sets and units (see
+  `Record sets and their units <#record-sets-and-their-units>`__).
 - The **record-to-sample stage** (``Record2Sample``, ``reef.record2sample``) turns
   one record set into samples. A sample is a ``Sample``: a ``TrajectorySample``
   that trains directly, or a ``TaskSample`` (a Harbor task) that an algorithm
-  rolls out. Job data may mix both.
+  rolls out. The buffer, and so one job's data, holds samples of one kind.
 - The **sample-to-job stage** (``Sample2Job``, ``reef.sample2job``)
   shapes the samples of the buffer into one ``JobData``. Grouped
   recipes set ``group_id`` on each member. The stage also sets
@@ -109,7 +109,7 @@ the pipeline pushes. Its status settles all records of the set together:
 A record set unit (``RecordSetUnit``) holds one or more record sets that must
 train in the same job. A report by itself is a unit of one record set. A
 ready group is a unit of the record sets of all its reports. The record stage
-puts a unit in its pool when the unit is ready.
+makes a unit ready when the samples of all its record sets are made.
 
 When a unit is ready, the pipeline saves the unit's samples to the scenario's
 sample store in one transaction (``TrainerSamples.add_record_samples``). The
@@ -241,10 +241,12 @@ from the scenario's sample store, in the same way in every training mode:
    trajectories (see `Uploaded trajectories <#uploaded-trajectories>`__).
    They are in store order: units in the order they became ready, and
    uploads in upload order, interleaved by arrival. The samples of job data
-   that the pipeline handed out are not in the buffer. Imported Harbor tasks
-   are not in the buffer either: an evaluation runs them.
+   that the pipeline handed out are not in the buffer. Imported ``train`` tasks
+   are in it when the sample-to-job stage sets ``accepts_imported_tasks``;
+   imported ``eval`` tasks never are, since an evaluation runs them.
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
-   sample.
+   sample. In ``auto`` a kind that the recipe gives no job parameters does not
+   count; such samples train only for an instruction that gives them.
 3. It leaves out each stale sample that the trainer made from records (see
    `Staleness <#staleness>`__), and every other sample of its group. An
    uploaded trajectory is never stale.
@@ -327,10 +329,10 @@ The record-to-record stage
    The pipeline pulls them (``pull``).
 2. The record-to-sample stage makes samples from each record set.
 3. The stage holds the record sets that train in record set units, places
-   reports in their groups, and ends units that can no longer train. It puts
-   each ready unit in its ``pool``.
-4. The pipeline saves the samples of each unit in the pool to the sample
-   store, and the stage ends the unit (``consume``).
+   reports in their groups, and ends units that can no longer train. It makes
+   each unit ready when its samples are.
+4. The pipeline takes the ready units (``take_ready_units``), saves the samples
+   of each one to the sample store, and the stage ends the unit (``consume``).
 
 A record that the stage ends, for example a report in a taken slot, appears
 in ``releasable_record_ids()``. The next commit
@@ -592,11 +594,13 @@ Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 - ``FailedTask(task, error, infrastructure_failure)``: the first rollout ran no
   rollout. ``infrastructure_failure`` is true when the task could not run at
   all, for example because the sandbox failed; it is not a failure of the
-  solver. It is false when the generator service refused the task.
+  solver. The built-in recipe sends it for a task that a task job trained
+  without reporting its rewards, as an infrastructure failure.
 
-The generator service scores a rollout whose verifier ran past its timeout
-as 0, and reports it, so a training rollout of that kind trains. The task's
-oracle passed the same verifier, so the timeout is the agent's.
+The training component scores a training rollout whose verifier ran past its
+timeout with ``rollout.verifier_timeout_reward``, 0 by default, so a rollout
+of that kind trains. The task's oracle passed the same verifier, so the
+timeout is the agent's.
 
 The recipe splits the work across its stages. A round is not a record set,
 and it does not train. The record stage (``GeneratedTaskRecord2Record``)
@@ -704,7 +708,6 @@ sample store counts the tasks that trained.
 After a restart, the record-to-sample stage continues with the next generation number.
 The sample store still holds the train tasks that did not train, so the buffer takes them again. The stage sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
-A task whose rollouts were running at the stop has no result, so it runs again.
 ``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the stored tasks that wait under ``ready_samples``.
 
 Container operations run in the generator service, ``reef.record2sample.generator``.
@@ -740,7 +743,7 @@ Each stage has its own package: ``reef/record2record/``, ``reef/record2sample/``
 and ``reef/sample2job/``. The pipeline lives in ``reef/train/pipeline.py``, and
 the context that the stages read in ``reef/pipeline_context.py``. A stage that
 saves generated tasks opens a store with
-``context.task_storage.open(name, split=...)`` (see `Task stores
+``context.task_storage.open(name)`` (see `Task stores
 <../reference/python-api.rst#task-stores>`__). In a composite recipe,
 each component opens its store names under its component name.
 ``task_storage`` is ``None`` if the trainer has no scenario session. The stage

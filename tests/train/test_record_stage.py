@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.task_service_stubs import task_for
 from tests.train.test_record_stage_job_data_parity import CountingBackend, inference, instruction, report
 
 from reef.artifact import ArtifactRef
-from reef.core import AgentRecord
+from reef.core import AgentRecord, RequestType
 from reef.core.errors import ManualBufferRefused
 from reef.core.job_data import JobOutcome
+from reef.core.tasks import write_harbor_task
 from reef.record2record import (
     GroupDecision,
     InferenceRecord2Record,
@@ -199,7 +201,6 @@ def test_the_inference_stage_forms_one_set_per_inference_record_in_arrival_order
     stage.push(report("r1", "i1"))
     formed = stage.pull()
     assert [record_set.record_ids() for record_set in formed] == [("i1",), ("i2",)]
-    assert [record_set.arrival_index for record_set in formed] == [1, 2]
     assert stage.pull() == ()
     assert stage.releasable_record_ids() == {"r1"} and not stage.background_jobs_running()
 
@@ -273,7 +274,7 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.samples] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
-    assert "r2" not in processor.samples
+    assert "r2" not in processor.set_samples
 
 
 @pytest.mark.unit
@@ -312,7 +313,7 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     # The ready group's records are consumed when its samples are stored; the job data consumes the samples.
     assert {"i1", "i2", "r1", "r2"} <= processor.releasable_record_ids()
     assert processor.acknowledge(batch.data_id) == {consumed_sample_id("r2:0"), consumed_sample_id("r1:0")}
-    assert not processor.samples
+    assert not processor.set_samples
 
 
 @pytest.mark.unit
@@ -328,7 +329,7 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
     assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
-    assert "r1" not in processor.samples
+    assert "r1" not in processor.set_samples
 
 
 @pytest.mark.unit
@@ -526,13 +527,13 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     processor.advance()
     # Both units are stored and their records consumed; the buffer takes one sample, and the other waits.
     assert processor.status()["ready_samples"] == 1
-    assert processor.store.count() == 2
+    assert len(processor.store.page()) == 2
     assert processor.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing version become stale once the serving version is known.
     processor.observe_serving_runtime_load_id("e:1")
     processor.advance()
     assert processor.status()["ready_samples"] == 0
-    assert processor.store.count() == 2, "a stale sample stays in the store untrained"
+    assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
     assert not processor.ready(1)
 
 
@@ -666,7 +667,7 @@ def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train_from_
     samples.made = (("made/a", TaskSample(Path("a"))),)
     assert processor.ready(1)
     samples.made = (("made/a", TaskSample(Path("a"))),)
-    assert processor.count_held_samples() == 1, "a sample made again is stored once"
+    assert processor.buffer() == ("made/a",), "a sample made again is stored once"
     (stored,) = processor.store.page()
     assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("made/a", "", None, ())
     built = processor.build_job_data(1)
@@ -760,3 +761,36 @@ def test_the_manual_buffer_holds_one_kind_of_sample_that_the_trainer_can_train()
     processor.set_training_mode("auto")
     with pytest.raises(ManualBufferRefused):
         processor.remove_from_buffer(("r1:0",))
+
+
+class TaskJobData(RecordingJobData):
+    """Recording job data that also trains the scenario's imported train tasks."""
+
+    accepts_imported_tasks = True
+
+
+@pytest.mark.unit
+def test_imported_train_tasks_are_buffer_samples_of_a_stage_that_trains_them(tmp_path: Path) -> None:
+    session = SQLiteScenarioStorage(tmp_path / "records").open("s")
+    session.samples.add_tasks((write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path / "a"),), "train")
+    session.samples.add_tasks((write_harbor_task(task_for("held", "record-2", 9001), tmp_path / "b"),), "eval")
+
+    def pipeline(stage: type[RecordingJobData], **context: Any) -> TrainingPipeline:
+        built = PipelineContext("s", samples=TrainerSamples(session.samples), **context)
+        return TrainingPipeline(built, record2sample=RecordingSamples(), sample2job=stage(built))
+
+    trains = pipeline(TaskJobData)
+    assert trains.ready(1) and trains.buffer() == ("task-a",), "an eval task never trains"
+    assert not pipeline(RecordingJobData).ready(1), "a stage that trains no imported task skips them"
+    # A kind that the recipe gives no parameters trains only for an instruction that gives them.
+    manual = pipeline(TaskJobData, job_parameters={"trajectory": {}}, training_mode="manual")
+    manual.set_training_mode("auto")
+    assert manual.buffer() == ()
+    manual.set_training_mode("manual")
+    manual.insert_into_buffer(("task-a",))
+    payload = {"text": "RL", "session": "s-1", "release_id": "r-1", "parameters": {"rollout": {}}}
+    manual.push(AgentRecord.create(scenario="s", request_type=RequestType.TRAIN, payload=payload, agent_record_id="t"))
+    data = manual.build_job_data(1)
+    assert manual.sample2job.job_parameters(data) == {"rollout": {}}
+    with pytest.raises(ValueError, match="cannot train the samples"):
+        manual.insert_into_buffer(("held",))

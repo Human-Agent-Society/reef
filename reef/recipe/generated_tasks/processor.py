@@ -253,14 +253,12 @@ def session_records(sessions: tuple[ReportContext, ...]) -> tuple[AgentRecord, .
 class TaskGenerationRound:
     """One task-generation round.
 
-    Values: ``round_number`` is the number of the round; the rounds of one
-    process have increasing numbers. ``sources`` holds at most
-    ``source_records_per_round`` source sessions, in arrival order.
+    Values: ``sources`` holds at most ``source_records_per_round`` source
+    sessions, in arrival order.
     Purpose: ``GeneratedTaskRecord2Record`` makes it when a round is due.
     ``GeneratedTaskSamples`` runs it.
     """
 
-    round_number: int
     sources: tuple[ReportContext, ...]
 
     def record_ids(self) -> frozenset[str]:
@@ -274,8 +272,8 @@ class TaskGenerationRound:
 class RoundResult:
     """How a round ended.
 
-    Values: ``tasks`` are the train tasks that the round's generation
-    published. ``counts`` is False for a
+    Values: ``made_train_tasks`` says whether the round's generation published
+    a train task. ``counts`` is False for a
     round that made nothing new, because a complete generation already used
     its sessions; such a round does not count toward the round limit.
     ``retry`` is True when the generation is incomplete, so the next round
@@ -284,7 +282,7 @@ class RoundResult:
     ``GeneratedTaskRecord2Record.advance`` reads it.
     """
 
-    tasks: tuple[TaskSample, ...] = ()
+    made_train_tasks: bool = False
     counts: bool = True
     retry: bool = False
 
@@ -551,7 +549,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         for result in self.runner.finished_rounds():
             finished = self.running_round
             self.running_round = None
-            self.follow_at_once = not result.tasks
+            self.follow_at_once = not result.made_train_tasks
             if result.counts:
                 self.completed_rounds += 1
             if result.retry and finished is not None and not self.rounds_stopped:
@@ -562,7 +560,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
             self.stop_rounds()
             return
         sources = self.retry_sources or tuple(self.waiting_sources[: self.sources_per_round])
-        generation_round = TaskGenerationRound(round_number=self.next_round, sources=sources)
+        generation_round = TaskGenerationRound(sources=sources)
         if not self.runner.start_round(generation_round):
             self.stop_rounds()
             return
@@ -609,7 +607,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
 
 
 class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
-    """The record-to-sample stage of generated tasks: the runner of the generations, and of each task's rollouts.
+    """The record-to-sample stage of generated tasks: the runner of the generations, and the source of their tasks.
 
     The record stage forms no record set, so the stage makes no sample from records.
 
@@ -667,11 +665,8 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
             logger.info("scenario %r generates tasks with %s", self.scenario, type(self.task_generator).__name__)
         self.eval_fraction = settings.eval_fraction
         self.split_seed = settings.split_seed
-        self.task_store = (
-            context.task_storage.open(TASK_STORE_NAME)
-            if context.task_storage is not None and self.rounds > 0
-            else None
-        )
+        # With no rounds, the stage still trains the train tasks that earlier generations saved.
+        self.task_store = None if context.task_storage is None else context.task_storage.open(TASK_STORE_NAME)
         #: Rollout results that the store could not save; the next job saves them before it delivers.
         self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
         #: Rounds that ended without a job, such as a round of sessions that a complete generation already used.
@@ -747,11 +742,14 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
         # The pipeline stores a made sample as <name>, or <component>:<name> for a trainer of several.
         trainer = self.samples.trainer
         prefix = f"{trainer}:{TASK_STORE_NAME}/" if trainer else f"{TASK_STORE_NAME}/"
-        return {
-            stored.sample.metadata["task"]["name"]: stored
-            for stored in self.samples.tasks(split="train")
-            if stored.component == trainer and stored.sample_id.startswith(prefix)
-        }
+        found: dict[str, StoredSample] = {}
+        after_sequence = 0
+        while page := self.samples.page(after_sequence=after_sequence, kind="task"):
+            for stored in page:
+                if stored.component == trainer and stored.sample_id.startswith(prefix):
+                    found[stored.sample.metadata["task"]["name"]] = stored
+            after_sequence = page[-1].sequence
+        return found
 
     def unfinished_task_count(self) -> int:
         """The number of published train tasks without a result: each waits for a job, or for its job's end."""
@@ -813,7 +811,7 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
                 self.scenario,
                 len(outcome.tasks),
             )
-            finished.append(RoundResult(tasks=outcome.tasks, retry=not outcome.is_complete))
+            finished.append(RoundResult(made_train_tasks=bool(outcome.tasks), retry=not outcome.is_complete))
             self.made.extend(outcome.tasks)
             self.unfinished.update(task.metadata["task"]["name"] for task in outcome.tasks)
         return tuple(finished)
@@ -1026,8 +1024,11 @@ class GeneratedTaskJobData(Sample2Job):
     tasks, 1 by default, and at most ``buffer_size``, 4 by default or ``job_samples`` when that is more. The
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
     Tinker component's ``rollout`` job parameter). The commit that submits the job counts the tasks trained;
-    ``GeneratedTaskSamples.job_ended`` saves their results when the job ends.
+    ``GeneratedTaskSamples.job_ended`` saves their results when the job ends. Imported train tasks train the same
+    way; only generated tasks get results.
     """
+
+    accepts_imported_tasks = True
 
     @classmethod
     def from_config(

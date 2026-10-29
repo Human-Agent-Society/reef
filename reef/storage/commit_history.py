@@ -93,10 +93,10 @@ class CommitHistory(ABC):
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """One open session of a scenario: its records, task stores, uploaded trajectories, evaluations and commits.
+    """One open session of a scenario: its records, task stores, training samples, evaluations and commits.
 
     Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
-    ``trajectories``, ``evaluations`` and ``commit_history`` hold that
+    ``samples``, ``evaluations`` and ``commit_history`` hold that
     scenario's state; the bundled storages keep all five in one database. Every record in the
     history names ``scenario``; a read that finds another name raises
     ``ReefError``. ``initial_step`` is a non-negative step for an existing

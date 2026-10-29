@@ -539,9 +539,12 @@ held-out tasks. It adds the tasks to the scenario's imported tasks, which the
 `task-import section <../user-guide/operate.rst#import-harbor-tasks>`__ also
 adds to. A task's name is its ID among the scenario's training samples, so it
 cannot be the ID of an uploaded trajectory. An upload to the
-``train`` split needs a recipe that trains on imported tasks
-(``Sample2Job.accepts_imported_tasks``); no built-in recipe does. If the
-recipe does not, Reef refuses the upload with 400. The ``eval`` split takes
+``train`` split needs a recipe that trains imported tasks
+(``Sample2Job.accepts_imported_tasks``), such as ``sft`` or the generated-task
+recipe. If no trainer of the scenario does, Reef refuses the upload with 400.
+A train task then trains from the buffer like an uploaded trajectory. In
+``sft`` it trains only in ``manual`` mode, for an instruction that gives its
+job's parameters (see `Manual training <#manual-training>`__). The ``eval`` split takes
 tasks for any recipe, because an `artifact evaluation <#evaluate-an-artifact>`__
 runs them.
 
@@ -789,6 +792,28 @@ not join the manual buffer by themselves, in any recipe:
   goes into the commit's ``training_request`` metrics.
 - Harness evolution runs the instruction at once, with the traces of the
   manual buffer, possibly none. The proposer reads the request next to them.
+
+A weight recipe's instruction can set the parameters of its training job with
+``parameters``, a JSON object of at most 16 KiB. Its keys go over the recipe's
+parameters for the kind of the buffer's samples. Reef does not read them: the
+training component checks them, as it checks the recipe's. A refused job fails
+the instruction with the component's reason. For example, after an SFT job on
+uploaded trajectories, put uploaded train tasks in the manual buffer and run an
+RL job on them:
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8900/reef/train \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "x-reef-scenario: coding" \
+     -H "Content-Type: application/json" \
+     -d '{"agent_record_id":"rl-001","text":"RL on the uploaded tasks","session":"session-1","release_id":"release-1",
+          "parameters":{"method":{"objective":"task_group"},"rollout":{"rollouts_per_task":4}}}'
+
+The Tinker component takes ``method``, ``scheduling``, ``batch_size``,
+``learning_rate``, ``kl_coef``, ``save_interval`` and ``rollout``; ``rollout``
+only on a job of tasks. Slime takes ``method``, ``scheduling`` and
+``save_interval``, and trains no tasks.
 
 .. code:: bash
 

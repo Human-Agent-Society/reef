@@ -1531,7 +1531,8 @@ The built-in generated-task recipe,
 objective on Tinker's ``importance_sampling`` loss, so it requires the
 ``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
 ``GeneratedTaskSamples``, and ``GeneratedTaskJobData``. Without
-``pipeline.record2sample.config.rounds`` no round runs and nothing trains. Each
+``pipeline.record2sample.config.rounds`` no round runs, and the recipe trains
+only the train tasks that earlier generations saved in the scenario. Each
 job is a task job: the training component rolls the job's tasks out on its own
 sampler and trains on their rollouts, as
 ``recipe.config.job_parameters.rollout`` says. The recipe requires that
@@ -1643,8 +1644,8 @@ The ``generator`` section
 Absent by default. When present, ``reef serve`` starts the generator service
 (``python -m reef.service.deploy.generator_process``) before the HTTP service, which depends on
 it, and publishes its address as ``${endpoints.generator}`` for the
-generated-task stages to consume. The generator writes and checks Harbor tasks and runs their rollouts for the
-generated-task recipe and for a task generator such as SPADE, under the same
+generated-task stages to consume. The generator writes and checks Harbor tasks for the generated-task recipe,
+and runs the plays of a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
 host needs the ``harbor`` command line and the Harbor environment that
 ``generator.environment`` selects; the Reef service itself needs neither. The
