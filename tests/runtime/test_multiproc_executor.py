@@ -60,7 +60,7 @@ class Rendezvous:
 
 class RolloutSleeper:
     def run(self, directory):
-        from reef.sandbox.process import ROLLOUT_OWNER_LEASE, LocalExecutor
+        from reef.execution.sandbox.process import ROLLOUT_OWNER_LEASE, LocalExecutor
 
         root = Path(directory)
         token = ROLLOUT_OWNER_LEASE.set(True)

@@ -15,6 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from reef.execution.sandbox.e2b import E2BSession
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, RolloutTimeout
+from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
@@ -23,9 +26,6 @@ from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutatio
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
-from reef.sandbox.e2b import E2BSession
-from reef.sandbox.process import LocalExecutor, ProcessOutcome, RolloutTimeout
-from reef.sandbox.remote import pack
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
 
@@ -433,7 +433,7 @@ def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) ->
 
 @pytest.mark.unit
 def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(tmp_path) -> None:
-    from reef.sandbox.process import SandboxExecutor
+    from reef.execution.sandbox.process import SandboxExecutor
 
     executor = SandboxExecutor(network="isolated", forward_ports=(4123,))
     argv = executor.bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path / "workspace", env={})
@@ -463,12 +463,12 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
 
 @pytest.mark.unit
 def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
+    from reef.execution.sandbox.e2b import E2BExecutor
+    from reef.execution.sandbox.modal import ModalExecutor
+    from reef.execution.sandbox.process import SandboxExecutor, SandboxUnavailable
+    from reef.execution.sandbox.remote import deployment_owner
     from reef.recipe.cordis import proposer_agent_settings
     from reef.recipe.errors import RecipeConfigError
-    from reef.sandbox.e2b import E2BExecutor
-    from reef.sandbox.modal import ModalExecutor
-    from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
-    from reef.sandbox.remote import deployment_owner
 
     assert proposer_agent_settings(None, {}) == (None, 1800.0, 300.0)
     executor, timeout_s, trial_s = proposer_agent_settings({"sandbox": "none", "timeout_s": 60}, {})

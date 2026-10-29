@@ -22,14 +22,11 @@ the sandbox refuses to start when the sandbox runtime is unavailable, through
 
 from __future__ import annotations
 
-import contextlib
 import os
 import resource
 import shutil
-import signal
 import subprocess
 import sys
-import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
@@ -37,6 +34,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from reef.core.errors import ReefError
+from reef.execution.processes import (
+    CURRENT_PROCESS_SCOPE,
+    ProcessRequest,
+    ProcessScope,
+    ProcessScopeClosed,
+    ProcessSetup,
+)
 
 ISOLATION_ENV = "REEF_SANDBOX_ISOLATION"
 
@@ -44,31 +48,17 @@ ROLLOUT_OWNER_LEASE: ContextVar[bool] = ContextVar("rollout_owner_lease", defaul
 
 
 class ProcessOwner:
-    """Terminate the local process groups belonging to one environment."""
+    """An environment's local process scope, stopped by ExecutorEnvironment.
+
+    scope starts open and empty. stop refuses future launches and requests
+    immediate termination of every owned process; each launch reaps its child.
+    """
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.process_groups: set[int] = set()
-        self.stopped = False
-
-    def register(self, process_group: int) -> None:
-        with self.lock:
-            if self.stopped:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process_group, signal.SIGKILL)
-                raise RolloutLaunchError("the execution environment was stopped")
-            self.process_groups.add(process_group)
-
-    def release(self, process_group: int) -> None:
-        with self.lock:
-            self.process_groups.discard(process_group)
+        self.scope = ProcessScope()
 
     def stop(self) -> None:
-        with self.lock:
-            self.stopped = True
-            for process_group in self.process_groups:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process_group, signal.SIGKILL)
+        self.scope.request_stop()
 
 
 PROCESS_OWNER: ContextVar[ProcessOwner | None] = ContextVar("sandbox_process_owner", default=None)
@@ -220,59 +210,38 @@ def run_process(
             raise RolloutLaunchError(f"harness binary {command[0]!r} not found or not executable")
         read_fd, write_fd = os.pipe()
         command = [sys.executable, str(Path(__file__).with_name("lease.py")), str(read_fd), *command]
+    owner = PROCESS_OWNER.get() if new_session else None
+    scope = owner.scope if owner is not None else ProcessScope()
+    job_scope = CURRENT_PROCESS_SCOPE.get()
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=dict(env),
-            stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=new_session,
-            preexec_fn=limits.apply if limits is not None else None,
-            pass_fds=() if read_fd is None else (read_fd,),
+        if job_scope is not None:
+            job_scope.attach(scope)
+        result = scope.run(
+            ProcessRequest(
+                argv=tuple(command),
+                cwd=cwd.absolute(),
+                env=env,
+                timeout_seconds=timeout,
+                stdin_text=stdin_text,
+                new_session=new_session,
+                pass_fds=() if read_fd is None else (read_fd,),
+                setup=limits,
+            )
         )
     except FileNotFoundError as exc:
-        if write_fd is not None:
-            os.close(write_fd)
         raise RolloutLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
-    except BaseException:
-        if write_fd is not None:
-            os.close(write_fd)
-        raise
+    except ProcessScopeClosed as exc:
+        raise RolloutLaunchError("the execution environment was stopped") from exc
     finally:
         if read_fd is not None:
             os.close(read_fd)
-    owner = PROCESS_OWNER.get() if new_session else None
-    try:
-        if owner is not None:
-            owner.register(process.pid)
-        stdout, stderr = process.communicate(input=stdin_text, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        with contextlib.suppress(ProcessLookupError):
-            if new_session:
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        process.wait()
-        raise RolloutTimeout(f"rollout timed out after {timeout}s: {list(popen_argv)}") from exc
-    except BaseException:
-        # A local worker can be terminated while a rollout is in flight.
-        # Do not leave the harness's separate process group behind.
-        with contextlib.suppress(ProcessLookupError):
-            if new_session:
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        process.wait()
-        raise
-    finally:
-        if owner is not None:
-            owner.release(process.pid)
         if write_fd is not None:
             os.close(write_fd)
-    return ProcessOutcome(exit_code=process.returncode, stdout=stdout, stderr=stderr)
+    if result.reason == "timed_out":
+        raise RolloutTimeout(f"rollout timed out after {timeout}s: {list(popen_argv)}")
+    if result.reason == "stopped":
+        raise RolloutLaunchError("the execution environment was stopped")
+    return ProcessOutcome(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
 
 
 def inherited_environment() -> dict[str, str]:
@@ -342,11 +311,27 @@ ISOLATION: tuple[str, ...] = (
 
 #: Resource limits every sandboxed rollout gets unless the config overrides one.
 @dataclass(frozen=True)
-class SandboxLimits:
+class SandboxLimits(ProcessSetup):
+    """Nonnegative integer resource limits applied to a child before exec.
+
+    cpu_seconds, memory_bytes, processes and file_bytes bound CPU time, address
+    space, process count and file size respectively. Zero leaves that OS limit
+    unchanged. The sandbox adapter constructs this value; ProcessScope calls
+    apply in the child, setting each nonzero soft and hard limit to its value.
+    OS errors fail the spawn rather than silently dropping a limit.
+    """
+
     cpu_seconds: int = 0  # 0 disables; else RLIMIT_CPU
     memory_bytes: int = 0  # 0 disables; else RLIMIT_AS
     processes: int = 0  # 0 disables; else RLIMIT_NPROC
     file_bytes: int = 0  # 0 disables; else RLIMIT_FSIZE
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in (self.cpu_seconds, self.memory_bytes, self.processes, self.file_bytes)
+        ):
+            raise ValueError("resource limits must be nonnegative integers")
 
     def apply(self) -> None:
         """Apply configured limits before the child executes its command."""

@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import BaseEnvironment, ExecResult
 
-from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.environment import ExecutorEnvironment, run_sync
-from reef.sandbox.process import LocalExecutor, ProcessOutcome, RolloutLaunchError, RolloutTimeout
+from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
+from reef.execution.sandbox.environment import ExecutorEnvironment, run_sync
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, RolloutLaunchError, RolloutTimeout
 
 
 def test_harbor_lifecycle_commands_and_file_transfers(tmp_path: Path) -> None:
@@ -69,7 +69,7 @@ def test_timeout_does_not_leave_a_process_running(tmp_path: Path) -> None:
         await environment.start(force_build=False)
         with pytest.raises(RolloutTimeout):
             await environment.exec(f"exec {shlex.quote(sys.executable)} -c 'import time; time.sleep(30)'")
-        assert environment.process_owner.process_groups == set()
+        assert environment.process_owner.scope.pids() == ()
         await environment.stop(delete=True)
 
     run_sync(_run())
@@ -86,8 +86,7 @@ def test_async_cancellation_terminates_the_process_before_returning(tmp_path: Pa
 
         async def _wait_for_process() -> tuple[int, ...]:
             while True:
-                with environment.process_owner.lock:
-                    groups = tuple(environment.process_owner.process_groups)
+                groups = environment.process_owner.scope.pids()
                 if groups:
                     return groups
                 await asyncio.sleep(0.01)
@@ -200,3 +199,61 @@ def test_file_transfers_reject_paths_outside_the_root(tmp_path: Path) -> None:
         run_sync(environment.download_dir("..", tmp_path / "copy"))
     with pytest.raises(ValueError, match="outside its source"):
         run_sync(environment.download_dir(".", workspace / "copy"))
+
+
+def test_program_execution_returns_its_result_only_after_remote_cleanup(tmp_path: Path) -> None:
+    from reef.execution.lifecycle import Execution
+    from reef.execution.sandbox.environment import ProgramExecution
+
+    executor = RecordingExecutor()
+    program = ProgramExecution(ExecutorEnvironment(executor, root=tmp_path, workspace=tmp_path), ["true"])
+    lifecycle: Execution = program
+    assert not lifecycle.wait_closed(0)
+    result = program.run()
+    assert result == ProcessOutcome(0, "remote", "")
+    assert executor.session.close_calls == 1
+    assert lifecycle.wait_closed(0)
+    lifecycle.request_stop()
+    with pytest.raises(RolloutLaunchError, match="already started"):
+        program.run()
+
+
+def test_program_execution_does_not_report_failed_cleanup_as_closed(tmp_path: Path) -> None:
+    from reef.execution.sandbox.environment import ProgramExecution
+
+    executor = RecordingExecutor()
+    executor.session.fail_close = True
+    program = ProgramExecution(ExecutorEnvironment(executor, root=tmp_path, workspace=tmp_path), ["true"])
+    with pytest.raises(RolloutLaunchError, match="cleanup failed"):
+        program.run()
+    with pytest.raises(RolloutLaunchError, match="cleanup failed"):
+        program.wait_closed(0)
+
+
+def test_program_execution_stop_reaps_a_running_local_program(tmp_path: Path) -> None:
+    from reef.execution.lifecycle import Execution
+    from reef.execution.sandbox.environment import ProgramExecution
+
+    environment = ExecutorEnvironment(LocalExecutor(), root=tmp_path, workspace=tmp_path)
+    program = ProgramExecution(environment, [sys.executable, "-c", "import time; time.sleep(30)"])
+    lifecycle: Execution = program
+
+    async def _run() -> None:
+        pending = asyncio.create_task(program.run_async())
+
+        async def _pid() -> int:
+            while not environment.process_owner.scope.pids():
+                await asyncio.sleep(0.01)
+            return environment.process_owner.scope.pids()[0]
+
+        pid = await asyncio.wait_for(_pid(), 5)
+        # The same synchronous control API is usable from a different thread.
+        await asyncio.to_thread(lifecycle.request_stop)
+        lifecycle.request_stop()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert await asyncio.to_thread(lifecycle.wait_closed, 1)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pid, 0)
+
+    asyncio.run(_run())

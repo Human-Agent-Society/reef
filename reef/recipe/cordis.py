@@ -33,6 +33,8 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
 from reef.evaluation.harness import FloorPlugin, RolloutScorer, ScoreComparisonPlugin, evaluation_selection
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
@@ -48,8 +50,6 @@ from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
-from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface

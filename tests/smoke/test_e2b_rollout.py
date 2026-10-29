@@ -17,15 +17,15 @@ import pytest
 from recipes.gepa.archive import Archive
 from recipes.gepa.method import GEPAProposer, ScoreFeedback
 from reef.evaluation.harness import RolloutEvaluationWorker, RolloutScorer
+from reef.execution.sandbox.config import build_executor
+from reef.execution.sandbox.e2b import E2BExecutor
+from reef.execution.sandbox.process import RolloutTimeout
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.rollouts.run import run_rollout
 from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent import launch_pi
-from reef.sandbox.config import build_executor
-from reef.sandbox.e2b import E2BExecutor
-from reef.sandbox.process import RolloutTimeout
 from reef.train.cordis_backend.backend import _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost
 
