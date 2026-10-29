@@ -132,6 +132,24 @@ def migrate_record_storage(connection: Connection, records: Table, consumption: 
         operations.drop_column(records.name, "compacted_at", schema=schema)
 
 
+def migrate_sample_columns(connection: Connection, samples: Table) -> None:
+    """Add to an existing ``training_sample`` table the columns that it lacks: ``component``, ``group_key`` and
+    ``record_ids_json``. The samples that were stored before have no component, no group and no records.
+
+    Run in the caller's schema transaction, after ``create_all``; a table that ``create_all`` made has them all.
+    """
+    columns = {column["name"] for column in inspect(connection).get_columns(samples.name, schema=samples.schema)}
+    operations = Operations(MigrationContext.configure(connection))
+    for name in ("component", "group_key", "record_ids_json"):
+        if name not in columns:
+            column = samples.c[name]
+            operations.add_column(
+                samples.name,
+                Column(name, column.type, nullable=column.nullable, server_default=column.server_default),
+                schema=samples.schema,
+            )
+
+
 def migrate_uploaded_trajectories(connection: Connection, samples: Table, train_counts: Table, commits: Table) -> None:
     """Move the rows of the old ``uploaded_trajectory`` table into ``samples``, then drop the old table.
 

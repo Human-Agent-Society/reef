@@ -512,8 +512,9 @@ The session contract is:
        session and survive restarts when ``durable``.
    * - ``samples``
      - The ``SampleStore`` of the scenario's training samples, in arrival
-       order: the uploaded trajectories, and the imported Harbor tasks of the
-       ``train`` and ``eval`` splits. Each sample has ``train_counts``, the
+       order: the uploaded trajectories, the imported Harbor tasks of the
+       ``train`` and ``eval`` splits, and the samples that each trainer made
+       from records. Each sample has ``train_counts``, the
        number of committed jobs of each trainer that trained it. It closes with the session and
        survives restarts when ``durable``.
    * - ``history()``
@@ -1031,9 +1032,10 @@ record2sample=..., sample2job=...)``):
 
 - ``record2record``: the record-to-record stage
   (``reef.record2record``). It decides which records train and in what order:
-  it groups reports, judges records, and drops records that can no longer
-  train, including data more than ``max_staleness`` versions behind the
-  serving version. ``max_staleness`` is the stage's own setting, from
+  it groups reports, judges records, and ends records that can no longer
+  train. Its staleness check (``is_stale``) keeps samples with data more than
+  ``max_staleness`` versions behind the serving version out of the buffer.
+  ``max_staleness`` is the stage's own setting, from
   ``Record2RecordSettings`` (see `the staleness check
   <../developer-guide/processors.rst#staleness>`__). Without
   one, the pipeline forms no record set and nothing trains.
@@ -1051,16 +1053,16 @@ record2sample=..., sample2job=...)``):
   ``ValueError`` to refuse the upload (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
-  Its ``make_job_data(samples, data_id)`` shapes the samples of the selected
-  sets into one job's data with the ID ``data_id``. The pipeline assigns the
+  Its ``make_job_data(samples, data_id)`` shapes the samples of the buffer,
+  in store order, into one job's data with the ID ``data_id``. The pipeline assigns the
   ID. Automatic job data gets ``<scenario>:data:<number>``. An instruction's
   data gets ``<scenario>:instruction:<request id>``. The number counts the
   job data of one pipeline. It is not a training step.
   ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
-  sets the most samples that wait for a job and the fewest samples of one
-  job. A ``job_samples`` of ``None`` takes ``context.default_job_samples``; a
-  ``buffer_size`` of ``None`` holds the data of four jobs
-  (``DEFAULT_BUFFER_JOBS``). The constructor raises ``PluginConfigError`` for
+  sets the most samples that one job takes from the buffer and the fewest
+  samples of one job. A ``job_samples`` of ``None`` takes
+  ``context.default_job_samples``; a ``buffer_size`` of ``None`` takes
+  ``job_samples``. The constructor raises ``PluginConfigError`` for
   a buffer smaller than ``job_samples`` and for a ``job_samples`` above
   ``max_job_samples`` (an SDPO or TTTD grid). A stage with the class
   attribute ``trains_own_job_data_only`` takes neither size.
@@ -1098,8 +1100,8 @@ in the same scenario.
 ``TrainingPipeline.training_mode`` selects automatic (``auto``) or
 instruction-triggered (``manual``) training. A ``Sample2Job`` declares
 ``supported_training_modes``. In ``manual`` an instruction's data takes the
-sets that automatic job data would; ``Sample2Job.reads_instructions`` says
-whether the instruction may run with fewer than ``job_samples`` samples. Record push, acknowledgement, retention, buffer release
+samples that automatic job data would; ``Sample2Job.reads_instructions`` says
+whether the instruction may run with fewer than ``job_samples`` samples. Record push, sample storage, acknowledgement, retention
 and background derivation are shared. See
 `Training pipeline <../developer-guide/processors.rst>`__ for the instruction queue and job data contract.
 
@@ -1125,8 +1127,7 @@ A reported-feedback recipe implements these hooks:
      - Shape the flat tuple of selected tasks into job data with the ID ``data_id``.
 
 The recipe owns the report policy. Its record stage is a subclass of
-``ReportRecord2Record(context, grouping, *, exclusive_sources=False,
-ordered_groups=False)``; ``ReportRecord2Record(context, ReportGrouping())``
+``ReportRecord2Record(context, grouping, *, exclusive_sources=False)``; ``ReportRecord2Record(context, ReportGrouping())``
 trains every report by itself. ``ExclusiveReportRecord2Record(context)`` also
 trains every report by itself, and a report that ends owns its inference
 records. No inference is in two record sets: a report that references an
@@ -1161,12 +1162,16 @@ consumption state stay in the stage; recipes never receive buffered report objec
 and a slot deduplicates retries within that group (None uses the report id).
 This collection group differs from ``TrajectorySample.group_id``: TTTD waits for
 a complete step, then trains several comparison groups within it.
-``make_job_data`` receives samples in group/arrival order. Acknowledgement consumes
-all selected reports, even when the recipe omits constant-reward groups from
-its output. Reports arriving after reservation remain for later job data.
+The pipeline stores the samples of a report or a ready group when it is
+ready, and that consumes their records. A group is fixed when it is first
+ready; later reports for its key form a new group. ``make_job_data``
+receives the samples of the `buffer
+<../developer-guide/processors.rst#the-buffer>`__ in store order: units in
+the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
+when the recipe omits constant-reward groups from its output. Samples stored
+after the job data was built wait for later job data.
 ``output_schema`` declares the job data type. On the stage, ``exclusive_sources``
-controls source release for terminal group/duplicate reports, and
-``ordered_groups`` orders ready groups by their keys.
+controls source release for terminal group/duplicate reports.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
 Reference validation runs at admission; incomplete groups wait for more valid

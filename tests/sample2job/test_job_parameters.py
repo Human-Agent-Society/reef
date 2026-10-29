@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
+from reef.core.plugins import PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import DistillJobData
 
@@ -44,3 +45,13 @@ def test_the_context_keeps_its_own_copy_of_json_parameters_by_sample_kind() -> N
         PipelineContext("s", job_parameters={"record": {}})
     with pytest.raises(ValueError):
         PipelineContext("s", job_parameters={"trajectory": {"learning_rate": float("nan")}})
+
+
+def test_a_stage_with_a_job_size_limit_refuses_a_larger_buffer() -> None:
+    class OneGridJobData(DistillJobData):
+        def __init__(self, context: PipelineContext, buffer_size: int | None) -> None:
+            super(DistillJobData, self).__init__(context, buffer_size, 4, max_job_samples=4)
+
+    assert OneGridJobData(PipelineContext("s"), None).buffer_size == 4
+    with pytest.raises(PluginConfigError, match="at most 4 samples in one job's data, not buffer_size 8"):
+        OneGridJobData(PipelineContext("s"), 8)

@@ -179,7 +179,7 @@ def test_refused_submission_retires_immediately() -> None:
     assert "r1" in processor.releasable_record_ids()
 
 
-def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
+def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_batch() -> None:
     processor, worker = _engine()
     processor.observe_serving_runtime_load_id("v1")
     processor.push(_record("old", track=True, version="v1"))
@@ -189,9 +189,9 @@ def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
-    assert not processor.ready(2)  # the stale candidate was dropped
-    assert "old" in processor.releasable_record_ids()
-    assert "new" not in processor.releasable_record_ids()
+    assert not processor.ready(2)  # the stale sample is not in the buffer
+    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
 def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
@@ -203,8 +203,8 @@ def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
         processor.push(_record(f"done-{name}", completes=name))
         worker.push(_Judgment(name))
     assert not processor.ready(3)  # e:3 is two versions behind e:5
-    assert "v3" in processor.releasable_record_ids()
-    assert {"v4", "v5"}.isdisjoint(processor.releasable_record_ids())
+    assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
+    assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]
 
 
 def test_correlate_only_mode_without_a_worker() -> None:

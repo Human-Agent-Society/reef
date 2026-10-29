@@ -214,7 +214,8 @@ class ReportRecord2Record(Record2Record):
     live report and the inference records that it references.
 
     * ``exclusive_sources``: a report that ends owns its referenced inference records outright.
-    * ``ordered_groups``: select ready groups in group-key order instead of arrival order.
+    * ``ordered_groups``: order the pool by group key. Job data takes samples in store order, so it does not change
+      the order of training.
     * ``max_staleness``: the staleness limit of ``Record2Record``.
 
     Config: ``Record2RecordSettings``.

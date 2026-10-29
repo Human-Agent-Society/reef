@@ -1213,13 +1213,13 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
     assert type(trainer.pipeline.record2record).__name__ == "ReportRecord2Record"
     assert type(trainer.pipeline.record2sample).__name__ == "TraceSamples"
     assert type(trainer.pipeline.sample2job).__name__ == "TraceJobData"
-    # The default buffer holds the data of four jobs.
-    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (1, 4)
+    # The default buffer holds the data of one job.
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (1, 1)
     # The stage config sets job_samples over evolution.batch_size.
     sized = CordisRecipe.from_environment(
         {}, config=config(pipeline={"sample2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy
     ).build("demo", SQLiteRecordStore())
-    assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 12)
+    assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 3)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         CordisRecipe.from_environment({}, config=config({"batch_size": 2}))
