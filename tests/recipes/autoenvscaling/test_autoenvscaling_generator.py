@@ -67,6 +67,7 @@ from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -684,7 +685,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
-    context = PipelineContext("autoenvscaling", task_storage=session.tasks)
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
@@ -721,7 +722,7 @@ def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_comp
     )
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, task_checks=(check,))
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
-    context = PipelineContext("autoenvscaling", task_storage=session.tasks)
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
