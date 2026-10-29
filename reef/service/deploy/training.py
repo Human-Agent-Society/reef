@@ -110,6 +110,8 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     settings = service_config_from_mapping(config)
     backend = training_deployment_for(settings.training_backend)
     mode = serving_mode(settings, backend)
+    if settings.training_colocate and settings.training_backend not in (None, "slime"):
+        raise DeployConfigError("training.colocate requires the slime backend")
     if mode == NONE:
         validate_no_inference(settings)
     if settings.teacher_model_path and not backend.supports_teacher_engine:
@@ -140,16 +142,17 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     if mode == ENGINES:
         prepare_engine_serving(config, settings)
         settings = service_config_from_mapping(config)
-        if not settings.inference_remote:
+        if not settings.inference_remote and not settings.training_colocate:
             component = local_inference_component(config, settings)
             settings = service_config_from_mapping(config)
-        # Every later reader gets the validated section, with underscore keys and defaults filled in. The
-        # component loads the model as the file names it: a later download replaces reef.model_path on this host.
-        remote = RemoteInferenceSettings.from_mapping(settings.inference_remote)
-        if remote.model_path is None:
-            remote = replace(remote, model_path=settings.model_path)
-        config["reef"]["inference_remote"] = asdict(remote)
-        settings = service_config_from_mapping(config)
+        if not settings.training_colocate:
+            # Every later reader gets the validated section, with underscore keys and defaults filled in. The
+            # component loads the model as the file names it: a later download replaces reef.model_path on this host.
+            remote = RemoteInferenceSettings.from_mapping(settings.inference_remote)
+            if remote.model_path is None:
+                remote = replace(remote, model_path=settings.model_path)
+            config["reef"]["inference_remote"] = asdict(remote)
+            settings = service_config_from_mapping(config)
         # The HTTP service starts the engines before it serves its first request.
         config["ready_timeout"] = max(int(config.get("ready_timeout", 30)), int(settings.training_ready_timeout))
     config["reef"]["training_backend"] = settings.training_backend or "slime"

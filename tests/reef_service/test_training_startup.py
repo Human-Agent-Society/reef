@@ -113,13 +113,12 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"training.ready-timeout": "0"}, "must be positive"),
         ({"training.timeout-s": "0"}, "must be positive"),
         ({"training.options.hf-checkpoint": "different/model"}, "must match inference.model-path"),
-        ({"training.colocate": "true"}, "unknown configuration flag --training.colocate"),
         ({"inference.upstream-url": "http://localhost:8000"}, "managed inference"),
         ({"inference.url": "http://localhost:8000"}, "inference.url is reserved"),
         ({"inference.options.tp-size": "2"}, "managed by Reef"),
         ({"inference.num-gpus": "3", "inference.tensor-parallel-size": "2"}, "must be divisible"),
         ({"inference.num-gpus": "0"}, "must be positive"),
-        ({"inference.backend": "none", "training.colocate": "true"}, "unknown configuration flag --training.colocate"),
+        ({"inference.backend": "none", "training.colocate": "true"}, "local SGLang"),
         ({"inference.backend": "none", "inference.num-gpus": "8"}, "remove inference.num-gpus"),
         (
             {"inference.backend": "none", "inference.tensor-parallel-size": "2", "inference.options.dtype": "bf16"},
@@ -646,5 +645,5 @@ def test_slime_serves_on_a_remote_inference_component(tmp_path):
     refused = training_config()
     refused["inference"]["remote"] = {"url": "https://gpu-host.example"}
     refused["training"] = {**raw["training"], "colocate": True}
-    with pytest.raises(DeployConfigError, match=r"unknown config fields: training\.colocate"):
+    with pytest.raises(DeployConfigError, match="requires local SGLang"):
         resolve_deployment_config(refused, None, tmp_path / "serve.yaml")

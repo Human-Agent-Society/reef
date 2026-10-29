@@ -17,15 +17,17 @@ backend contracts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, replace
 from numbers import Integral, Real
 from pathlib import Path
-from threading import Lock
+from threading import Condition, Lock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
@@ -312,8 +314,9 @@ class InferenceAdmissionHandle(InferenceLease):
 class InferenceAdmissionController:
     """Thread-safe inference admission: it counts the admitted requests, and once closed it admits none.
 
-    Values: ``open`` is True until ``close``, and never True again; ``active``
-    is the non-negative count of admitted requests not yet released.
+    Values: admission is temporarily paused by ``pause_and_drain`` and reopened
+    by ``resume``. ``close`` permanently prevents new admission, including
+    after ``resume``. ``active`` counts admitted requests not yet released.
     ``status`` reports both. The runtime's ``acquire_inference`` makes the
     handles, and the runtime closes admission when it shuts down.
     """
@@ -322,14 +325,34 @@ class InferenceAdmissionController:
         self._lock = Lock()
         self._open = True
         self._active = 0
+        self.paused = False
+        self.drained = Condition(self._lock)
 
     async def acquire(self) -> InferenceAdmissionHandle:
         """Count one active request; ``InferenceUnavailable`` once admission is closed."""
+        while True:
+            with self._lock:
+                if not self._open:
+                    raise InferenceUnavailable("the inference runtime is shutting down")
+                if not self.paused:
+                    self._active += 1
+                    return InferenceAdmissionHandle(self)
+            # Do not occupy a thread while training holds the GPUs. Cancellation admits nothing.
+            await asyncio.sleep(0.01)
+
+    def pause_and_drain(self, timeout_seconds: float) -> None:
+        """Pause new requests and wait for admitted requests; a timeout leaves admission paused."""
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("inference drain timeout must be positive")
+        with self.drained:
+            self.paused = True
+            if not self.drained.wait_for(lambda: self._active == 0, timeout=timeout_seconds):
+                raise TimeoutError("active inference requests did not drain before training")
+
+    def resume(self) -> None:
+        """End a temporary pause; permanently closed admission stays closed."""
         with self._lock:
-            if not self._open:
-                raise InferenceUnavailable("the inference runtime is shutting down")
-            self._active += 1
-            return InferenceAdmissionHandle(self)
+            self.paused = False
 
     def close(self) -> None:
         """Admit no new request from now on; admitted requests continue."""
@@ -339,7 +362,7 @@ class InferenceAdmissionController:
     @property
     def status(self) -> Mapping[str, Any]:
         with self._lock:
-            return {"open": self._open, "active": self._active}
+            return {"open": self._open and not self.paused, "active": self._active}
 
     def release(self) -> None:
         """Count one admitted request as finished."""
@@ -347,6 +370,8 @@ class InferenceAdmissionController:
             if self._active <= 0:
                 raise RuntimeError("inference admission handle released without an active request")
             self._active -= 1
+            if self._active == 0:
+                self.drained.notify_all()
 
 
 # -- Request handling ---------------------------------------------------------
@@ -534,6 +559,14 @@ class InferenceRuntime(AdapterWeightRuntime):
         """Admit no new request, before shutdown; admitted requests continue."""
         self._inference_admission.close()
 
+    def pause_and_drain_inference(self, timeout_seconds: float) -> None:
+        """Wait for admitted requests before shared GPU training, with admission paused."""
+        self._inference_admission.pause_and_drain(timeout_seconds)
+
+    def resume_inference(self) -> None:
+        """Reopen temporarily paused admission after GPU ownership returns to inference."""
+        self._inference_admission.resume()
+
     # -- Scenarios
 
     @property
@@ -582,6 +615,20 @@ class InferenceRuntime(AdapterWeightRuntime):
 
     def adapter_residency_status(self) -> Mapping[str, Any] | None:
         return None
+
+
+class SharedGpuInferenceRuntime(InferenceRuntime):
+    """Serving that lends its GPU allocation to one serialized training operation.
+
+    The deployment binds this runtime to its trainer. Entering
+    ``training_phase`` drains inference and releases its GPU memory. The
+    trainer must offload before leaving the context. Successful exit restores
+    inference; an uncertain handoff must leave admission closed.
+    """
+
+    @abstractmethod
+    def training_phase(self) -> AbstractContextManager[None]:
+        """Hold exclusive use of the shared GPU memory until the context exits."""
 
 
 @dataclass(frozen=True)

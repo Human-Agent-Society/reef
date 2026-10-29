@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.inference.null import NullRuntimeFactory
 from reef.runtime.deployment import (
+    InferenceResources,
     RuntimeConfigError,
     RuntimeFactory,
     RuntimeRegistry,
@@ -79,3 +82,11 @@ def test_registration_refuses_a_bundled_or_registered_kind():
     registry = RuntimeRegistry({"none": build_proxy})
     assert isinstance(registry.build({"type": "none"}, model_path="model", environ={}), StubInferenceRuntime)
     assert "none" in registry.names
+
+
+def test_borrowed_resources_require_an_explicit_factory_contract():
+    resources = MagicMock(spec=InferenceResources)
+    with pytest.raises(RuntimeConfigError, match="cannot borrow"):
+        RuntimeRegistry().build({"type": f"{__name__}:ProxyFactory"}, model_path="model", resources=resources)
+    resources.start.assert_not_called()
+    resources.close.assert_not_called()

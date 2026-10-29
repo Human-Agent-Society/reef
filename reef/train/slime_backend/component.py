@@ -5,7 +5,8 @@ there, and Slime's actor (and critic) workers. A job trains as Slime
 rollouts, one by default or one per ``save_interval`` optimizer steps: Reef's
 job data becomes Slime's rollout data, the workers train its optimizer steps,
 and the component saves the paired Hugging Face and Megatron checkpoints of
-each rollout. No serving engine takes part; Reef serves the Hugging Face export
+each rollout. Optional colocation pauses serving while those workers train.
+Reef serves the Hugging Face export
 (or, with LoRA, the PEFT adapter) of a checkpoint that passes evaluation.
 
 Training continues from the workers' own weights. A job therefore starts from
@@ -26,6 +27,7 @@ import json
 import math
 import shutil
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,7 @@ from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.executor import resolve
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
+    SharedGpuInferenceRuntime,
     learning_rate_metrics,
     resolve_learning_rate_schedule_state,
 )
@@ -250,6 +253,7 @@ class SlimeTrainingComponent(LocalJobComponent):
         score_centering: ScoreCenteringSettings | None = None,
         train_timeout_s: float = DEFAULT_TRAIN_TIMEOUT_S,
         resources: SlimeDeploymentResources | None = None,
+        colocate: bool = False,
     ) -> None:
         self.args = args
         self.train_timeout_s = train_timeout_s
@@ -262,6 +266,8 @@ class SlimeTrainingComponent(LocalJobComponent):
         self.lora = lora
         self.score_centering = score_centering
         self.resources = resources
+        self.colocate = colocate
+        self.serving: SharedGpuInferenceRuntime | None = None
         self.critic_steps_per_actor = args.critic_steps_per_actor
         self.critic_only_steps = args.num_critic_only_steps
         algorithm = resolve_loss_family(loss_family).bind(
@@ -287,7 +293,8 @@ class SlimeTrainingComponent(LocalJobComponent):
         if not (self.base_start_dir / "start.json").exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
         super().__init__(root / "reef-jobs")
-        self.start_jobs()
+        if not colocate:
+            self.start_jobs()
 
     @property
     def name(self) -> str:
@@ -370,6 +377,11 @@ class SlimeTrainingComponent(LocalJobComponent):
 
     def close_resources(self) -> None:
         errors = []
+        if self.serving is not None:
+            try:
+                self.serving.shutdown()
+            except Exception as exc:
+                errors.append(exc)
         for group in (self.critic_group, self.group):
             if group is not None:
                 try:
@@ -448,7 +460,11 @@ class SlimeTrainingComponent(LocalJobComponent):
                 schedule_state = next_schedule
             else:
                 write_json(directory / ROLLOUT_FILE, {"rollout_id": rollout.rollout_id, "step": last})
-                schedule_state = self.train_and_save(job, directory, rollout, training)
+                if self.colocate and self.serving is None:
+                    raise RuntimeError("shared inference must start before colocated training")
+                phase = self.serving.training_phase() if self.serving is not None else nullcontext()
+                with phase:
+                    schedule_state = self.train_and_save(job, directory, rollout, training)
                 metrics["rollout_id"] = rollout.rollout_id
         return metrics
 
@@ -632,6 +648,8 @@ class SlimeSettings:
     ``execution`` holds the deployment's ``execution`` and ``executors``
     sections, which select the training workers' executor. ``ray_address``
     and ``namespace`` name the Ray cluster the workers run on.
+    ``colocate`` defers job execution until the deployment binds shared
+    serving; it requires native train offload.
     ``train_timeout_s`` bounds one worker call, in seconds. The strings are
     non-empty and the timeout is positive. ``SlimeComponentFactory`` makes the
     value; ``create_slime_component`` reads it.
@@ -644,8 +662,11 @@ class SlimeSettings:
     ray_address: str
     namespace: str
     train_timeout_s: float = DEFAULT_TRAIN_TIMEOUT_S
+    colocate: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.colocate, bool):
+            raise TypeError("SlimeSettings.colocate must be a bool")
         for name, value in (
             ("loss_family", self.loss_family),
             ("recipe", self.recipe),
@@ -667,12 +688,15 @@ def create_slime_component(settings: SlimeSettings) -> SlimeTrainingComponent:
     args, loss_family_config, retention = prepare_slime_arguments(
         settings.arguments, loss_family=settings.loss_family, recipe=settings.recipe, execution=settings.execution
     )
+    if settings.colocate and not args.offload_train:
+        raise ValueError("colocated Slime requires native offload-train")
     storage = prepare_checkpoint_storage(args, retention)
     resources = SlimeDeploymentResources(
         args,
         ray_address=settings.ray_address,
         namespace=settings.namespace,
         runtime_env=job_runtime_env(),
+        colocate=settings.colocate,
     )
     resources.start()
     try:
@@ -698,6 +722,7 @@ def create_slime_component(settings: SlimeSettings) -> SlimeTrainingComponent:
             score_centering=settings_from_args(args),
             train_timeout_s=settings.train_timeout_s,
             resources=resources,
+            colocate=settings.colocate,
         )
     except BaseException:
         resources.close()

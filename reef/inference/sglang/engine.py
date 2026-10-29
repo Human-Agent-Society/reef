@@ -443,5 +443,13 @@ class ReefSGLangEngine(InferenceEngine):
     def continue_generation(self) -> object:
         return self._make_request("continue_generation")
 
+    def release_memory_occupation(self) -> object:
+        """Release native memory-saver regions after every request has drained."""
+        return self._make_request("release_memory_occupation", {})
+
+    def resume_memory_occupation(self) -> object:
+        """Restore the regions released by the preceding memory-saver request."""
+        return self._make_request("resume_memory_occupation", {})
+
     def _weight_update_timeout_s(self) -> float:
         return self.config.request_timeout

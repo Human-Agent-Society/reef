@@ -41,8 +41,9 @@ def ray_session(monkeypatch):
         def release(self):
             session.event("release")
 
-    def reserve(layout):
+    def reserve(layout, *, single_node=False):
         session.layout = layout
+        session.single_node = single_node
         session.event("reserve")
         return Reservation()
 
@@ -54,14 +55,18 @@ def ray_session(monkeypatch):
     return session
 
 
-def component_resources(*, use_critic=False):
+def component_resources(*, use_critic=False, colocate=False):
     args = SlimeArguments(
         actor_num_nodes=1,
         actor_num_gpus_per_node=2,
         use_critic=use_critic,
     )
     return resources.SlimeDeploymentResources(
-        args, ray_address="external", namespace="test", runtime_env={"env_vars": {"PYTHONPATH": "/repo"}}
+        args,
+        ray_address="external",
+        namespace="test",
+        runtime_env={"env_vars": {"PYTHONPATH": "/repo"}},
+        colocate=colocate,
     )
 
 
@@ -82,7 +87,11 @@ def test_the_component_connects_once_reserves_its_training_gpus_and_releases_the
         "address": "external",
         "namespace": "test",
         "runtime_env": {
-            "env_vars": {"PYTHONPATH": "/repo", resources.DEPLOYMENT_ENV: owned._process_lease},
+            "env_vars": {
+                "PYTHONPATH": "/repo",
+                resources.DEPLOYMENT_ENV: owned._process_lease,
+                "RAY_kill_child_processes_on_worker_exit": "false",
+            },
             "worker_process_setup_hook": "reef.runtime.executor.process_guard.install",
         },
     }
@@ -92,6 +101,16 @@ def test_the_component_connects_once_reserves_its_training_gpus_and_releases_the
     owned.close()
     assert ray_session.events == ["connect", "reserve", "release", "disconnect"]
     assert owned.placement_groups == {}
+
+
+def test_shared_inference_borrows_training_bundles_on_one_node(ray_session):
+    owned = component_resources(use_critic=True, colocate=True)
+    owned.start()
+    assert ray_session.single_node
+    assert owned.inference_placement == owned.placement_groups["actor"] == owned.placement_groups["critic"]
+    assert ray_session.layout.total == 2
+    owned.close()
+    assert ray_session.events == ["connect", "reserve", "release", "disconnect"]
 
 
 @pytest.mark.parametrize("failure", ["reserve", "release"])

@@ -1075,6 +1075,7 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_serving_e
         assert build_calls["arguments"] == ["--lr=1e-06"]
         assert build_calls["retention"] == RetentionConfig(policy="best_reward", max_storage_bytes=100 * 1024**3)
         assert build_calls["resources"] == {
+            "colocate": False,
             "ray_address": "ray://head:10001",
             "namespace": "test",
             "runtime_env": {

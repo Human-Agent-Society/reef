@@ -16,9 +16,15 @@ from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, TrainingComponentFactory, http_readiness_command
+from reef.runtime.deployment import (
+    RuntimeConfigError,
+    RuntimeRegistry,
+    TrainingComponentFactory,
+    http_readiness_command,
+)
 from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
+from reef.runtime.interfaces import InferenceRuntime, SharedGpuInferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.train.deployment import TrainingDeployment
 
@@ -33,16 +39,16 @@ INFERENCE_LAUNCH_OPTIONS = frozenset(
         "prefill-num-servers",
     }
 )
-# Training and serving never share GPUs; these native options would make them.
+# Reef owns GPU sharing; native rollout placement cannot replace its handoff.
 PLACEMENT_OPTIONS = frozenset({"colocate", "offload-rollout"})
 
 
 def refuse_serving_options(training_options: Mapping[str, Any]) -> None:
     """Refuse native training options that would configure serving engines or share GPUs with them.
 
-    Serving engines are configured by the ``inference`` section alone, and
-    training and serving never share GPUs. Raise ``DeployConfigError`` for an
-    option (or an abbreviation of one) that does either.
+    Serving engines are configured by ``inference``. Shared placement uses
+    ``training.colocate`` and Reef's admission control, not Slime's rollout
+    manager. Raise ``DeployConfigError`` for native options that bypass either.
     """
     for name in training_options:
         if (
@@ -205,6 +211,26 @@ class SlimeDeployment(TrainingDeployment):
         # Refuse a missing batch size at deploy time; the HTTP service reads it again, resolved.
         global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
         refuse_serving_options(options)
+        if settings["training_colocate"]:
+            if settings["inference_backend"] != "sglang" or settings["inference_remote"]:
+                raise DeployConfigError("training.colocate requires local SGLang inference")
+            if settings["inference_serving"] not in (None, "engines"):
+                raise DeployConfigError("training.colocate requires inference.serving: engines")
+            if settings["teacher_model_path"] or settings["inference_handler_factory"]:
+                raise DeployConfigError("training.colocate does not support teachers or custom inference handlers")
+            if settings["inference_prefix_sharing"]:
+                raise DeployConfigError("training.colocate requires inference.prefix-sharing: false")
+            shared_options = expand_option_references(config, options)
+            nodes = int(shared_options.get("actor-num-nodes", 1))
+            width = int(shared_options.get("actor-num-gpus-per-node", 1))
+            if nodes != 1 or settings["inference_num_gpus"] != width or settings["tensor_parallel_size"] != width:
+                raise DeployConfigError("training.colocate requires one node and one engine on all actor GPUs")
+            if int(shared_options.get("megatron-lora-rank", 0)) or shared_options.get("release-train"):
+                raise DeployConfigError("training.colocate supports full-weight training with persistent workers only")
+            if shared_options.get("offload-train") is False or shared_options.get("no-offload-train"):
+                raise DeployConfigError("training.colocate requires offload-train")
+            options["offload-train"] = True
+            require_ray_roles(config, "rollout", backend="Slime colocate")
         if options.get("use-rollout-routing-replay"):
             raise DeployConfigError(
                 "training.options.use-rollout-routing-replay needs each rollout's routed experts, "
@@ -238,11 +264,29 @@ class SlimeDeployment(TrainingDeployment):
             "namespace": settings["ray_namespace"],
             "execution": dict(settings["execution_config"]),
             "train_timeout_s": settings["train_timeout_s"],
+            "colocate": settings["training_colocate"],
             "settings": {
                 key: settings[key]
                 for key in ("model_path", "training_backend_options", "teacher_model_path", "teacher_timeout")
             },
         }
+
+    def build_serving(
+        self, component: TrainingComponent, config: Mapping[str, Any], *, model_path: str
+    ) -> InferenceRuntime:
+        from reef.train.slime_backend.component import SlimeTrainingComponent
+
+        if isinstance(component, SlimeTrainingComponent) and component.colocate:
+            if component.resources is None:
+                raise RuntimeConfigError("colocated Slime has no GPU reservation")
+            serving = RuntimeRegistry().build(config, model_path=model_path, resources=component.resources)
+            if not isinstance(serving, SharedGpuInferenceRuntime):
+                serving.shutdown()
+                raise RuntimeConfigError("colocated Slime requires a shared GPU serving runtime")
+            component.serving = serving
+            component.start_jobs()
+            return serving
+        return super().build_serving(component, config, model_path=model_path)
 
 
 class SlimeComponentFactory(TrainingComponentFactory):
@@ -268,6 +312,7 @@ class SlimeComponentFactory(TrainingComponentFactory):
                 execution=config["execution"],
                 ray_address=ray_address,
                 namespace=config["namespace"],
+                colocate=config.get("colocate", False),
                 train_timeout_s=DEFAULT_TRAIN_TIMEOUT_S if train_timeout_s is None else float(train_timeout_s),
             )
         )

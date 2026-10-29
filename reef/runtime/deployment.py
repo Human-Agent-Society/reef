@@ -157,6 +157,17 @@ class RuntimeFactory(ConfiguredFactory):
     ) -> InferenceRuntime:
         """Build the serving runtime that ``config`` describes."""
 
+    def build_with_resources(
+        self,
+        resources: InferenceResources,
+        config: Mapping[str, Any],
+        model_path: str,
+        recipe_config: Mapping[str, Any],
+        environ: Mapping[str, str],
+    ) -> InferenceRuntime:
+        """Borrow an owner's allocation, or refuse if this factory owns its placement."""
+        raise RuntimeConfigError(f"runtime {self.kind!r} cannot borrow inference resources")
+
 
 class TrainingComponentFactory(ConfiguredFactory):
     """Build the training component that a training deployment's component config describes.
@@ -273,6 +284,7 @@ class RuntimeRegistry:
         model_path: str,
         recipe_config: Mapping[str, Any] | None = None,
         environ: Mapping[str, str] | None = None,
+        resources: InferenceResources | None = None,
     ) -> InferenceRuntime:
         """The serving runtime of ``config``; ``RuntimeConfigError`` for an unknown type, and ``TypeError`` when
         the factory builds anything but an ``InferenceRuntime``. A training component it built is closed first."""
@@ -288,7 +300,12 @@ class RuntimeRegistry:
         if isinstance(factory, RuntimeFactory):
             # Injected entries may be plain callables that parse nothing.
             config = factory.parse_config(config, values)
-        runtime = factory(config, model_path, recipe_config or {}, values)
+        if resources is None:
+            runtime = factory(config, model_path, recipe_config or {}, values)
+        else:
+            if not isinstance(factory, RuntimeFactory):
+                raise RuntimeConfigError("borrowed resources require a RuntimeFactory")
+            runtime = factory.build_with_resources(resources, config, model_path, recipe_config or {}, values)
         if isinstance(runtime, TrainingComponent):
             runtime.close()
             raise TypeError(

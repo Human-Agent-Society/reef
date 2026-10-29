@@ -96,8 +96,10 @@ Implementation
 - Implement ``TrainingDeployment`` in the integration to describe process
   preparation, and a ``RuntimeFactory`` that returns the
   ``TrainingComponent``. Declare the component's ``release_format``; the
-  ``inference`` section builds the serving from it, so the integration builds
-  no serving runtime. A backend with its own serving returns its runtime
+  ``inference`` section configures serving from it. ``build_serving`` normally
+  delegates to the runtime registry; an integration that shares its GPU
+  reservation can override assembly while preserving these settings.
+  A backend with its own serving returns its runtime
   config from ``trainer_serving_config``. In-process integrations can extend
   ``InProcessTrainingDeployment``. Expose the definition through a
   dotted reference or the ``reef.training_backends`` entry-point group; see

@@ -86,7 +86,7 @@ def connect_training_component(
 ) -> tuple[TrainingComponent, InferenceRuntime]:
     """Build the selected training component for the recipe's ``loss_family``, then the serving of its releases.
 
-    The training backend builds only the component. The serving runtime comes
+    The training backend assembles the component and its serving. Serving comes
     from the deployment's ``inference`` settings and the component's
     ``release_format`` (``reef.service.deploy.serving``).
     """
@@ -95,8 +95,8 @@ def connect_training_component(
         backend.component_config(asdict(settings), loss_family=loss_family), model_path=model_path
     )
     try:
-        serving = RuntimeRegistry().build(
-            serving_runtime_config(settings, backend, component.release_format), model_path=model_path
+        serving = backend.build_serving(
+            component, serving_runtime_config(settings, backend, component.release_format), model_path=model_path
         )
     except BaseException:
         component.close()

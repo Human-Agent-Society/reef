@@ -31,6 +31,28 @@ def test_closed_admission_refuses_new_requests_and_lets_admitted_ones_finish() -
     asyncio.run(run())
 
 
+def test_pause_timeout_and_cancellation_never_leak_an_admission_handle() -> None:
+    async def run() -> None:
+        controller = InferenceAdmissionController()
+        active = await controller.acquire()
+        with pytest.raises(TimeoutError, match="did not drain"):
+            await asyncio.to_thread(controller.pause_and_drain, 0.01)
+        waiting = asyncio.create_task(controller.acquire())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert controller.status == {"open": False, "active": 1}
+        active.release()
+        controller.close()
+        controller.resume()
+        assert controller.status == {"open": False, "active": 0}
+        with pytest.raises(InferenceUnavailable):
+            await controller.acquire()
+
+    asyncio.run(run())
+
+
 class LocalReleases:
     """A release repository for request tests: every release materializes to the same local directory."""
 

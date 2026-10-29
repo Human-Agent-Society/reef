@@ -86,8 +86,8 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
 @pytest.mark.parametrize(
     ("inference", "training", "message"),
     [
-        # Training and serving never share GPUs: there is no colocation option.
-        ({}, {"colocate": True}, "unknown config fields: training.colocate"),
+        # Shared inference must match the training GPU group.
+        ({}, {"colocate": True}, "one node and one engine"),
         ({}, {"options": {"global-batch-size": 4, "offload-rollout": True}}, "shares GPUs"),
         ({}, {"options": {"global-batch-size": 4, "sglang-mem-fraction-static": 0.5}}, "configures inference"),
         ({}, {"options": {"global-batch-size": 4, "rollout-num-gpus": 2}}, "configures inference"),

@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, training_component_factory_for
+from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry, training_component_factory_for
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.jobs import ReleaseFormat
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import ReleaseFormat, TrainingComponent
 from reef.runtime.serving import ReleaseWeights
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
@@ -90,6 +91,16 @@ class TrainingDeployment(ABC):
     def trainer_serving_config(self, settings: Mapping[str, Any]) -> dict[str, Any] | None:
         """The runtime config of the backend's own serving (``inference.serving: trainer``), or None without one."""
         return None
+
+    def build_serving(
+        self, component: TrainingComponent, config: Mapping[str, Any], *, model_path: str
+    ) -> InferenceRuntime:
+        """Build the selected serving runtime after the training component starts.
+
+        A backend with shared GPU ownership can bind serving to its component here.
+        The default creates an independent serving runtime from the resolved configuration.
+        """
+        return RuntimeRegistry().build(config, model_path=model_path)
 
     def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights | None:
         """How Reef's engines (``inference.serving: engines``) get weights for releases that hold none, or None.

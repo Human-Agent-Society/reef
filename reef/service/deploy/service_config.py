@@ -142,6 +142,11 @@ class ServiceConfig:
     training_backend: str | None = config_option(
         None, public_path=("training", "backend"), help="Managed weight-training backend (default: slime)."
     )
+    training_colocate: bool = config_option(
+        False,
+        public_path=("training", "colocate"),
+        help="Share Slime training GPUs with local SGLang; inference waits during each train-and-save operation.",
+    )
     training_ready_timeout: int = config_option(
         3600, public_path=("training", "ready_timeout"), help="Training component startup deadline in seconds."
     )

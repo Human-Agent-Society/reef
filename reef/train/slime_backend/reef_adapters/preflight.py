@@ -22,8 +22,8 @@ REEF_ROLLOUT_DATA_KEYS = (
 def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
     """Reject Slime arguments the training component cannot run with.
 
-    The component trains only: Slime starts no engines, and training and
-    serving never share GPUs.
+    Slime starts no rollout engines. Reef controls optional GPU sharing
+    through ``training.colocate`` and the serving runtime's handoff.
     """
     num_rollout = args.num_rollout
     if not isinstance(num_rollout, int) or isinstance(num_rollout, bool) or num_rollout <= 0:
@@ -41,7 +41,7 @@ def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> No
         ("--offload-rollout", args.offload_rollout),
     ):
         if value:
-            raise ValueError(f"training and serving use separate GPUs; remove {name}")
+            raise ValueError(f"Reef owns shared GPU placement; remove {name} and use training.colocate")
     if args.release_train:
         raise ValueError("the training workers keep running between jobs; remove --release-train")
 

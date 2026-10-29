@@ -202,7 +202,11 @@ def serving_runtime_config(
         )
     rollout = role_executor_settings(settings.execution_config, "rollout")
     config: dict[str, Any] = {
-        "type": "remote_serving",
+        "type": (
+            "reef.inference.sglang.colocate:ColocatedServingFactory"
+            if settings.training_colocate
+            else "remote_serving"
+        ),
         "remote": dict(settings.inference_remote),
         "release_format": release_format.to_dict(),
         "engine": settings.inference_backend,

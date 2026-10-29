@@ -46,8 +46,8 @@ Method code should depend only on what this page documents. Anything else under
 Backend and runtime contracts
 -----------------------------
 
-Training and inference are separate contracts. Neither holds the other, and
-there is no aggregate runtime:
+Training and inference implement separate contracts. An optional shared GPU
+deployment coordinates them through ``SharedGpuInferenceRuntime``:
 
 .. list-table::
    :header-rows: 1
@@ -85,6 +85,18 @@ through ``EngineInferenceBackend``. ``InferenceService`` in
 ``reef/runtime/deployment.py`` owns engine start and shutdown. It also requires
 explicit inheritance; inference factory discovery rejects objects that only
 happen to expose similarly named methods.
+
+``SharedGpuInferenceRuntime.training_phase()`` returns a context manager.
+Entering it drains inference and releases inference GPU memory. The trainer
+must offload its workers before leaving the context. Successful exit restores
+serving; a failed handoff leaves admission closed. Training imports this
+interface, not an inference backend implementation.
+
+``RuntimeRegistry.build(..., resources=...)`` passes a borrowed
+``InferenceResources`` allocation to ``RuntimeFactory.build_with_resources``.
+Factories must explicitly support this operation; the default refuses it.
+The owner releases the allocation after serving and training stop. Existing
+factory calls without ``resources`` keep their original behavior.
 
 Two other extension points have separate names and purposes:
 

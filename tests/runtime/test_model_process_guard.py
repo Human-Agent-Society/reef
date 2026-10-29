@@ -103,3 +103,42 @@ def test_group_retirement_never_signals_reused_owner_pid(monkeypatch):
     monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 2))
     monkeypatch.setattr(process_guard.os, "killpg", lambda *args: pytest.fail("unrelated group signaled"))
     process_guard._retire_group(12345, 1)
+
+
+def test_ray_worker_exit_preserves_guard_until_native_children_are_retired(monkeypatch):
+    """Ray's child cleanup must not kill the deployment's cleanup watchdog."""
+    ray = pytest.importorskip("ray")
+    psutil = pytest.importorskip("psutil")
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    token = uuid4().hex
+    ray.init(
+        address="local",
+        num_cpus=1,
+        include_dashboard=False,
+        runtime_env={
+            "env_vars": {
+                DEPLOYMENT_ENV: token,
+                "RAY_kill_child_processes_on_worker_exit": "false",
+            },
+            "worker_process_setup_hook": "reef.runtime.executor.process_guard.install",
+        },
+    )
+
+    @ray.remote
+    class Owner:
+        def spawn(self):
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            return os.getpid(), child.pid
+
+    try:
+        owner = Owner.remote()
+        pid, child = ray.get(owner.spawn.remote(), timeout=30)
+        ray.kill(owner)
+        wait_for(_directory(token) / f"{pid}.done")
+        retire(token)
+        assert not psutil.pid_exists(child) or psutil.Process(child).status() == psutil.STATUS_ZOMBIE
+    finally:
+        try:
+            retire(token)
+        finally:
+            ray.shutdown()

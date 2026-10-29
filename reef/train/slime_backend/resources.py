@@ -2,7 +2,8 @@
 
 Reef reserves the training GPUs itself from the parsed Slime topology; the
 actor and critic groups borrow their bundles from that one reservation. The
-serving engines reserve their own GPUs on the inference component.
+serving engines either reserve their own GPUs on the inference component or
+borrow these same bundles when ``colocate`` is enabled.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from uuid import uuid4
 
 import ray
 
-from reef.runtime.deployment import DeploymentResources
+from reef.runtime.deployment import InferenceResources
 from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -25,7 +26,7 @@ def model_gpu_layout(args: SlimeArguments) -> ModelGpuLayout:
     )
 
 
-class SlimeDeploymentResources(DeploymentResources):
+class SlimeDeploymentResources(InferenceResources):
     """Own one Ray client session and the training GPU reservation."""
 
     def __init__(
@@ -35,11 +36,13 @@ class SlimeDeploymentResources(DeploymentResources):
         ray_address: str,
         namespace: str,
         runtime_env: dict[str, Any] | None = None,
+        colocate: bool = False,
     ) -> None:
         self.args = args
         self.ray_address = ray_address
         self.namespace = namespace
         self.runtime_env = runtime_env
+        self.colocate = colocate
         #: Slime's view of the reservation: the actor and critic groups share the training bundles.
         self.placement_groups: dict[str, GpuBundles | None] = {}
         self._reservation: ModelGpuReservation | None = None
@@ -57,15 +60,29 @@ class SlimeDeploymentResources(DeploymentResources):
         self._started = True
         self._owns_session = True
         runtime_env = dict(self.runtime_env or {})
-        runtime_env["env_vars"] = {**runtime_env.get("env_vars", {}), DEPLOYMENT_ENV: self._process_lease}
+        runtime_env["env_vars"] = {
+            **runtime_env.get("env_vars", {}),
+            DEPLOYMENT_ENV: self._process_lease,
+            # Reef's watchdog must survive worker exit to retire the entire
+            # native process group and confirm cleanup. Ray's direct-child
+            # cleanup would otherwise kill the watchdog before it can finish.
+            "RAY_kill_child_processes_on_worker_exit": "false",
+        }
         runtime_env["worker_process_setup_hook"] = "reef.runtime.executor.process_guard.install"
         ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env)
         self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
-        self._reservation = reserve_model_gpus(model_gpu_layout(self.args))
+        self._reservation = reserve_model_gpus(model_gpu_layout(self.args), single_node=self.colocate)
         self.placement_groups = {
             "actor": self._reservation.training,
             "critic": self._reservation.training if self.args.use_critic else None,
         }
+
+    @property
+    def inference_placement(self) -> GpuBundles | None:
+        """Borrow the training bundles only in the single-node shared deployment."""
+        if self.colocate and self._reservation is not None:
+            return self._reservation.training
+        return None
 
     def close(self) -> None:
         if self._closed:

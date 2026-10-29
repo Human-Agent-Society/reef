@@ -3,7 +3,8 @@
 A component reserves its GPUs in one placement group and schedules its
 workers on the ordered bundles. Bundles are ordered by node address and
 device id, so a tensor-parallel engine or a Megatron group always lands on
-contiguous devices of one node. Training and serving never share a bundle.
+contiguous devices of one node. Colocated Slime explicitly lends its training
+bundles to serving; separate deployments own separate reservations.
 
 Ray is imported lazily so the base installation stays CPU-only.
 """
@@ -98,7 +99,7 @@ class ModelGpuReservation:
 
 
 def reserve_model_gpus(
-    layout: ModelGpuLayout, *, wait_log_interval_s: float = WAIT_LOG_INTERVAL_S
+    layout: ModelGpuLayout, *, wait_log_interval_s: float = WAIT_LOG_INTERVAL_S, single_node: bool = False
 ) -> ModelGpuReservation:
     """Reserve ``layout.total`` GPUs in one placement group and order its bundles.
 
@@ -109,7 +110,8 @@ def reserve_model_gpus(
     import ray
     from ray.util.placement_group import placement_group
 
-    group = placement_group([{"GPU": 1, "CPU": 1} for _ in range(layout.total)], strategy="PACK")
+    strategy = "STRICT_PACK" if single_node else "PACK"
+    group = placement_group([{"GPU": 1, "CPU": 1} for _ in range(layout.total)], strategy=strategy)
     _wait_until_placed(ray, group, layout.total, wait_log_interval_s)
     identities = _bundle_identities(ray, group, layout.total)
     order = sorted(
