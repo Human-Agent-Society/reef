@@ -1,6 +1,6 @@
 """The capture proxy between a harness and Reef: forward model calls, tag them, keep their receipts.
 
-A harness that runs outside Reef's evaluation, such as a Harbor task episode
+A harness that runs outside Reef's evaluation, such as a Harbor task rollout
 or the native serve process, reaches Reef through this proxy. It forwards to
 Reef with ``x-reef-scenario`` and the token, tags every call as
 ``x-reef-tag-<name>``, keeps the receipt each answer carries, and hands the
@@ -147,7 +147,7 @@ class CaptureProxy:
     call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
     and hands the release id an answer names to ``observer``.
 
-    With ``is_rollout``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
+    With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
     record of it, and the captured response holds the whole training block. A streaming agent still gets a
     stream, which the proxy makes from the complete answer."""
 
@@ -160,7 +160,7 @@ class CaptureProxy:
         tags: Mapping[str, str] | None = None,
         observer: ReleaseObserver | None = None,
         listen_host: str = "127.0.0.1",
-        is_rollout: bool = False,
+        is_unrecorded: bool = False,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -168,10 +168,10 @@ class CaptureProxy:
         fixed: dict[str, str] = {"x-reef-scenario": scenario}
         if token:
             fixed["authorization"] = f"Bearer {token}"
-        if is_rollout:
+        if is_unrecorded:
             fixed[ROLLOUT_HEADER] = "1"
         self.config = ServeConfig(
-            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_rollout
+            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
         )
         #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)

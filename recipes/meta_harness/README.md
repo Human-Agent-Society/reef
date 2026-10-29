@@ -2,7 +2,7 @@
 
 Meta-Harness is full-history search over a fixed model's harness. This method
 represents every candidate as a complete Reef harness tree, so the same search
-works with any Reef adapter and any episode scorer. It has no Harbor,
+works with any Reef adapter and any rollout scorer. It has no Harbor,
 Terminal-Bench, Terminus, or coding-agent dependency.
 
 The implementation is a specialization of Reef's harness evolution recipe, in
@@ -18,7 +18,7 @@ meta_harness/
                   the runnable Terminal-Bench search
 ```
 
-Reef still owns tree validation, adapter rendering, model binding, episode
+Reef still owns tree validation, adapter rendering, model binding, rollout
 execution, timeouts, residue policy, finite-score checks, publication, and
 scenario commits. Meta-Harness adds only the population-aware proposer and
 selection.
@@ -32,7 +32,7 @@ recipe:
     evolution:
       adapter: pi
       seed: seed                 # the first tree, a directory
-      evaluate: my_harness.scoring:EpisodeScore
+      evaluate: my_harness.scoring:RolloutScore
       tasks:
         - First validation task
         - Second validation task
@@ -44,7 +44,7 @@ recipe:
       meta_harness:
         mode: full_history
         max_candidates: 20
-        max_target_episodes: 200
+        max_target_rollouts: 200
         max_files: 32
 
 inference:
@@ -52,11 +52,11 @@ inference:
 ```
 
 `seed` is a directory of tree files, such as `rules.md` with the starting
-rules. `evaluate` names a standard Reef episode scorer class:
+rules. `evaluate` names a standard Reef rollout scorer class:
 
 ```python
-class EpisodeScore(EpisodeScorer):
-    def score(self, task: str, result: EpisodeResult) -> float:
+class RolloutScore(RolloutScorer):
+    def score(self, task: str, result: RolloutResult) -> float:
         ...
 ```
 
@@ -68,7 +68,7 @@ The `meta_harness` section takes these keys:
 | `model` | `proposer` | the `evolution.models` binding that proposes |
 | `components` | every kind the adapter renders | the tree kinds the proposer may change |
 | `max_candidates` | `0` (no limit) | new candidates to evaluate |
-| `max_target_episodes` | `0` (no limit) | evaluation episodes to spend |
+| `max_target_rollouts` | `0` (no limit) | evaluation rollouts to spend |
 | `max_files` | `32` | files in one proposed tree |
 
 The proposer is a standard Reef `Proposer`: `propose(context)` reads the
@@ -149,8 +149,8 @@ improvement in mean validation score over the score the incumbent was admitted
 on, which reproduces upstream's frontier: it keeps the highest recorded score.
 Reef's paired evaluation still measures both sides, so this method spends two
 evaluations per iteration where upstream spends one; budgets expressed in
-episodes are not directly comparable to upstream's iteration counts. Failed
-episodes count as zero; a non-finite score is rejected by Reef before
+rollouts are not directly comparable to upstream's iteration counts. Failed
+rollouts count as zero; a non-finite score is rejected by Reef before
 selection.
 
 The [Terminal-Bench example](examples/terminal_bench/README.md) runs the shared
@@ -171,8 +171,8 @@ each step. A step reads the population from the latest commit and folds in
 the evaluation of the candidate the previous step proposed, so evaluation,
 publication, or commit failures cannot advance the committed population.
 
-`max_target_episodes` counts both sides of Reef's paired evaluation: candidate
-and incumbent, multiplied by `episode_repeats`. A proposal is not started
+`max_target_rollouts` counts both sides of Reef's paired evaluation: candidate
+and incumbent, multiplied by `rollout_repeats`. A proposal is not started
 unless the complete next evaluation fits. Zero disables a budget; Reef's shared
 `max_steps`, `max_model_calls_per_step`, executor, timeout, and residue options
 remain available as usual.

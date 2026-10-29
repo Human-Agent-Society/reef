@@ -12,8 +12,9 @@ from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginReference
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.runners.terminus.runner import trial_record
 from reef.harness.tree import HarnessTree, TreeKind
 from reef.recipe.errors import RecipeConfigError
@@ -29,7 +30,9 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.name == "reefine"
     assert built.training_mode == "manual"
     assert isinstance(built.propose, AgentProposer) and built.propose.reads_requests
-    assert built.review_kinds == (TreeKind.CODE_EXTENSION,)
+    # By default a person activates a tree that changes an extension.
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {TreeKind.CODE_EXTENSION}
     # The floor: the candidate alone must pass every evaluation task; the current release is not run.
     assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
     # Without evolution.seed the first tree is the packaged one: the starter skill.
@@ -52,14 +55,15 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
                 "tasks": ["[fib] Compute fib(90)."],
                 "selection": "score_comparison",
                 "seed": str(seed),
-                "review_kinds": [],
                 "evaluate": "recipes.beta.reefine.scorer:AnswerScorer",
             },
+            "activation": {"module": "never"},
         },
     )
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.stages().sample2job.config == {"batch_size": 3}
-    assert built.seed == HarnessTree({"rules.md": "Answer in one line.\n"}) and built.review_kinds == ()
+    assert built.seed == HarnessTree({"rules.md": "Answer in one line.\n"})
+    assert isinstance(built.activation_rule(), NeverActivate)
     assert built.selection == PluginReference(ScoreComparisonPlugin)
 
 
@@ -96,16 +100,16 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
     pi = ReefineRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}})
     assert isinstance(pi, ReefineRecipe) and pi.tasks[0].startswith("[health] ")
 
-    def ran(rewards: dict[str, float], error: str = "") -> EpisodeResult:
+    def ran(rewards: dict[str, float], error: str = "") -> RolloutResult:
         row = trial_record(HEALTH_TASK_DIRECTORY, rewards, tmp_path, error)
         events = ({"type": "verifier", **{key: value for key, value in row.items() if key != "steps"}},)
-        return EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
+        return RolloutResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
 
     scorer = AnswerScorer()
     assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 1.0})) == 1.0
     assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 0.0})) == 0.0
     assert scorer.score(HEALTH_TASK_DIRECTORY, ran({}, "the container never built")) == 0.0
-    # The reply's last line is not the score of a task directory: a Harbor episode has no assistant reply.
+    # The reply's last line is not the score of a task directory: a Harbor rollout has no assistant reply.
     assert scorer.score("[health] x", ran({"reward": 1.0})) == 0.0
 
 

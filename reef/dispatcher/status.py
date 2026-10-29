@@ -77,6 +77,8 @@ class TrainingStatus:
             "training_mode": stepping_trainer.pipeline.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
+            # Each component's active artifact and training start, by artifact_id.
+            "artifacts": current.artifact_status(),
         }
         if stepping_trainer.job_loop is not None:
             # The job the trainer waits on, and where its next job starts.

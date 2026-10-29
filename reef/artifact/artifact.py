@@ -91,11 +91,13 @@ class Artifact:
         *,
         local_path: Path | None = None,
         metadata: Mapping[str, object] | None = None,
+        artifact_id: str | None = None,
     ) -> None:
         self._ref = ref
         self._repository = repository
         self._local_path = None if local_path is None else Path(local_path)
         self._metadata = dict(metadata or {})
+        self._artifact_id = artifact_id
 
     @property
     def ref(self) -> ArtifactRef:
@@ -112,6 +114,27 @@ class Artifact:
     @property
     def metadata(self) -> Mapping[str, object]:
         return MappingProxyType(self._metadata)
+
+    @property
+    def artifact_id(self) -> str:
+        """The artifact that this value holds: the artifact of a component view, or the only component of a release.
+
+        A release without a manifest is one artifact. The release made it, so
+        its ``release_id`` names it. A manifest of one component names the
+        artifact (``ReleaseComponents.artifact_ids``). For a release of several
+        components, raise ``ArtifactNotFound``: each component view holds one
+        of its artifacts.
+        """
+        if self._artifact_id is not None:
+            return self._artifact_id
+        manifest = self.materialize().components
+        if manifest is None:
+            return self.ref.release_id
+        if not manifest.single:
+            raise ArtifactNotFound(
+                f"release {self.ref.release_id!r} holds components {list(manifest.names)}; name one of them"
+            )
+        return next(iter(manifest.artifact_ids(self.ref.release_id).values()))
 
     @property
     def components(self) -> ReleaseComponents | None:
@@ -150,6 +173,7 @@ class Artifact:
             None,
             local_path=directory,
             metadata=entry.metadata,
+            artifact_id=manifest.artifact_ids(self.ref.release_id)[name],
         )
 
     @classmethod
@@ -159,11 +183,13 @@ class Artifact:
         *,
         metadata: Mapping[str, object] | None = None,
         repository: ArtifactRepository | None = None,
+        content_id: str | None = None,
     ) -> Artifact:
+        """The unpublished artifact in ``path``; ``content_id`` names its content, a new unique id when ``None``."""
         token = uuid.uuid4().hex
         return cls(
             ArtifactRef(
-                content_id=f"content:{token}",
+                content_id=f"content:{token}" if content_id is None else content_id,
                 release_id=f"{LOCAL_RELEASE_PREFIX}{token}",
                 parent_release_id=None,
             ),
@@ -178,6 +204,7 @@ class Artifact:
             repository,
             local_path=self.local_path,
             metadata=self.metadata,
+            artifact_id=self._artifact_id,
         )
 
     def materialize(self) -> Artifact:

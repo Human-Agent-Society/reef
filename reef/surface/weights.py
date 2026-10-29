@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
+from reef.core.evaluation import ArtifactKind
 from reef.surface.adapter import adapter_name
 from reef.surface.base import (
     AcceptAnyArtifact,
     AdapterWeightRuntime,
+    ArtifactLayout,
     ArtifactLoader,
     ComponentSurface,
     InferenceHooks,
@@ -18,8 +19,6 @@ from reef.surface.base import (
     Surface,
     WeightRuntime,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class RuntimeLoadMismatch(ReefError):
@@ -51,28 +50,11 @@ class WeightLoader(ArtifactLoader):
             return runtime.activate_checkpoint(artifact, scenario=self._scenario)
         return artifact.ref.release_id
 
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef:
-        if current is not None and current.release_id != checkpoint.release_id:
-            # A staged-but-never-published artifact (``local:``) has no
-            # durable bytes address; keep the committed step/state
-            # continuity and fall serving back to the last checkpoint.
-            logger.info(
-                "committed artifact %r is not durable; serving falls back to checkpoint %r",
-                current.release_id,
-                checkpoint.release_id,
-            )
-        return checkpoint
-
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
         """Return the runtime load ID that serves the committed ``artifact``, or None when it is unknown.
 
-        The runtime names it: every activation of a release, at a commit, a
-        rollback or a restart, loads it under a version of its own.
+        The runtime names it: every activation of a release, at a commit, an
+        activation or a restart, loads it under a version of its own.
         """
         if self._scenario is not None:
             return scenario_adapter_version(self._scenario, runtime)
@@ -116,7 +98,7 @@ class WeightInferenceHooks(InferenceHooks):
         if self._scenario is None:
             return None
         version = scenario_adapter_version(self._scenario, self._runtime)
-        # A scenario served no adapter samples the base model, as a release without weights does.
+        # A scenario that serves no adapter samples the base model, as the base artifact does.
         return None if version is None else adapter_name(self._scenario, version)
 
     def _address_adapter(self, payload: dict[str, Any], served: str | None) -> dict[str, Any]:
@@ -146,21 +128,29 @@ WEIGHTS_COMPONENT = "weights"
 def create_weight_surface(
     *,
     scenario: str | None = None,
+    kind: ArtifactKind,
     runtime: AdapterWeightRuntime | None = None,
     validator: ArtifactValidator | None = None,
+    layout: ArtifactLayout | None = None,
 ) -> Surface:
     """Build weight loading and inference capabilities as the ``weights`` component.
 
-    ``scenario`` selects per-scenario adapter routing on ``runtime``, which
-    several scenarios share. ``validator`` admits
-    published weights; the default accepts any.
+    ``kind`` is the kind of the weights, ``model`` or ``model_adapter``: the
+    serving runtime's ``served_weight_kind``. ``scenario`` selects
+    per-scenario adapter routing on ``runtime``, which several scenarios
+    share. ``validator`` admits published weights; the default accepts any.
+    ``layout`` checks an imported directory; ``None`` takes no import.
     """
+    if kind not in ("model", "model_adapter"):
+        raise ValueError(f"the weights component is a model or a model_adapter, not {kind!r}")
     return Surface(
         components={
             WEIGHTS_COMPONENT: ComponentSurface(
                 validator=AcceptAnyArtifact() if validator is None else validator,
                 loader=WeightLoader(scenario),
                 inference=WeightInferenceHooks(scenario=scenario, runtime=runtime),
+                kind=kind,
+                layout=layout,
             )
         }
     )

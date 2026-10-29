@@ -1,8 +1,10 @@
-"""The generator service and its client: proposals, written tasks, checks and episodes over HTTP."""
+"""The generator service and its client: proposals, written tasks, checks and rollouts over HTTP."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -10,6 +12,7 @@ import stat
 import sys
 import threading
 import time
+import types
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +25,13 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.harness.episodes.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner, rewards_of
+from reef.execution.sandbox.task_environment import (
+    HARBOR_E2B_NAMES,
+    DockerProbe,
+    EnvironmentVariableProbe,
+    ModuleProbe,
+)
+from reef.harness.rollouts.tasks import RolloutTurn, TaskRollout, TaskRolloutRunner, rewards_of
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import (
     Designer,
@@ -31,6 +40,7 @@ from reef.record2sample.generator import (
     DesignerRequest,
     DuplicateTask,
     GeneratorError,
+    GeneratorRollouts,
     GeneratorService,
     HarborChecks,
     HarborRuns,
@@ -39,19 +49,18 @@ from reef.record2sample.generator import (
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
-    ReefTaskEpisodes,
+    ReefGeneratorRollouts,
     TaskChecks,
-    TaskEpisodes,
     TaskNameConflict,
     readiness_probes,
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.record2sample.generator.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
+from reef.record2sample.generator.service import CLOSE_GRACE_S, HarborProbe
 from reef.record2sample.generator.wire import (
     WireError,
     designer_request_document,
-    episode_document,
-    episode_from_document,
+    rollout_document,
+    rollout_from_document,
     source_records_from_document,
     task_document,
     task_from_document,
@@ -118,12 +127,12 @@ class StandInChecks(TaskChecks):
         return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
 
 
-class StandInEpisodes(TaskEpisodes):
+class StandInRollouts(GeneratorRollouts):
     def __init__(self, reward: float = 0.5) -> None:
         self.reward = reward
         self.calls: list[dict[str, object]] = []
 
-    async def run_episodes(self, task_path, *, scenario, model, arm, count, extra_instruction_paths, tags):
+    async def run_rollouts(self, task_path, *, scenario, model, arm, count, extra_instruction_paths, tags):
         self.calls.append(
             {
                 "task": task_path.name,
@@ -136,7 +145,7 @@ class StandInEpisodes(TaskEpisodes):
             }
         )
         return tuple(
-            TaskEpisode(
+            TaskRollout(
                 task_path,
                 task_path.name,
                 f"e{n}",
@@ -152,18 +161,18 @@ class StandInEpisodes(TaskEpisodes):
         )
 
 
-class GatedEpisodes(StandInEpisodes):
-    """Episodes that wait for ``gate``, so a test sees what runs beside the episodes in flight."""
+class GatedRollouts(StandInRollouts):
+    """Rollouts that wait for ``gate``, so a test sees what runs beside the rollouts in flight."""
 
     def __init__(self, gate: threading.Event) -> None:
         super().__init__()
         self.gate = gate
         self.waiting = 0
 
-    async def run_episodes(self, task_path, **arguments):
+    async def run_rollouts(self, task_path, **arguments):
         self.waiting += 1
         await asyncio.to_thread(self.gate.wait)
-        return await super().run_episodes(task_path, **arguments)
+        return await super().run_rollouts(task_path, **arguments)
 
 
 class StandInProbe(ReadinessProbe):
@@ -179,21 +188,21 @@ class StandInProbe(ReadinessProbe):
 
 def service(
     tmp_path: Path, **parts: object
-) -> tuple[GeneratorService, StandInDesigner, StandInChecks, StandInEpisodes]:
+) -> tuple[GeneratorService, StandInDesigner, StandInChecks, StandInRollouts]:
     designer = parts.get("designer") or StandInDesigner()
     checks = parts.get("checks") or StandInChecks()
-    episodes = parts.get("episodes") or StandInEpisodes()
+    rollouts = parts.get("rollouts") or StandInRollouts()
     built = GeneratorService(
         tasks_root=tmp_path / "tasks",
         designer=designer,  # type: ignore[arg-type]
         checks=checks,  # type: ignore[arg-type]
-        episodes=episodes,  # type: ignore[arg-type]
+        rollouts=rollouts,  # type: ignore[arg-type]
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
         probes=parts.get("probes"),  # type: ignore[arg-type]
         jobs=parts.get("jobs"),  # type: ignore[arg-type]
     )
-    return built, designer, checks, episodes  # type: ignore[return-value]
+    return built, designer, checks, rollouts  # type: ignore[return-value]
 
 
 def run_with(built: GeneratorService, body: Callable[[HttpGenerator], Awaitable[object]]) -> object:
@@ -253,14 +262,14 @@ def test_a_proposal_without_a_model_uses_the_services_default_and_none_is_refuse
 
 
 def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_body_says(tmp_path: Path) -> None:
-    built, designer, _, episodes = service(tmp_path, designer_model="strong")
+    built, designer, _, rollouts = service(tmp_path, designer_model="strong")
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={}, model="m")
         await generator.propose(request(), scenario="spade", generation=1, index=1, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        await generator.run_episodes(
+        await generator.run_rollouts(
             written.path,
             scenario="spade",
             arm="bare",
@@ -273,8 +282,8 @@ def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_b
     run_with(built, body)
     assert [call["model"] for call in designer.calls] == ["strong", "strong"]
     assert (
-        episodes.calls[0]["model"] == "served"
-    ), "the designer model is the Designer's alone; episodes keep the served one"
+        rollouts.calls[0]["model"] == "served"
+    ), "the designer model is the Designer's alone; rollouts keep the served one"
     built, designer, _, _ = service(tmp_path / "without")
 
     async def body_without(generator: HttpGenerator) -> object:
@@ -436,10 +445,10 @@ def test_a_job_that_never_finishes_is_given_up_after_the_job_timeout(tmp_path: P
     assert len(checks.calls) == 1
 
 
-def test_a_check_and_a_second_episode_job_run_while_an_episode_job_waits(tmp_path: Path) -> None:
+def test_a_check_and_a_second_rollout_job_run_while_a_rollout_job_waits(tmp_path: Path) -> None:
     gate = threading.Event()
-    episodes = GatedEpisodes(gate)
-    built, _, _, _ = service(tmp_path, episodes=episodes)
+    rollouts = GatedRollouts(gate)
+    built, _, _, _ = service(tmp_path, rollouts=rollouts)
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
@@ -448,16 +457,16 @@ def test_a_check_and_a_second_episode_job_run_while_an_episode_job_waits(tmp_pat
         arguments = {"scenario": "spade", "arm": "plain", "count": 1}
         running = [
             asyncio.ensure_future(
-                generator.run_episodes(written.path, extra_instruction_files=(), tags={}, **arguments)
+                generator.run_rollouts(written.path, extra_instruction_files=(), tags={}, **arguments)
             )
             for _ in range(2)
         ]
         try:
-            assert (await generator.check(written.path)).is_solvable, "the check does not wait behind the episodes"
+            assert (await generator.check(written.path)).is_solvable, "the check does not wait behind the rollouts"
             deadline = time.monotonic() + 10.0
-            while episodes.waiting < 2 and time.monotonic() < deadline:
+            while rollouts.waiting < 2 and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
-            assert episodes.waiting == 2, "the second episode job does not wait behind the first"
+            assert rollouts.waiting == 2, "the second rollout job does not wait behind the first"
         finally:
             gate.set()
         return await asyncio.gather(*running)
@@ -466,28 +475,28 @@ def test_a_check_and_a_second_episode_job_run_while_an_episode_job_waits(tmp_pat
     assert len(first) == len(second) == 1
 
 
-def test_the_task_episodes_keep_at_most_concurrency_episodes_of_all_requests_in_flight(
+def test_the_task_rollouts_keep_at_most_concurrency_rollouts_of_all_requests_in_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     in_flight = 0
     most_in_flight = 0
 
-    async def episode(self: TaskEpisodeRunner, task_path: Path) -> TaskEpisode:
+    async def rollout(self: TaskRolloutRunner, task_path: Path) -> TaskRollout:
         nonlocal in_flight, most_in_flight
         in_flight += 1
         most_in_flight = max(most_in_flight, in_flight)
         await asyncio.sleep(0.02)
         in_flight -= 1
-        return TaskEpisode(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
+        return TaskRollout(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
 
-    monkeypatch.setattr(TaskEpisodeRunner, "run_async", episode)
-    task_episodes = ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
+    monkeypatch.setattr(TaskRolloutRunner, "run_async", rollout)
+    task_rollouts = ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
 
-    async def two_runs() -> list[tuple[TaskEpisode, ...]]:
+    async def two_runs() -> list[tuple[TaskRollout, ...]]:
         arguments = {"scenario": "s", "model": "m", "arm": "plain", "count": 3}
         return await asyncio.gather(
             *(
-                task_episodes.run_episodes(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments)
+                task_rollouts.run_rollouts(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments)
                 for _ in range(2)
             )
         )
@@ -496,14 +505,60 @@ def test_the_task_episodes_keep_at_most_concurrency_episodes_of_all_requests_in_
     assert most_in_flight == 2
 
 
-def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
-    built, _, _, episodes = service(tmp_path)
+def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments_path = tmp_path / "arguments.json"
+    harbor = tmp_path / "harbor"
+    harbor.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"open({str(arguments_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\nsys.exit(2)\n"
+    )
+    harbor.chmod(0o755)
+    with pytest.raises(OracleUnavailable, match="harbor run -a oracle exited 2"):
+        HarborChecks(harbor=str(harbor), environment="e2b").oracle(tmp_path / "tasks" / "t")
+    harbor_arguments = json.loads(arguments_path.read_text())
+    assert harbor_arguments[harbor_arguments.index("-e") + 1] == "e2b"
+    assert HarborChecks().environment == "docker"
+    environments: list[str] = []
+
+    async def rollout(self: TaskRolloutRunner, task_path: Path) -> TaskRollout:
+        environments.append(self.environment)
+        return TaskRollout(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
+
+    monkeypatch.setattr(TaskRolloutRunner, "run_async", rollout)
+    rollout_arguments = {
+        "scenario": "s",
+        "model": "m",
+        "arm": "plain",
+        "count": 2,
+        "extra_instruction_paths": (),
+        "tags": {},
+    }
+    for generator_rollouts in (
+        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path),
+        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b"),
+    ):
+        asyncio.run(generator_rollouts.run_rollouts(tmp_path / "t", **rollout_arguments))  # type: ignore[arg-type]
+    assert environments == ["docker", "docker", "e2b", "e2b"]
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b"):
+        HarborChecks(environment="")
+    for fields, message in (
+        ({"environment": ""}, "the Harbor environment must be docker or e2b"),
+        ({"concurrency": 0}, "concurrency must be a positive int"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, **fields)  # type: ignore[arg-type]
+
+
+def test_a_rollout_job_runs_the_arm_with_its_files_and_comes_back_as_rollouts(tmp_path: Path) -> None:
+    built, _, _, rollouts = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        ran = await generator.run_episodes(
+        ran = await generator.run_rollouts(
             written.path,
             scenario="spade",
             arm="hint",
@@ -511,9 +566,9 @@ def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(t
             extra_instruction_files=("solution/hint.txt",),
             tags={"generation": "1"},
         )
-        assert [episode.reward for episode in ran] == [0.5, 0.5] and ran[0].report_agent_record_ids == ("rep",)
+        assert [rollout.reward for rollout in ran] == [0.5, 0.5] and ran[0].report_agent_record_ids == ("rep",)
         with pytest.raises(GeneratorError, match="extra instruction files do not exist"):
-            await generator.run_episodes(
+            await generator.run_rollouts(
                 written.path,
                 scenario="spade",
                 arm="hint",
@@ -523,11 +578,11 @@ def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(t
             )
         for tags, message in (
             ({"arm": "plain"}, "may not name 'arm'"),
-            ({"task": "other"}, "episode runner's own tag"),
+            ({"task": "other"}, "rollout runner's own tag"),
             ({"batch": ""}, "non-empty printable ASCII value"),
         ):
             with pytest.raises(GeneratorError, match=rf"refused \(400\).*{message}"):
-                await generator.run_episodes(
+                await generator.run_rollouts(
                     written.path,
                     scenario="spade",
                     arm="plain",
@@ -538,8 +593,8 @@ def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(t
         return None
 
     run_with(built, body)
-    assert len(episodes.calls) == 1, "an episode request with labels that cannot ride as tags never runs"
-    call = episodes.calls[0]
+    assert len(rollouts.calls) == 1, "a rollout request with labels that cannot ride as tags never runs"
+    call = rollouts.calls[0]
     assert call["task"] == "harbor-00001-000-inspection" and call["arm"] == "hint" and call["count"] == 2
     assert call["model"] == "served" and call["scenario"] == "spade" and call["tags"] == {"generation": "1"}
     assert call["extra"] == [tmp_path / "tasks" / "harbor-00001-000-inspection" / "solution" / "hint.txt"]
@@ -661,6 +716,95 @@ def test_the_stack_probes_look_for_reef_eval_harbor_and_docker(
     )
 
 
+KEY_REASON = "E2B_API_KEY is not set; export it before reef serve starts"
+
+
+def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probes = readiness_probes(harbor="/opt/harbor", environment="e2b")
+    assert [probe.name for probe in probes] == ["reef_eval", "harbor", "E2B_API_KEY", "e2b", "dockerfile_parse"]
+    assert not any(isinstance(probe, DockerProbe) for probe in probes)
+    key, package, parser = probes[2], probes[3], probes[4]
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    assert key.missing() == KEY_REASON
+    monkeypatch.setenv("E2B_API_KEY", "")
+    assert key.missing() == KEY_REASON, "an empty key is no key"
+    monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
+    assert key.missing() == ""
+    import_module = importlib.import_module
+
+    def without_e2b(name: str, package: str | None = None) -> types.ModuleType:
+        if name == "e2b":
+            raise ImportError("No module named 'e2b'")
+        return import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", without_e2b)
+    reason = package.missing()
+    assert reason.startswith(f"e2b does not import under {sys.executable}") and "install reef-infra[e2b]" in reason
+    too_old = types.ModuleType("e2b")
+    too_old.AsyncSandbox = object  # type: ignore[attr-defined]
+    monkeypatch.setattr(importlib, "import_module", lambda name, package=None: too_old)
+    reason = package.missing()
+    assert reason.startswith(f"e2b under {sys.executable} lacks ALL_TRAFFIC, AsyncTemplate"), reason
+    assert "SandboxNetworkOpts" in reason
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+    reason = parser.missing()
+    assert reason.startswith(f"dockerfile_parse does not import under {sys.executable}"), reason
+    assert "install reef-infra[e2b]" in reason
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
+        readiness_probes(environment="modal")
+    with pytest.raises(ValueError, match="non-empty environment variable name"):
+        EnvironmentVariableProbe("")
+
+
+def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The test environment may lack reef-eval and the e2b extra; stand in specs and a stand in module make them import.
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, package=None: find_spec("json" if name in ("reef_eval", "dockerfile_parse") else name, package),
+    )
+    e2b = types.ModuleType("e2b")
+    for name in HARBOR_E2B_NAMES:
+        setattr(e2b, name, object)
+    import_module = importlib.import_module
+    monkeypatch.setattr(
+        importlib, "import_module", lambda name, package=None: e2b if name == "e2b" else import_module(name, package)
+    )
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    built, _, _, _ = service(tmp_path, probes=readiness_probes(harbor=sys.executable, environment="e2b"))
+
+    async def body(generator: HttpGenerator) -> object:
+        return await generator.request("GET", "/healthz")
+
+    assert run_with(built, body) == (
+        503,
+        {
+            "ok": False,
+            "missing": ["E2B_API_KEY"],
+            "reasons": {"E2B_API_KEY": KEY_REASON},
+            "tasks_root": str(tmp_path / "tasks"),
+        },
+    )
+    monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
+    assert run_with(built, body) == (200, {"ok": True, "tasks_root": str(tmp_path / "tasks")})
+
+
+def test_the_checks_and_the_rollouts_refuse_an_environment_the_generator_cannot_probe(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
+        HarborChecks(environment="modal")
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
+        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="modal")
+    assert HarborChecks(environment="e2b").environment == "e2b"
+    assert (
+        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b").environment == "e2b"
+    )
+
+
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     task = HarborTask(
         name="t",
@@ -676,19 +820,19 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
         task_from_document({**task_document(task), "tests": {}})
     with pytest.raises(ValueError, match="must be a JSON object"):
         task_from_document("task")
-    episode = TaskEpisode(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)
-    assert episode_from_document(episode_document(episode)) == episode
+    rollout = TaskRollout(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)
+    assert rollout_from_document(rollout_document(rollout)) == rollout
     with pytest.raises(ValueError, match="failed_calls"):
-        episode_from_document({**episode_document(episode), "failed_calls": "2"})
+        rollout_from_document({**rollout_document(rollout), "failed_calls": "2"})
     with pytest.raises(WireError, match="rewards must map names to numbers"):
-        episode_from_document({**episode_document(episode), "rewards": {"score": "high"}})
+        rollout_from_document({**rollout_document(rollout), "rewards": {"score": "high"}})
     with pytest.raises(WireError, match="rewards must map names to numbers"):
-        episode_from_document({**episode_document(episode), "rewards": {"score": True}})
-    turn = EpisodeTurn(request={"messages": []}, response={"training": {"tokens": [1, 2]}})
-    rollout = TaskEpisode(tmp_path / "t", "t", "e2", 1.0, {"reward": 1.0}, "", (), 0, (), None, turns=(turn,))
-    assert episode_from_document(episode_document(rollout)) == rollout, "a rollout episode carries its calls"
+        rollout_from_document({**rollout_document(rollout), "rewards": {"score": True}})
+    turn = RolloutTurn(request={"messages": []}, response={"training": {"tokens": [1, 2]}})
+    rollout = TaskRollout(tmp_path / "t", "t", "e2", 1.0, {"reward": 1.0}, "", (), 0, (), None, turns=(turn,))
+    assert rollout_from_document(rollout_document(rollout)) == rollout, "a rollout carries its calls"
     with pytest.raises(WireError, match="turns must be objects"):
-        episode_from_document({**episode_document(rollout), "turns": [{"request": {}}]})
+        rollout_from_document({**rollout_document(rollout), "turns": [{"request": {}}]})
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
@@ -696,6 +840,11 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         {"tasks-root": "/tmp/t", "designer-timeout-s": 60, "agent": {"name": "terminus-2"}}, setting="generator"
     )
     assert settings.tasks_root == "/tmp/t" and settings.designer_timeout_s == 60.0 and settings.port == 8910
+    assert settings.environment == "docker", "a deployment that names no environment runs in Docker as before"
+    assert (
+        GeneratorSettings.from_config({"tasks-root": "/tmp/t", "environment": "e2b"}, setting="generator").environment
+        == "e2b"
+    )
     assert GeneratorSettings.from_config({"tasks_root": "/tmp/t"}, setting="generator").tasks_root == "/tmp/t"
     for section, message in (
         ({}, "tasks_root is required"),
@@ -705,6 +854,8 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
         ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
         ({"tasks-root": "/tmp/t", "designer-api": "anthropic"}, "designer-api must be openai or responses"),
+        ({"tasks-root": "/tmp/t", "environment": "modal"}, r"generator\.environment must be docker or e2b"),
+        ({"tasks-root": "/tmp/t", "environment": "Docker"}, r"generator\.environment must be docker or e2b"),
     ):
         with pytest.raises(ValueError, match=message):
             GeneratorSettings.from_config(section, setting="generator")
@@ -738,7 +889,7 @@ def spade(generator: HttpGenerator, tmp_path: Path) -> SpadeTaskGenerator:
 
 
 def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(tmp_path: Path) -> None:
-    built, designer, checks, episodes = service(tmp_path)
+    built, designer, checks, rollouts = service(tmp_path)
     material = tmp_path / "selected-snapshot"
     (material / "state").mkdir(parents=True)
     (material / "state" / "app.port").write_text("8472\n")
@@ -752,9 +903,9 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         assert task.metadata["designer_record_id"] == "designer-1"
         assert task.name.startswith("harbor-history-")
         assert (await task_generator.validate(task)).is_valid
-        # Two episodes of the staged task, as a training rollout runs them, give the Designer its result.
+        # Two rollouts of the staged task, as a training rollout runs them, give the Designer its result.
         written = await generator.write_task(task)
-        training = await generator.run_episodes(
+        training = await generator.run_rollouts(
             written.path, scenario="spade", arm="plain", count=2, extra_instruction_files=(), tags={"round": "0"}
         )
         result = TaskRolloutResult(task.name, rewards_of(training))
@@ -769,7 +920,7 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
     assert "asset-0/state/app.port" in prompt and "8472" in prompt
     assert str(material) not in prompt
     assert "before the task was solved" in prompt
-    assert len(checks.calls) == 1 and len(episodes.calls) == 2
+    assert len(checks.calls) == 1 and len(rollouts.calls) == 2
     assert [report["record_id"] for report in designer.reports] == ["designer-1"]
 
 
@@ -936,3 +1087,38 @@ def test_generator_accepts_the_shared_request_without_a_processor(tmp_path: Path
     prompt = designer.calls[0]["messages"][1]["content"]
     assert "The service port is 8472." in prompt
     assert inputs.assets or inputs.asset_files
+
+
+def test_worker_scope_stops_harbor_without_a_shared_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
+    pid_path = tmp_path / "harbor.pid"
+    cleanup_path = tmp_path / "cleaned"
+    harbor = tmp_path / "harbor"
+    harbor.write_text(
+        f"#!{sys.executable}\nimport os, pathlib, signal, sys, time\n"
+        f"def stop(*args):\n    pathlib.Path({str(cleanup_path)!r}).touch()\n    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    harbor.chmod(0o755)
+    built, _, _, _ = service(tmp_path, checks=HarborChecks(harbor=str(harbor)))
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert pid_path.exists()
+        return submitted["job"]
+
+    job_id = run_with(built, body)
+    assert isinstance(job_id, str)
+    assert cleanup_path.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)
+    job = built.jobs.get(job_id)
+    assert job is not None and job.state == "failed" and job.result is None
+    assert built.jobs.worker.wait_closed(0)

@@ -417,6 +417,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
         "recipes/beta/reefine/examples/configs/deployment.yaml",
+        "recipes/beta/reefine/examples/configs/serve.yaml",
         "tutorials/tinker/serve.yaml",
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",

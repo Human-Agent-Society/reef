@@ -20,8 +20,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.records_types import AgentRecord
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.record2record.base import Record2Record
 from reef.record2record.selection import ArrivalOrder
 from reef.record2record.sets import RecordSet

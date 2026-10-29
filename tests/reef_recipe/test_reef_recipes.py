@@ -492,11 +492,11 @@ def test_harness_evolution_recipe_reads_the_evolution_batch_size(
     from reef.recipe.harness import HarnessEvolutionRecipe
 
     (tmp_path / "batch_size_strategies.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.harness_backend.contract import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, context):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))

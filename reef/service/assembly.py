@@ -20,6 +20,7 @@ from typing import Any
 from aiohttp import web
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
+from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
@@ -33,6 +34,8 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
+from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
+from reef.service.artifact_imports import ArtifactImports
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
@@ -126,8 +129,8 @@ def _training_recipe(
     # Resolve the recipe fields once before connecting its runtime.
     # Construction consumes those same resolved values.
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
-    if settings.evaluation_settings is not None:
-        recipe_config["evaluation"] = dict(settings.evaluation_settings)
+    if settings.activation_settings is not None:
+        recipe_config["activation"] = dict(settings.activation_settings)
     if settings.pipeline_settings is not None:
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
@@ -176,32 +179,24 @@ def composed_training_recipe(
         settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
-    framework_sections = {
-        key: value
-        for key, value in (
-            ("evaluation", settings.evaluation_settings),
-            ("pipeline", settings.pipeline_settings),
-        )
-        if value is not None
-    }
-    if framework_sections:
-        # The component that trains weights keeps these sections under its own config.
+    if settings.pipeline_settings is not None:
+        # The component that trains weights keeps the pipeline section under its own config.
         components = dict(config["components"])
         for name, section in components.items():
             if recipe_class_for(section["implementation"]) is weight_type:
-                components[name] = {**section, "config": {**section.get("config", {}), **framework_sections}}
+                components[name] = {
+                    **section,
+                    "config": {**section.get("config", {}), "pipeline": dict(settings.pipeline_settings)},
+                }
         config = {**config, "components": components}
+    if settings.activation_settings is not None:
+        # The composite activates the artifacts of all its components with one rule.
+        config = {**config, "activation": dict(settings.activation_settings)}
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_component=training_component)
     except BaseException:
         close_runtimes(training_component, runtime)
         raise
-
-
-def refuse_weight_training_sections(settings: ServiceConfig) -> None:
-    """Refuse the top-level section that only a recipe that trains weights reads."""
-    if settings.evaluation_settings is not None:
-        raise ValueError("the top-level evaluation section requires a weight-training recipe")
 
 
 def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
@@ -232,9 +227,10 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
             return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env)
-        refuse_weight_training_sections(settings)
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
+        if settings.activation_settings is not None:
+            config["activation"] = dict(settings.activation_settings)
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(
@@ -251,9 +247,10 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         except BaseException:
             close_runtimes(None, runtime)
             raise
-    refuse_weight_training_sections(settings)
-    if settings.pipeline_settings is not None:
-        raise ValueError(f"recipe {selected!r} is a preset: set its pipeline section in the preset file")
+    if settings.pipeline_settings is not None or settings.activation_settings is not None:
+        raise ValueError(
+            f"recipe {selected!r} is a preset: set its pipeline and activation sections in the preset file"
+        )
     return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
 
 
@@ -280,8 +277,12 @@ def build_dispatcher(
     environ: Mapping[str, str] | None = None,
     hold_local_cycles: bool = False,
     evaluation_token: str | None = None,
+    new_artifacts: NewArtifacts | None = None,
 ) -> Dispatcher:
     """Build the dispatcher of a service.
+
+    ``new_artifacts`` observes the scenario storage's commits, so the service
+    evaluates each new artifact with its scenario's settings.
 
     A composite recipe's evaluation calls come back to this service, so a
     candidate of one component is evaluated against the release the others
@@ -340,6 +341,8 @@ def build_dispatcher(
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
             scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
+        if new_artifacts is not None:
+            scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
         artifact_backend = (
             {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
             if settings.artifact_backend == "git_lfs"
@@ -349,12 +352,11 @@ def build_dispatcher(
             artifact_backend, setting="storage.artifact_backend"
         )
         factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
-        # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
+        # Every scenario starts from the recipe's base artifact: the base model, the base harness, or both.
         context = RepositoryBackendContext(
             work_dir=Path(settings.artifact_work_dir),
             cache_dir=Path(settings.artifact_cache_dir),
-            bootstrap_files=recipe.base_artifact_files() or {},
-            bootstrap_component=recipe.bootstrap_artifact_component(),
+            base=recipe.base_artifact_source(),
         )
         try:
             backend_factory = factory_class.from_config(reference.config, context=context)
@@ -421,11 +423,13 @@ def build_app(
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token; a restart issues a new one with the recipe it rebuilds.
     evaluation_token = secrets.token_urlsafe(32) if settings.tokens else None
+    new_artifacts = NewArtifacts()
     dispatcher = build_dispatcher(
         settings,
         environ=environ,
         hold_local_cycles=True,
         evaluation_token=evaluation_token,
+        new_artifacts=new_artifacts,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
@@ -440,6 +444,11 @@ def build_app(
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
+            evaluations=ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts),
+            artifact_imports=ArtifactImports(
+                ArtifactSources.from_setting(settings.artifact_sources),
+                Path(settings.artifact_cache_dir) / "imports",
+            ),
         )
     except BaseException:
         with suppress(Exception):

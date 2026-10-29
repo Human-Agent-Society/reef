@@ -18,6 +18,7 @@ from typing import Any, Self
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
 from reef.evaluation.harness import HarnessCandidate
+from reef.train.harness_backend.backend import rollout_values
 
 from .archive import Archive
 from .proposer import ARCHIVE_KEY, scores
@@ -40,8 +41,8 @@ class GEPASelection(BackendEvaluateMixin, SelectionPlugin):
         if not isinstance(candidate, HarnessCandidate):
             raise TypeError(f"the GEPA selection decides a HarnessCandidate, got {type(candidate).__name__}")
         archive = Archive.from_state(candidate.method_state.get(ARCHIVE_KEY))
-        candidate_scores = scores(evaluation.metrics.get("candidate_scores", ()))
-        served_scores = scores(evaluation.metrics.get("current_scores", ()))
+        candidate_scores = scores(rollout_values(evaluation.metrics.get("candidate_scores", [])))
+        served_scores = scores(rollout_values(evaluation.metrics.get("current_scores", [])))
         served = archive.served
         candidate_mean = fmean(candidate_scores) if candidate_scores else 0.0
         if served is None:

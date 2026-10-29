@@ -1,4 +1,4 @@
-"""Reefine on pi, end to end: ask, step, promote, install, show.
+"""Reefine on pi, end to end: ask, step, activate, install, show.
 
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
@@ -10,25 +10,27 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
               health task and the floor decides; the catalog row carries
               the result, the notes and the request it answered under
               ``metrics.training_request``
-    promote - a release that changes an extension waits as pending; its page
-              says why it exists and what it changed, and the demo promotes
-              it through the route (a person reads the page first)
-    install - the head's source tree (``GET /reef/harness?form=source``)
-              renders for pi with a model binding at this Reef into
-              work/harness; when the release names ``requires``, the demo
-              checks each item on this machine first, and an unmet one stops it
+    activate - a release that changes an extension is made but is not the
+              active release; its page says why it exists and what it
+              changed, and the demo activates it through the route (a person
+              reads the page first)
+    install - the active release's source tree
+              (``GET /reef/harness?form=source``) renders for pi with a model
+              binding at this Reef into work/harness; when the release names
+              ``requires``, the demo checks each item on this machine first,
+              and an unmet one stops it
     show    - one ``pi -p`` session on the installed tree, with the session's
               tool calls in order and its final answer
 
 The measurement (``./run.sh measure``) posts a fixed list of requests one
 after another, each once the step of the one before it settled, and prints
 one row per request and the counts: filed, answered, admitted, won (met the
-floor), published, pending. The won count is the first of the two things
+floor), published, inactive. The won count is the first of the two things
 RFC #310's stage 6 asks for (requests that passed the checks); the held out
 shapes are not here.
 
 Start this through ./run.sh: it starts the Reef these constants point at
-from configs/deployment.yaml, installs the served tree, and runs a mode.
+from configs/deployment.yaml, installs the active release, and runs a mode.
 The demo is the client here: it pulls, renders and runs the release itself.
 Every mode writes work/<mode>-<timestamp>.json with the raw rows it read.
 """
@@ -45,18 +47,19 @@ from pathlib import Path
 from reef_client import ReefClient, ReefClientError
 
 from recipes.beta.reefine.agent import launch_pi, tool_calls
+from reef.execution.sandbox.process import LocalExecutor, RolloutTimeout
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.trajectory import final_assistant_text
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.trajectory import final_assistant_text
+from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.step_result import result_of
 from reef.harness.tree import HarnessTree, locate, render_tree
-from reef.sandbox.process import EpisodeTimeout, LocalExecutor
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
 MODEL = os.environ.get("REEF_UPSTREAM_MODEL", "gemma4:26b")  # run.sh exports the same default
-# A local model reads the API skill and writes the change, then six pi episodes score it.
+# A local model reads the API skill and writes the change, then six pi rollouts score it.
 STEP_TIMEOUT_S = 1800.0
 POLL_S = 5.0
 
@@ -174,18 +177,6 @@ def _ensure_scenario(client):
     return _manifest(client)
 
 
-def result_of(row):
-    """The row's result as the page words it: pending, selected, rejected, skipped with its reason."""
-    if row.get("pending"):
-        return "pending"
-    metrics = row.get("metrics") or {}
-    if isinstance(metrics.get("selected"), bool):
-        return "selected" if metrics["selected"] else "rejected"
-    if metrics.get("skipped"):
-        return f"skipped: {metrics['skipped']}"
-    return str(row.get("operation") or "unknown")
-
-
 def changes_of(metrics):
     """The step's patch as ``write path`` and ``remove path`` lines, in path order."""
     patch = metrics.get("patch") or {}
@@ -215,7 +206,7 @@ def tally_parts(metrics):
     candidate, current = scored.get("candidate_scores"), scored.get("current_scores")
     if not isinstance(candidate, list) or not isinstance(current, list) or len(candidate) != len(current):
         return None
-    # An episode that failed scores None, which the score comparison ranks below every number.
+    # A rollout that failed scores None, which the score comparison ranks below every number.
     ranked = [
         (-float("inf") if c is None else c, -float("inf") if k is None else k)
         for c, k in zip(candidate, current, strict=True)
@@ -285,7 +276,7 @@ def unmet(items):
 
 
 def install(release_id=None):
-    """Render the head (or ``release_id``) for pi with a model binding at this Reef, into work/harness.
+    """Render the active release (or ``release_id``) for pi with a model binding at this Reef, into work/harness.
 
     Return the release id, or None when the release requires something this machine lacks.
     """
@@ -376,16 +367,22 @@ def wait_for_step(client, text, before, deadline):
     return rows, None
 
 
-def promote(client, rows, row, run_dir):
-    """Save the pending step's page beside the run, print its URL, promote the release; the new head."""
+def activate(client, rows, row, run_dir):
+    """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
+    active release that the activation names."""
     step = rows.index(row)
     page = f"/reef/harness/releases/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(_fetch_text(page), encoding="utf-8")
-    say(f"pending: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
-    say("promote: the demo is scripted; a person reads the page first")
-    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/promote", SCENARIO, {"release_id": row["release_id"]})
-    say(f"promoted: the head is {answer['release_id']}")
+    say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
+    say("activate: the demo is scripted; a person reads the page first")
+    body = {"artifact_id": row["artifact_id"]}
+    if row.get("component"):
+        body["component"] = row["component"]
+    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, body)
+    if answer.get("artifact_id") != row["artifact_id"]:
+        raise SystemExit(f"reef answered the activation without artifact {row['artifact_id']}: {answer}")
+    say(f"activated: release {answer['release_id']} is the active release")
     return answer["release_id"]
 
 
@@ -395,7 +392,7 @@ def promote(client, rows, row, run_dir):
 def show(mode, run_dir):
     """One pi session on the installed tree in the mode's workspace; the tool calls in order and the final answer.
 
-    The session runs headless, as an episode does, over a copy of the installed
+    The session runs headless, as a rollout does, over a copy of the installed
     files; pi's own session log is the record this driver reads."""
     root = run_dir / "session"
     workspace = root / "workspace"
@@ -416,7 +413,7 @@ def show(mode, run_dir):
             descriptor, binary, executor, files, prompt, {}, root=root, timeout=SHOW_TIMEOUT_S
         )
         exit_code = outcome.exit_code
-    except EpisodeTimeout:
+    except RolloutTimeout:
         exit_code, trajectory = None, []
     calls = [f"{call['tool']}({call.get('arguments', call.get('error', ''))[:60]})" for call in tool_calls(trajectory)]
     answer = (final_assistant_text(trajectory) or "").strip()
@@ -455,9 +452,9 @@ def _won(result):
 
 def totals_of(results):
     """The measurement's counts: filed, answered (a patch came back), admitted (the evaluation ran), won (met the
-    floor; on a row from before the floor, more wins than losses), published, pending. Under ``selection:
+    floor; on a row from before the floor, more wins than losses), published, inactive. Under ``selection:
     always`` a publish said nothing about the evaluation, so won and published are counted apart; under the floor a
-    publish is a win, and the two agree unless a release waits as pending."""
+    publish is a win, and the two agree unless a release waits as inactive."""
     return {
         "filed": sum(1 for r in results if r.get("filed")),
         # A patch came back: a step that skipped on a refusal or on a failed step carries none.
@@ -465,7 +462,7 @@ def totals_of(results):
         "admitted": sum(1 for r in results if was_evaluated(r)),
         "won": sum(1 for r in results if _won(r)),
         "published": sum(1 for r in results if r.get("result", r.get("verdict")) == "selected"),
-        "pending": sum(1 for r in results if r.get("result", r.get("verdict")) == "pending"),
+        "inactive": sum(1 for r in results if r.get("result", r.get("verdict")) == "inactive"),
     }
 
 
@@ -492,28 +489,28 @@ def demo(mode):
     changes = changes_of(metrics)
     say(f"result: {selection_result}; evaluation {tally(metrics)}; proposer {metrics.get('proposer_seconds', '-')} s")
     say(f"changes: {'; '.join(changes) or 'none'}")
-    promoted = None
-    if row.get("pending"):
-        promoted = promote(client, rows, row, run_dir)
+    activated = None
+    if selection_result == "inactive":
+        activated = activate(client, rows, row, run_dir)
     requires = _manifest(client).get("requires") or []
     result = {
         "request": text,
         "result": selection_result,
         "evaluation": tally(metrics),
         "kinds": ", ".join(kinds_of(metrics)) or "-",
-        "pending": bool(row.get("pending")),
-        "promoted": promoted or "-",
+        "inactive": selection_result == "inactive",
+        "activated": activated or "-",
         "requires": _requires_of(requires),
         "proposer_seconds": metrics.get("proposer_seconds", "-"),
     }
-    if selection_result == "selected" or promoted:
+    if selection_result == "selected" or activated:
         installed = install()
         if installed is None:
             record["result"] = {**result, "installed": "-", "setup": "unmet requires"}
             _write_record(record_path, record)
             raise SystemExit(2)
     else:
-        say(f"the head did not move: release {installed_before} stays installed")
+        say(f"the active release did not change: release {installed_before} stays installed")
         installed = installed_before
     # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
@@ -590,7 +587,7 @@ def measure(n):
         ],
     )
     print()
-    _print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Pending"), [tuple(totals.values())])
+    _print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Inactive"), [tuple(totals.values())])
 
 
 def main(argv=None):
@@ -599,7 +596,7 @@ def main(argv=None):
         description="Reefine on pi: the two demos and the measurement; start it through ./run.sh",
     )
     modes = parser.add_subparsers(dest="mode", required=True)
-    modes.add_parser("install", help="install the served head into work/harness (run.sh does this first)")
+    modes.add_parser("install", help="install the active release into work/harness (run.sh does this first)")
     modes.add_parser("bugfix", help="the bug fix flow demo: demos/bugfix.md")
     modes.add_parser("research", help="the research loop demo: demos/research.md")
     measured = modes.add_parser("measure", help="file the fixed request list and count what passed the checks")

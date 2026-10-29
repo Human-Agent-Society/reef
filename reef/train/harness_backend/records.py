@@ -3,8 +3,8 @@
 With ``evolution.step_record_dir`` set, each step claims a fresh directory
 ``<scenario>/<step>`` (a retried step ``<step>-<attempt>``) and writes
 ``proposer.json`` (every model call the proposer made), ``patch.json`` (the
-proposed patch, written before validation) and ``episodes/`` (each evaluation
-episode's trajectory files). Every text in a record is redacted of
+proposed patch, written before validation) and ``rollouts/`` (each evaluation
+rollout's trajectory files). Every text in a record is redacted of
 credential-shaped literals and clipped, since the record holds traffic the
 tree's checks have not seen. ``StepRecord.read`` serves bounded raw reads of
 a committed step's files to the release pages.

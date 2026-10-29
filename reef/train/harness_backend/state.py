@@ -3,7 +3,7 @@
 The tree itself is not here: it is the git release the commit recorded. The
 state keeps the bookkeeping that crosses steps: the counters the budgets
 read, the grown evaluation tasks, the failure manifest, the rejected
-proposals, the recheck's rollback target, the latest outcome, and the
+proposals, the recheck's target, the latest outcome, and the
 method's own state.
 """
 
@@ -30,8 +30,8 @@ class HarnessState:
     without duplicates. ``promoted_clients`` counts, per tagged client, the
     prompts promoted from its traffic; every count is positive.
     ``rejected`` holds the latest rejected proposals, oldest first.
-    ``rollback_release_id`` names the release the latest publish replaced,
-    which a recheck evaluates again; ``rollback_context`` is the evaluation
+    ``recheck_release_id`` names the release the latest publish replaced,
+    which a recheck evaluates again; ``recheck_context`` is the evaluation
     context of that publish, and the two are both ``None`` or both set.
     ``last_outcome`` is the outcome of the latest step that evaluated the
     method's own proposal, ``None`` before the first. ``method_state`` is the
@@ -47,8 +47,8 @@ class HarnessState:
     promoted_tasks: tuple[str, ...] = ()
     promoted_clients: Mapping[str, int] = field(default_factory=dict)
     rejected: tuple[RejectedProposal, ...] = ()
-    rollback_release_id: str | None = None
-    rollback_context: Mapping[str, Any] | None = None
+    recheck_release_id: str | None = None
+    recheck_context: Mapping[str, Any] | None = None
     last_outcome: StepOutcome | None = None
     method_state: Mapping[str, Any] = field(default_factory=dict)
 
@@ -63,8 +63,8 @@ class HarnessState:
             for count in self.promoted_clients.values()
         ):
             raise ValueError("HarnessState.promoted_clients counts must be positive integers")
-        if (self.rollback_release_id is None) != (self.rollback_context is None):
-            raise ValueError("HarnessState rollback_release_id and rollback_context are both set or both None")
+        if (self.recheck_release_id is None) != (self.recheck_context is None):
+            raise ValueError("HarnessState recheck_release_id and recheck_context are both set or both None")
         object.__setattr__(self, "promoted_clients", MappingProxyType(dict(self.promoted_clients)))
         object.__setattr__(self, "method_state", MappingProxyType(dict(self.method_state)))
 
@@ -77,8 +77,8 @@ class HarnessState:
             "promoted_tasks": list(self.promoted_tasks),
             "promoted_clients": dict(self.promoted_clients),
             "rejected_proposals": [proposal.to_json() for proposal in self.rejected],
-            "rollback_release_id": self.rollback_release_id,
-            "rollback_context": None if self.rollback_context is None else dict(self.rollback_context),
+            "recheck_release_id": self.recheck_release_id,
+            "recheck_context": None if self.recheck_context is None else dict(self.recheck_context),
             "last_outcome": None if self.last_outcome is None else self.last_outcome.to_json(),
             "method_state": dict(self.method_state),
         }
@@ -97,8 +97,8 @@ class HarnessState:
                 str(name): int(count) for name, count in dict(value.get("promoted_clients", {})).items()
             },
             rejected=tuple(RejectedProposal.from_json(item) for item in value.get("rejected_proposals", ())),
-            rollback_release_id=value.get("rollback_release_id"),
-            rollback_context=value.get("rollback_context"),
+            recheck_release_id=value.get("recheck_release_id"),
+            recheck_context=value.get("recheck_context"),
             last_outcome=None if outcome is None else StepOutcome.from_json(outcome),
             method_state=dict(value.get("method_state", {})),
         )

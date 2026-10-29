@@ -30,8 +30,8 @@ from reef.core.evaluation import EvaluationResult
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import HarnessCandidate
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
@@ -48,11 +48,18 @@ class ServedModel(ModelBinding):
         super().__init__(base_url="http://127.0.0.1:9", model="served-model", api_key="dummy")
 
 
+def rollout_scores(values: tuple) -> list[dict[str, object]]:
+    """``RolloutScores.to_json`` of one task per value, with None as a failed rollout."""
+    return [
+        {"task": f"t{index}", "scores": ["failed" if value is None else value]} for index, value in enumerate(values)
+    ]
+
+
 def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
     return EvaluationResult(
-        evaluator="harness_episode_pairs",
+        evaluator="harness_rollout_pairs",
         evaluator_version="1",
-        metrics={"candidate_scores": candidate, "current_scores": current},
+        metrics={"candidate_scores": rollout_scores(candidate), "current_scores": rollout_scores(current)},
     )
 
 
@@ -60,7 +67,7 @@ def outcome(step: int, selected: bool, candidate=(1.0,), current=(0.0,)) -> Step
     return StepOutcome(step, TreePatch({"rules.md": "x"}), selected, "decided", candidate, current)
 
 
-def non_finite_score(task: str, result: EpisodeResult) -> float:
+def non_finite_score(task: str, result: RolloutResult) -> float:
     del task, result
     return float("nan")
 
@@ -109,7 +116,7 @@ def test_population_retains_a_losing_candidate_as_a_future_parent() -> None:
     assert population.by_id(losing).scores == (0.0,)
     # The incumbent takes its first scores from the step that measured it beside the candidate.
     assert population.by_id(genesis).scores == (0.5,)
-    assert population.episode_calls == 2 and population.pending_id is None
+    assert population.rollout_calls == 2 and population.pending_id is None
 
 
 def test_a_served_tree_the_population_does_not_hold_joins_it_as_a_new_root() -> None:
@@ -220,7 +227,7 @@ def test_a_proposal_that_fails_validation_or_repeats_a_candidate_is_recorded_and
     assert population_of(unknown).served_id == genesis
 
 
-def test_candidate_and_episode_budgets_stop_before_another_model_call() -> None:
+def test_candidate_and_rollout_budgets_stop_before_another_model_call() -> None:
     population = Population()
     genesis = population.sync_served(SEED, step=1)
     population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
@@ -234,9 +241,9 @@ def test_candidate_and_episode_budgets_stop_before_another_model_call() -> None:
         "status": "budget_exhausted",
         "budget": "max_candidates",
     }
-    # Two episodes spent and two more for the next evaluation reach a budget of three.
-    episodes = proposer(max_target_episodes=3).propose(context(population, chat, tree=IMPROVED))
-    assert episodes.notes == {"status": "budget_exhausted", "budget": "max_target_episodes"} and chat.prompts == []
+    # Two rollouts spent and two more for the next evaluation reach a budget of three.
+    rollouts = proposer(max_target_rollouts=3).propose(context(population, chat, tree=IMPROVED))
+    assert rollouts.notes == {"status": "budget_exhausted", "budget": "max_target_rollouts"} and chat.prompts == []
 
 
 def test_the_reply_is_one_object_of_the_four_proposal_fields() -> None:
@@ -280,7 +287,7 @@ def test_selection_judges_against_the_frontier_the_incumbent_was_admitted_on() -
     assert not decision.selected and decision.policy == "meta_harness"
     assert decision.metrics["incumbent_mean"] == 0.8
     assert decision.metrics["population_candidate_id"] == proposed.candidate_id
-    assert decision.metrics["target_episode_calls"] == 2
+    assert decision.metrics["target_rollout_calls"] == 2
     # The next step records the result; the frontier does not drift down to this batch's measurement.
     population.settle(outcome(1, False, candidate=(0.7,), current=(0.1,)))
     assert population.by_id(genesis.candidate_id).scores == (0.8,)
@@ -303,7 +310,7 @@ def test_selection_refuses_scores_it_cannot_compare() -> None:
     genesis = population.sync_served(SEED, step=1)
     population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
     selection = MetaHarnessSelection(None)
-    with pytest.raises(ValueError, match="only finite values"):
+    with pytest.raises(ValueError, match="a rollout score is a finite number"):
         selection.decide(harness_candidate(population), evaluation((float("nan"),), (0.0,)))
     with pytest.raises(ValueError, match="equal lengths"):
         selection.decide(harness_candidate(population), evaluation((1.0, 1.0), (0.0,)))
@@ -332,7 +339,7 @@ def test_recipe_is_adapter_agnostic(tmp_path: Path, adapter: str) -> None:
     assert isinstance(built, MetaHarnessRecipe)
     assert built.adapter == adapter and built.seed == SEED
     assert isinstance(built.propose, MetaHarnessProposer) and built.propose.settings.mode == "full_history"
-    # Both sides of the one task: the cost the episode budget counts per evaluation.
+    # Both sides of the one task: the cost the rollout budget counts per evaluation.
     assert built.propose.settings.evaluation_cost == 2
     assert built.selection.plugin_class is MetaHarnessSelection
     releases = ComponentReleases(TreeReleases(built.seed), "harness")
@@ -363,12 +370,18 @@ def test_recipe_rejects_an_invalid_meta_harness_block(tmp_path: Path, block: dic
 
 
 @pytest.mark.parametrize(
-    "option,value",
-    [("publish", "review"), ("review_kinds", ["rules"]), ("recheck_every", 1), ("promote_failures", True)],
+    "overrides",
+    [
+        {"activation": {"module": "never"}},
+        {"activation": {"module": "always", "config": {"review_kinds": ["rules"]}}},
+        {"evolution": {"recheck_every": 1}},
+        {"evolution": {"promote_failures": True}},
+    ],
 )
-def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, option, value):
+def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, overrides):
     config = meta_harness_sections(tmp_path)
-    config["evolution"][option] = value
+    for section, values in overrides.items():
+        config.setdefault(section, {}).update(values)
 
     with pytest.raises((ValueError, RecipeConfigError), match="Meta-Harness requires"):
         build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
@@ -419,11 +432,11 @@ def test_one_step_commits_the_population_with_the_tree(tmp_path: Path) -> None:
     # The next step folds the evaluation into the committed population.
     population = population_for_step(committed.method_state, committed.last_outcome)
     assert population.served_id == IMPROVED.checksum() and population.pending_id is None
-    assert population.episode_calls == 2
+    assert population.rollout_calls == 2
     assert [candidate.outcome for candidate in population.candidates] == ["selected", "selected"]
 
 
-def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tmp_path, monkeypatch) -> None:
+def test_terminus_extension_uses_shared_recipe_rollout_runner_and_publication(tmp_path, monkeypatch) -> None:
     # Replace only process launch and the remote trial. Rendering, model
     # binding, Harbor's agent contract, scoring, selection and commit are real.
     pytest.importorskip("reef_eval")
@@ -434,8 +447,8 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     from harbor.models.trial.config import TrialConfig
     from harbor.utils.import_path import import_class
 
+    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
     from reef.harness.runners.terminus import runner
-    from reef.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = HarnessTree({**SEED.files, "extensions/agent.py": code})
@@ -482,7 +495,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     config["evolution"].pop("binary")
     config["evolution"].update(
         executor="sandbox",
-        episode_timeout_s=17,
+        rollout_timeout_s=17,
         forbid_residue=True,
         tasks=["test/hello-world"],
         sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},

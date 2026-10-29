@@ -456,6 +456,12 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
         ((ANSWER, THANKS), "needs a system or user step before its first agent step"),
         (({"step_id": 1, "message": "no source"},), "string source"),
         ((ASK, {**CALL, "tool_calls": [{"tool_call_id": "c1"}]}), "tool_calls must be objects"),
+        (({**ASK, "message": [{"type": "image"}]}, ANSWER), "image part needs source.path"),
+        (({**ASK, "message": [{"type": "image", "source": {}}]}, ANSWER), "image part needs source.path"),
+        (({**ASK, "message": [{"type": "image", "source": "a"}]}, ANSWER), "image part needs source.path"),
+        (({**ASK, "message": ["a.png"]}, ANSWER), "content parts must be objects"),
+        (({**ASK, "message": [{"type": "text", "text": None}]}, ANSWER), "text part needs a string text"),
+        ((ASK, {**ANSWER, "observation": "ok"}), "observation must be an object"),
     ],
 )
 def test_an_uploaded_trajectory_that_cannot_train_is_refused(tokenizer: TurnTokenizer, steps, reason) -> None:

@@ -40,7 +40,7 @@ def assembled(metadata: dict[str, object] | None) -> TrajectorySample:
 
 
 def test_a_report_that_names_its_task_puts_it_on_the_sample() -> None:
-    sample = assembled({"task": TASK, "episode": {"id": "e1", "labels": {"arm": "hint"}}})
+    sample = assembled({"task": TASK, "rollout": {"id": "e1", "labels": {"arm": "hint"}}})
     assert sample.metadata["task"] == TASK
     assert sample.metadata["report_agent_record_id"] == "rep-1" and sample.metadata["references"] == ["rec-1"]
 
@@ -53,7 +53,7 @@ def test_a_report_without_a_task_leaves_the_sample_as_before() -> None:
         {"task": {}},
         {"task": {"name": ""}},
         {"task": {"path": "/tasks/x"}},
-        {"episode": {"id": "e1"}},
+        {"rollout": {"id": "e1"}},
         {"harbor": {"trial_id": "t1"}},
     ):
         sample = assembled(metadata)

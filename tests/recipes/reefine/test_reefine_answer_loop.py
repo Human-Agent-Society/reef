@@ -32,7 +32,7 @@ from tests.support._trajectories import recorded_trajectory
 from recipes.beta.reefine import proposer
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.train.harness_backend import ProposalContext
 
 #: An extension pi's validation refuses: it writes to the session's stdout while it has a UI.

@@ -20,7 +20,7 @@ Example recipe section::
           meta_harness:
             mode: full_history
             max_candidates: 20
-            max_target_episodes: 200
+            max_target_rollouts: 200
             max_files: 32
 """
 
@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.plugins import PluginReference
+from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tree import TreeKind
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe, HarnessEvolutionSpec
@@ -39,7 +40,7 @@ from .proposer import MetaHarnessProposer, MetaHarnessSettings
 from .selection import MetaHarnessSelection
 
 #: The keys of the ``evolution.meta_harness`` section.
-META_HARNESS_KEYS = ("mode", "model", "components", "max_candidates", "max_target_episodes", "max_files")
+META_HARNESS_KEYS = ("mode", "model", "components", "max_candidates", "max_target_rollouts", "max_files")
 
 
 @dataclass(frozen=True)
@@ -50,8 +51,12 @@ class MetaHarnessRecipe(HarnessEvolutionRecipe):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.publish != "auto" or self.review_kinds:
-            raise ValueError("Meta-Harness requires automatic publication so selection and serving commit together")
+        rule = self.activation_rule()
+        if not isinstance(rule, AlwaysActivate) or rule.review_kinds:
+            raise ValueError(
+                "Meta-Harness requires the always activation rule without review_kinds, so selection and serving "
+                "commit together"
+            )
         if self.recheck_every or self.promote_failures or self.promote is not None:
             raise ValueError("Meta-Harness requires a fixed evaluation suite without rechecks or task promotion")
 
@@ -76,7 +81,7 @@ class MetaHarnessRecipe(HarnessEvolutionRecipe):
         if isinstance(kinds, str) or not isinstance(kinds, Sequence):
             raise RecipeConfigError("evolution.meta_harness.components must be a list of tree kinds")
         tasks = evolution.get("tasks") or ()
-        repeats = evolution.get("episode_repeats", 1)
+        repeats = evolution.get("rollout_repeats", 1)
         try:
             meta_settings = MetaHarnessSettings(
                 # Both sides of every task, every repeat.
@@ -85,7 +90,7 @@ class MetaHarnessRecipe(HarnessEvolutionRecipe):
                 model=str(block.get("model", "proposer")).strip(),
                 kinds=tuple(TreeKind(str(kind)) for kind in kinds),
                 max_candidates=block.get("max_candidates", 0),
-                max_target_episodes=block.get("max_target_episodes", 0),
+                max_target_rollouts=block.get("max_target_rollouts", 0),
                 max_files=block.get("max_files", 32),
             )
         except ValueError as exc:

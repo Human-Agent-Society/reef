@@ -105,8 +105,8 @@ The proposer URL and key default to the target's; the target URL defaults to
 `https://api.openai.com`. Unauthenticated endpoints can omit keys.
 
 `REEF_META_HARNESS_WORKERS` defaults to 4; lower it for endpoint or E2B limits.
-Episodes time out after 9,000 seconds, including setup and verification.
-Model keys stay in temporary episode configs, not published harnesses.
+Rollouts time out after 9,000 seconds, including setup and verification.
+Model keys stay in temporary rollout configs, not published harnesses.
 Sandbox `egress_hosts` enables networking, not hostname filtering; see the
 [sandbox configuration](../../README.md#terminus-2-code-evolution).
 
@@ -121,11 +121,11 @@ rollout of it with its verifier report, rotating tasks by committed step. The
 recipe proposes a candidate, evaluates it and the incumbent on the selected
 suite, then commits the population and serving state together.
 Rollouts and evaluations use Reef's executor, timeout, residue policy, and
-finite-score checks. Failed evaluation episodes score zero; rollout launch
+finite-score checks. Failed evaluation rollouts score zero; rollout launch
 failures stop the run. Infrastructure failures are not automatically replaced.
 
 Defaults allow four evaluated candidates and eight proposal attempts, including
-invalid or duplicate proposals: at most 1,424 evaluation episodes
+invalid or duplicate proposals: at most 1,424 evaluation rollouts
 (`4 x 2 sides x suite size x 2 repeats`) plus eight feedback rollouts. Smaller
 runs scale the evaluation budget. Retrying uncommitted work can cost extra;
 these are search limits, not billing caps.
@@ -145,7 +145,7 @@ replay pending reports. Failed commits cannot advance search or its summary.
 - `artifacts.git`, `artifact-work/`, `artifact-cache/`: published harnesses and
   their release chain.
 - `summary.json`: rebuilt from the latest commit: each candidate's scores, the
-  served id, proposer calls, and the evaluation episodes spent.
+  served id, proposer calls, and the evaluation rollouts spent.
 
 ## Deviations
 
@@ -175,6 +175,6 @@ pytest tests/recipes/meta_harness/test_meta_harness_terminal_bench.py \
 pre-commit run --all-files
 ```
 
-Tests mock model calls and episode launches, checking the real recipe,
+Tests mock model calls and rollout launches, checking the real recipe,
 scoring, commits, publication, and recovery. They do not measure live benchmark
 performance or replace a Linux/E2B smoke run.

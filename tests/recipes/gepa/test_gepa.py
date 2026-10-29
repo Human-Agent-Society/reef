@@ -1,5 +1,5 @@
 """Guarantees of the recipes/gepa method package, hermetic: no reflection
-model is ever reached, the proposer's minibatch episodes run through a fake
+model is ever reached, the proposer's minibatch rollouts run through a fake
 trial runner, and the full steps drive a fake pi binary through the real
 adapter, backend, and commit path."""
 
@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_steps import TreeReleases
 
@@ -31,13 +31,13 @@ from recipes.gepa.recipe import GEPARecipe
 from recipes.gepa.selection import GEPASelection
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import EvaluationResult
+from reef.core.evaluation import EvaluationResult, RolloutScore
 from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
-from reef.evaluation.harness import FailureObservation, HarnessCandidate, ScoredEpisode
+from reef.evaluation.harness import FailureObservation, HarnessCandidate, ScoredRollout
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -99,25 +99,28 @@ def test_recorded_traffic_reads_buffered_and_streamed_replies() -> None:
     assert [texts for _, texts in traffic((SAMPLE, STREAMED_SAMPLE))] == [(TASK, "4"), (TASK, "4")]
 
 
-def score_rules(task: str, result: EpisodeResult) -> float:
+def score_rules(task: str, result: RolloutResult) -> float:
     """1.0 when the tree that ran carried the marker instruction."""
     last = result.trajectory[-1] if result.trajectory else {}
     return 1.0 if MARKER in str(last.get("content", last.get("rules", ""))) else 0.0
 
 
 class FakeTrials(TrialRunner):
-    """Trial episodes that answer with the rules text the tree carries; ``failure`` fails every episode."""
+    """Trial rollouts that answer with the rules text the tree carries; ``failure`` fails every rollout."""
 
     def __init__(self, failure: str | None = None) -> None:
         self.runs: list[tuple[str, tuple[str, ...]]] = []
         self.failure = failure
 
-    def run(self, tree: HarnessTree, tasks) -> tuple[ScoredEpisode, ...]:
+    def run(self, tree: HarnessTree, tasks) -> tuple[ScoredRollout, ...]:
         rules = tree.files.get("rules.md", "")
         self.runs.append((rules, tuple(tasks)))
         if self.failure is not None:
-            return tuple(ScoredEpisode(None, FailureObservation(task, "launch", self.failure)) for task in tasks)
-        return tuple(ScoredEpisode(1.0 if MARKER in rules else 0.0, None, reply=rules) for task in tasks)
+            return tuple(
+                ScoredRollout(RolloutScore.failed(), FailureObservation(task, "launch", self.failure))
+                for task in tasks
+            )
+        return tuple(ScoredRollout(RolloutScore(1.0 if MARKER in rules else 0.0), None, reply=rules) for task in tasks)
 
 
 class FakeChat(ModelBinding):
@@ -202,7 +205,7 @@ def test_the_patch_writes_the_components_the_child_changed_against_the_served_tr
         {"rules.md": REFLECTED, "skills/notes/SKILL.md": "# better"}
     )
     assert components.patch_to(served, served) == TreePatch({})
-    # The tree a minibatch episode runs: the served tree with the candidate's texts, every other file kept.
+    # The tree a minibatch rollout runs: the served tree with the candidate's texts, every other file kept.
     assert components.candidate_tree(TREE, {"rules.md": REFLECTED}) == HarnessTree(
         {**TREE.files, "rules.md": REFLECTED}
     )
@@ -376,7 +379,7 @@ def test_a_step_folds_in_only_the_outcome_of_the_step_that_proposed_its_pending_
         return StepOutcome(step, TreePatch({"rules.md": REFLECTED}), True, "won", (1.0, None), (0.0, 0.0))
 
     settled = archive_for_step(state, outcome(3))
-    # A failed episode is a zero, not a gap.
+    # A failed rollout is a zero, not a gap.
     assert settled.candidates[1].val_scores == [1.0, 0.0] and settled.served == 1
     # The step that proposed it never reached an evaluation: the candidate is dropped unvalidated.
     for last in (outcome(2), None):
@@ -387,9 +390,9 @@ def test_a_step_folds_in_only_the_outcome_of_the_step_that_proposed_its_pending_
 # -- proposer: minibatch, reflection, acceptance ----------------------------
 
 
-def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_episodes() -> None:
+def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_rollouts() -> None:
     """The served tree's minibatch is free: the step already batched its real
-    traffic, so only the child costs episodes."""
+    traffic, so only the child costs rollouts."""
     trials = FakeTrials()
     models, reflector = bindings()
 
@@ -427,7 +430,7 @@ def committed_parent() -> Archive:
 
 def test_a_parent_that_never_served_is_re_run_on_the_minibatch() -> None:
     """No traffic was ever served from an archive candidate, so its minibatch
-    scores and its outputs have to be produced by episodes."""
+    scores and its outputs have to be produced by rollouts."""
     trials = FakeTrials()
     models, reflector = bindings()
 
@@ -453,7 +456,7 @@ def test_a_child_that_does_not_beat_its_parent_is_rejected() -> None:
     assert len(archive.candidates) == 1
 
 
-def test_an_episode_that_cannot_run_scores_zero_and_reports_its_error() -> None:
+def test_a_rollout_that_cannot_run_scores_zero_and_reports_its_error() -> None:
     models, reflector = bindings()
 
     proposal = proposer().propose(
@@ -465,9 +468,9 @@ def test_an_episode_that_cannot_run_scores_zero_and_reports_its_error() -> None:
     assert "## Feedback\nharness binary 'pi' not found" in prompt
 
 
-def test_a_step_without_trial_episodes_is_refused() -> None:
+def test_a_step_without_trial_rollouts_is_refused() -> None:
     models, _ = bindings()
-    with pytest.raises(ValueError, match="trial episodes"):
+    with pytest.raises(ValueError, match="trial rollouts"):
         proposer().propose(context(models, None))
 
 
@@ -538,11 +541,18 @@ def test_every_reflection_is_logged_with_its_prompt_reply_and_result() -> None:
 # -- selection: the stored validation means ----------------------------------
 
 
+def rollout_scores(values: tuple) -> list[dict[str, object]]:
+    """``RolloutScores.to_json`` of one task per value, with None as a failed rollout."""
+    return [
+        {"task": f"t{index}", "scores": ["failed" if value is None else value]} for index, value in enumerate(values)
+    ]
+
+
 def evaluation(candidate: tuple, current: tuple) -> EvaluationResult:
     return EvaluationResult(
-        evaluator="harness_episode_pairs",
+        evaluator="harness_rollout_pairs",
         evaluator_version="1",
-        metrics={"candidate_scores": candidate, "current_scores": current},
+        metrics={"candidate_scores": rollout_scores(candidate), "current_scores": rollout_scores(current)},
     )
 
 
@@ -638,7 +648,7 @@ def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
         "evolution": {
             "adapter": "pi",
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_episode_scorer(score_rules),
+            "evaluate": resolve_rollout_scorer(score_rules),
             "feedback": feedback_hook,
             "tasks": list(EVALUATION_TASKS),
             "seed": str(seed),

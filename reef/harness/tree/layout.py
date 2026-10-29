@@ -16,7 +16,7 @@ per kind) and which checks its text must pass::
     native/loops/<name>.py        native_loop      the native loop itself as code
 
 Model endpoints and credentials are never in a tree: the model binding writes
-them when a tree is rendered for an episode.
+them when a tree is rendered for a rollout.
 """
 
 from __future__ import annotations

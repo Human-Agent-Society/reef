@@ -1,7 +1,7 @@
 """The method contract of harness evolution: what a method implements, and what each step hands it.
 
 A harness evolution method implements a ``Proposer`` and, where it needs its
-own, an ``EpisodeScorer`` (``reef.evaluation.harness``), a selection plugin
+own, an ``RolloutScorer`` (``reef.evaluation.harness``), a selection plugin
 (``reef.evaluation.SelectionPlugin``) and a ``Promoter``. A method never
 subclasses the backend. Everything a step gives a method is in
 ``ProposalContext``, and everything a method gives back is in
@@ -20,11 +20,11 @@ from reef.core.job_data import TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import ScoredEpisode
+from reef.evaluation.harness import ScoredRollout
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.sandbox.process import EpisodeExecutor
 from reef.train.harness_backend.manifest import FailureManifest
 
 
@@ -74,9 +74,8 @@ class StepOutcome:
 
     Values: ``step`` is that step's positive number, ``patch`` the change it
     evaluated, ``selected`` whether the candidate was published, ``reason``
-    the selection's reason, and the two score tuples the evaluation's
-    per-task scores in pairing order, ``None`` for an episode that could not
-    run. ``current_scores`` is empty when the selection ran the candidate alone.
+    the selection's reason, and the two score tuples the value of each
+    evaluation rollout in run order, ``None`` for a rollout that failed. ``current_scores`` is empty when the selection ran the candidate alone.
     Purpose: the backend hands the outcome of the latest step that evaluated
     the method's own proposal to the next proposal, so a method updates its
     own state from the result.
@@ -136,17 +135,17 @@ class ProposerCalls(ABC):
 
 
 class TrialRunner(ABC):
-    """Run trial episodes of a tree before the proposer settles on its patch.
+    """Run trial rollouts of a tree before the proposer settles on its patch.
 
     Purpose: a method that probes its candidates (harness2's probes, GEPA's
-    minibatches) runs them here instead of rendering and launching episodes
+    minibatches) runs them here instead of rendering and launching rollouts
     itself; the trials use the evaluation's worker pool, scorer and model
     binding, and they count against the step's budget and record.
     """
 
     @abstractmethod
-    def run(self, tree: HarnessTree, tasks: Sequence[str]) -> tuple[ScoredEpisode, ...]:
-        """One scored episode of ``tree`` per task, in task order."""
+    def run(self, tree: HarnessTree, tasks: Sequence[str]) -> tuple[ScoredRollout, ...]:
+        """One scored rollout of ``tree`` per task, in task order."""
 
 
 @dataclass(frozen=True)
@@ -154,8 +153,8 @@ class AgentHost:
     """What a proposer that runs a coding agent needs from the step.
 
     Values: ``descriptor`` and ``binary`` are the harness adapter and its
-    installed binary, the same the episodes run; ``executor`` is the one the
-    deployment built for the agent (its isolation, not the episodes');
+    installed binary, the same the rollouts run; ``executor`` is the one the
+    deployment built for the agent (its isolation, not the rollouts');
     ``step_dir`` is the step's record directory, ``None`` with the record
     off; ``calls`` is the step's budget and record; ``timeout_s`` bounds the
     whole agent run and ``trial_timeout_s`` each trial, both positive.
@@ -165,7 +164,7 @@ class AgentHost:
 
     descriptor: AdapterDescriptor
     binary: str
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     step_dir: Path | None
     calls: ProposerCalls
     timeout_s: float
@@ -199,7 +198,7 @@ class ProposalContext:
     result of the latest step that evaluated this method's proposal, ``None``
     before the first; a recheck and a client's proposal from the inbox leave it
     as it was.
-    ``trials`` runs trial episodes, ``None`` when the deployment allows none.
+    ``trials`` runs trial rollouts, ``None`` when the deployment allows none.
     ``agent_host`` is set exactly when the proposer runs an agent and the
     deployment configured an agent executor.
     Purpose: the backend makes one per proposal; a proposer reads it and
