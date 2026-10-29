@@ -771,7 +771,7 @@ persistent.
 .. config::
 
    storage.artifact-backend | git_lfs | where releases are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
-   storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``
+   storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``. A Hugging Face repository needs the factory's ``refs`` and ``token_env`` options (`Choose the artifact backend <../user-guide/operate.rst#choose-the-artifact-backend>`__)
    storage.artifact-work-dir | .reef/artifact-work | materialization scratch
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache; artifact imports run under ``imports/`` in it
    storage.artifact-sources | [] | ``ArtifactSourceReader`` plugin references that read artifact import URIs, beside the built-in ``hf``, ``file`` and ``s3`` readers
