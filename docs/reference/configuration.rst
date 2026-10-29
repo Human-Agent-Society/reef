@@ -1712,15 +1712,15 @@ The following names are relative to ``operations/``:
    * - ``records/oldest_unread_age_seconds``
      - Age of the first unread record, measured from its recorded creation
        time; zero when none remain.
-   * - ``processor/unreserved_reports``, ``processor/reserved_reports``
-     - Reported-feedback records waiting outside, or held inside, the reserved
-       job data. An incomplete group still counts as waiting.
+   * - ``processor/waiting_reports``
+     - Reported-feedback reports that wait for their group or for the sample
+       store. An incomplete group still counts as waiting.
    * - ``processor/oldest_report_wait_seconds``
-     - Age of the oldest unreserved report; zero when none remain.
+     - Age of the oldest waiting report; zero when none remain.
    * - ``processor/tracked_records``, ``processor/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
-   * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
-     - Computed-feedback candidates outside or inside the reserved job data.
+   * - ``processor/waiting_candidates``
+     - Computed-feedback candidates that wait for the sample store.
    * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
      - Samples that job data can take now (the buffer), samples that
        automatic job data needs, and the most samples that one job takes

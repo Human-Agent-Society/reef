@@ -133,7 +133,6 @@ class SDPORecord2Record(ReportRecord2Record):
             context,
             self.step_grouping,
             exclusive_sources=True,
-            ordered_groups=True,
             max_staleness=settings.max_staleness,
         )
 
