@@ -459,6 +459,10 @@ class TrainingPipeline:
         the pipeline ready.
         """
         self.advance()
+        return self.holds_job_data(sample_count)
+
+    def holds_job_data(self, sample_count: int | None) -> bool:
+        """Whether the pipeline holds the next job's data now, as ``ready`` decides it, without advancing it."""
         if self.pending is not None or self.sample2job.own_job_data() is not None:
             return True
         return self.held_data_ready(sample_count)
