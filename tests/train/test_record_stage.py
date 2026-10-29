@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.task_service_stubs import task_for
 from tests.train.test_record_stage_job_data_parity import CountingBackend, inference, instruction, report
 
 from reef.artifact import ArtifactRef
-from reef.core import AgentRecord
+from reef.core import AgentRecord, RequestType
 from reef.core.errors import ManualBufferRefused
 from reef.core.job_data import JobOutcome
+from reef.core.tasks import write_harbor_task
 from reef.record2record import (
     GroupDecision,
     InferenceRecord2Record,
@@ -759,3 +761,36 @@ def test_the_manual_buffer_holds_one_kind_of_sample_that_the_trainer_can_train()
     processor.set_training_mode("auto")
     with pytest.raises(ManualBufferRefused):
         processor.remove_from_buffer(("r1:0",))
+
+
+class TaskJobData(RecordingJobData):
+    """Recording job data that also trains the scenario's imported train tasks."""
+
+    accepts_imported_tasks = True
+
+
+@pytest.mark.unit
+def test_imported_train_tasks_are_buffer_samples_of_a_stage_that_trains_them(tmp_path: Path) -> None:
+    session = SQLiteScenarioStorage(tmp_path / "records").open("s")
+    session.samples.add_tasks((write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path / "a"),), "train")
+    session.samples.add_tasks((write_harbor_task(task_for("held", "record-2", 9001), tmp_path / "b"),), "eval")
+
+    def pipeline(stage: type[RecordingJobData], **context: Any) -> TrainingPipeline:
+        built = PipelineContext("s", samples=TrainerSamples(session.samples), **context)
+        return TrainingPipeline(built, record2sample=RecordingSamples(), sample2job=stage(built))
+
+    trains = pipeline(TaskJobData)
+    assert trains.ready(1) and trains.buffer() == ("task-a",), "an eval task never trains"
+    assert not pipeline(RecordingJobData).ready(1), "a stage that trains no imported task skips them"
+    # A kind that the recipe gives no parameters trains only for an instruction that gives them.
+    manual = pipeline(TaskJobData, job_parameters={"trajectory": {}}, training_mode="manual")
+    manual.set_training_mode("auto")
+    assert manual.buffer() == ()
+    manual.set_training_mode("manual")
+    manual.insert_into_buffer(("task-a",))
+    payload = {"text": "RL", "session": "s-1", "release_id": "r-1", "parameters": {"rollout": {}}}
+    manual.push(AgentRecord.create(scenario="s", request_type=RequestType.TRAIN, payload=payload, agent_record_id="t"))
+    data = manual.build_job_data(1)
+    assert manual.sample2job.job_parameters(data) == {"rollout": {}}
+    with pytest.raises(ValueError, match="cannot train the samples"):
+        manual.insert_into_buffer(("held",))
