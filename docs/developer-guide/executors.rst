@@ -53,9 +53,6 @@ model. Reef reads none of the parameters. The component contract is:
    Copy a published release into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.
-``fresh_start(start)``
-   Return a start with the weights of ``start`` and no training state. Reef
-   does not call it now. The default raises ``ValueError``.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``
@@ -259,10 +256,7 @@ recorded checkpoint. A restart can also stop a job after Megatron saved a
 rollout but before the component recorded it. The job then records that
 checkpoint and does not train the rollout's data twice.
 
-The optimizer state stays in the workers from one job to the next. A job
-from a ``fresh_start``, which Reef does not request now, first clears the
-actor's and the critic's optimizer state and sets Megatron's scheduler back to
-step 0. The weights stay as they are.
+The optimizer state stays in the workers from one job to the next.
 
 `Slime worker executors <#slime-worker-executors>`__ describes how the
 component launches its workers.

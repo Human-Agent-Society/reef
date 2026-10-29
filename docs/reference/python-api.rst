@@ -1875,13 +1875,6 @@ loop:
        manifest and looks up its ``state_path`` on its service. The Tinker
        API describes no sampler or exported-adapter path, so those are
        checked only for their ``tinker://`` form.
-   * - ``fresh_start(start)``
-     - Return a start with the weights of ``start`` and no training state: a
-       new optimizer state, the learning-rate schedule at step 0, and an
-       empty objective state. The same ``start`` always gives the same
-       result. Raise ``ValueError`` when the component cannot do this; the
-       default refuses. Slime implements it; Tinker does not. Reef does not
-       call it now.
    * - ``close()``
      - Release the component's resources; safe to call repeatedly.
 
