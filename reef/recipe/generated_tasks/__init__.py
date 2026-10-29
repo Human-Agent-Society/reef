@@ -17,6 +17,8 @@ generator's method:
   component as task jobs, which the component rolls out on its own sampler.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
+- ``review``: with ``pool_capacity``, each use of a train task, the pool
+  reviews, and the tasks that a review retired, kept in the same documents.
 - ``objective``: group relative advantages per task group on Tinker's
   importance sampling loss.
 - ``recipe``: the objective and the report contract.

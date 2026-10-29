@@ -8,14 +8,14 @@ tasks are handed out at a time:
    within the hand-out.
 2. When the trainer commits the job's submission, the commit lists ``rollout:<task use>``; each task is
    marked trained once that ID is released after the commit is durable.
-3. When the job's end is durable, the tasks leave the pool, and the stage saves each task's first result
-   from the job's metrics.
+3. When the job's end is durable, the stage saves each task's first result from the job's metrics. The tasks
+   leave the pool; with a pool capacity, the tasks that a review did not retire go back to the end of the pool.
 """
 
 from __future__ import annotations
 
 from collections.abc import Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from reef.core.job_data import TaskSample
 
@@ -36,7 +36,7 @@ class PooledTask:
     orders the tasks of a pool. ``group_key`` names what the task came from,
     such as its generation. ``item`` is the task that the job rolls out.
     Purpose: a ``TaskPool`` holds it; the sample-to-job stage takes it from the
-    pool for a task job, and drops it when the job ends.
+    pool for a task job, and drops it or puts it back when the job ends.
     """
 
     task_id: Hashable
@@ -49,14 +49,19 @@ class TaskPool:
     """The saved tasks that wait for a task job, and the ones that a task job took.
 
     Values: ``waiting`` and ``taken`` are disjoint finite sets of ``PooledTask`` values with distinct
-    ``task_id``; ``arrival_count`` is larger than the ``arrival_index`` of each task that ``add`` made.
-    ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``drop`` removes taken tasks;
-    ``add`` gives a new task a new index.
+    ``task_id``; ``arrival_count`` is larger than the ``arrival_index`` of each task that ``add`` or ``requeue``
+    made. ``capacity`` is None or a positive int, the active tasks (waiting or taken) below which the pool
+    needs new tasks. ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``drop``
+    removes taken tasks; ``requeue`` moves taken tasks back to ``waiting`` with new indices, and ``put_back``
+    with their own indices; ``retire`` removes waiting tasks; ``add`` gives a new task a new index.
     Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the sample-to-job
-    stage takes a job's tasks from it, and drops them when the job ends.
+    stage takes a job's tasks from it, and drops them or puts them back when the job ends.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, capacity: int | None = None) -> None:
+        if capacity is not None and (isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1):
+            raise ValueError("a task pool's capacity must be None or a positive integer")
+        self.capacity = capacity
         self.waiting: dict[Hashable, PooledTask] = {}
         self.taken: dict[Hashable, PooledTask] = {}
         self.arrival_count = 0
@@ -88,6 +93,29 @@ class TaskPool:
         """Remove taken tasks: their task job ended."""
         for task in tasks:
             self.taken.pop(task.task_id)
+
+    def requeue(self, tasks: tuple[PooledTask, ...]) -> None:
+        """Move taken tasks back after the waiting ones, in order: their task job ended, and they train again."""
+        for task in tasks:
+            self.arrival_count += 1
+            self.waiting[task.task_id] = replace(self.taken.pop(task.task_id), arrival_index=self.arrival_count)
+
+    def put_back(self, tasks: tuple[PooledTask, ...]) -> None:
+        """Move taken tasks back to their places among the waiting ones: no task job took them."""
+        for task in tasks:
+            self.waiting[task.task_id] = self.taken.pop(task.task_id)
+
+    def retire(self, task_ids: frozenset[Hashable]) -> None:
+        """Remove the waiting tasks with these IDs; a taken task stays taken."""
+        for task_id in task_ids:
+            self.waiting.pop(task_id, None)
+
+    def needs_tasks(self, refill_tasks: int) -> bool:
+        """Whether a new round may add tasks: without a capacity, while fewer than ``refill_tasks`` tasks wait;
+        with one, while the waiting and taken tasks are fewer than the capacity."""
+        if self.capacity is None:
+            return len(self.waiting) < refill_tasks
+        return len(self.waiting) + len(self.taken) < self.capacity
 
 
 @dataclass(frozen=True)

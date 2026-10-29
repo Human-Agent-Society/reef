@@ -1429,6 +1429,42 @@ so the stage has no ``buffer_size`` and no ``job_samples``:
 .. config::
 
    pipeline.sample2job.config.tasks_per_step | 4 | saved tasks of one task job
+   pipeline.sample2job.config.pool_capacity | 0 | 0 trains each train task once. Above 0, a task goes back to the task pool when its job ends, and rounds start only while fewer tasks than this are active.
+   pipeline.sample2job.config.review_interval | 16 | task jobs between two pool reviews; 0 reviews nothing
+   pipeline.sample2job.config.review_window | 4 | the most recent rewards of a task that a review reads; at least 2
+   pipeline.sample2job.config.review_band_low | 0.25 | a review retires a task whose pass rate is below this; between 0 and 1
+   pipeline.sample2job.config.review_band_high | 0.75 | a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
+   pipeline.sample2job.config.review_min_reward_std | 0.1 | a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
+
+With ``pool_capacity`` above 0, the train tasks form a training pool. A task
+goes back to the end of the pool when its job ends, so the tasks train in
+turn. A new round starts only while fewer tasks than ``pool_capacity`` are
+active, so the pool can hold more tasks than the capacity by the train tasks
+of one generation. The ``review_*`` keys need ``pool_capacity`` above 0, and
+``refill_tasks`` must stay 1.
+
+After every ``review_interval`` task jobs, a review reads the last
+``review_window`` rewards of each active task. The pass rate is their mean. A
+task with fewer rewards stays. The review retires a task for one of these
+reasons, in this order:
+
+- ``below_band``: the pass rate is below ``review_band_low``.
+- ``above_band``: the pass rate is above ``review_band_high``.
+- ``no_reward_spread``: the population standard deviation of the rewards is
+  below ``review_min_reward_std``.
+
+A pass rate on a bound keeps the task. A retired task does not train again.
+The review reads the rewards that training recorded, so they can be one pool
+cycle old. With ``review_interval: 0``, the tasks train in turn and no review
+retires them. The generator still receives the first rollout of each task
+only.
+
+The task store keeps each use of a task, each review, and each retired task
+with its rewards, pass rate and reason. The status shows them under
+``training_pool``: ``capacity``, ``active``, ``retired``, ``reviews``, and
+``last_review_retired``. A restart puts every train task that no review
+retired back in the pool, least used first, and repeats a review that a stop
+interrupted.
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights. The ``rollout`` job parameter configures them:
