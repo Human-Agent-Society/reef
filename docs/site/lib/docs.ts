@@ -49,6 +49,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "getting-started/intro.rst",
       "getting-started/installation.rst",
       "getting-started/quickstart.rst",
+      "getting-started/harness-tutorial.rst",
       "getting-started/core-loop.rst",
     ],
   },
@@ -447,6 +448,8 @@ const docDescriptions: Partial<Record<string, string>> = {
     "Install Reef for harness evolution on a laptop, GPU-based model training, or client-only access to an existing deployment.",
   "getting-started/quickstart":
     "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the release history.",
+  "getting-started/harness-tutorial":
+    "Start Reef, connect your coding agent, give feedback on a session, and see Reef evolve the agent's harness from it.",
   "user-guide/recipes":
     "Compare Reef recipes for model training and harness evolution. Choose a method based on your workload, feedback, and compute requirements.",
   "user-guide/evolve-your-harness":
