@@ -14,7 +14,8 @@ from tests.support.component_trainers import _TwoTrainerRecipe, component_files,
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.files import ArtifactFiles, DirectorySource
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.sources import DirectorySource
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source

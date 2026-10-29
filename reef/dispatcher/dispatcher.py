@@ -14,9 +14,9 @@ from threading import Lock, Thread
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.artifact.files import SourceFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.sources import SourceFiles
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType

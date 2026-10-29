@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
-from reef.artifact.files import SourceFiles
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError

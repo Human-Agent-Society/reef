@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.artifact.files import HuggingFaceSource, download_huggingface_snapshot, read_reference
+from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapshot, read_reference
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
 from reef.core.plugins import ConfiguredPlugin

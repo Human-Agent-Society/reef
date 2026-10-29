@@ -286,10 +286,10 @@ def test_a_commit_is_kept_by_reference_and_a_branch_is_copied_at_its_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hub = MemoryHub(tmp_path / "cache", "org/model", {"config.json": b"{}", "model.safetensors": b"weights-bytes"})
-    monkeypatch.setattr("reef.artifact.files.HfApi", lambda: hub)
+    monkeypatch.setattr("reef.artifact.sources.HfApi", lambda: hub)
     snapshot = write_tree(tmp_path / "snapshots" / COMMIT, hub.files)
     monkeypatch.setattr(
-        "reef.artifact.files.download_huggingface_snapshot", lambda source: DownloadedSnapshot(snapshot, COMMIT)
+        "reef.artifact.sources.download_huggingface_snapshot", lambda source: DownloadedSnapshot(snapshot, COMMIT)
     )
     reader = HuggingFaceReader()
 

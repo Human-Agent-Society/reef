@@ -256,7 +256,7 @@ def test_the_import_http_api_takes_a_uri(tmp_path) -> None:
 @pytest.mark.unit
 def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_path, monkeypatch) -> None:
     hub = MemoryHub(tmp_path / "cache", "org/model", {"config.json": b"{}", "model.safetensors": b"w9-weights"})
-    monkeypatch.setattr("reef.artifact.files.HfApi", lambda: hub)
+    monkeypatch.setattr("reef.artifact.sources.HfApi", lambda: hub)
 
     async def run() -> None:
         value, _, _ = dispatcher(tmp_path)

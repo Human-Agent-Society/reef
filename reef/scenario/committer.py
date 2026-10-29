@@ -18,8 +18,9 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
-from reef.artifact.files import SourceFiles, directory_content_id
+from reef.artifact.files import directory_content_id
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
+from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
