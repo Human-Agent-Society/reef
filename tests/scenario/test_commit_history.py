@@ -474,7 +474,9 @@ class _SavedArtifactBackend(CandidateBackend):
 class _SavedArtifactRecipe(Recipe):
     backend: CandidateBackend
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+    ):
         del experiment_logger
         return Trainer.build(
             scenario,
@@ -576,7 +578,9 @@ class ProtectAllPipeline(TrainingPipeline):
 
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+    ):
         component = self.training_component
         return Trainer.build(
             scenario,
@@ -854,7 +858,9 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_harness_surface()
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None) -> Trainer:
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+    ) -> Trainer:
         candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),

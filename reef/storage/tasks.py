@@ -47,10 +47,6 @@ from typing import Any, Literal, Self
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings, Plugin
 
-#: The task store of a scenario that holds the tasks a deployment imports. Only the service writes it, and
-#: every component of the scenario reads it.
-IMPORTED_TASK_STORE = "imported-tasks"
-
 SplitName = Literal["train", "eval"]
 SPLIT_NAMES: tuple[SplitName, ...] = ("train", "eval")
 
@@ -435,7 +431,6 @@ def sync_directory(path: Path) -> None:
 
 
 __all__ = [
-    "IMPORTED_TASK_STORE",
     "GenerationState",
     "LocalTaskFileStore",
     "SplitName",

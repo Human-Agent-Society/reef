@@ -26,7 +26,7 @@ class SFTThenRLRecipe(SFTRecipe):
     * SFT jobs, as ``SFTRecipe`` trains them: the samples of ``TeacherContextReport`` reports and of uploaded
       ATIF trajectories (``POST /reef/trajectories``), with the objective ``SftObjective`` and
       ``recipe.config.job_parameters``.
-    * RL task jobs on the train tasks of the scenario's ``imported-tasks`` store
+    * RL task jobs on the train tasks of the scenario's imported tasks
       (``POST /reef/scenarios/{scenario}/tasks``, or the deployment's ``task-import`` section), up to
       ``pipeline.sample2job.config.tasks_per_job`` tasks in one job, with the objective ``task_group`` (group
       relative advantages per task) and ``recipe.config.task_job_parameters``. The training component rolls

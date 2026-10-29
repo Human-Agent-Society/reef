@@ -51,6 +51,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
 from reef.surface.files import ENTRIES_FILE, entries_file, read_entries
@@ -240,8 +241,8 @@ class CordisRecipe(Recipe):
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and
     ``evaluate`` (:class:`Proposer` and :class:`RolloutScorer` class references), ``tasks`` (the rollout
-    prompts scored per step; or ``eval_task_store``, a task store such as ``imported-tasks`` whose eval split
-    each step reads), optional ``binary`` (a path to the harness
+    prompts scored per step; or ``eval_imported_tasks``, true to evaluate each step on the eval split of the
+    scenario's imported tasks, as the step reads it), optional ``binary`` (a path to the harness
     binary; left unset, backend construction installs the adapter descriptor's
     pinned version through the vendor's own channel, into the same prefix a
     client's install script uses - see :mod:`reef.harness.rollouts.vendor_install`),
@@ -312,8 +313,8 @@ class CordisRecipe(Recipe):
     propose: Proposer
     score_rollout: RolloutScorer
     tasks: tuple[str, ...]
-    #: A task store whose eval split each step evaluates on, in place of ``tasks``.
-    eval_task_store: str | None = None
+    #: Whether each step evaluates on the eval split of the scenario's imported tasks, in place of ``tasks``.
+    eval_imported_tasks: bool = False
     adapter: str = "pi"
     binary: str | None = None
     rollout_timeout_s: float = 600.0
@@ -378,8 +379,8 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires a Proposer")
         if not isinstance(self.score_rollout, RolloutScorer):
             raise ValueError("harness evolution requires a RolloutScorer")
-        if not self.tasks and self.eval_task_store is None:
-            raise ValueError("harness evolution requires tasks or an eval task store")
+        if not self.tasks and not self.eval_imported_tasks:
+            raise ValueError("harness evolution requires tasks or eval_imported_tasks")
         evaluation_selection(self.score_rollout, self.worker_executor)
         if self.rollout_timeout_s <= 0:
             raise ValueError("rollout_timeout_s must be positive")
@@ -420,16 +421,21 @@ class CordisRecipe(Recipe):
         tasks = evolution.get("tasks")
         manifest_path = evolution.get("task_manifest")
         tasks_root = evolution.get("tasks_root")
-        eval_task_store = evolution.get("eval_task_store")
-        if eval_task_store is not None:
+        if "eval_task_store" in evolution:
+            raise RecipeConfigError(
+                "evolution.eval_task_store is gone: imported tasks are in the scenario's sample store; "
+                "set evolution.eval_imported_tasks: true"
+            )
+        eval_imported_tasks = evolution.get("eval_imported_tasks", False)
+        if not isinstance(eval_imported_tasks, bool):
+            raise RecipeConfigError("evolution.eval_imported_tasks must be true or false")
+        if eval_imported_tasks:
             if tasks is not None or manifest_path is not None or tasks_root is not None:
                 raise RecipeConfigError(
-                    "evolution.eval_task_store cannot be set with evolution.tasks or evolution.task_manifest"
+                    "evolution.eval_imported_tasks cannot be set with evolution.tasks or evolution.task_manifest"
                 )
-            if not isinstance(eval_task_store, str) or not eval_task_store:
-                raise RecipeConfigError("evolution.eval_task_store must be the name of a task store")
-            require_task_directories(evolution, "eval_task_store")
-            # The tasks are the store's eval split, which build reads from the scenario session.
+            require_task_directories(evolution, "eval_imported_tasks")
+            # The tasks are the eval split of the imported tasks, which build reads from the scenario session.
             tasks = []
         elif manifest_path is not None:
             if tasks is not None:
@@ -458,7 +464,7 @@ class CordisRecipe(Recipe):
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
             raise RecipeConfigError(
                 "evolution.tasks must be a non-empty list of prompts, or set evolution.task_manifest with "
-                "evolution.tasks_root, or evolution.eval_task_store"
+                "evolution.tasks_root, or evolution.eval_imported_tasks"
             )
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
@@ -624,7 +630,7 @@ class CordisRecipe(Recipe):
             "score_rollout": scorer,
             "worker_executor": worker_executor,
             "tasks": tuple(str(task) for task in tasks),
-            "eval_task_store": eval_task_store,
+            "eval_imported_tasks": eval_imported_tasks,
             "adapter": adapter,
             "binary": binary,
             "rollout_timeout_s": float(timeout),
@@ -760,6 +766,7 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
@@ -769,14 +776,13 @@ class CordisRecipe(Recipe):
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:
             kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
-        if self.eval_task_store is not None:
-            if task_storage is None:
-                raise RecipeConfigError("evolution.eval_task_store needs the task storage of a scenario session")
-            store = task_storage.open(self.eval_task_store)
-            kwargs["tasks"] = eval_task_paths(store)
+        if self.eval_imported_tasks:
+            if samples is None:
+                raise RecipeConfigError("evolution.eval_imported_tasks needs the sample store of a scenario session")
+            kwargs["tasks"] = eval_task_paths(samples)
             if not kwargs["tasks"]:
-                raise RecipeConfigError(f"the eval split of task store {self.eval_task_store!r} holds no task")
-            kwargs["eval_task_store"] = store
+                raise RecipeConfigError("the eval split of the scenario's imported tasks holds no task")
+            kwargs["eval_samples"] = samples
         candidate_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
@@ -786,6 +792,7 @@ class CordisRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
+            samples=samples,
         )
 
     def _backend_kwargs(self, scenario: str | None = None) -> dict[str, Any]:
@@ -834,6 +841,7 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
         task_storage: TaskStorage | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         if self.training_mode != "auto" and not self.propose.reads_requests:
             raise RecipeConfigError(
@@ -853,5 +861,6 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
             default_job_samples=self.batch_size,
         )
