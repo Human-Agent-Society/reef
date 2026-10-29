@@ -407,6 +407,33 @@ A change from one backend to another does not move releases. Keep the old
 store readable while scenarios refer to its releases, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
+To keep the Git LFS repository on Hugging Face, give the built-in factory with
+its options. Reef still reads every release from its local clone, and pushes
+each release to the Hub as it publishes it:
+
+.. code-block:: yaml
+
+   storage:
+     artifact-backend:
+       module: reef.artifact.git_lfs:GitLFSRepositoryBackendFactory
+       config:
+         repository: https://huggingface.co/org/reef-artifacts
+         refs: branches-and-tags
+         token_env: HF_TOKEN
+
+- ``refs: branches-and-tags`` keeps each release on a tag
+  ``reef/releases/<release_id>``, and the refs that move on branches under
+  ``reef/``, because the Hub accepts no other refs. The default, ``reef``,
+  keeps every ref under ``refs/reef/``. A repository keeps the layout it
+  started with, and Reef refuses the other.
+- A release's ID is its commit, so ``hf://org/reef-artifacts@<release_id>``
+  names the release on the Hub, for a serving runtime or an import.
+- ``token_env`` names the variable of a token that can write the repository.
+  Reef sends it to the repository's host only, as an HTTP header, so it
+  appears in no URL, file or log. Keep the repository private unless you mean
+  to publish what Reef trains.
+- Archiving a deleted scenario's ref works with a local repository only.
+
 Choose the task file store
 --------------------------
 
