@@ -19,7 +19,7 @@ from collections.abc import Iterator
 import pytest
 from aiohttp import web
 from reef_client import ReefClient
-from reef_client.harness import HarnessInstall, HarnessSyncError
+from reef_client.harness import HarnessInstall, HarnessSyncError, commands_root, connect
 
 from tests.reef_service.test_harness_channel import HEADERS, PATCHES, app_client, channel_dispatcher, evaluated_step
 from tests.support.harness_service import EchoInference
@@ -109,6 +109,8 @@ def test_a_client_install_calls_the_scenario_route_and_the_call_is_recorded(tmp_
                 "/home/a/install/pi-agent",
             ]
             assert "pi-agent/skills/{name}/SKILL.md" in manifest["synced"]
+            # The agent's pinned install, so a client without pi can install the version the episodes run.
+            assert manifest["run"]["install"]["package"] == "@earendil-works/pi-coding-agent"
             for missing in ("service_url", "root"):
                 partial = {key: value for key, value in params.items() if key != missing}
                 assert (await client.get("/reef/harness", params=partial, headers=HEADERS)).status == 400
@@ -159,8 +161,9 @@ sys.exit(3)
 
 
 def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeypatch) -> None:
-    """The client's whole round: install the head as a layer over the person's own pi, run pi and send what the
-    session wrote when it exits, merge an edit onto a release a step made, refuse a line both changed, discard."""
+    """The client's whole round: connect sets the machine up so that the person's own pi command runs through Reef,
+    pi runs on the layer and the run sends what the session wrote when it exits, an edit merges onto a release a
+    step made, a line both changed is refused, discard, and disconnect gives pi back."""
     home = tmp_path / "home"
     (home / ".pi" / "agent").mkdir(parents=True)
     (home / ".pi" / "agent" / "AGENTS.md").write_text("My own rules.\n")
@@ -170,16 +173,22 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
     (bin_dir / "pi").write_text(FAKE_PI.format(python=sys.executable, learned=learned))
     (bin_dir / "pi").chmod(0o755)
     install_dir = tmp_path / "install"
+    for name, value in {"HOME": home, "XDG_DATA_HOME": tmp_path / "data", "SHELL": "/bin/zsh"}.items():
+        monkeypatch.setenv(name, str(value))
+    monkeypatch.delenv("ZDOTDIR", raising=False)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     with served(channel_dispatcher(tmp_path, PATCHES[:1], seed=PI_SEED)) as url:
-        install = HarnessInstall.create(install_dir, url, "delivery", token=None)
-        assert "alias pi='reef-client harness run delivery --'" in install.connect()
+        report = connect("delivery", url, install_dir, assume_yes=True)
+        assert "pi now runs through Reef" in report and str(commands_root()) in (home / ".zshrc").read_text()
+        install = HarnessInstall.open(install_dir)
+        assert install.record["agent"] == str(bin_dir / "pi")
         agents = install_dir / "pi-agent" / "AGENTS.md"
         provider = json.loads((install_dir / "pi-agent" / "models.json").read_text())["providers"]["reef"]
         assert provider["baseUrl"] == f"{url}/reef/scenarios/delivery/v1" and provider["apiKey"] == "reef"
-        # pi runs with the layer's arguments and the person's own; the run sends the skill the session wrote.
-        command = [sys.executable, "-m", "reef_client", "harness", "run", "delivery", "--dir", str(install_dir)]
-        environment = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-        shown = subprocess.run([*command, "--", "--resume"], capture_output=True, text=True, env=environment)
+        # The person types pi as before. It runs with the layer's arguments and the person's own, and the run sends
+        # the skill the session wrote.
+        environment = {**os.environ, "PATH": f"{commands_root()}{os.pathsep}{os.environ['PATH']}"}
+        shown = subprocess.run(["pi", "--resume"], capture_output=True, text=True, env=environment)
         assert shown.returncode == 3, shown.stderr
         assert f"-e {install_dir}/pi-agent" in shown.stdout and shown.stdout.strip().endswith("--resume")
         assert "sent pi-agent/skills/learned/SKILL.md" in shown.stderr
@@ -208,4 +217,5 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
         agents.write_text("Dropped.\n")
         assert "installed release" in install.sync(discard=True)
         assert agents.read_text() == "marker rules\n"
-        assert "your own configuration is as it was" in install.disconnect() and not install_dir.exists()
+        assert "pi runs on its own again" in install.disconnect() and not install_dir.exists()
+        assert not commands_root().exists() and "reef-client" not in (home / ".zshrc").read_text()

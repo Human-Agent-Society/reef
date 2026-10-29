@@ -442,33 +442,50 @@ Use a published tree
 release as a layer over your own configuration. Your own settings, skills,
 rules and sessions stay as they are; the release adds to them, and its model
 calls go to Reef. The adapters ``claude``, ``pi``, ``opencode`` and ``codex``
-support it. Install ``reef-client`` where the agent runs, and set
-``REEF_TOKEN`` when the deployment has a token:
+support it. Install ``reef-client`` where the agent runs, and connect once:
 
 .. code:: bash
 
    pip install reef-client
-   reef-client harness connect code-repair --reef http://127.0.0.1:8900
-   reef-client harness run
+   reef-client harness connect
+
+``connect`` asks only for what it cannot find:
+
+- the Reef URL, unless ``--reef`` or ``REEF_URL`` gives it;
+- the token, only when Reef refuses the call without one, unless
+  ``REEF_TOKEN`` gives it;
+- the scenario, picked from Reef's list or named anew, unless the command
+  names it. Everyone who connects to one scenario shares its harness.
+
+Then it sets the machine up:
+
+- It creates the scenario when it does not exist, and installs its head in
+  ``~/.local/share/reef-client/harness/<scenario>``. The scenario's adapter
+  decides which agent runs. It never reads or writes your own configuration.
+- When the agent is not installed, it offers to install the version that
+  Reef's evaluation episodes run, with npm, under
+  ``~/.local/share/reef-client/agents``.
+- It offers to make the agent's own command run through Reef: a command of
+  the same name, such as ``claude``, in ``~/.local/share/reef-client/bin``,
+  and that directory ahead on ``PATH`` in your shell's startup file (zsh,
+  bash or fish). In a new terminal, ``claude`` then runs as
+  ``reef-client harness run`` does.
+
+``--yes`` accepts both offers without asking, for a script.
 
 .. flow::
    :loop: each run starts on the newest release
 
-   connect :: installs the scenario's head as a layer, once
+   connect :: sets the machine up, once
    run :: syncs, starts the agent on the layer, and syncs again when it exits
    Reef* :: records each model call; steps publish releases
 
-- ``connect`` creates the scenario when it does not exist and installs its
-  head in ``~/.local/share/reef-client/harness/<scenario>``. The scenario's
-  adapter decides which agent runs. ``connect`` keeps the token, and prints
-  an alias that makes the agent's own command run through Reef, such as
-  ``alias claude='reef-client harness run code-repair --'``. It never reads
-  or writes your own configuration.
 - ``run`` syncs, starts the agent with the layer, and syncs again when the
-  agent exits. Each session starts on the newest release, and what the
-  session changed in the layer reaches Reef before its next step. Arguments
-  after ``--`` go to the agent. With one scenario installed, ``run``,
-  ``sync``, ``status`` and ``disconnect`` need no scenario name.
+  agent exits. The agent's own command runs it, once ``connect`` added that
+  command. Each session starts on the newest release, and what the session
+  changed in the layer reaches Reef before its next step. Arguments after
+  ``--`` go to the agent. With one scenario installed, ``run``, ``sync``,
+  ``status`` and ``disconnect`` need no scenario name.
 - ``sync`` sends the layer's files that you or the agent changed since the
   installed release, then installs the head. Reef merges them onto its head
   as each part's ``merge`` says (`Tree parts
@@ -478,8 +495,9 @@ support it. Install ``reef-client`` where the agent runs, and set
   they are. The result serves at once, and Reef does not evaluate it: you
   are its author. While a step runs, your changes wait for the next ``run``
   or ``sync``. ``sync --discard`` drops them and installs the head.
-- ``status`` shows the installed release, the head and the changed files;
-  ``disconnect`` removes the install.
+- ``status`` shows the installed release, the head and the changed files.
+  ``disconnect`` removes the install, and the agent command and the ``PATH``
+  line that ``connect`` added.
 
 How the layer goes over your own configuration depends on the agent:
 
