@@ -3,7 +3,7 @@
 A client uploads tasks to one scenario as a gzip-compressed tar archive whose top-level entries are Harbor task
 directories, one for each task, named by the task. ``upload_tasks`` unpacks the archive into a temporary
 directory, checks that each directory is a Harbor task, and gives the directories to the dispatcher, which
-publishes them to the scenario's ``imported-tasks`` store in the split that the request names. No aiohttp
+saves them to the scenario's sample store in the split that the request names. No aiohttp
 types appear here. ``reef.service.routes.tasks`` adapts it to HTTP.
 """
 
@@ -70,7 +70,7 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
 
 
 def upload_tasks(dispatcher: Dispatcher, scenario: str, split: str, archive: Path) -> dict[str, Any]:
-    """Publish the Harbor tasks of ``archive`` to ``split`` of ``scenario``'s imported tasks, and return the receipt.
+    """Save the Harbor tasks of ``archive`` to ``split`` of ``scenario``'s sample store, and return the receipt.
 
     The receipt is ``{scenario, split, tasks: [{name, files_digest}]}``, in name order. Raise ``ValueError`` for a
     split other than ``train`` and ``eval``, an archive that ``unpack_task_archive`` refuses, or a directory that
@@ -90,16 +90,24 @@ def upload_tasks(dispatcher: Dispatcher, scenario: str, split: str, archive: Pat
     return {
         "scenario": scenario,
         "split": checked_split,
-        "tasks": [{"name": task.name, "files_digest": task.files_digest} for task in published],
+        "tasks": [{"name": task.sample_id, "files_digest": task.files_digest} for task in published],
     }
 
 
 def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]:
-    """The scenario's imported tasks in publication order: ``{scenario, tasks: [{name, split, files_digest, trained}]}``."""
+    """The scenario's imported tasks in arrival order: ``{scenario, tasks: [{name, split, files_digest, trained}]}``.
+
+    ``trained`` is whether a committed job of any trainer of the scenario trained the task.
+    """
     return {
         "scenario": scenario,
         "tasks": [
-            {"name": task.name, "split": task.split, "files_digest": task.files_digest, "trained": trained}
-            for task, trained in dispatcher.imported_tasks(scenario)
+            {
+                "name": task.sample_id,
+                "split": task.split,
+                "files_digest": task.files_digest,
+                "trained": bool(task.train_counts),
+            }
+            for task in dispatcher.imported_tasks(scenario)
         ],
     }
