@@ -762,7 +762,7 @@ def test_saved_tasks_are_stored_as_samples_and_the_buffer_trains_them_as_one_tas
     p, _ = rounds(tmp_path, task_generator, rounds=1)
     assert not p.ready(BATCH_SIZE), "the generation saves three tasks"
     assert p.ready(BATCH_SIZE), "the stored tasks make the buffer"
-    stored = p.store.tasks()
+    stored = p.store.page(kind="task")
     assert [task.sample_id for task in stored] == [f"generated-tasks/harbor-00000-00{index}" for index in range(3)]
     assert all(task.component == "" and task.record_ids == () for task in stored)
     names = ["harbor-00000-000", "harbor-00000-001"]

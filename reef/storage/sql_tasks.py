@@ -40,14 +40,12 @@ class TaskTables:
     candidate, with the digest of its task files and its outcome.
     ``published`` holds one row for each published task name, with its
     position in publication order and the digest of its task files.
-    ``trained`` holds the trained marks that task stores kept before the sample store counted training; only
-    ``migrate_imported_tasks`` reads them. ``documents`` holds one row for each document key with its text.
+    ``documents`` holds one row for each document key with its text.
     """
 
     generations: Table
     candidates: Table
     published: Table
-    trained: Table
     documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
@@ -95,12 +93,6 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
             Column("sequence", BigInteger, nullable=False),
             Column("files_digest", String(64), nullable=False),
             Column("split", Text, nullable=False),
-        ),
-        trained=Table(
-            "task_trained",
-            metadata,
-            *key_columns(),
-            Column("task_name", Text, primary_key=True),
         ),
         documents=Table(
             "task_document",
@@ -206,13 +198,6 @@ class SQLTaskStore(TaskStore):
             if candidate["split"] is None:
                 self.set_outcome(connection, generation, index, split=split)
         return published
-
-    def add_task(self, *, directory: Path, split: SplitName) -> StoredTask:
-        if split not in SPLIT_NAMES:
-            raise ValueError("split must be 'train' or 'eval'")
-        digest = self.files.put(self.scenario, directory)
-        with self.records._transaction(write=True) as connection:
-            return self.publish(connection, directory.name, digest, split)
 
     def reject_task(self, *, generation: int, index: int, reason: str) -> None:
         if not isinstance(reason, str) or not reason:

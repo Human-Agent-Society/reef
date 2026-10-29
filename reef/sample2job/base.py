@@ -93,12 +93,12 @@ class Sample2Job(ABC, Plugin):
 
     #: The job data type ``make_job_data`` returns; the trainer validates it.
     output_schema: type[JobData] = JobData
-    #: The training modes that the recipe's job data supports. ``auto`` makes job data when
-    #: ``job_samples`` samples are held; ``manual`` makes it for a queued training instruction.
+    #: The training modes that the recipe's job data supports. ``auto`` makes job data when the buffer holds
+    #: ``job_samples`` samples; ``manual`` makes it of the manual buffer for a queued training instruction.
     supported_training_modes: frozenset[str] = frozenset({"auto", "manual"})
     #: Whether the job reads the instruction in its data, as a harness proposer does. In ``manual`` such a stage
-    #: runs an instruction with fewer than ``job_samples`` samples, or none. Another stage takes the instruction as
-    #: a request to train and waits until ``job_samples`` samples are held.
+    #: runs an instruction also with an empty manual buffer. Another stage waits until the manual buffer holds a
+    #: sample.
     reads_instructions: bool = False
     #: The kinds of record that the trainer gives the pipeline.
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
@@ -127,7 +127,8 @@ class Sample2Job(ABC, Plugin):
         self.job_samples = context.default_job_samples if job_samples is None else job_samples
         #: The most samples that the buffer holds; None holds every sample.
         self.buffer_size = self.job_samples if buffer_size is None else buffer_size
-        #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed unit sets it.
+        #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed grid sets it,
+        #: and the manual buffer holds no more (``TrainingPipeline.insert_into_buffer``).
         self.max_job_samples = max_job_samples
         if self.job_samples is not None and self.buffer_size is not None and self.buffer_size < self.job_samples:
             raise PluginConfigError(
@@ -175,8 +176,8 @@ class Sample2Job(ABC, Plugin):
         pipeline restarts. It is not a training step.
         The job's commit consumes every sample of ``samples``, including the
         samples that the recipe leaves out of the job data. In ``manual`` mode an
-        instruction's data holds the samples that automatic job data would take next: the buffer, which holds at
-        least ``job_samples`` samples unless the stage ``reads_instructions``.
+        instruction's data holds the samples of the manual buffer, at most ``max_job_samples``: one or more, or
+        none for a stage that ``reads_instructions``.
         """
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:

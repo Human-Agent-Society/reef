@@ -199,7 +199,6 @@ def test_the_inference_stage_forms_one_set_per_inference_record_in_arrival_order
     stage.push(report("r1", "i1"))
     formed = stage.pull()
     assert [record_set.record_ids() for record_set in formed] == [("i1",), ("i2",)]
-    assert [record_set.arrival_index for record_set in formed] == [1, 2]
     assert stage.pull() == ()
     assert stage.releasable_record_ids() == {"r1"} and not stage.background_jobs_running()
 
@@ -273,7 +272,7 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.samples] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
-    assert "r2" not in processor.samples
+    assert "r2" not in processor.set_samples
 
 
 @pytest.mark.unit
@@ -312,7 +311,7 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     # The ready group's records are consumed when its samples are stored; the job data consumes the samples.
     assert {"i1", "i2", "r1", "r2"} <= processor.releasable_record_ids()
     assert processor.acknowledge(batch.data_id) == {consumed_sample_id("r2:0"), consumed_sample_id("r1:0")}
-    assert not processor.samples
+    assert not processor.set_samples
 
 
 @pytest.mark.unit
@@ -328,7 +327,7 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
     assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
-    assert "r1" not in processor.samples
+    assert "r1" not in processor.set_samples
 
 
 @pytest.mark.unit
@@ -526,13 +525,13 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     processor.advance()
     # Both units are stored and their records consumed; the buffer takes one sample, and the other waits.
     assert processor.status()["ready_samples"] == 1
-    assert processor.store.count() == 2
+    assert len(processor.store.page()) == 2
     assert processor.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing version become stale once the serving version is known.
     processor.observe_serving_runtime_load_id("e:1")
     processor.advance()
     assert processor.status()["ready_samples"] == 0
-    assert processor.store.count() == 2, "a stale sample stays in the store untrained"
+    assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
     assert not processor.ready(1)
 
 
@@ -666,7 +665,7 @@ def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train_from_
     samples.made = (("made/a", TaskSample(Path("a"))),)
     assert processor.ready(1)
     samples.made = (("made/a", TaskSample(Path("a"))),)
-    assert processor.count_held_samples() == 1, "a sample made again is stored once"
+    assert processor.buffer() == ("made/a",), "a sample made again is stored once"
     (stored,) = processor.store.page()
     assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("made/a", "", None, ())
     built = processor.build_job_data(1)

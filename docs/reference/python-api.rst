@@ -585,8 +585,8 @@ Task stores
 A ``TaskStore`` holds published Harbor tasks, each in the ``train`` or
 ``eval`` split. A record-to-sample stage that generates tasks saves them in a
 task store before any rollout. Thus generation and rollout can recover
-independently after a restart. A caller can also add a task directory with
-``add_task``. The contract and its values are in ``reef.storage.tasks``.
+independently after a restart. The contract and its values are in
+``reef.storage.tasks``.
 
 To open a store, call ``task_storage.open(name)``. Each record-to-sample stage
 uses its own ``name``.
@@ -615,9 +615,8 @@ in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
 A task is a Harbor task directory. The database keeps the state of the store
 and the digest of each task directory. The task file store keeps the files,
 text or binary, under that digest. ``publish_task`` records the publication of
-a saved candidate. ``add_task`` saves a task directory, such as one with
-images, and then records its publication. A ``StoredTask`` holds the task
-``name``, its ``split`` and its ``files_digest``.
+a saved candidate. A ``StoredTask`` holds the task ``name``, its ``split`` and
+its ``files_digest``.
 
 .. list-table::
    :header-rows: 1
@@ -635,10 +634,6 @@ images, and then records its publication. A ``StoredTask`` holds the task
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
        same split. It then returns the published task.
-   * - ``add_task(directory=..., split=...)``
-     - Publish a Harbor task directory under its directory name, and return
-       its ``StoredTask``. The caller checks that the directory is a Harbor
-       task. A retry with the same files and split returns the published task.
    * - ``reject_task(generation=..., index=..., reason=...)``
      - Save the rejection of one candidate.
    * - ``complete_generation(generation=...)``
@@ -1031,7 +1026,7 @@ for each in ``pipeline_spec()`` (``PipelineSpec(record2record=...,
 record2sample=..., sample2job=...)``):
 
 - ``record2record``: the record-to-record stage
-  (``reef.record2record``). It decides which records train and in what order:
+  (``reef.record2record``). It decides which records train and which train together:
   it groups reports, judges records, and ends records that can no longer
   train. Its staleness check (``is_stale``) keeps samples with data more than
   ``max_staleness`` versions behind the serving version out of the buffer.
@@ -1290,7 +1285,7 @@ Job data
 
 ``Sample = TrajectorySample | TaskSample``. Every processor returns a frozen
 ``JobData(data_id, samples, request=None)`` with an ordered tuple of samples.
-The same job data may contain both kinds. ``request`` is keyword-only and carries
+One job's data holds samples of one kind. ``request`` is keyword-only and carries
 an optional explicit training instruction; request-only job data may be empty.
 The pipeline returns the same pending job data until its id is acknowledged.
 Reef submits one training job for each value. The training component cuts the
@@ -1302,7 +1297,7 @@ samples into its own optimizer batches.
        "scenario:data:1",
        (
            TrajectorySample(atif_document, source_agent_record_ids=("inference-1", "report-1")),
-           TaskSample(Path("tasks/example"), source_agent_record_ids=("record-2",)),
+           TrajectorySample(other_atif_document, source_agent_record_ids=("inference-2", "report-2")),
        ),
    )
 

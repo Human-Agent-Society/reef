@@ -1,15 +1,12 @@
 """Storage contracts and values for the published Harbor tasks of a scenario.
 
-A task store holds published tasks, each in the train or eval split. A task
-gets into a store in one of two ways:
+A task store holds published tasks, each in the train or eval split. A
+record-to-sample stage generates them. The stage saves each generation job in
+the store before any rollout. A generation holds its source record ids and the
+directories of its candidate tasks. Each candidate then gets one outcome: the
+stage publishes it to a split, or rejects it with a reason.
 
-- A record-to-sample stage generates it. The stage saves each generation job in
-  the store before any rollout. A generation holds its source record ids and
-  the directories of its candidate tasks. Each candidate then gets one
-  outcome: the stage publishes it to a split, or rejects it with a reason.
-- A caller adds a task directory to a split (``TaskStore.add_task``).
-
-The caller chooses the split. The store keeps it and refuses writes that
+The stage chooses the split. The store keeps it and refuses writes that
 conflict with it.
 
 A task is a Harbor task directory. Its files can be text or binary, so they
@@ -158,11 +155,10 @@ class TaskStore(ABC):
     ``P`` or ``D``.
 
     Purpose: a record-to-sample stage writes its generations and publishes their
-    candidates. A caller adds task directories (``add_task``). Readers take the
-    published tasks of a split (``tasks``) and their directories (``path``).
-    The sample store counts which published tasks trained, not the task store. The stage that writes the store
-    keeps its own durable state about its tasks in ``D``; the store does not
-    interpret a document.
+    candidates. Readers take the published tasks of a split (``tasks``) and their
+    directories (``path``). The stage that writes the store keeps its own
+    durable state about its tasks in ``D``; the store does not interpret a
+    document.
 
     A store is part of a scenario session and closes with it. Each write is
     durable when it returns. An identical retry of a write changes nothing.
@@ -197,20 +193,6 @@ class TaskStore(ABC):
         Raises ``TaskConflict`` if the name is published with other files or
         in the other split. Raises ``TaskStoreError`` if the candidate does not
         exist or is rejected.
-        """
-
-    @abstractmethod
-    def add_task(self, *, directory: Path, split: SplitName) -> StoredTask:
-        """Publish the task directory ``directory`` to ``split`` under the name ``directory.name``.
-
-        The method saves the task files before it records the publication, and
-        returns the published task. If the name is published with the same
-        files and split, the method returns that task. The caller checks that
-        the directory is a Harbor task.
-
-        Raises ``TaskConflict`` if the name is published with other files or
-        in the other split. Raises ``TaskStoreError`` if the directory holds an
-        entry that is not a file or a directory.
         """
 
     @abstractmethod
@@ -266,7 +248,7 @@ class TaskStorage(ABC):
 
 
 class TaskFileStore(Plugin, ABC):
-    """Keeps the directory of each published task, addressed by the digest of its files.
+    """Keeps the directory of each saved candidate, published task and imported task, addressed by the digest of its files.
 
     The store keeps the files of each scenario apart, so that ``archive``
     retires them with the scenario. The scenario storage owns the store and
