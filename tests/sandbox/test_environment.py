@@ -69,7 +69,7 @@ def test_timeout_does_not_leave_a_process_running(tmp_path: Path) -> None:
         await environment.start(force_build=False)
         with pytest.raises(RolloutTimeout):
             await environment.exec(f"exec {shlex.quote(sys.executable)} -c 'import time; time.sleep(30)'")
-        assert environment.process_owner.process_groups == set()
+        assert environment.process_owner.scope.pids() == ()
         await environment.stop(delete=True)
 
     run_sync(_run())
@@ -86,8 +86,7 @@ def test_async_cancellation_terminates_the_process_before_returning(tmp_path: Pa
 
         async def _wait_for_process() -> tuple[int, ...]:
             while True:
-                with environment.process_owner.lock:
-                    groups = tuple(environment.process_owner.process_groups)
+                groups = environment.process_owner.scope.pids()
                 if groups:
                     return groups
                 await asyncio.sleep(0.01)

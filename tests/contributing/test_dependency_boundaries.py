@@ -530,11 +530,15 @@ def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
             assert _imports_of(imported, dependency) == [], module_name
 
 
-def test_background_jobs_depend_only_on_the_standard_library() -> None:
-    # Processors in every package use the worker, so it imports no Reef module.
+def test_background_jobs_use_only_the_standard_library_and_process_lifecycle() -> None:
+    # Keep the shared worker independent of concrete sandbox providers and execution adapters.
     tree = ast.parse((REPO_ROOT / "reef" / "background_jobs.py").read_text(encoding="utf-8"))
     targets = _imported_modules(tree, package="reef")
-    assert not [target for target in targets if target == "reef" or target.startswith("reef.")]
+    assert all(target.startswith("reef.sandbox.lifecycle.") for target in targets if target.startswith("reef."))
+    assert "reef" not in targets
+    lifecycle = ast.parse((REPO_ROOT / "reef/sandbox/lifecycle.py").read_text(encoding="utf-8"))
+    imports = _imported_modules(lifecycle, package="reef.sandbox")
+    assert all(target.split(".")[0] in sys.stdlib_module_names for target in imports)
 
 
 def test_record_to_record_stage_depends_only_on_contracts_below_training() -> None:

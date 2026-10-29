@@ -1,7 +1,8 @@
 """Shared process execution and isolation through Harbor's environment contract.
 
 ``process`` owns the ``ProgramExecutor`` interface, local execution, resource
-limits and process cleanup. Callers bind an executor to a ``SandboxProgram``
+limits and execution adapters. ``lifecycle`` owns local child processes,
+termination grace and reaping for executors and background jobs. Callers bind an executor to a ``SandboxProgram``
 and open sessions through that interface, without knowing the sandbox kind.
 ``config`` builds the executor a deployment's ``executor`` setting selects, and
 ``task_environment`` names the Harbor task environments and checks what each

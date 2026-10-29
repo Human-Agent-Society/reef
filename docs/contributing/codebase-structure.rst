@@ -176,6 +176,10 @@ package's own submodules and third-party libraries):
    * - ``cli``
      - ``service``, ``core``
 
+``background_jobs.py`` depends only on the standard library and
+``sandbox.lifecycle``. That module uses only the standard library; the shared
+worker must not import concrete sandbox providers or executor adapters.
+
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
 payloads and holds the queued instruction carried by a job's data. Request

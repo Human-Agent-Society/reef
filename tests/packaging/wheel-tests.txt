@@ -206,3 +206,4 @@ tests/train/test_trainer.py
 tests/train/test_training_data_samples.py
 tests/sandbox/test_environment.py
 tests/sandbox/test_task_environment.py
+tests/sandbox/test_process_lifecycle.py

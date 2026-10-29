@@ -126,6 +126,7 @@ class ExecutorEnvironment(BaseEnvironment):
         if self.owns_session and not delete:
             raise ValueError("retaining a stopped sandbox session is not supported")
         self.process_owner.stop()
+        await asyncio.to_thread(self.process_owner.scope.wait_closed)
         if self.owns_session:
             await asyncio.to_thread(self.executor.close)
         self.closed = True

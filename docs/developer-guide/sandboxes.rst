@@ -40,12 +40,64 @@ is where Harbor builds a task's ``environment/Dockerfile``, starts it, runs
 the task's agent and verifier in it and stops it.
 
 The generator service's checks (``harbor run -e`` children) and rollouts
-(in-process Harbor trials) use only Harbor's task environment lifecycle: they
-select an environment by name, read its needs from
-``reef.sandbox.task_environment``, and reuse nothing from the executors. The
-Terminus harness layers the two: an executor launches its runner, and the
-runner then drives a Harbor task environment, so that harness also checks that
-the jail passes the environment's credentials.
+(in-process Harbor trials) use Harbor's task environment lifecycle. They select
+an environment by name and read its needs from ``reef.sandbox.task_environment``.
+Checks share local process management with the executors through
+``reef.sandbox.lifecycle.ProcessScope``; their command arguments and scoring
+remain in the generator. The Terminus harness layers the two: an executor
+launches its runner, which then drives a Harbor task environment.
+
+Local process ownership
+-----------------------
+
+Use ``ProcessScope`` when a local command needs a timeout and coordinated
+shutdown. ``run(ProcessRequest(...))`` starts a child, waits for it, and returns
+its captured output, exit status and termination reason. The request supplies
+an absolute working directory and the complete environment mapping. Missing
+executables and other launch errors propagate without registering a child.
+
+A result's reason is ``exited``, ``timed_out`` or ``stopped``. The first accepted
+termination request determines the reason, even if the child handles termination
+and exits with code zero. ``grace_seconds`` gives a child time to clean up after
+SIGTERM; SIGKILL follows when the grace expires. Zero grace requests immediate
+SIGKILL. The local executor retains its immediate timeout termination. Harbor
+checks retain a cleanup grace before forced termination.
+
+``request_stop()`` rejects new launches and signals current children. It does
+not mean they have exited. ``wait_closed(timeout_seconds)`` returns true only
+when the scope and its attached scopes have reaped their direct children and
+finished handling their output. False means cleanup is still pending. A child
+scope has one owner; attaching it transfers shutdown responsibility. Repeated
+attachment to the same owner is allowed, but sharing between owners and cycles
+are refused.
+
+Scopes signal POSIX process groups by default. They cannot reclaim descendants
+that leave the group, Docker containers or remote sandboxes. Harbor remains
+responsible for its task environments. Giving Harbor a termination grace does
+not prove that remote cleanup succeeded.
+
+Background job ownership
+------------------------
+
+``BackgroundJobWorker`` gives each running submission a ``JobContext`` and binds
+its process scope across async calls and ``asyncio.to_thread``. Local executor
+launches attach their scopes to this owner; generator checks use it directly.
+A runner can override ``run_in_context(job, context)`` to read cancellation or
+use the scope explicitly. Existing ``run(job)`` implementations remain supported.
+
+Every accepted submission produces one result, including separate submissions
+with the same receipt. The runner must preserve the receipt. Results become
+available after runner cleanup and owned-process reaping. Failure and cancellation
+produce ``Failed``. Runners must await cleanup of their own threads, async tasks
+and remote resources; cancelling a coroutine does not stop a detached thread.
+
+``request_stop()`` stops admission and cancels queued work. Running jobs have
+five seconds to finish before cancellation; their local processes then receive
+a ten-second termination grace. ``wait_closed(timeout_seconds)`` returns false
+while the worker thread remains alive, including when a runner delays cancellation.
+``close()`` requests shutdown and waits up to twenty seconds, then raises
+``TimeoutError`` if closure is incomplete. A caller can wait again; a timeout
+does not reopen the worker or establish that its resources were released.
 
 
 Run a command

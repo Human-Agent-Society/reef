@@ -28,6 +28,7 @@ root: a restarted service serves the same root.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -75,6 +76,7 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
+from reef.sandbox.lifecycle import CURRENT_PROCESS_SCOPE
 from reef.sandbox.task_environment import (
     ModuleProbe,
     ReadinessProbe,
@@ -136,10 +138,10 @@ class HarborChecks(TaskChecks):
     """The checks through the harbor command line, in one Harbor environment.
 
     Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is one of
-    ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is the registry of harbor children, or None
-    for a registry per check.
-    Purpose: the generator process makes it with the ``runs`` of its job runner, so closing the runner stops a
-    check; ``CheckJob`` calls ``oracle``, which runs both of a task's harbor runs in ``environment``.
+    ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is an explicit caller-owned HarborRuns,
+    or None to use the worker's job scope (a fresh scope outside a worker).
+    Purpose: ``CheckJob`` calls ``oracle``, which runs both checks in ``environment``. The default generator
+    delegates process ownership and shutdown to its worker.
     """
 
     def __init__(
@@ -319,15 +321,35 @@ class ProposalJob(Job):
 
 
 class CheckJob(Job):
+    """One task check, with the Job state fields and kind fixed to check.
+
+    checks implements TaskChecks; task_path is a Path for the task to check.
+    run returns the serialized oracle result or propagates its error. On
+    cancellation it requests process shutdown and awaits the synchronous check
+    thread before propagating cancellation. The HTTP handler creates this job;
+    JobRunner executes it and stores its result.
+    """
+
     kind = "check"
 
     def __init__(self, checks: TaskChecks, task_path: Path) -> None:
+        if not isinstance(checks, TaskChecks) or not isinstance(task_path, Path):
+            raise ValueError("a check job needs TaskChecks and a task Path")
         super().__init__()
         self.checks = checks
         self.task_path = task_path
 
     async def run(self) -> dict[str, object]:
-        return oracle_document(await asyncio.to_thread(self.checks.oracle, self.task_path))
+        pending = asyncio.create_task(asyncio.to_thread(self.checks.oracle, self.task_path))
+        try:
+            return oracle_document(await asyncio.shield(pending))
+        except asyncio.CancelledError:
+            scope = CURRENT_PROCESS_SCOPE.get()
+            if scope is not None:
+                scope.request_stop(grace_seconds=CLOSE_GRACE_S)
+            with contextlib.suppress(RuntimeError):
+                await pending
+            raise
 
 
 class RolloutJob(Job):
@@ -378,14 +400,21 @@ class JobTicket(SupportsReceipt):
 
 
 class JobRunner(BackgroundJobRunner):
-    """Runs the service's jobs at the same time on one job worker; closing stops the harbor runs in flight, then the worker.
+    """The generator's job registry and runner, with one BackgroundJobWorker.
 
-    A job is queued, running, then done or failed. ``get`` reads a job's state by its ID, and marks a job that the
-    worker gave up, such as one cancelled at close, as failed.
+    jobs maps each submitted Job.id to that Job, initially empty; lock protects
+    registry access. runs is None for worker-owned processes or an explicit
+    HarborRuns also stopped at close. worker executes at most MAX_JOBS_IN_FLIGHT
+    jobs. submit returns the registered job or raises after removing a refused
+    submission. run stores its result or error. get returns the matching job or
+    None, translating worker cancellation into failed state. close stops
+    admission and waits for cleanup, propagating an incomplete-close error.
     """
 
     def __init__(self, runs: HarborRuns | None = None) -> None:
-        self.runs = runs if runs is not None else HarborRuns()
+        if runs is not None and not isinstance(runs, HarborRuns):
+            raise ValueError("runs must be HarborRuns or None")
+        self.runs = runs
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
         # A rollout job waits for rollout slots, not for job slots; the limit only bounds what one client can queue.
@@ -412,7 +441,9 @@ class JobRunner(BackgroundJobRunner):
             return self.jobs.get(job_id)
 
     def close(self) -> None:
-        self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
+        self.worker.request_stop()
+        if self.runs is not None:
+            self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
         self.worker.close()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:

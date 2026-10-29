@@ -1082,3 +1082,38 @@ def test_generator_accepts_the_shared_request_without_a_processor(tmp_path: Path
     prompt = designer.calls[0]["messages"][1]["content"]
     assert "The service port is 8472." in prompt
     assert inputs.assets or inputs.asset_files
+
+
+def test_worker_scope_stops_harbor_without_a_shared_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reef.background_jobs.CLOSE_GRACE_S", 0.01)
+    pid_path = tmp_path / "harbor.pid"
+    cleanup_path = tmp_path / "cleaned"
+    harbor = tmp_path / "harbor"
+    harbor.write_text(
+        f"#!{sys.executable}\nimport os, pathlib, signal, sys, time\n"
+        f"def stop(*args):\n    pathlib.Path({str(cleanup_path)!r}).touch()\n    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    harbor.chmod(0o755)
+    built, _, _, _ = service(tmp_path, checks=HarborChecks(harbor=str(harbor)))
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert pid_path.exists()
+        return submitted["job"]
+
+    job_id = run_with(built, body)
+    assert isinstance(job_id, str)
+    assert cleanup_path.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)
+    job = built.jobs.get(job_id)
+    assert job is not None and job.state == "failed" and job.result is None
+    assert built.jobs.worker.wait_closed(0)

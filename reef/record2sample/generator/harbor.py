@@ -17,23 +17,19 @@ that write it.
 
 from __future__ import annotations
 
-import contextlib
 import fnmatch
 import hashlib
 import json
 import os
 import re
 import shutil
-import signal
-import subprocess
-import threading
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, primary_reward
 from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
+from reef.sandbox.lifecycle import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
 CATEGORIES = (
@@ -351,65 +347,28 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     return TrialOutcome(reward=float(value), exception=exception_text, agent_note=agent_note)
 
 
-def signal_process_group(process: subprocess.Popen[str], signum: int) -> None:
-    """Signal the whole group of a child that is still running; a group already gone is no error."""
-    if process.poll() is None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signum)
-
-
-def wait_or_kill(process: subprocess.Popen[str], *, deadline: float) -> None:
-    """Wait for the child until the monotonic ``deadline``; a kill to its whole group when it is still there."""
-    try:
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        signal_process_group(process, signal.SIGKILL)
-        process.wait()
-
-
-def stop_process_groups(processes: Sequence[subprocess.Popen[str]], *, grace_s: float) -> None:
-    """A term to every group, so Harbor can stop the environments it started; a kill after ``grace_s``."""
-    for process in processes:
-        signal_process_group(process, signal.SIGTERM)
-    deadline = time.monotonic() + grace_s
-    for process in processes:
-        wait_or_kill(process, deadline=deadline)
-
-
 class HarborRuns:
-    """The harbor children in flight, each its own process group: started here so a closed registry refuses one."""
+    """Compatibility adapter for callers that explicitly own several Harbor checks.
+
+    scope is one initially open ProcessScope. pids reports its active children;
+    terminate_all closes it, signals with the supplied grace and waits for reaping.
+    New generator jobs instead receive their worker's per-job process scope.
+    """
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.live: dict[int, subprocess.Popen[str]] = {}
-        self.is_closed = False
+        self.scope = ProcessScope()
 
-    def start(self, command: Sequence[str]) -> subprocess.Popen[str]:
-        """Start ``command`` in its own session and keep it until ``release``; refused once the runs are closed."""
-        with self.lock:
-            if self.is_closed:
-                raise RuntimeError("the generator is stopping; no new harbor run")
-            process = subprocess.Popen(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True
-            )
-            self.live[process.pid] = process
-        return process
-
-    def release(self, process: subprocess.Popen[str]) -> None:
-        with self.lock:
-            self.live.pop(process.pid, None)
+    @property
+    def is_closed(self) -> bool:
+        return self.scope.closed
 
     def pids(self) -> tuple[int, ...]:
-        with self.lock:
-            return tuple(self.live)
+        return self.scope.pids()
 
     def terminate_all(self, *, grace_s: float = STOP_GRACE_S) -> tuple[int, ...]:
-        """Close the runs, then stop every live group: a term, and a kill for what is still alive after ``grace_s``."""
-        with self.lock:
-            self.is_closed = True
-            processes = list(self.live.values())
-        stop_process_groups(processes, grace_s=grace_s)
-        return tuple(process.pid for process in processes)
+        pids = self.scope.request_stop(grace_seconds=grace_s)
+        self.scope.wait_closed()
+        return pids
 
 
 def run_harbor_agent(
@@ -428,24 +387,30 @@ def run_harbor_agent(
     environment (``reef.sandbox.task_environment``) reach Harbor.
     """
     command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
-    registry = runs if runs is not None else HarborRuns()
-    process = registry.start(command)
+    scope = runs.scope if runs is not None else CURRENT_PROCESS_SCOPE.get()
+    if scope is None:
+        scope = ProcessScope()
     try:
-        with process:
-            try:
-                _, stderr = process.communicate(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                stop_process_groups([process], grace_s=STOP_GRACE_S)
-                raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s") from None
-    finally:
-        registry.release(process)
-    if process.returncode != 0:
-        if registry.is_closed:
-            raise RuntimeError(f"harbor run -a {agent} was stopped with the generator")
-        # A traceback names its error last; the whole of it stays beside the run for the person who reads it.
+        result = scope.run(
+            ProcessRequest(
+                argv=tuple(command),
+                cwd=Path.cwd(),
+                env=dict(os.environ),
+                timeout_seconds=timeout_s,
+                grace_seconds=STOP_GRACE_S,
+                capture_stdout=False,
+            )
+        )
+    except ProcessScopeClosed as exc:
+        raise RuntimeError("the generator is stopping; no new harbor run") from exc
+    if result.reason == "timed_out":
+        raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s")
+    if result.reason == "stopped":
+        raise RuntimeError(f"harbor run -a {agent} was stopped with the generator")
+    if result.exit_code != 0:
         jobs_path.mkdir(parents=True, exist_ok=True)
-        (jobs_path / STDERR_FILE).write_text(stderr, encoding="utf-8")
-        raise RuntimeError(f"harbor run -a {agent} exited {process.returncode}: {stderr.strip()[-500:]}")
+        (jobs_path / STDERR_FILE).write_text(result.stderr, encoding="utf-8")
+        raise RuntimeError(f"harbor run -a {agent} exited {result.exit_code}: {result.stderr.strip()[-500:]}")
     return trial_outcome(jobs_path)
 
 
