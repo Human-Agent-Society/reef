@@ -8,15 +8,19 @@ from pathlib import Path
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.task_service_stubs import task_for
 
 from reef.artifact import Artifact, BaseArtifactSource
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
+from reef.core.tasks import write_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.sample2job import Sample2Job
+from reef.storage.samples import TrainerSamples
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -406,3 +410,61 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
         default_job_samples=1,
     )
     assert stages[-1].outcomes == ended.outcomes
+
+
+class TrajectoryAndTaskJobData(Sample2Job):
+    """Takes uploaded trajectories and imported train tasks, as the SFT stage does."""
+
+    accepts_trajectories = True
+    accepts_imported_tasks = True
+
+    def make_job_data(self, samples, data_id):
+        return JobData(data_id, samples)
+
+
+def train_record(record_id: str, parameters: dict) -> AgentRecord:
+    payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": parameters}
+    return AgentRecord.create(
+        scenario="math", request_type=RequestType.TRAIN, payload=payload, agent_record_id=record_id
+    )
+
+
+@pytest.mark.unit
+def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruction(component, tmp_path):
+    session = SQLiteScenarioStorage(tmp_path / "records").open("math")
+    trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
+    session.samples.add_trajectories((("t1", trajectory),))
+    session.samples.add_tasks((write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path / "a"),), "train")
+    trainer = Trainer.build(
+        "math",
+        session.records,
+        pipeline_factory=lambda context: TrainingPipeline(
+            context, sample2job=TrajectoryAndTaskJobData(context, None, 1)
+        ),
+        job_loop=loop_with(component),
+        training_mode="manual",
+        samples=TrainerSamples(session.samples),
+        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
+        job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
+        default_job_samples=1,
+    )
+    pipeline = trainer.pipeline
+
+    def train(sample_id: str, record: AgentRecord) -> dict:
+        pipeline.insert_into_buffer((sample_id,))
+        pipeline.push(record)
+        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        job = component.jobs[-1]
+        component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
+        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        # A scenario's commit removes the trained sample from the manual buffer; this trainer has no scenario.
+        pipeline.remove_from_buffer((sample_id,))
+        return dict(job.parameters)
+
+    assert train("t1", train_record("sft", {"learning_rate": 2e-5})) == {"method": "sft", "learning_rate": 2e-5}
+    rl = {"method": "task_group", "rollout": {"rollouts_per_task": 4}}
+    assert train("task-a", train_record("rl", rl)) == rl
+    assert [type(sample).__name__ for job in component.jobs for sample in job.data.samples] == [
+        "TrajectorySample",
+        "TaskSample",
+    ]
