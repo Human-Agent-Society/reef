@@ -2,7 +2,7 @@
 
 ``harness_dispatcher`` writes the recipe's seed into the repository's
 bootstrap directory, as the service's assembly does through
-``base_artifact_files``, so a new scenario's base release is the seed tree.
+``base_artifact_source``, so a new scenario's base release is the seed tree.
 ``run_step`` drives one step of a scenario; ``backend_step`` drives one step
 of a backend alone, through the phases the trainer runs.
 """
@@ -46,7 +46,7 @@ def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: boo
     """
     return Dispatcher(
         recipe,
-        harness_repository(tmp_path, recipe.base_artifact_files() or {}),
+        harness_repository(tmp_path, recipe.base_artifact_source().files),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         hold_local_cycles=hold_local_cycles,

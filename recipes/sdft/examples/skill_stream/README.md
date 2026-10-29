@@ -8,7 +8,7 @@ forgetting.
 
 The model trains with the `sdft` recipe (`recipes/sdft/`) and is compared with
 an SFT control on the same demonstrations. Each stage runs as a
-[reef-eval](https://github.com/Human-Agent-Society/reef-eval) episode and a
+[reef-eval](https://github.com/Human-Agent-Society/reef-eval) rollout and a
 judge scores the served model on both test splits.
 
 

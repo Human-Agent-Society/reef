@@ -1,4 +1,4 @@
-"""Test-only adapters that wrap a plain function as a Method or an EpisodeScorer.
+"""Test-only adapters that wrap a plain function as a Method or a RolloutScorer.
 
 Reef takes harness evolution plugins as classes only. Tests keep their short
 functions through these adapters. A method function takes the step's
@@ -10,7 +10,7 @@ stays, so the step skips). A scorer function takes ``(task, result)``, and
 
 import inspect
 
-from reef.evaluation.harness import EpisodeScorer
+from reef.evaluation.harness import RolloutScorer
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend import Method, StepResult
 
@@ -36,7 +36,7 @@ class FunctionMethod(Method):
         return StepResult() if result is None else result
 
 
-class FunctionScorer(EpisodeScorer):
+class FunctionScorer(RolloutScorer):
     def __init__(self, fn):
         self.fn = fn
 
@@ -53,5 +53,5 @@ def resolve_method(value):
     return value if isinstance(value, Method) else FunctionMethod(value)
 
 
-def resolve_episode_scorer(value):
-    return value if isinstance(value, EpisodeScorer) else FunctionScorer(value)
+def resolve_rollout_scorer(value):
+    return value if isinstance(value, RolloutScorer) else FunctionScorer(value)

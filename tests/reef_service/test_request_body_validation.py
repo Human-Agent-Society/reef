@@ -81,11 +81,15 @@ def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None
         client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
         await client.start_server()
         try:
-            for path in ("/reef/scenarios", "/reef/scenarios/x/rollback", "/reef/scenarios/x/promote"):
-                for release_id in ("", "   "):
-                    response = await client.post(path, json={"name": "s", "release_id": release_id})
-                    assert response.status == 400, (path, release_id, response.status)
-                    assert "release_id must be a non-empty string" in await response.text()
+            for path, key in (
+                ("/reef/scenarios", "release_id"),
+                ("/reef/scenarios/x/activate", "artifact_id"),
+                ("/reef/scenarios/x/train-from", "artifact_id"),
+            ):
+                for value in ("", "   "):
+                    response = await client.post(path, json={"name": "s", key: value})
+                    assert response.status == 400, (path, value, response.status)
+                    assert f"{key} must be a non-empty string" in await response.text()
 
                 if path == "/reef/scenarios":
                     # create keeps its current behavior: no release_id is allowed there.
@@ -99,7 +103,7 @@ def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None
 
 @pytest.mark.unit
 def test_create_scenario_strips_surrounding_whitespace_from_release_id() -> None:
-    """#228 — a supplied release_id is stripped before use, matching rollback/promote."""
+    """#228 — a supplied release_id is stripped before use, matching activate and train-from."""
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
@@ -122,17 +126,16 @@ def test_create_scenario_strips_surrounding_whitespace_from_release_id() -> None
 
 
 @pytest.mark.unit
-def test_promote_route_rejects_non_object_body_with_400() -> None:
-    """#228 — promote now shares the read_object path with the other JSON routes."""
+@pytest.mark.parametrize("path", ["/reef/scenarios/x/activate", "/reef/scenarios/x/train-from"])
+def test_activation_routes_reject_non_object_bodies_with_400(path: str) -> None:
+    """#228 — activate and train-from share the read_object path with the other JSON routes."""
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
         await client.start_server()
         try:
             for body in NON_OBJECTS:
-                response = await client.post(
-                    "/reef/scenarios/x/promote", data=json.dumps(body), headers={"Content-Type": "application/json"}
-                )
+                response = await client.post(path, data=json.dumps(body), headers={"Content-Type": "application/json"})
                 assert response.status == 400, (body, response.status)
                 assert "request body must be an object" in await response.text()
         finally:

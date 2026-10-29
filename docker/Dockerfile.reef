@@ -163,7 +163,7 @@ RUN SGLANG_QWEN3_5=/opt/sglang/python/sglang/srt/models/qwen3_5.py && \
                assert MRotaryEmbedding._build_axis_map(rope).tolist() == [0, 1, 2] * 10 + [0, 1]"
 
 # Slime's Qwen3.5 trainer runs the transformers vision tower. Five of its ops
-# round differently from SGLang's vision tower, so in bf16 the trainer's image
+# round differently from SGLang's vision tower. So in bf16, the trainer's image
 # features differ from the rollout's by 5 to 10 percent. The module makes the
 # trainer use SGLang's kernels and encode each image in its own call. Then the
 # features are bit-identical to the engine under the conditions in
@@ -187,7 +187,7 @@ RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
                assert transformers_api_supported()"
 
 # With context parallel size 1, Slime's Qwen3.5-VL trainer rejects every packed
-# sequence with an odd length ("must be divisible by 2 * CP size 1"), so it
+# sequence with an odd length ("must be divisible by 2 * CP size 1"). So it
 # fails in the first training step. The patch returns the full packed stream
 # when cp_size is 1. THUDM/slime#2376 fixes the call site. This patch is a
 # helper-side variant of the same fix, which #2376 says would be directly

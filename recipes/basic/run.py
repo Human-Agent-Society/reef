@@ -1,6 +1,6 @@
 """The whole loop, in the open.
 
-One episode:
+One rollout:
 
     solve  — reef-eval runs the harbor/ task under our agent; the agent asks
              Reef for the answer (Reef records the exchange, returns a
@@ -24,4 +24,4 @@ HERE = Path(__file__).resolve().parent
 lab = Lab(HERE / "work" / "lab")
 agent = {"name": "harness:HarborAgent", "model_name": MODEL}
 row = asyncio.run(lab.run(str(HERE / "harbor"), agent))
-print(f"episode reward: {row.rewards}")
+print(f"rollout reward: {row.rewards}")

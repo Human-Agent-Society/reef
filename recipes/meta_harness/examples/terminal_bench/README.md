@@ -106,8 +106,8 @@ The proposer URL and key default to the target's; the target URL defaults to
 `https://api.openai.com`. Unauthenticated endpoints can omit keys.
 
 `REEF_META_HARNESS_WORKERS` defaults to 4; lower it for endpoint or E2B limits.
-Episodes time out after 9,000 seconds, including setup and verification.
-Model keys stay in temporary episode configs, not published harnesses.
+Rollouts time out after 9,000 seconds, including setup and verification.
+Model keys stay in temporary rollout configs, not published harnesses.
 Sandbox `egress_hosts` enables networking, not hostname filtering; see the
 [sandbox configuration](../../README.md#terminus-2-code-evolution).
 
@@ -123,16 +123,16 @@ method proposes a candidate from the search history. Reef evaluates it on the
 selected suite against the incumbent's cached scores, adds it to the history,
 and commits the step with the serving state.
 Rollouts and evaluations use Reef's executor, timeout, residue policy, and
-finite-score checks. Failed evaluation episodes score zero; rollout launch
+finite-score checks. Failed evaluation rollouts score zero; rollout launch
 failures stop the run. Infrastructure failures are not automatically replaced.
 Before each rollout, `run.py` asks the method whether a budget is spent, so no
 rollout feeds a step that would propose nothing.
 
 Defaults allow four evaluated candidates and eight proposal attempts, including
-invalid or duplicate proposals: at most 890 evaluation episodes (the seed and
+invalid or duplicate proposals: at most 890 evaluation rollouts (the seed and
 four candidates, each on 89 tasks with 2 repeats) plus eight feedback
 rollouts. Smaller runs scale the evaluation budget. A failed commit keeps its
-episodes in the history, and its retry reuses them; a candidate that a retry
+rollouts in the history, and its retry reuses them; a candidate that a retry
 proposes in place of the failed one costs extra. These are search limits, not
 billing caps.
 
@@ -145,7 +145,7 @@ per directory.
 Committed Reef state is authoritative. Restarts reuse recorded rollouts and
 replay pending reports. Failed commits cannot advance search or its summary.
 
-- `harness/`: the search history (every candidate tree, its episodes and their
+- `harness/`: the search history (every candidate tree, its rollouts and their
   records, and each step's decision) and one record per step, which holds the
   proposer's prompt and reply in `calls.json`.
 - `reef-data/`: SQLite records and the scenario's commits. Each commit holds
@@ -154,19 +154,19 @@ replay pending reports. Failed commits cannot advance search or its summary.
   their release chain.
 - `summary.json`: rebuilt from the latest commit and the history of the steps
   it covers: each candidate's parent, outcome, and scores, the served id, the
-  candidates generated, and the evaluation episodes spent.
+  candidates generated, and the evaluation rollouts spent.
 
 ## Deviations
 
 - **Suite:** full pinned dataset by default; reported scores use a fixed subset
   at the same revision.
 - **Schedule:** each evaluation pairs the candidate with the incumbent's
-  cached scores, so the incumbent does not run again, except an episode that
+  cached scores, so the incumbent does not run again, except a rollout that
   could not run, which runs again. The baseline's scores
   arrive with the first candidate's evaluation. As in the comparison, the
   baseline and each candidate run once.
 - **Proposals:** one feedback rollout, the complete population, and bounded
-  excerpts of the episode records feed the method's prompt, not an upstream
+  excerpts of the rollout records feed the method's prompt, not an upstream
   tool-using coding agent that reads the trial files.
 - **Requests:** Chat Completions/LiteLLM for the target; Responses with default
   reasoning for the proposer. The comparison uses Responses and `xhigh`, plus
@@ -187,6 +187,6 @@ pytest tests/recipes/meta_harness/test_meta_harness_terminal_bench.py \
 pre-commit run --all-files
 ```
 
-Tests mock model calls and episode launches, checking the real method, recipe,
+Tests mock model calls and rollout launches, checking the real method, recipe,
 scoring, commits, publication, and recovery. They do not measure live benchmark
 performance or replace a Linux/E2B smoke run.

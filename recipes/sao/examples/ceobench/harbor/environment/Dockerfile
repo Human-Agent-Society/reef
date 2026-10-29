@@ -19,7 +19,7 @@ RUN git apply /opt/ceobench-reef.patch \
     && uv sync --frozen \
     && uv run --no-sync python scripts/build_public.py
 
-# engine.py starts the episode's session and engine for the harness and
+# engine.py starts the rollout's session and engine for the harness and
 # stops it for the verifier.
 COPY engine.py /opt/ceobench-engine.py
 

@@ -31,3 +31,11 @@ class DeployConfigError(ReefError):
 
 class InferenceUnavailable(ReefError):
     """The deployment serves no inference requests, for example one with ``inference.backend: none``."""
+
+
+class CommitPending(ReefError):
+    """A training result waits for its scenario commit, so an activation or a new training start must wait too."""
+
+
+class TrainingStartRefused(ReefError):
+    """A trainer cannot start training from the artifact it was given; nothing changed."""

@@ -34,7 +34,7 @@ from recipes.gepa import GEPA, Feedback, GEPASettings
 from recipes.gepa.archive import Archive
 from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
 from reef.evaluation.harness import ComparePolicy
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.state import HarnessState

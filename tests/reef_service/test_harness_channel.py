@@ -1,6 +1,6 @@
 """Read-channel guarantees of the harness routes: the release catalog with each step's evaluation metrics,
 version-addressed pulls, served files that are byte for byte the evaluated source tree rendered for the
-adapter, the source form, and the routes the wrapper used that are gone. Hermetic: episodes run a fake pi
+adapter, the source form, and the routes the wrapper used that are gone. Hermetic: rollouts run a fake pi
 binary through the real adapter path, and the reads go through the real HTTP app."""
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service.app import create_app
@@ -39,7 +39,7 @@ UPDATE_TIMEOUT_S = 5.0
 UPDATE_POLL_S = 0.01
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
+def evaluate(task: str, result: RolloutResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
@@ -277,7 +277,7 @@ def test_the_catalog_carries_the_publishing_steps_evaluation_metrics(tmp_path) -
             # manifest's evaluation.
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
-            assert head["release_id"] == manifest["release_id"] and head["current"] is True
+            assert head["release_id"] == manifest["release_id"] and head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
         finally:
@@ -328,16 +328,16 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             )
             assert current == pinned == first
             head = catalog["releases"][-1]
-            assert head["current"] is True and head["release_id"] == first["release_id"]
+            assert head["active"] is True and head["release_id"] == first["release_id"]
             assert head["content_id"] == first["content_id"] and head["metrics"] == first["evaluation"]
 
             finish_evaluation.set()
             second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
             updated = await read_release("/reef/harness/releases")
             assert len(updated["releases"]) == len(catalog["releases"]) + 1
-            assert updated["releases"][-2]["current"] is False
+            assert updated["releases"][-2]["active"] is False
             head = updated["releases"][-1]
-            assert head["current"] is True and head["release_id"] == second["release_id"] != first["release_id"]
+            assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
             assert head["content_id"] == second["content_id"] and head["metrics"] == second["evaluation"]
             assert second["files"] == render_tree(TREE_V2, PI)
             assert await read_release("/reef/harness", first["release_id"]) == first
@@ -438,8 +438,8 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
         client = app_client(channel_dispatcher(tmp_path, PATCHES[:1]))
         await client.start_server()
         try:
-            rows = (await (await client.get("/reef/scenarios/delivery/releases")).json())["releases"]
-            current = next(row["release_id"] for row in rows if row["current"])
+            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
+            current = next(row["release_id"] for row in rows if row["active"])
             body = {"messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
             assert response.status == 200 and response.headers["x-reef-release-id"] == current
@@ -489,5 +489,5 @@ def test_descriptor_install_fields_constrain_their_charset(tmp_path, adapter: st
 @pytest.mark.parametrize("path", ["/tmp/state", "../state", "workspace", "workspace/state", "."])
 def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) -> None:
     target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("writable_paths", [path]))
-    with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+    with pytest.raises(DescriptorError, match=r"writable_paths.*rollout root"):
         load_descriptor(target)

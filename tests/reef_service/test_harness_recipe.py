@@ -1,5 +1,5 @@
 """Guarantees of the harness evolution recipe: the ``evolution`` section and its ``evaluation`` section, the backend
-and the trainer it builds, and what that backend's steps do with each setting. Hermetic: episodes run a fake pi
+and the trainer it builds, and what that backend's steps do with each setting. Hermetic: rollouts run a fake pi
 binary through the real adapter path, and each backend step runs the phases the trainer runs (``backend_step``)."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step, harness_dispatcher, harness_repository, report_once, run_step
 from tests.support.harness_steps import (
@@ -38,22 +38,27 @@ from tests.support.harness_steps import (
 )
 
 from reef.artifact import Artifact
+from reef.core.activation import MadeArtifact
+from reef.core.evaluation import RolloutScore
+from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
 from reef.dispatcher import Dispatcher
+from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.harness import (
     ComparePolicy,
-    EpisodeEvaluationWorker,
     EvaluationSettings,
     FloorPolicy,
     NoEvaluationPolicy,
+    RolloutEvaluationWorker,
     evaluation_selection,
     verifier_reward,
 )
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import TerminusAtifReader
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.trajectory import TerminusAtifReader
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -63,7 +68,6 @@ from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, Scena
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskRollouts
-from reef.sandbox.process import LocalExecutor
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE
@@ -74,16 +78,21 @@ from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
-#: The models a scorer receives in an episode worker's tests: the deployment's served model alone.
+#: The models a scorer receives in a rollout worker's tests: the deployment's served model alone.
 MODELS = ModelBindings(served=MODEL)
-#: Where the episode worker launches the harness; the tests spy on it.
-RUN_EPISODE = "reef.evaluation.harness.runner.run_episode"
+#: Where the rollout worker launches the harness; the tests spy on it.
+RUN_ROLLOUT = "reef.evaluation.harness.runner.run_rollout"
 #: The module of the test plugins that ``evolution_config`` names.
 SUPPORT = "tests.support.harness_steps"
 
 
 def from_config(settings: dict[str, Any], **options: Any) -> HarnessEvolutionRecipe:
     return HarnessEvolutionRecipe.from_environment({}, config=settings, **options)
+
+
+def flat(scores: list[dict[str, object]]) -> list[object]:
+    """Every rollout's score in ``RolloutScores.to_json``'s value, task by task."""
+    return [score for task in scores for score in task["scores"]]
 
 
 def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
@@ -127,7 +136,7 @@ def test_config_without_evolution_section_is_rejected() -> None:
 def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -> None:
     built = from_config(evolution_config())
     assert isinstance(built.method, IdleMethod) and isinstance(built.scorer, FixedScorer)
-    assert built.promoter is None and built.seed == HarnessTree({}) and built.base_artifact_files() is None
+    assert built.promoter is None and built.seed == HarnessTree({}) and built.base_artifact_source().files == {}
     promoted = from_config(
         evolution_config(
             method={"module": f"{SUPPORT}:IdleMethod", "config": {}},
@@ -152,17 +161,15 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "max_steps": 3,
         "max_failure_streak": 2,
         "max_model_calls_per_step": 4,
-        "max_episodes_per_step": 5,
+        "max_rollouts_per_step": 5,
         "max_pending_proposals": 2,
-        "publish": "review",
-        "review_kinds": ["code_extension"],
         "client_models": ["model-b"],
     }
     evaluation = {
         "statistic": "mean",
         "min_margin": 0.5,
         "repeats": 2,
-        "episode_timeout_s": 5,
+        "rollout_timeout_s": 5,
         "forbid_residue": True,
         "recheck_every": 3,
         "promote_failures": True,
@@ -172,9 +179,9 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
     built = from_config(evolution_config(evaluation=evaluation, **evolution))
     assert built.evolution == dataclasses.replace(
         defaults.evolution,
-        **{**evolution, "review_kinds": ("code_extension",), "client_models": ("model-b",)},
+        **{**evolution, "client_models": ("model-b",)},
     )
-    assert built.evaluation == dataclasses.replace(defaults.evaluation, **{**evaluation, "episode_timeout_s": 5.0})
+    assert built.evaluation == dataclasses.replace(defaults.evaluation, **{**evaluation, "rollout_timeout_s": 5.0})
     assert built.batch_size == 2
 
 
@@ -184,19 +191,19 @@ INVALID_SETTINGS = {
     "no-method": ({"method": None}, r"evolution\.method must name the Method"),
     "batch-size": ({"batch_size": 0}, r"evolution\.batch_size must be at least 1"),
     "batch-size-type": ({"batch_size": True}, r"evolution\.batch_size must be a valid int"),
-    "episode-budget": ({"max_episodes_per_step": -1}, r"evolution\.max_episodes_per_step must be at least 0"),
+    "rollout-budget": ({"max_rollouts_per_step": -1}, r"evolution\.max_rollouts_per_step must be at least 0"),
     "inbox-size": ({"max_pending_proposals": 0}, r"evolution\.max_pending_proposals must be at least 1"),
     "state-dir": ({"state_dir": " "}, r"evolution\.state_dir must be a non-empty path"),
-    "publish": ({"publish": "staged"}, r"evolution\.publish must be 'auto' or 'review'"),
-    "review-kinds-type": ({"review_kinds": "rules"}, r"evolution\.review_kinds must be a list of strings"),
-    "review-kinds": ({"review_kinds": ["extension"]}, r"evolution\.review_kinds must name tree kinds"),
+    # The activation section decides whether a kept tree serves; these evolution settings are gone.
+    "publish": ({"publish": "review"}, r"evolution\.publish is gone: the activation section"),
+    "review-kinds": ({"review_kinds": ["code_extension"]}, r"evolution\.review_kinds is gone: the activation section"),
     "served-model": ({"models": {"served": {"url": "http://x", "model": "m"}}}, "may not name a model 'served'"),
     "policy": ({"evaluation": {"policy": "best"}}, r"evaluation\.policy must be one of compare, floor, none"),
     "statistic": ({"evaluation": {"statistic": "median"}}, r"evaluation\.statistic must be one of wins, mean"),
     "margin": ({"evaluation": {"min_margin": -1}}, r"evaluation\.min_margin must be at least 0"),
     "floor-score": ({"evaluation": {"floor_score": 0}}, r"evaluation\.floor_score must be positive"),
     "repeats": ({"evaluation": {"repeats": 0}}, r"evaluation\.repeats must be at least 1"),
-    "timeout": ({"evaluation": {"episode_timeout_s": 0}}, r"evaluation\.episode_timeout_s must be positive"),
+    "timeout": ({"evaluation": {"rollout_timeout_s": 0}}, r"evaluation\.rollout_timeout_s must be positive"),
     "residue-type": ({"evaluation": {"forbid_residue": "maybe"}}, r"evaluation\.forbid_residue must be a valid bool"),
     "recheck-floor": ({"evaluation": {"policy": "floor", "recheck_every": 2}}, "recheck_every compares two trees"),
     "promoter-alone": (
@@ -217,6 +224,26 @@ def test_an_invalid_setting_refuses_boot_naming_it(section: dict, message: str) 
     evolution = {key: value for key, value in section.items() if key != "evaluation"}
     with pytest.raises(RecipeConfigError, match=message):
         from_config(evolution_config(evaluation=evaluation, **evolution))
+
+
+def test_the_activation_section_names_the_rule_that_decides_whether_a_kept_tree_serves() -> None:
+    """Whether a kept tree serves is the top-level ``activation`` section's rule, not an ``evolution`` setting
+    (``INVALID_SETTINGS`` refuses the retired ``publish`` and ``review_kinds``)."""
+
+    def config(activation: dict | None = None, **evolution: Any) -> dict:
+        built = evolution_config(**evolution)
+        if activation is not None:
+            built["activation"] = activation
+        return built
+
+    reviewed = from_config(config({"module": "always", "config": {"review_kinds": ["code_extension"]}}))
+    rule = reviewed.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
+    default = from_config(config()).activation_rule()
+    assert isinstance(default, AlwaysActivate) and default.review_kinds == frozenset()
+    assert isinstance(from_config(config({"module": "never"})).activation_rule(), NeverActivate)
+    with pytest.raises(RecipeConfigError, match="review_kinds must be a list"):
+        from_config(config({"module": "always", "config": {"review_kinds": "rules"}}))
 
 
 @pytest.mark.parametrize(
@@ -240,7 +267,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
     try:
         assert type(trainer.candidate_evaluator) is policy
         assert {name: vars(trainer.candidate_evaluator)[name] for name in fields} == fields
-        # With no episode to run, the backend holds no evaluator.
+        # With no rollout to run, the backend holds no evaluator.
         assert (trainer.candidate_backend.evaluator is None) == (policy is NoEvaluationPolicy)
     finally:
         trainer.close()
@@ -297,7 +324,7 @@ def test_the_seed_is_a_directory_whose_tree_is_the_base_release(tmp_path: Path) 
     seed = tmp_path / "seed"
     PI_SEED.write(seed)
     built = from_config(evolution_config(seed=str(seed)))
-    assert built.seed == PI_SEED and built.base_artifact_files() == dict(PI_SEED.files)
+    assert built.seed == PI_SEED and built.base_artifact_source().files == dict(PI_SEED.files)
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed must be a string"):
         from_config(evolution_config(seed=["rules.md"]))
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed: harness tree directory .* does not exist"):
@@ -474,17 +501,17 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         )
 
 
-def test_recipe_selects_the_episode_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recipe_selects_the_rollout_executor(monkeypatch: pytest.MonkeyPatch) -> None:
     """evolution.executor selects the executor; local is the default, and a sandbox that cannot isolate refuses
     at recipe build."""
     assert type(from_config(evolution_config()).executor).__name__ == "LocalExecutor"
     assert type(from_config(evolution_config(executor="local")).executor).__name__ == "LocalExecutor"
-    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(RecipeConfigError, match="bubblewrap"):
         from_config(evolution_config(executor="sandbox"))
 
 
-def test_recipe_forwards_the_episode_executor_to_every_episode(tmp_path: Path, monkeypatch) -> None:
+def test_recipe_forwards_the_rollout_executor_to_every_rollout(tmp_path: Path, monkeypatch) -> None:
     class SentinelExecutor(LocalExecutor):
         pass
 
@@ -493,11 +520,11 @@ def test_recipe_forwards_the_episode_executor_to_every_episode(tmp_path: Path, m
 
     def spy(*args, **kwargs):
         seen.append(kwargs["executor"])
-        return run_episode(*args, **kwargs)
+        return run_rollout(*args, **kwargs)
 
-    from reef.evaluation.harness.runner import run_episode
+    from reef.evaluation.harness.runner import run_rollout
 
-    monkeypatch.setattr(RUN_EPISODE, spy)
+    monkeypatch.setattr(RUN_ROLLOUT, spy)
     recipe = dataclasses.replace(harness_recipe(tmp_path, lambda workspace, tools: MARKER), executor=executor)
     step(backend_of(recipe))
     assert seen and all(received is executor for received in seen)
@@ -541,22 +568,22 @@ def test_adapter_without_model_binding_refuses_boot(tmp_path: Path, monkeypatch)
         backend_of(built)
 
 
-def test_model_binding_reaches_episodes_but_never_the_published_tree(tmp_path: Path, monkeypatch) -> None:
-    """The deployment's endpoint renders into each evaluation episode through the adapter's model_binding
+def test_model_binding_reaches_rollouts_but_never_the_published_tree(tmp_path: Path, monkeypatch) -> None:
+    """The deployment's endpoint renders into each evaluation rollout through the adapter's model_binding
     template; the published release is the source tree, which carries no provider."""
-    from reef.evaluation.harness.runner import run_episode
+    from reef.evaluation.harness.runner import run_rollout
 
     seen: list[dict[str, str]] = []
 
     def spy(descriptor, files, prompt, **kwargs):
         seen.append(dict(files))
-        return run_episode(descriptor, files, prompt, **kwargs)
+        return run_rollout(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(RUN_EPISODE, spy)
+    monkeypatch.setattr(RUN_ROLLOUT, spy)
     backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
     result = step(backend)
 
-    assert seen, "evaluation ran episodes"
+    assert seen, "evaluation ran rollouts"
     models = json.loads(seen[0]["pi-agent/models.json"])
     assert models["providers"]["reef"]["baseUrl"] == "http://localhost:8000/v1"
     assert models["providers"]["reef"]["apiKey"] == "dummy"
@@ -566,16 +593,16 @@ def test_model_binding_reaches_episodes_but_never_the_published_tree(tmp_path: P
     assert not any("dummy" in text or "localhost" in text for text in published.files.values())
 
 
-def test_episodes_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, monkeypatch) -> None:
-    """A scenario's model setting is read once per step; that step's episodes render and score with it."""
-    from reef.evaluation.harness.runner import run_episode
+def test_rollouts_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, monkeypatch) -> None:
+    """A scenario's model setting is read once per step; that step's rollouts render and score with it."""
+    from reef.evaluation.harness.runner import run_rollout
 
     rendered: list[str] = []
     scored: list[str] = []
 
     def spy(descriptor, files, prompt, **kwargs):
         rendered.append(json.loads(files["pi-agent/settings.json"])["defaultModel"])
-        return run_episode(descriptor, files, prompt, **kwargs)
+        return run_rollout(descriptor, files, prompt, **kwargs)
 
     def score(task, result, models):
         scored.append(models.served.model)
@@ -584,7 +611,7 @@ def test_episodes_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, 
     def endpoint(model: str) -> dict:
         return {"url": MODEL.base_url, "model": model, "api_key": "scoped"}
 
-    monkeypatch.setattr(RUN_EPISODE, spy)
+    monkeypatch.setattr(RUN_ROLLOUT, spy)
     config_value = ModelConfig.from_value(endpoint("first-model"))
     recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, score=score).with_model_config(config_value)
     backend = backend_of(recipe)
@@ -614,7 +641,7 @@ def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
-    """Told where Reef answers inference, episodes sample the release the scenario serves through it."""
+    """Told where Reef answers inference, rollouts sample the release the scenario serves through it."""
     config = {"model": {"path": "qwen3-8b"}, **evolution_config()}
     recipe = HarnessEvolutionRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
     assert recipe.model_binding().base_url == "http://upstream.test"
@@ -659,9 +686,9 @@ def test_settle_records_the_context_the_evaluation_ran_in(tmp_path: Path) -> Non
     assert step(backend).metrics["evaluation_context"] == context.key()
 
 
-@pytest.mark.parametrize("change", ["none", "binary", "episode-executor", "scorer-config", "named-model"])
+@pytest.mark.parametrize("change", ["none", "binary", "rollout-executor", "scorer-config", "named-model"])
 def test_the_cache_reuses_a_score_only_in_the_context_it_ran_in(tmp_path: Path, change: str) -> None:
-    """A new harness binary, episode executor, scorer config or named model (a judge scorer reads it) is a new
+    """A new harness binary, rollout executor, scorer config or named model (a judge scorer reads it) is a new
     evaluation context: no score from before the change is reused. The config names the scorer, so two builds name
     it alike."""
     judge = {"url": MODEL.base_url, "model": "judge-a", "api_key": "dummy"}
@@ -669,7 +696,7 @@ def test_the_cache_reuses_a_score_only_in_the_context_it_ran_in(tmp_path: Path, 
     changes: dict[str, dict[str, Any]] = {
         "none": {},
         "binary": {"binary": str(make_pi_binary(tmp_path / "other"))},
-        "episode-executor": {"sandbox": {"limits": {"cpu_seconds": 60}}},
+        "rollout-executor": {"sandbox": {"limits": {"cpu_seconds": 60}}},
         "scorer-config": {"evaluation": {"scorer": {"module": f"{SUPPORT}:FixedScorer", "config": {"score": 0.5}}}},
         "named-model": {"models": {"judge": {**judge, "model": "judge-b"}}},
     }
@@ -679,27 +706,27 @@ def test_the_cache_reuses_a_score_only_in_the_context_it_ran_in(tmp_path: Path, 
         "models": {"judge": judge},
     }
 
-    def episode(step_number: int, evaluation: dict[str, Any] | None = None, **evolution: Any):
+    def rollout(step_number: int, evaluation: dict[str, Any] | None = None, **evolution: Any):
         settings = evolution_config(evaluation=evaluation, **{**deployment, **evolution})
         backend = backend_of(from_config(settings, runtime=runtime()))
         try:
             backend.history.add_candidate(PI_SEED, step=1, origin="seed")
-            (record,) = backend.evaluator.episodes(PI_SEED, ["t"], repeats=1, step=step_number)
+            (record,) = backend.evaluator.rollouts(PI_SEED, ["t"], repeats=1, step=step_number)
         finally:
             backend.close()
         return record
 
-    first = episode(1)
-    assert (episode(2, **changes[change]) == first) is (change == "none")
+    first = rollout(1)
+    assert (rollout(2, **changes[change]) == first) is (change == "none")
 
 
-# -- the evaluation episodes ---------------------------------------------------------------------
+# -- the evaluation rollouts ---------------------------------------------------------------------
 
 
-def test_episode_settings_reach_the_episodes_and_interleave_the_sides(tmp_path: Path, monkeypatch) -> None:
-    """episode_timeout_s reaches every run_episode call, a repeat is one more pairing of the same task, and
-    episodes alternate candidate and current inside each pairing instead of running batched by side."""
-    from reef.evaluation.harness.runner import run_episode
+def test_rollout_settings_reach_the_rollouts_and_interleave_the_sides(tmp_path: Path, monkeypatch) -> None:
+    """rollout_timeout_s reaches every run_rollout call, a repeat is one more pairing of the same task, and
+    rollouts alternate candidate and current inside each pairing instead of running batched by side."""
+    from reef.evaluation.harness.runner import run_rollout
 
     sides: list[str] = []
     timeouts: list[float] = []
@@ -707,24 +734,24 @@ def test_episode_settings_reach_the_episodes_and_interleave_the_sides(tmp_path: 
     def spy(descriptor, files, prompt, **kwargs):
         timeouts.append(kwargs["timeout"])
         sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
-        return run_episode(descriptor, files, prompt, **kwargs)
+        return run_rollout(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(RUN_EPISODE, spy)
+    monkeypatch.setattr(RUN_ROLLOUT, spy)
     backend, _ = harness_backend(
-        tmp_path, lambda workspace, tools: MARKER, evaluation={"episode_timeout_s": 5.0, "repeats": 2}
+        tmp_path, lambda workspace, tools: MARKER, evaluation={"rollout_timeout_s": 5.0, "repeats": 2}
     )
     result = step(backend)
     assert timeouts == [5.0] * 4
     assert sides == ["candidate", "current", "candidate", "current"]
-    assert result.metrics["episode_repeats"] == 2
+    assert result.metrics["rollout_repeats"] == 2
     # The history keeps the score of each repeat; the commit keeps only their sum.
     assert backend.history.scores(PI_SEED.apply(MARKER).checksum(), ("task one",), repeats=2) == (1.0, 1.0)
     assert result.metrics["candidate_score"] == 2.0 and "candidate_scores" not in result.metrics
 
 
-def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: Path) -> None:
-    """Files an episode leaves outside the cleanup whitelist are counted into the evaluation; with
-    forbid_residue a littering episode scores as one that could not run, so it cannot win."""
+def test_littering_rollouts_are_counted_and_forbid_residue_fails_them(tmp_path: Path) -> None:
+    """Files a rollout leaves outside the cleanup whitelist are counted into the evaluation; with
+    forbid_residue a littering rollout scores 0 and counts as a rollout failure, so it cannot win."""
     litterer = tmp_path / "fake-pi-littering"
     litterer.write_text(
         PI_FAKE.replace(
@@ -736,7 +763,7 @@ def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: 
     litterer.chmod(0o755)
     counted = step(backend_of(harness_recipe(tmp_path, lambda workspace, tools: MARKER, binary=str(litterer))))
     assert counted.metrics["candidate_residue"] == 1 and counted.metrics["current_residue"] == 1
-    assert counted.metrics["episode_failures"] == 0
+    assert counted.metrics["rollout_failures"] == 0
     (tmp_path / "forbidden").mkdir()
     strict = backend_of(
         harness_recipe(
@@ -747,29 +774,30 @@ def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: 
         )
     )
     forbidden = step(strict)
-    assert forbidden.metrics["episode_failures"] == 2 and forbidden.metrics["selected"] is False
-    # Both trees' episodes failed on their residue, as the history records them.
-    failed = {(record.tree, record.score, record.failure.stage) for record in strict.history.episodes}
-    assert failed == {(PI_SEED.apply(MARKER).checksum(), None, "residue"), (PI_SEED.checksum(), None, "residue")}
+    assert forbidden.metrics["rollout_failures"] == 2 and forbidden.metrics["selected"] is False
+    # Both trees' rollouts ran and their residue was refused: each scores 0 with the residue failure, as the
+    # history records them.
+    failed = {(record.tree, record.score.value, record.failure.stage) for record in strict.history.rollouts}
+    assert failed == {(PI_SEED.apply(MARKER).checksum(), 0.0, "residue"), (PI_SEED.checksum(), 0.0, "residue")}
 
 
-def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
-    """An unlaunchable episode loses its pairing but puts no -inf into the metrics, which the commit history
+def test_failed_rollouts_are_counted_never_scored(tmp_path: Path) -> None:
+    """An unlaunchable rollout loses its pairing but puts no -inf into the metrics, which the commit history
     writes as JSON."""
     recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, binary=str(tmp_path / "no-such-binary"))
     result = step(backend_of(recipe))
-    assert result.metrics["episode_failures"] == 2  # both sides, one task
+    assert result.metrics["rollout_failures"] == 2  # both sides, one task
     assert result.metrics["selected"] is False  # both failed: a tie
     json.loads(json.dumps(result.metrics, allow_nan=False))
 
 
 def test_a_scorer_that_fails_or_returns_no_number_aborts_the_step_and_the_next_one_runs(tmp_path: Path) -> None:
     def broken(task, result):
-        raise RuntimeError("episode scorer bug")
+        raise RuntimeError("rollout scorer bug")
 
     patches = iter((MARKER,))
     backend, _ = harness_backend(tmp_path, lambda workspace, tools: next(patches, None), score=broken)
-    with pytest.raises(RuntimeError, match="episode scorer bug"):
+    with pytest.raises(RuntimeError, match="rollout scorer bug"):
         step(backend)
     assert step(backend).metrics["skipped"] == UNCHANGED
 
@@ -777,7 +805,7 @@ def test_a_scorer_that_fails_or_returns_no_number_aborts_the_step_and_the_next_o
     backend, _ = harness_backend(
         tmp_path / "nan", lambda workspace, tools: MARKER, score=lambda task, result: float("nan")
     )
-    with pytest.raises(ValueError, match="episode scorer returned a non-finite score"):
+    with pytest.raises(ValueError, match="rollout scorer returned a non-finite score"):
         step(backend)
 
 
@@ -788,7 +816,7 @@ def task_order_score(task, result):
 
 
 def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
-    """With more than one worker, evaluation episodes of the candidate and the current tree run at once and
+    """With more than one worker, evaluation rollouts of the candidate and the current tree run at once and
     still report in task order."""
     barrier = tmp_path / "barrier"
     barrier.mkdir()
@@ -818,14 +846,14 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
     try:
         evaluation = backend.evaluate(prepared.candidate)
         assert len(list(barrier.iterdir())) == 4
-        assert evaluation.metrics["candidate_scores"] == (0.0, 1.0)
-        assert evaluation.metrics["current_scores"] == (0.0, 1.0)
+        assert flat(evaluation.metrics["candidate_scores"]) == [0.0, 1.0]
+        assert flat(evaluation.metrics["current_scores"]) == [0.0, 1.0]
     finally:
         backend.close()
 
 
 @pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
-def test_real_episodes_run_on_the_selected_worker_backend(tmp_path, workers, expected, caplog):
+def test_real_rollouts_run_on_the_selected_worker_backend(tmp_path, workers, expected, caplog):
     recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, tasks=("task one", "task two"))
     backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=workers)))
     assert backend.evaluator.worker_pool.selection.settings.backend == expected
@@ -833,16 +861,16 @@ def test_real_episodes_run_on_the_selected_worker_backend(tmp_path, workers, exp
     prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
     with caplog.at_level("INFO"):
         result = backend.evaluate(prepared.candidate)
-    assert result.metrics["candidate_scores"] == (1.0, 1.0)
-    assert result.metrics["current_scores"] == (0.0, 0.0)
+    assert flat(result.metrics["candidate_scores"]) == [1.0, 1.0]
+    assert flat(result.metrics["current_scores"]) == [0.0, 0.0]
     assert f"executor={expected}" in caplog.text
     backend.close()
 
 
-def episode_worker_for(adapter: str, scorer) -> EpisodeEvaluationWorker:
-    return EpisodeEvaluationWorker(
+def rollout_worker_for(adapter: str, scorer) -> RolloutEvaluationWorker:
+    return RolloutEvaluationWorker(
         descriptor=get_adapter(adapter),
-        scorer=resolve_episode_scorer(scorer),
+        scorer=resolve_rollout_scorer(scorer),
         binary=None,
         timeout=10,
         executor=LocalExecutor(),
@@ -850,29 +878,32 @@ def episode_worker_for(adapter: str, scorer) -> EpisodeEvaluationWorker:
     )
 
 
-def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not_run() -> None:
+def test_a_native_turn_that_ended_on_an_error_ranks_as_a_rollout_that_could_not_run() -> None:
     """A tree that cannot load or a graph that cannot run writes no answer; it ranks below every real score
     instead of tying a current tree that also scored nothing. Any other nonzero exit still scores."""
-    worker = episode_worker_for("pi", marker_score)
+    worker = rollout_worker_for("pi", marker_score)
     session = {"type": "session", "seq": 0, "time": 0, "data": {"agent": "root"}}
 
-    def result(reason: dict, exit_code: int) -> EpisodeResult:
+    def result(reason: dict, exit_code: int) -> RolloutResult:
         end = {"type": "turn/end", "seq": 2, "time": 0, "data": {"turn": 1, "reason": reason}, "rules": "marker"}
-        return EpisodeResult(exit_code=exit_code, stdout="", stderr="boom", trajectory=(session, end), residue=())
+        return RolloutResult(exit_code=exit_code, stdout="", stderr="boom", trajectory=(session, end), residue=())
 
     error = {"code": "LOAD_ERROR", "message": "tool 'x' cannot load"}
     errored = worker.score_result(result({"kind": "error", "error": error}, 1), "task one", MODELS)
-    assert errored.score is None and errored.failure is not None
+    # The tree gave no answer: the rollout ran, so it scores 0 and names why.
+    assert errored.score == RolloutScore.scored(0.0) and errored.failure is not None
     assert errored.failure.stage == "graph" and errored.failure.cause == "LOAD_ERROR: tool 'x' cannot load"
     assert errored.path == {"stages": [], "reason": "error", "error": error}
     crashed = worker.score_result(result({"kind": "completed"}, 1), "task one", MODELS)
-    assert crashed.score == 1.0 and crashed.failure is not None and crashed.failure.stage == "exit"
+    assert (
+        crashed.score == RolloutScore.scored(1.0) and crashed.failure is not None and crashed.failure.stage == "exit"
+    )
     assert crashed.path == {"stages": [], "reason": "completed"}
 
 
-def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run() -> None:
-    """A subagent's model error aborts the whole run with no root turn/end; the episode could not run either."""
-    worker = episode_worker_for("pi", marker_score)
+def test_an_agents_error_that_ended_the_run_ranks_the_rollout_as_one_that_could_not_run() -> None:
+    """A subagent's model error aborts the whole run with no root turn/end; the rollout could not run either."""
+    worker = rollout_worker_for("pi", marker_score)
     error = {"code": "MODEL_ERROR", "message": "the endpoint answered 500"}
     trajectory = (
         {"type": "session", "seq": 0, "time": 0, "data": {"agent": "checker"}},
@@ -880,9 +911,9 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
         {"type": "session", "seq": 0, "time": 0, "data": {"agent": "root"}},
         {"type": "stage/exit", "seq": 1, "time": 0, "data": {"stage": "think"}, "rules": "marker"},
     )
-    result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
+    result = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
     scored = worker.score_result(result, "task one", MODELS)
-    assert scored.score is None and scored.failure is not None and scored.failure.stage == "graph"
+    assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "graph"
     assert scored.failure.cause == "agent checker: MODEL_ERROR: the endpoint answered 500"
     assert scored.path == {"stages": ["think"], "reason": None, "error": error, "errored_agent": "checker"}
     # An agent that errored while the root still finished its turn is the root's business: the turn scores.
@@ -897,50 +928,51 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
         },
     )
     scored = worker.score_result(
-        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=finished, residue=()), "task one", MODELS
+        RolloutResult(exit_code=0, stdout="", stderr="", trajectory=finished, residue=()), "task one", MODELS
     )
-    assert scored.score == 1.0 and scored.failure is None
+    assert scored.score == RolloutScore.scored(1.0) and scored.failure is None
     assert scored.path == {"stages": ["think"], "reason": "completed"}
 
 
-def test_an_episode_whose_log_the_reader_found_empty_says_no_transcript_was_read() -> None:
-    """A reader that found no session log leaves a text grader nothing to read: the score stands and the episode is
+def test_a_rollout_whose_log_the_reader_found_empty_says_no_transcript_was_read() -> None:
+    """A reader that found no session log leaves a text grader nothing to read: the score stands and the rollout is
     no failure, but it says no transcript was read, so a step rejected on it does not blame the request. The reply a
     grader reads rides the result."""
-    worker = episode_worker_for("pi", lambda task, result: 0.0)
-    empty = EpisodeResult(exit_code=0, stdout="reef-ok", stderr="", trajectory=(), residue=())
+    worker = rollout_worker_for("pi", lambda task, result: 0.0)
+    empty = RolloutResult(exit_code=0, stdout="reef-ok", stderr="", trajectory=(), residue=())
     scored = worker.score_result(empty, "task one", MODELS)
-    assert scored.score == 0.0 and scored.reply is None
+    assert scored.score == RolloutScore.scored(0.0) and scored.reply is None
     assert scored.failure is None and scored.transcript_read is False
     answered = ({"role": "assistant", "content": "reef-ok"},)
     scored = worker.score_result(
-        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=answered, residue=()), "task one", MODELS
+        RolloutResult(exit_code=0, stdout="", stderr="", trajectory=answered, residue=()), "task one", MODELS
     )
     assert scored.failure is None and scored.reply == "reef-ok"
 
 
-def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run() -> None:
+def test_a_terminus_trial_that_never_ran_ranks_as_a_rollout_that_could_not_run() -> None:
     """The runner records a trial whose image did not build or whose agent could not start as a failed verifier
     row with the error; it ranks below every real score and the error reaches the manifest."""
-    worker = episode_worker_for("terminus", verifier_reward)
+    worker = rollout_worker_for("terminus", verifier_reward)
 
     def row(error: str) -> dict:
         return {"type": "verifier", "task": "task one", "rewards": {}, "reward": None, "failed": True, "error": error}
 
-    never_ran = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row("docker build failed"),), residue=())
+    never_ran = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=(row("docker build failed"),), residue=())
     scored = worker.score_result(never_ran, "task one", MODELS)
-    assert scored.score is None and scored.failure is not None
+    # The trial never ran: the environment, not the tree, failed it.
+    assert scored.score.is_failed and scored.failure is not None
     assert scored.failure.stage == "trial" and scored.failure.cause == "docker build failed"
     # A verifier that ran and wrote nothing is the agent's loss: it scores through the scorer.
-    wrote_nothing = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
+    wrote_nothing = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
     scored = worker.score_result(wrote_nothing, "task one", MODELS)
-    assert scored.score == 0.0 and scored.failure is not None and scored.failure.stage == "exit"
+    assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "exit"
 
 
-def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Path) -> None:
+def test_a_terminus_rollout_with_agent_steps_scores_by_its_verifier(tmp_path: Path) -> None:
     """A terminus trial's ATIF steps carry their text as a plain string ``message``: scoring reads the verifier's
     reward and finds no assistant reply, instead of taking the step's text for a wrapped message."""
-    worker = episode_worker_for("terminus", verifier_reward)
+    worker = rollout_worker_for("terminus", verifier_reward)
     steps = [
         {"step_id": 1, "source": "user", "message": "Write the output of `echo reef-ok` to health.txt."},
         {"step_id": 2, "source": "agent", "model_name": "m", "message": "Analysis: fresh terminal.\nPlan: run it."},
@@ -949,9 +981,9 @@ def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Pa
     (tmp_path / "health.json").write_text(json.dumps(trial), encoding="utf-8")
     trajectory = TerminusAtifReader()(tmp_path)
     scored = worker.score_result(
-        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health", MODELS
+        RolloutResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health", MODELS
     )
-    assert scored.score == 1.0 and scored.failure is None and scored.reply is None
+    assert scored.score == RolloutScore.scored(1.0) and scored.failure is None and scored.reply is None
 
 
 # -- the evaluation tasks grown from traffic ------------------------------------------------------
@@ -1033,7 +1065,7 @@ def test_a_recheck_runs_at_once_when_the_served_model_changes(tmp_path: Path) ->
     )
     first = step(backend)
     assert first.metrics["selected"] is True
-    assert HarnessState.from_json(first.state).rollback_context == backend.context_key()
+    assert HarnessState.from_json(first.state).recheck_context == backend.context_key()
     releases.publish("r1", HarnessTree.read(first.artifact.local_path))
     # Same model, step 2 of a 100 step cadence: no recheck.
     same = step(backend, first.state)
@@ -1047,13 +1079,53 @@ def test_a_recheck_runs_at_once_when_the_served_model_changes(tmp_path: Path) ->
     assert "recheck" not in after.metrics and stepped == [1, 2, 4]
 
 
-def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_path: Path) -> None:
-    """Under review a win is minted into the catalog but not served; promote serves it as the new head through
-    the rollback path."""
+def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Path) -> None:
+    """The held tip's metadata names what served, so a restart that lost the history serves that, not the tip."""
+    patches = iter((MARKER,))
+    built = harness_recipe(
+        tmp_path, lambda workspace, tools: next(patches, None), activation=PluginReference(NeverActivate, {})
+    )
+    factory = harness_repository(tmp_path, built.base_artifact_source().files)
+
+    def open_dispatcher() -> Dispatcher:
+        return Dispatcher(
+            built,
+            factory,
+            local_artifact_dir=tmp_path / "staged",
+            scenario_storage=SQLiteScenarioStorage(),
+            hold_local_cycles=True,
+        )
+
+    dispatcher = open_dispatcher()
+    try:
+        scenario = dispatcher.get_or_create_scenario("review")
+        assert scenario is not None
+        served = scenario.current_artifact_ref()
+        run_step(scenario, "1")
+        tip = scenario.repository.require_checkpoint_artifact()
+        assert tip != served and scenario.current_artifact_ref() == served
+    finally:
+        dispatcher.close()
+
+    reopened = open_dispatcher()
+    try:
+        recovered = reopened.get_or_create_scenario("review")
+        assert recovered is not None
+        assert recovered.repository.require_checkpoint_artifact() == tip
+        assert recovered.current_artifact_ref() == served
+    finally:
+        reopened.close()
+
+
+def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path: Path) -> None:
+    """Under the never rule a kept tree is minted into the catalog but not served; an activation serves that release
+    itself."""
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
-        harness_recipe(tmp_path, lambda workspace, tools: next(patches, None), publish="review"),
+        harness_recipe(
+            tmp_path, lambda workspace, tools: next(patches, None), activation=PluginReference(NeverActivate, {})
+        ),
         hold_local_cycles=True,
     )
     try:
@@ -1061,36 +1133,122 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert scenario is not None
         head_before = scenario.current_artifact_ref()
         result = run_step(scenario, "1")
-        assert result.pending is True
+        assert result.changed_kinds == {"rules"}
         record = scenario.store.history()[-1]
-        assert record.operation == "training" and record.pending is True and record.checkpoint is True
+        assert record.operation == "training" and record.activated is False and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
-        row = scenario.releases()[0]
-        assert row["release_id"] == record.artifact_ref.release_id
-        assert row["pending"] is True and row["restorable"] is True
+        row = scenario.artifacts()[0]
+        assert row["release_id"] == row["artifact_id"] == record.artifact_ref.release_id
+        assert row["active"] is False
         tree = scenario.surface.files
-        pending_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
-        assert any("marker" in text for text in pending_files.values())
+        held_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
+        assert any("marker" in text for text in held_files.values())
         served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert not any("marker" in text for text in served_files.values())
 
-        promoted = dispatcher.promote("review", row["release_id"])
-        assert promoted.release_id != row["release_id"]
-        assert scenario.current_artifact_ref() == promoted
+        activated = dispatcher.activate("review", row["artifact_id"])
+        assert activated.release_id == row["release_id"]
+        assert scenario.current_artifact_ref() == record.artifact_ref
         served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
-        assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
-        assert scenario.releases()[0]["pending"] is False
+        assert last.operation == "activate" and last.artifact_ref == record.artifact_ref
+        assert scenario.artifacts()[0]["active"] is True
     finally:
         dispatcher.close()
 
 
-def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
+def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: Path) -> None:
+    """``train-from`` sets the tree the next step evolves; what serves stays, and a restart keeps the start."""
+
+    def markers(task: str, result: RolloutResult) -> float:
+        return float(result.trajectory[-1]["rules"].count("marker"))
+
+    def recipe(*labels: str) -> HarnessEvolutionRecipe:
+        """Each step appends one marker line, named by the next label, to the rules of the tree it evolves."""
+        remaining = iter(labels)
+
+        def method(workspace, tools):
+            label = next(remaining, None)
+            if label is None:
+                return None
+            return TreePatch(changed_rules(workspace.tree().files["rules.md"] + f"marker {label}\n"))
+
+        return harness_recipe(tmp_path, method, score=markers)
+
+    def open_dispatcher(built: HarnessEvolutionRecipe) -> Dispatcher:
+        return Dispatcher(
+            built,
+            factory,
+            local_artifact_dir=tmp_path / "staged",
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+            hold_local_cycles=True,
+        )
+
+    def rules_of(scenario, release_id: str) -> str:
+        """Every file text of the release ``release_id``, joined: the rules render into one of them."""
+        files = scenario.surface.files.read_files(scenario.release_queries.artifact_for_version(release_id))
+        return "".join(files.values())
+
+    first_recipe = recipe("r1", "r2")
+    # One repository across the restart, as a durable backend keeps it.
+    factory = harness_repository(tmp_path, first_recipe.base_artifact_source().files)
+    dispatcher = open_dispatcher(first_recipe)
+    try:
+        scenario = dispatcher.get_or_create_scenario("start")
+        assert scenario is not None
+        for suffix in ("1", "2"):
+            result = run_step(scenario, suffix)
+            assert result.artifact is not None
+        second, first = scenario.artifacts()[:2]
+        assert second["active"] and "marker r2" in rules_of(scenario, second["release_id"])
+
+        started = dispatcher.train_from("start", first["artifact_id"])
+        assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
+        # What serves stays the second release.
+        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        record = scenario.store.history()[-1]
+        assert (record.operation, record.artifact_ref.release_id) == ("train_from", first["release_id"])
+    finally:
+        dispatcher.close()
+
+    # A restart before the trainer's next commit takes the start again from the train_from record.
+    restarted = open_dispatcher(recipe("r3"))
+    try:
+        scenario = restarted.get_or_create_scenario("start")
+        assert scenario is not None
+        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
+        # chain tip, the second release.
+        result = run_step(scenario, "3")
+        assert result.artifact is not None
+        newest = scenario.store.history()[-1]
+        assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["release_id"]
+        evolved = rules_of(scenario, newest.artifact_ref.release_id)
+        assert "marker r1" in evolved and "marker r3" in evolved and "marker r2" not in evolved
+    finally:
+        restarted.close()
+
+
+def test_review_kinds_hold_only_kept_trees_that_touch_a_listed_kind(tmp_path: Path) -> None:
+    """A kept tree names the kinds it changes; the always rule holds it only when one of them is reviewed."""
+    backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
+    result = step(backend)
+    assert result.artifact is not None and result.changed_kinds == {"rules"}
+    made = MadeArtifact(None, result.changed_kinds)
+    assert AlwaysActivate().activates(made)
+    assert not AlwaysActivate(frozenset({"rules"})).activates(made)
+    assert AlwaysActivate(frozenset({"skill"})).activates(made)
+    assert not NeverActivate().activates(made)
+
+
+def test_activate_http_route_serves_an_inactive_release(tmp_path: Path) -> None:
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
-        harness_recipe(tmp_path, lambda workspace, tools: next(patches, None), publish="review"),
+        harness_recipe(
+            tmp_path, lambda workspace, tools: next(patches, None), activation=PluginReference(NeverActivate, {})
+        ),
         hold_local_cycles=True,
     )
 
@@ -1098,16 +1256,22 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         scenario = dispatcher.get_or_create_scenario("review-http")
         assert scenario is not None
         run_step(scenario, "1")
-        pending_id = scenario.releases()[0]["release_id"]
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            listed = await client.get("/reef/scenarios/review-http/releases")
-            assert listed.status == 200 and (await listed.json())["releases"][0]["pending"] is True
-            promoted = await client.post("/reef/scenarios/review-http/promote", json={"release_id": pending_id})
-            assert promoted.status == 200 and (await promoted.json())["release_id"] != pending_id
-            missing = await client.post("/reef/scenarios/review-http/promote", json={"release_id": "missing"})
+            listed = await client.get("/reef/scenarios/review-http/artifacts")
+            assert listed.status == 200
+            row = (await listed.json())["artifacts"][0]
+            assert row["active"] is False
+            activated = await client.post(
+                "/reef/scenarios/review-http/activate", json={"artifact_id": row["artifact_id"]}
+            )
+            assert activated.status == 200
+            assert (await activated.json())["release_id"] == row["release_id"]
+            missing = await client.post("/reef/scenarios/review-http/activate", json={"artifact_id": "missing"})
             assert missing.status == 404
+            listed = await client.get("/reef/scenarios/review-http/artifacts")
+            assert (await listed.json())["artifacts"][0]["active"] is True
         finally:
             await client.close()
 
@@ -1117,14 +1281,15 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_pending_requires_durable_bytes() -> None:
-    """Only a step with bytes to promote later can ask to be held back, so a no-artifact step is refused where
-    it is built."""
-    assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
-    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
-        TrainStepResult({}, {}, pending=True)
-    with pytest.raises(ValueError, match="pending must be a boolean"):
-        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
+def test_changed_kinds_describe_published_bytes() -> None:
+    """Only a step that publishes bytes changes node kinds, so a no-artifact step with kinds is refused where it is
+    built."""
+    published = TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds=frozenset({"rules"}))
+    assert published.changed_kinds == {"rules"}
+    with pytest.raises(ValueError, match="changed_kinds describe the artifact a step publishes"):
+        TrainStepResult({}, {}, changed_kinds=frozenset({"rules"}))
+    with pytest.raises(ValueError, match="changed_kinds must be a frozenset"):
+        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds={"rules"})
 
 
 # -- what a commit keeps --------------------------------------------------------------------------
@@ -1161,7 +1326,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     leak = TreePatch({"config/models.json": json.dumps({"providers": {"leak": {"apiKey": key}}}) + "\n"})
     patches = iter((leak,))
     built = harness_recipe(tmp_path, lambda workspace, tools: next(patches, None))
-    repository = harness_repository(tmp_path, built.base_artifact_files() or {})
+    repository = harness_repository(tmp_path, built.base_artifact_source().files)
     agent_record_dir = tmp_path / "agent-record"
 
     def dispatcher() -> Dispatcher:

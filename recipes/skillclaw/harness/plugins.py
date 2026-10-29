@@ -1,14 +1,14 @@
 """The plugin classes skillclaw.yaml names: ``evolution.method`` and ``evolution.evaluation.scorer``.
 
 ``NightMethod`` runs the night of ``skillclaw.py`` and then the probe
-episodes; ``ProbeScorer`` grades the probes with ``skillclaw.py``'s grader.
+rollouts; ``ProbeScorer`` grades the probes with ``skillclaw.py``'s grader.
 """
 
 from __future__ import annotations
 
 from reef.core.job_data import TrajectorySample
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.run import RolloutResult
 from reef.train.harness_backend import Method, StepContext, StepResult
 
 from . import skillclaw
@@ -22,11 +22,11 @@ class NightMethod(Method):
     backend calls ``step`` once per night.
 
     The night reads the ATIF trajectories of the step's traffic traces and
-    writes its patch to the workspace. The probe episodes then score the
+    writes its patch to the workspace. The probe rollouts then score the
     served pool and the night's pool on the evaluation tasks, and the step's
-    notes keep both as ``probe_scores``. They decide nothing:
-    skillclaw.yaml's ``policy: none`` publishes every night that changes the
-    pool, and the next day's traffic measures it. A night that changes
+    notes keep both as ``probe_scores``: each rollout's value, or
+    ``"failed"``. They decide nothing: skillclaw.yaml's ``policy: none``
+    keeps every night that changes the pool, and the next day's traffic measures it. A night that changes
     nothing leaves the served pool, and the step skips.
     """
 
@@ -49,14 +49,14 @@ class NightMethod(Method):
             return StepResult(summary)
         tasks = workspace.tasks()
         probes = {
-            side: [record.score for record in tools.evaluate(tree, tasks)]
+            side: [record.score.to_json() for record in tools.evaluate(tree, tasks)]
             for side, tree in (("served", served), ("night", night))
         }
         return StepResult(summary, {"probe_scores": probes})
 
 
-class ProbeScorer(EpisodeScorer):
-    """Exact last-line grading of the probe episodes (:func:`skillclaw.evaluate`)."""
+class ProbeScorer(RolloutScorer):
+    """Exact last-line grading of the probe rollouts (:func:`skillclaw.evaluate`)."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return skillclaw.evaluate(task, result)

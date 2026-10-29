@@ -1,4 +1,4 @@
-"""The task's engine session: start it for one episode, stop it for the verifier.
+"""The task's engine session: start it for one rollout, stop it for the verifier.
 
 Runs inside the task container with the pinned checkout's interpreter
 (``cd /opt/ceobench && .venv/bin/python /opt/ceobench-engine.py ...``) and

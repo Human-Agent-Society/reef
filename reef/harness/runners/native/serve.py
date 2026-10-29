@@ -12,7 +12,7 @@ replaces the current one between two steps of the open turn, or at once when
 no turn is open. A tree that does not render or load leaves the current host
 in place. Every mount, unmount and failed mount is an event in the open
 turn's session, else in ``sessions/serve.jsonl``. ``reef-native -p`` stays
-the episode form: one process, one turn.
+the rollout form: one process, one turn.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from typing import Any
 
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureError, CaptureProxy
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, LoadError, Session, _Loop, binding_from
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
 from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_loop_module

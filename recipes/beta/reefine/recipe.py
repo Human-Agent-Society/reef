@@ -3,12 +3,12 @@
 ``ReefineRecipe`` answers a person's training instructions, one step per
 instruction (``training_mode: manual``), with ``ReefineMethod``. It merges
 Reefine's defaults into the deployment's ``evolution`` section: the method,
-the seed beside this module, extensions held for a promote (``review_kinds``),
-and an evaluation that runs the candidate alone on the deployment's tasks,
-scored by ``AnswerScorer``, and publishes it when every task meets the floor.
-On the health task the floor checks that the tree still works, not that the
-requested change does; the step's design and review and the person judge
-that.
+the seed beside this module, and an evaluation that runs the candidate alone
+on the deployment's tasks, scored by ``AnswerScorer``, and keeps it when every
+task meets the floor. On the health task the floor checks that the tree still
+works, not that the requested change does; the step's design and review and
+the person judge that. By default, a person activates a tree that changes an
+extension (the ``activation`` rule's ``review_kinds``).
 
 Two keys of the section are Reefine's own. ``agent`` says where the
 coding agent that answers a request on pi runs (``agent_settings``), and
@@ -29,16 +29,16 @@ from recipes.beta.reefine.answer import EXTENSION_ADAPTER
 from recipes.beta.reefine.method import ReefineMethod
 from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree import TreeKind
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.interfaces import MultimodalRelay
-from reef.sandbox.config import REMOTE_EXECUTORS, remote_executor
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -49,8 +49,12 @@ SEED_DIRECTORY = Path(__file__).with_name("seed")
 EVOLUTION_DEFAULTS: Mapping[str, Any] = {
     "method": f"{ReefineMethod.__module__}:{ReefineMethod.__qualname__}",
     "seed": str(SEED_DIRECTORY),
-    # An extension runs in the harness's process, so it waits for a person.
-    "review_kinds": [TreeKind.CODE_EXTENSION.value],
+}
+#: Reefine's ``activation`` section when the deployment names none. An extension runs in the harness's process with
+#: the user's privileges, so a person activates a tree that changes one.
+ACTIVATION_DEFAULT: Mapping[str, Any] = {
+    "module": "always",
+    "config": {"review_kinds": [TreeKind.CODE_EXTENSION.value]},
 }
 EVALUATION_DEFAULTS: Mapping[str, Any] = {
     "policy": "floor",
@@ -69,7 +73,7 @@ class AgentSettings:
     ``ReefineRecipe.build_backend`` binds it for each scenario.
     """
 
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     timeout_s: float
     trial_timeout_s: float
 
@@ -152,7 +156,7 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
 
 @dataclass(frozen=True, kw_only=True)
 class ReefineRecipe(HarnessEvolutionRecipe):
-    """Refine a harness once per instruction, with extensions held for review.
+    """Refine a harness once per instruction; a person activates a tree that changes an extension.
 
     Values: the fields of ``HarnessEvolutionRecipe``, read with Reefine's
     defaults merged in. ``multimodal`` is ``evolution.multimodal`` read,
@@ -163,7 +167,7 @@ class ReefineRecipe(HarnessEvolutionRecipe):
     requests (off pi, or where the host cannot jail it).
     Purpose: a deployment names it as its recipe; it builds each scenario's
     backend with ``ReefineMethod``. Override ``evolution.evaluation.policy``
-    to compare scores against the current release, and ``training-mode`` to
+    to compare scores against the head tree, and ``training-mode`` to
     learn from reports too.
     """
 
@@ -210,7 +214,12 @@ class ReefineRecipe(HarnessEvolutionRecipe):
             ]
         own = {key: value for key, value in section.items() if key not in ("agent", "multimodal")}
         kwargs = super()._recipe_kwargs(
-            {**settings, "evolution": {**EVOLUTION_DEFAULTS, **own, "evaluation": evaluation}}, values
+            {
+                **settings,
+                "evolution": {**EVOLUTION_DEFAULTS, **own, "evaluation": evaluation},
+                "activation": settings.get("activation", ACTIVATION_DEFAULT),
+            },
+            values,
         )
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(section.get("multimodal"), values)
