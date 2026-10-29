@@ -418,6 +418,8 @@ storage.
   ``job_samples`` samples are held. A ``Sample2Job`` that sets
   ``reads_instructions`` runs the instruction at once, with fewer samples or
   none; harness evolution sets it, because its proposer reads the instruction.
+  A stage's own job data, such as the imported tasks of ``sft-then-rl``, also
+  waits for an instruction, and its job consumes the instruction.
 
 The pipeline runs the oldest instruction first, one per step. It gives the
 instruction's data the id ``<scenario>:instruction:<request id>`` and attaches
