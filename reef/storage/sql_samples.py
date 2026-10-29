@@ -37,6 +37,8 @@ from reef.storage.sql_records import ScopedTable, SQLRecordStore
 def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
     """Define the ``training_sample`` table in ``metadata``.
 
+    ``kind`` is the kind of the sample, ``trajectory`` or ``task``, and
+    ``split`` is ``train`` or ``eval``; a trajectory is always ``train``.
     ``content_json`` holds the sample as canonical JSON (``sample_content``),
     and ``content_sha256`` its SHA-256. ``train_count`` is the number of
     committed jobs that trained the sample. If ``foreign_key`` names a column,
@@ -46,6 +48,8 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
     """
     columns = (
         Column("sample_id", Text, nullable=False),
+        Column("kind", String(16), nullable=False),
+        Column("split", String(8), nullable=False),
         Column("content_json", Text, nullable=False),
         Column("content_sha256", String(64), nullable=False),
         Column("train_count", Integer, nullable=False, server_default="0"),
@@ -109,6 +113,8 @@ class SQLSampleStore(SampleStore):
                     table.insert().values(
                         **self.table.scope,
                         sample_id=sample_id,
+                        kind="trajectory",
+                        split="train",
                         content_json=content_json,
                         content_sha256=content_sha256,
                     )

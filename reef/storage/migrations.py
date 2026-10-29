@@ -164,6 +164,8 @@ def migrate_uploaded_trajectories(connection: Connection, samples: Table, commit
             storage_id = row["storage_id"] if scoped else None
             values: dict[str, object] = {
                 "sample_id": row["trajectory_id"],
+                "kind": "trajectory",
+                "split": "train",
                 "content_json": row["content_json"],
                 "content_sha256": row["content_sha256"],
                 "train_count": train_counts[(storage_id, row["trajectory_id"])],
