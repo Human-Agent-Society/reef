@@ -677,22 +677,28 @@ support it. Install ``reef-client`` where the agent runs, and connect once:
    pip install reef-client
    reef-client harness connect --reef http://127.0.0.1:8900
 
+The deployment decides the agent. Its ``evolution.adapter`` names the
+agent, and every harness that one deployment serves runs that agent. To see
+it before you connect, list the harnesses: ``curl
+http://127.0.0.1:8900/reef/scenarios`` gives each one with its ``adapter``.
+
 ``connect`` asks at most two things: the token, when Reef refuses the call
 without one and ``REEF_TOKEN`` is unset, and which harness, when Reef serves
-more than one. Everyone who connects to one harness shares it. The Reef URL
-comes from ``--reef`` or ``REEF_URL``. Then it sets the machine up, and says
-one line when it is done:
+more than one. The list it shows names each harness's agent. Everyone who
+connects to one harness shares it. The Reef URL comes from ``--reef`` or
+``REEF_URL``. Then it sets the machine up, and says one line when it is done:
 
 - It installs the harness's head in
   ``~/.local/share/reef-client/harness/<scenario>``. It never reads or writes
   your own configuration.
 - When the agent is not installed, it installs the version that Reef's
   evaluation episodes run, with npm, under ``~/.local/share/reef-client/agents``.
-- It makes the agent's own command run through Reef: a command of the same
-  name, such as ``claude``, in ``~/.local/share/reef-client/bin``, and that
-  directory first on ``PATH`` in your shell's startup file (zsh, bash or
-  fish). In a new terminal, ``claude`` then runs as ``reef-client harness
-  run`` does.
+- It makes the agent's own command run through Reef: a command with the
+  agent's name in ``~/.local/share/reef-client/bin``, and that directory
+  first on ``PATH`` in your shell's startup file (zsh, bash or fish). In a
+  new terminal, the agent's command then runs as ``reef-client harness run``
+  does. The last line that ``connect`` prints names it: ``Done. Open a new
+  terminal and run <agent>.``
 
 .. flow::
    :loop: each run starts on the newest release
