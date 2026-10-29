@@ -258,7 +258,7 @@ Limits:
 - **Text fixtures only.** A reef task holds text files, so a task with a binary fixture is refused. So is a task with a fixture that no file or several files match equally, two fixtures with one name under `fixtures/`, no `From:` image, no description or no final-state tests.
 - **No failure summary yet.** `variant.md` gives the parent's pass rate (its mean reward, since the verifier gives part marks) and the direction, not the solver's most common failure as upstream's assignment does. The generator receives only the rewards of a task's rollouts, so this needs a change to the shared generated-task results first.
 - **One rollout per seed.** Each seed in the train split costs one first rollout (`rollout.rollouts_per_task` rollouts) before its pass rate is known.
-- **No network.** A converted task has `network_mode = "no-network"`, so terminus-2 cannot install asciinema to record its session. On `e2b` that install hangs until the sandbox's command timeout fails the rollout; set `record_terminal_session: false` in the agent's `kwargs`, in `rollout.agent` and in an artifact evaluation's harness. On `docker` the install fails at once and the rollout runs without a recording.
+- **No network.** A converted task has `network_mode = "no-network"`, so terminus-2 cannot install asciinema to record its session. On `e2b` that install hangs until the sandbox's command timeout fails the rollout; set `record_terminal_session: false` in the agent's `kwargs`, in `rollout.agent`, and in the harness of an artifact evaluation that runs such tasks. On `docker` the install fails at once and the rollout runs without a recording.
 
 ## The task checks
 
