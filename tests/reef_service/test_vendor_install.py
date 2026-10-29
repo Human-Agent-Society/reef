@@ -19,8 +19,9 @@ import pytest
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import COMPONENT, PI_FAKE, TreeReleases, changed_rules, harness_recipe, make_pi_binary
 
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.vendor_install import (
+from reef.harness.rollouts.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
     PREFIX_ENV,
@@ -31,7 +32,6 @@ from reef.harness.episodes.vendor_install import (
 )
 from reef.harness.tree import TreePatch
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.types import JobData, TrainStepResult
@@ -173,7 +173,7 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
         steps.append(list(command))
         _write_executable(binary, "#!/bin/sh\necho 'Hermes Agent v0.21.0'\n")
 
-    monkeypatch.setattr("reef.harness.episodes.vendor_install._run", record)
+    monkeypatch.setattr("reef.harness.rollouts.vendor_install._run", record)
 
     assert resolve_binary(descriptor, prefix=prefix) == str(binary)
     assert [step[0:2] for step in steps] == [
@@ -205,7 +205,7 @@ def _counting_resolver(monkeypatch, result):
             raise result
         return result
 
-    monkeypatch.setattr("reef.harness.episodes.vendor_install.resolve_binary", resolve)
+    monkeypatch.setattr("reef.harness.rollouts.vendor_install.resolve_binary", resolve)
     return calls
 
 
@@ -213,7 +213,7 @@ def _backend(
     tmp_path: Path,
     binary: str | None,
     *,
-    executor: EpisodeExecutor | None = None,
+    executor: ProgramExecutor | None = None,
     worker_executor: ExecutorSettings | None = None,
 ) -> HarnessBackend:
     """The pi backend a recipe builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
@@ -237,7 +237,7 @@ def _step(backend: HarnessBackend) -> TrainStepResult:
 @pytest.mark.unit
 @pytest.mark.parametrize("workers", [1, 2])
 def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch, tmp_path, workers) -> None:
-    """Startup resolves the agent, and every episode reuses that result."""
+    """Startup resolves the agent, and every rollout reuses that result."""
     calls = _counting_resolver(monkeypatch, str(make_pi_binary(tmp_path)))
 
     backend = _backend(tmp_path, None, worker_executor=ExecutorSettings(workers=workers))
@@ -261,7 +261,7 @@ def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp
 
 
 def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch, tmp_path) -> None:
-    from reef.sandbox.e2b import E2BExecutor
+    from reef.execution.sandbox.e2b import E2BExecutor
 
     calls = _counting_resolver(monkeypatch, VendorInstallError("must not install locally"))
     monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
@@ -399,7 +399,7 @@ def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatc
     binary.symlink_to("../package/cli.sh")
     _backend(tmp_path, None, executor=sandbox)
     executor, binary = sandbox.for_program(AdapterProgram(get_adapter("pi")))
-    root = tmp_path / "episode"
+    root = tmp_path / "rollout"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
     outcome = executor.launch(

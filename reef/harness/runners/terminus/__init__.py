@@ -1,10 +1,10 @@
-"""The ``reef-terminus`` runner: the binary the terminus adapter's episodes launch.
+"""The ``reef-terminus`` runner: the binary the terminus adapter's rollouts launch.
 
 Terminus 2 is a harbor agent class rather than a CLI, so this package is the
 adapter's own runner. It reads the tree Reef rendered into ``REEF_TERMINUS_DIR``,
 hands it to Harbor's own ``terminus-2`` agent as native configuration,
 runs the task, and writes the ATIF trajectory and the verifier's reward under
-``REEF_TERMINUS_SESSION_DIR`` for the episode's trajectory reader.
+``REEF_TERMINUS_SESSION_DIR`` for the rollout's trajectory reader.
 
 harbor is imported only when the runner actually runs, so importing the adapter
 registry stays cheap and CI without Docker still loads the descriptor.
@@ -27,7 +27,7 @@ from reef.harness.runners.terminus.tree import (
 def main(argv: Sequence[str] | None = None) -> int:
     """The ``reef-terminus`` console script: run one task through harbor."""
     parser = argparse.ArgumentParser(
-        prog="reef-terminus", description="Run one Terminal-Bench task for a reef episode."
+        prog="reef-terminus", description="Run one Terminal-Bench task for a reef rollout."
     )
     parser.add_argument("--task", required=True, help="the task name harbor should run")
     arguments = parser.parse_args(argv)

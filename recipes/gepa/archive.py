@@ -184,7 +184,7 @@ class Archive:
     def seed(self, texts: Mapping[str, str]) -> None:
         """Append ``texts`` as a parentless candidate and serve it.
 
-        Used for the first boot and for a rollback: when the served tree no
+        Used for the first boot and for a new training start: when the served tree no
         longer matches the archive's served candidate, whatever the operator
         put there is the new root of the search, not a descendant of it.
         """
@@ -232,9 +232,9 @@ class Archive:
     ) -> None:
         """Fold one evaluated step into the archive: GEPA's validation pass and the update of the served candidate.
 
-        Each score is one task's mean over the ``repeats`` episodes the
+        Each score is one task's mean over the ``repeats`` rollouts the
         evaluation ran for it. The pending candidate takes the step's
-        candidate scores and is charged one metric call per episode,
+        candidate scores and is charged one metric call per rollout,
         ``len(candidate_scores) * repeats``; a served candidate that has no
         validation yet (the seed, on the first evaluated step) takes the
         served scores, charged when it was seeded. A selected step serves the
@@ -255,7 +255,7 @@ class Archive:
         self.pending_step = None
 
     def charge(self, calls: int) -> None:
-        """Spend ``calls`` of the metric-call budget: one per scored episode."""
+        """Spend ``calls`` of the metric-call budget: one per scored rollout."""
         self.metric_calls += calls
 
     # -- GEPA's two rules ----------------------------------------------------

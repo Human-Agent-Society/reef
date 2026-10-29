@@ -9,7 +9,7 @@ mkdir -p work
 
 # Env defaults: the OpenAI-compatible endpoint (no /v1 suffix), the model
 # under test (executor and evolver, the paper's qwen3-max), the pi binary
-# the probe episodes run, and the provider api key (required).
+# the probe rollouts run, and the provider api key (required).
 : "${REEF_UPSTREAM_URL:=https://openrouter.ai/api}"
 : "${REEF_MODEL:=qwen/qwen3-max}"
 : "${REEF_PI_BINARY:=pi}"

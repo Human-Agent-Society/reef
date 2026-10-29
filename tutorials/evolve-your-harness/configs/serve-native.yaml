@@ -29,7 +29,7 @@ recipe:
       # (read_file, write_file, run_bash, execute), its loop guard hook and main
       # graph, which the method may retune or replace, plus the starter skill.
       # It carries no provider: Reef renders its own model binding into each
-      # evaluation episode.
+      # evaluation rollout.
       seed: seeds/native
       # Each scenario's proposals, history (the score cache) and step records,
       # relative to the directory run.sh starts Reef in, as every path in this file is.

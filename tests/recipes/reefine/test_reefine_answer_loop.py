@@ -37,7 +37,7 @@ from tests.support._trajectories import recorded_trajectory
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import answer as reefine_answer
 from reef.core.training_request import TrainingRequest
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.train.types import JobData
 
 #: An extension pi's validation refuses: it writes to the session's stdout while it has a UI.

@@ -16,20 +16,18 @@ from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportVal
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
 from reef.storage.records import RecordStore
 from reef.evaluation import (
+    ActivationRule,
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
-    CandidateEvaluationConfig,
-    CandidateEvaluationConfigError,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
-    ConfiguredEvaluationPlugin,
     EvaluationResult,
+    MadeArtifact,
     RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
-    build_candidate_evaluation,
 )
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.scenario import Scenario
@@ -42,26 +40,23 @@ from reef.train import Sample2Job, Trainer, TrainingPipeline
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent, TrainingJob
 from reef.train.jobs import JobPlan, JobRequest
-from reef.core.evaluation import CheckpointCandidate
 
 __all__ = [
     "SCENARIO_METADATA_KEY",
+    "ActivationRule",
     "AgentRecord",
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
-    "CandidateEvaluationConfig",
-    "CandidateEvaluationConfigError",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
-    "CheckpointCandidate",
-    "ConfiguredEvaluationPlugin",
     "Dispatcher",
     "EvaluationResult",
     "InferenceRuntime",
     "JobPlan",
     "JobRequest",
+    "MadeArtifact",
     "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",
@@ -83,7 +78,6 @@ __all__ = [
     "TrainingPipeline",
     "UpdateCandidate",
     "__version__",
-    "build_candidate_evaluation",
     "build_default_dispatcher",
     "parse_request_headers",
 ]

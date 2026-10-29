@@ -6,7 +6,7 @@ one path template per kind) and which checks its text must pass.
 ``KIND_GUIDE`` gives each kind's path pattern and what its file holds.
 
 Model endpoints and credentials are never in a tree: the model binding writes
-them when a tree is rendered for an episode.
+them when a tree is rendered for a rollout.
 """
 
 from __future__ import annotations

@@ -54,22 +54,22 @@ Harness evolution
 
 A harness evolution step captures one model configuration before the method
 runs. It replaces ``models.served`` and each named binding (including teacher
-and judge) with that endpoint. The method's model calls, the episodes of both
+and judge) with that endpoint. The method's model calls, the rollouts of both
 trees, and model-based scoring share the captured bindings, including across
 worker processes. A configuration change affects new inference requests and
 new steps. An active step continues with its captured settings; a revoked
 key fails without falling back to another provider.
 
 Use the supplied bindings for every model call. A model-based judge is an
-``EpisodeScorer`` that overrides ``score_with_models(task, result, models)``::
+``RolloutScorer`` that overrides ``score_with_models(task, result, models)``::
 
-    class Judge(EpisodeScorer):
+    class Judge(RolloutScorer):
         def score(self, task, result):
             raise ValueError("the judge needs the step's model bindings")
 
         def score_with_models(self, task, result, models):
             reply = models["judge"].chat([
-                {"role": "user", "content": "Evaluate the episode: " + str(result.trajectory)}
+                {"role": "user", "content": "Evaluate the rollout: " + str(result.trajectory)}
             ])
             return float(reply.strip() == "pass")
 

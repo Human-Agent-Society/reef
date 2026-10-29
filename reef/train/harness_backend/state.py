@@ -3,7 +3,7 @@
 The tree itself is not here: it is the git release the commit recorded, and
 the trees a step tried are in the scenario's history. The state keeps what
 crosses steps and must commit with them: the counters the budgets read, the
-promoted evaluation tasks, the failure manifest, the recheck's rollback
+promoted evaluation tasks, the failure manifest, the recheck's
 target, and the method's own files.
 """
 
@@ -28,9 +28,9 @@ class HarnessState:
     are the prompts promoted into the evaluation tasks, in promotion order,
     without duplicates. ``promoted_clients`` counts, per tagged client, the
     prompts promoted from its traffic; every count is positive.
-    ``rollback_release_id`` names the release the latest publish replaced,
-    which a recheck evaluates again; ``rollback_context`` is the evaluation
-    context key the latest publish or the latest recheck that kept the head
+    ``recheck_release_id`` names the release the latest kept tree replaced,
+    which a recheck evaluates again; ``recheck_context`` is the evaluation
+    context key the latest kept tree or the latest recheck that kept the head
     ran in. Each is non-empty text or ``None``, and the two are both ``None``
     or both set.
     ``method_files`` maps each relative path of the method's ``state/``
@@ -45,8 +45,8 @@ class HarnessState:
     manifest: FailureManifest | None = None
     promoted_tasks: tuple[str, ...] = ()
     promoted_clients: Mapping[str, int] = field(default_factory=dict)
-    rollback_release_id: str | None = None
-    rollback_context: str | None = None
+    recheck_release_id: str | None = None
+    recheck_context: str | None = None
     method_files: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -60,12 +60,12 @@ class HarnessState:
             for count in self.promoted_clients.values()
         ):
             raise ValueError("HarnessState.promoted_clients counts must be positive integers")
-        rollback = (("rollback_release_id", self.rollback_release_id), ("rollback_context", self.rollback_context))
-        for label, text in rollback:
+        recheck = (("recheck_release_id", self.recheck_release_id), ("recheck_context", self.recheck_context))
+        for label, text in recheck:
             if text is not None and (not isinstance(text, str) or not text):
                 raise ValueError(f"HarnessState.{label} must be non-empty text or None")
-        if (self.rollback_release_id is None) != (self.rollback_context is None):
-            raise ValueError("HarnessState rollback_release_id and rollback_context are both set or both None")
+        if (self.recheck_release_id is None) != (self.recheck_context is None):
+            raise ValueError("HarnessState recheck_release_id and recheck_context are both set or both None")
         if any(not isinstance(text, str) for text in self.method_files.values()):
             raise ValueError("HarnessState.method_files must map paths to text")
         object.__setattr__(self, "promoted_clients", MappingProxyType(dict(self.promoted_clients)))
@@ -79,8 +79,8 @@ class HarnessState:
             "failure_manifest": None if self.manifest is None else self.manifest.to_state(),
             "promoted_tasks": list(self.promoted_tasks),
             "promoted_clients": dict(self.promoted_clients),
-            "rollback_release_id": self.rollback_release_id,
-            "rollback_context": self.rollback_context,
+            "recheck_release_id": self.recheck_release_id,
+            "recheck_context": self.recheck_context,
             "method_files": dict(self.method_files),
         }
 
@@ -96,8 +96,8 @@ class HarnessState:
             promoted_clients={
                 str(name): int(count) for name, count in dict(value.get("promoted_clients", {})).items()
             },
-            rollback_release_id=value.get("rollback_release_id"),
-            rollback_context=value.get("rollback_context"),
+            recheck_release_id=value.get("recheck_release_id"),
+            recheck_context=value.get("recheck_context"),
             method_files={str(path): str(text) for path, text in dict(value.get("method_files", {})).items()},
         )
 

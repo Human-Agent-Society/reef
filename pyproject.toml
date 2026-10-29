@@ -25,7 +25,7 @@ dependencies = [
     "aiohttp>=3.14",  # web.RequestKey
     "alembic>=1.13,<2",
     "huggingface_hub",
-    # Harbor's environment contract backs reef.sandbox; the terminus runner, the task player and the generator
+    # Harbor's environment contract backs reef.execution.sandbox; the terminus runner, the task player and the generator
     # service play Harbor tasks with reef-eval.
     "harbor>=0.20,<0.25",
     "pyyaml",
@@ -47,9 +47,12 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
-# Cloud sandboxes for evaluation episodes and the Reefine agent: E2B, and Modal.
-e2b = ["e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
-modal = ["modal>=1.6"]
+# Reads s3:// sources of an artifact import (storage.artifact_sources).
+s3 = ["boto3"]
+# Cloud sandboxes for evaluation rollouts and the Reefine agent: E2B, and Modal. Harbor's extra of each
+# environment adds what its sandbox needs to build a task's image (dockerfile-parse).
+e2b = ["harbor[e2b]", "e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
+modal = ["harbor[modal]", "modal>=1.6"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [

@@ -11,7 +11,8 @@ gives the method a workspace: one directory with a copy of the head tree, the
 step's traces, and the method's own files. The method edits the tree in that
 directory. Reef then validates the tree, evaluates it under the deployment's
 publication policy, records the result in the scenario's history, and
-publishes a selected tree as a new release.
+publishes a selected tree as a new release. The deployment's activation rule
+then decides whether that release serves.
 
 A method is one class with one operation:
 
@@ -77,7 +78,7 @@ traces that scored below 1, asks for new rules, and writes them to
            return StepResult(f"rewrote rules.md from {len(failing)} failing traces", {"failing": len(failing)})
 
 `Configure a deployment`_ shows the deployment file that runs it, and `Score
-an episode`_ shows the scorer it names.
+a rollout`_ shows the scorer it names.
 
 A method made of prompts
 ------------------------
@@ -131,8 +132,9 @@ The step
 
 One step runs in this order:
 
-#. Reef reads the head tree from the scenario's releases, chooses the step's
-   evaluation tasks, and writes the step's workspace.
+#. Reef reads the head tree, the scenario's training start, from its
+   releases. It chooses the step's evaluation tasks and writes the step's
+   workspace.
 #. Reef calls ``step(context)``.
 #. Reef reads the tree in ``harness/``. An unchanged tree skips the step. A
    tree that fails validation skips the step too, and the step's ``skipped``
@@ -140,7 +142,7 @@ One step runs in this order:
    return.
 #. The publication policy evaluates the candidate (see `Evaluation`_). Reef
    records the decision in the history and publishes a selected candidate as
-   a new release.
+   a new release. The activation rule decides whether the release serves.
 
 Two kinds of automatic step do not call the method. A recheck compares the
 latest publish with the tree it replaced
@@ -194,10 +196,10 @@ after the step as the step record.
   After them, an offline step has one ``trace.json`` per train task it rolled
   out on the head tree (see `Offline runs on uploaded tasks
   <../user-guide/evolve-your-harness.rst#offline-runs-on-uploaded-tasks>`__).
-  The history keeps the files of such an episode.
+  The history keeps the files of such a rollout.
 - ``request.json``: the training request the step answers. Only a request
   step has it.
-- ``evaluation.json``: the step's evaluation tasks and the episodes per task
+- ``evaluation.json``: the step's evaluation tasks and the rollouts per task
   and tree (``repeats``), which ``workspace.tasks()`` and
   ``workspace.evaluation_repeats()`` read.
 - ``failures.json``: the failure manifest of the head tree, after the
@@ -233,7 +235,7 @@ A Python method reads the directories through ``Workspace``:
    * - ``tasks()``
      - the step's evaluation tasks, the seed tasks first
    * - ``evaluation_repeats()``
-     - the episodes that the evaluation runs per task and tree
+     - the rollouts that the evaluation runs per task and tree
        (``evolution.evaluation.repeats``), 0 when the deployment configured
        no scorer
    * - ``host()``
@@ -251,12 +253,12 @@ A ``Trace`` has these fields:
    * - Field
      - Value
    * - ``source``
-     - ``traffic`` for a client's request, ``rollout`` for an episode that an
+     - ``traffic`` for a client's request, ``rollout`` for a rollout that an
        offline step ran on a train task
    * - ``task``
      - the last user prompt of the request, ``None`` for a request without
-       a user prompt; for a rollout, the instruction of the task the episode
-       played (the history's episode names the task directory)
+       a user prompt; for a rollout, the instruction of the task the rollout
+       played (the history's rollout names the task directory)
    * - ``reply``
      - the final assistant text, ``None`` when there is none. With the
        inference stages (``InferenceRecord2Record`` and ``InferenceSamples``),
@@ -264,16 +266,16 @@ A ``Trace`` has these fields:
        reply: a call that ends on a tool call has none
    * - ``score``
      - the reported score, ``None`` for unscored traffic; for a rollout, the
-       scorer's score, ``None`` for an episode that could not run
+       scorer's score, ``None`` for a rollout that could not run
    * - ``feedback``
      - the reported feedback as text (structured feedback as JSON text),
        ``None`` when there is none and for a rollout
    * - ``failure``
-     - why the rollout's episode failed, ``None`` when it did not fail and
+     - why the rollout's rollout failed, ``None`` when it did not fail and
        for traffic
    * - ``record``
      - the agent record id of the request; for a rollout, the history's
-       episode id, whose files ``history.episode_dir(record)`` holds
+       rollout id, whose files ``history.rollout_dir(record)`` holds
    * - ``client``
      - the client's ``x-reef-tag-client`` tag, else its session tag, else
        ``untagged``; ``untagged`` for a rollout
@@ -287,7 +289,7 @@ before the text enters a model prompt (see `Untrusted input`_).
 The tools
 ---------
 
-``tools`` is the method's way to call a model and to run an episode:
+``tools`` is the method's way to call a model and to run a rollout:
 
 .. list-table::
    :header-rows: 1
@@ -303,8 +305,8 @@ The tools
      - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``, and
        ``problems``, every problem found
    * - ``tools.evaluate(tree, tasks, *, repeats=1)``
-     - ``repeats`` scored episodes of ``tree`` on each task, task by task, as
-       ``EpisodeRecord`` values; ``tasks`` is a list of tasks, and a single
+     - ``repeats`` scored rollouts of ``tree`` on each task, task by task, as
+       ``RolloutRecord`` values; ``tasks`` is a list of tasks, and a single
        string is refused
    * - ``tools.calls``
      - the step's call meter: ``spend()`` and ``record(entry)`` for a model
@@ -336,25 +338,31 @@ after it, so that the budget and the record stay complete.
 Evaluate a tree
 ~~~~~~~~~~~~~~~
 
-``tools.evaluate`` runs episodes as the step's evaluation does: the same
-rendering, worker pool, scorer and episode settings. Each ``EpisodeRecord``
-has the ``task``, the ``repeat`` index, the ``score``, and the ``reply``. The
-``score`` is ``None`` for an episode that could not run, and then
-``failure`` says why. ``episode`` names the episode's record directory in the
-history.
+``tools.evaluate`` runs rollouts as the step's evaluation does: the same
+rendering, worker pool, scorer and rollout settings. Each ``RolloutRecord``
+has the ``task``, the ``repeat`` index, the ``score``, and the ``reply``.
+``rollout`` names the rollout's record directory in the history. ``score`` is
+a ``RolloutScore`` (``reef.core.evaluation``) in one of two cases:
 
-The history keeps every episode, and reuses a scored episode of the same
+- A value: the rollout ran, and ``score.value`` is the scorer's finite value.
+  A rollout where the tree gave no answer scores 0: an error ended its turn,
+  or ``forbid_residue`` refused its residue. The candidate caused it.
+- Failed: ``score.value`` is ``None``, and ``failure`` says why. The environment
+  could not run the rollout: the launch failed, the trial never ran, or its
+  trajectory could not be read. The candidate did not cause it.
+
+The history keeps every rollout, and reuses a scored rollout of the same
 tree, task, repeat and evaluation context. Asking again costs nothing, except
-for an episode that could not run: the history does not reuse it, so it runs
+for a failed rollout: the history does not reuse it, so it runs
 again. Ask for more repeats to get new samples. A tree that the method
 evaluates joins the history as a candidate of the step.
 
-``evolution.max_episodes_per_step`` (0, no limit, by default) limits the
-episodes that ``tools.evaluate`` runs in one step. Reused episodes do not
-count. An episode counts when it ran, also in a call whose scorer raised.
+``evolution.max_rollouts_per_step`` (0, no limit, by default) limits the
+rollouts that ``tools.evaluate`` runs in one step. Reused rollouts do not
+count. A rollout counts when it ran, also in a call whose scorer raised.
 ``evaluate`` raises ``RuntimeError`` when the deployment configured no
-scorer. It also raises ``RuntimeError`` when a call needs more episodes than
-the step has left, and then no episode of the call runs. It raises
+scorer. It also raises ``RuntimeError`` when a call needs more rollouts than
+the step has left, and then no rollout of the call runs. It raises
 ``ValueError`` when the tree fails ``check``, and ``TypeError`` when
 ``tasks`` is one string. A refused call adds nothing to the history.
 
@@ -383,8 +391,8 @@ prompts can check and score its work:
 - ``POST $REEF_AGENT_URL/check`` with ``{"tree": "harness"}`` answers
   ``passed`` and ``problems``.
 - ``POST $REEF_AGENT_URL/evaluate`` with ``{"tree": "harness", "tasks":
-  [...], "repeats": 1}`` answers one record per episode, through the score
-  cache and the step's episode budget.
+  [...], "repeats": 1}`` answers one record per rollout, through the score
+  cache and the step's rollout budget.
 
 A ``tree`` argument is a directory of the workspace, such as ``harness`` or
 ``scratch/try-2``. A refused call answers 400 with the reason.
@@ -447,7 +455,7 @@ Read the history
 ----------------
 
 The history holds every tree that a step proposed or evaluated, every
-episode, and every decision. ``workspace.history()`` returns it as a
+rollout, and every decision. ``workspace.history()`` returns it as a
 ``reef.evaluation.harness.History``:
 
 .. list-table::
@@ -460,25 +468,24 @@ episode, and every decision. ``workspace.history()`` returns it as a
      - each tree's ``CandidateRecord`` by checksum: ``step``, ``origin``
        (``seed``, ``method``, ``proposal`` or ``release``), ``parent``,
        ``summary`` and ``notes``
-   * - ``episodes``
-     - every ``EpisodeRecord``, in run order
+   * - ``rollouts``
+     - every ``RolloutRecord``, in run order
    * - ``decisions``
      - every ``DecisionRecord``: ``step``, ``tree`` (the candidate),
        ``head`` (the head tree that the step started from), ``selected``
-       (published, or held for review under ``evolution.publish: review``),
-       ``policy`` and ``reason``
+       (published), ``policy`` and ``reason``
    * - ``tree(checksum)``
      - the files of a tree that the history holds
    * - ``scores(checksum, tasks, *, repeats=1)``
      - the tree's scores on ``tasks``, task by task and repeat by repeat: the
-       latest episode of each pair, ``None`` where none ran or the latest
-       could not run
+       latest rollout of each pair, ``None`` where none ran or the latest
+       failed
    * - ``decision(step)``
      - the decision on that step's candidate, ``None`` when the step decided
        none
-   * - ``episode_dir(episode)``
-     - the episode's record directory: its trajectory files and
-       ``episode.json``
+   * - ``rollout_dir(rollout)``
+     - the rollout's record directory: its trajectory files and
+       ``rollout.json``
 
 The history also keeps the records of a step attempt that did not commit,
 such as one whose method, evaluation or commit failed. The next attempt runs
@@ -495,7 +502,7 @@ to the previous step's candidate:
    decision = history.decision(workspace.step - 1)
    repeats = max(1, workspace.evaluation_repeats())
    if decision is not None:
-       selected = decision.selected  # published, or held for review
+       selected = decision.selected  # published; the activation rule decides whether it serves
        scores = history.scores(decision.tree, workspace.tasks(), repeats=repeats)
        head_scores = history.scores(decision.head, workspace.tasks(), repeats=repeats)
 
@@ -522,8 +529,10 @@ instruction overrides. It merges the items that pass after the request's own
 items into the step's ``training_request.requires``, and the release manifest
 serves them to clients.
 
-A client's proposal and a recheck cannot take a request's step. The
-evaluation and ``evolution.publish`` apply as for any other step.
+A client's proposal and a recheck cannot take a request's step. Reef
+evaluates the request's candidate as it evaluates other candidates. The
+deployment's activation rule decides whether its release serves, as for
+other steps.
 
 Evaluation
 ----------
@@ -543,25 +552,25 @@ The beta Reefine recipe uses ``floor`` with one health task.
 The evaluation reads the score cache that ``tools.evaluate`` fills. So a
 candidate that the method already scored with ``tools.evaluate`` on the
 step's tasks, ``workspace.evaluation_repeats()`` times each, needs no new
-episodes in the evaluation.
+rollouts in the evaluation.
 
-Score an episode
+Score a rollout
 ~~~~~~~~~~~~~~~~
 
-An ``EpisodeScorer`` (``reef.evaluation.harness``) scores one finished
-episode. ``score(task, result)`` returns a finite number; higher is better.
+An ``RolloutScorer`` (``reef.evaluation.harness``) scores one finished
+rollout. ``score(task, result)`` returns a finite number; higher is better.
 ``result`` holds the exit code, stdout, stderr, and the parsed
-``trajectory``. An episode that could not run does not reach the scorer.
+``trajectory``. A rollout that failed does not reach the scorer.
 
 .. code:: python
 
-   from reef.evaluation.harness import EpisodeScorer
-   from reef.harness.episodes.trajectory import final_assistant_text
+   from reef.evaluation.harness import RolloutScorer
+   from reef.harness.rollouts.trajectory import final_assistant_text
 
    EXPECTED = {"[fib]": "2880067194370816120"}
 
 
-   class ExactAnswer(EpisodeScorer):
+   class ExactAnswer(RolloutScorer):
        def score(self, task, result):
            """1.0 when the final assistant text ends with the task's expected answer."""
            text = final_assistant_text(result.trajectory) or ""
@@ -574,7 +583,7 @@ bindings. The evaluation always calls ``score_with_models``, and its default
 calls ``score``. ``score`` stays abstract, so a judge implements it too, for
 example by raising an error (see `Scenario model configuration
 <../user-guide/scenario-models.rst#harness-evolution>`__).
-``VerifierRewardScorer`` scores a Harbor task episode by its verifier's
+``VerifierRewardScorer`` scores a Harbor task rollout by its verifier's
 reward.
 
 Promote traffic prompts
@@ -738,10 +747,13 @@ the promoted prompts of each tagged client, and
 ``evolution.evaluation.max_promoted_tasks`` limits all of them.
 
 Put code-bearing kinds that client text can shape (``code_extension``,
-``native_tool`` and ``native_hook``) in ``evolution.review_kinds``, so that a
-person reviews them before publication. A ``native_graph`` holds no code and
-can publish on the evaluation alone; add it to ``review_kinds`` if every loop
-change needs a review. A ``native_loop`` always waits for a person.
+``native_tool`` and ``native_hook``) in the ``always`` activation rule's
+``review_kinds``, so that a person reviews them before they serve
+(`Configuration
+<../reference/configuration.rst#the-activation-section>`__). A
+``native_graph`` holds no code and can serve on the evaluation alone; add it
+to ``review_kinds`` if every loop change needs a review. A ``native_loop``
+always waits for a person.
 
 .. warning::
 

@@ -20,17 +20,17 @@ recipe:
       batch_size: 60
       # The method in the harness/ package: the sealed night flow (one decision
       # per skill group plus the no-skill bucket) mapped to one patch of the
-      # skill pool; it then runs the probe episodes and keeps their scores in
+      # skill pool; it then runs the probe rollouts and keeps their scores in
       # the step's notes.
       method: harness.plugins:NightMethod
-      # The harness binary the probe episodes run headless, from the environment.
+      # The harness binary the probe rollouts run headless, from the environment.
       binary: ${REEF_PI_BINARY}
       # The bootstrap pool: each <name>/SKILL.md under this directory - the
       # benchmark's shipped skills library, the sealed campaign's day-one pool -
       # joins the first tree as skills/<name>/SKILL.md. Empty (unset) seeds no
       # skills. The first tree carries no provider: the driver (run.py) hands
       # the recipe its model binding, which reef renders into each probe
-      # episode and passes to the night. The served pool never names an endpoint.
+      # rollout and passes to the night. The served pool never names an endpoint.
       seed_skills: ${REEF_SC_SKILLS}
       # Each scenario's proposals, history (the score cache) and step records,
       # relative to the directory run.sh starts the driver in: this example's
@@ -41,7 +41,7 @@ recipe:
         # scores do not decide which changes are published; the next day's
         # traffic judges the pool.
         policy: none
-        # Grades the probe episodes by their exact final answer.
+        # Grades the probe rollouts by their exact final answer.
         scorer: harness.plugins:ProbeScorer
         # Three exact-answer probe tasks. Each prefix keys the expected answer
         # in harness/skillclaw.py's answer table; each prompt pins the format the

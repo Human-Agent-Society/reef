@@ -27,6 +27,7 @@ from reef.storage.migrations import archive_imported_files, legacy_model_configs
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
@@ -90,6 +91,7 @@ _SCENARIO_SETTING = Table(
 )
 TASK_TABLES = task_tables(_METADATA)
 TRAJECTORY_TABLE = ScopedTable(trajectory_table(_METADATA))
+EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
 
@@ -210,6 +212,10 @@ class SQLiteRecordStore(SQLRecordStore):
     def trajectory_store(self) -> SQLTrajectoryStore:
         """Open the uploaded trajectories in this database."""
         return SQLTrajectoryStore(self, TRAJECTORY_TABLE)
+
+    def evaluation_store(self) -> SQLEvaluationStore:
+        """Open the artifact evaluations in this database."""
+        return SQLEvaluationStore(self, EVALUATION_TABLE)
 
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history in this database; it is durable unless the database is in memory."""
@@ -396,6 +402,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
                     trajectories=records.trajectory_store(),
+                    evaluations=records.evaluation_store(),
                 )
             except BaseException:
                 records.close()

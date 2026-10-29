@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
+import json
 
+import pytest
+from tests.support.runtime_stubs import StubTrainingComponent
+
+from reef.artifact.files import DirectoryFiles
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob, job_id_for
 from reef.train.algos.signals import PreparedJob
 from reef.train.types import JobData
@@ -15,14 +20,15 @@ from reef.train.types import JobData
     [
         ({"job_id": ""}, ValueError, "job_id must be a non-empty string"),
         ({"backend": ""}, ValueError, "backend must be a non-empty string"),
-        ({"start": ""}, ValueError, "start must be a non-empty string or None"),
+        ({"start": ""}, ValueError, "start must be a non-empty string"),
+        ({"start": None}, ValueError, "start must be a non-empty string"),
         ({"data": ()}, TypeError, "data must be a JobData"),
         ({"parameters": [("lr", 1.0)]}, TypeError, "parameters must be a mapping"),
         ({"parameters": {"lr": float("nan")}}, ValueError, "Out of range float"),
     ],
 )
 def test_a_training_job_checks_its_values_at_construction(changes, error, message):
-    values = {"job_id": "job", "backend": "tinker", "start": None, "data": JobData("b"), "parameters": {}}
+    values = {"job_id": "job", "backend": "tinker", "start": "/base", "data": JobData("b"), "parameters": {}}
     TrainingJob(**values)
     with pytest.raises(error, match=message):
         TrainingJob(**{**values, **changes})
@@ -30,12 +36,12 @@ def test_a_training_job_checks_its_values_at_construction(changes, error, messag
 
 @pytest.mark.unit
 def test_a_job_id_names_the_backend_start_data_and_parameters():
-    job_id = job_id_for("tinker", None, ["row"], {"lr": 1.0})
-    assert job_id == job_id_for("tinker", None, ["row"], {"lr": 1.0})
-    assert job_id != job_id_for("slime", None, ["row"], {"lr": 1.0})
+    job_id = job_id_for("tinker", "/base", ["row"], {"lr": 1.0})
+    assert job_id == job_id_for("tinker", "/base", ["row"], {"lr": 1.0})
+    assert job_id != job_id_for("slime", "/base", ["row"], {"lr": 1.0})
     assert job_id != job_id_for("tinker", "/weights", ["row"], {"lr": 1.0})
-    assert job_id != job_id_for("tinker", None, ["other"], {"lr": 1.0})
-    assert job_id != job_id_for("tinker", None, ["row"], {"lr": 2.0})
+    assert job_id != job_id_for("tinker", "/base", ["other"], {"lr": 1.0})
+    assert job_id != job_id_for("tinker", "/base", ["row"], {"lr": 2.0})
 
 
 @pytest.mark.unit
@@ -133,3 +139,35 @@ def test_a_release_format_reads_back_what_it_writes(value):
 def test_a_release_format_refuses_another_shape(value, message):
     with pytest.raises(ValueError, match=message):
         ReleaseFormat.from_dict(value)
+
+
+@pytest.mark.unit
+def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp_path):
+    full, adapter = tmp_path / "full", tmp_path / "adapter"
+    full.mkdir()
+    (adapter / ADAPTER_DIR).mkdir(parents=True)
+    full_weights = StubTrainingComponent(release_format=ReleaseFormat("full"))
+    with pytest.raises(ValueError, match=r"config\.json and weight files"):
+        full_weights.check_release(DirectoryFiles(full))
+    (full / "config.json").write_text("{}")
+    (full / "model-00001-of-00002.safetensors").write_bytes(b"w")
+    full_weights.check_release(DirectoryFiles(full))
+
+    rank_8 = StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("q_proj", "v_proj")))
+    with pytest.raises(ValueError, match="holds a PEFT adapter in adapter/"):
+        rank_8.check_release(DirectoryFiles(adapter))
+    (adapter / ADAPTER_DIR / "adapter_model.safetensors").write_bytes(b"a")
+    for config, message in (
+        ({"r": 16, "target_modules": ["q_proj"]}, "at most 8"),
+        ({"r": 4, "target_modules": ["q_proj", "o_proj"]}, "within"),
+        ({"r": 4, "target_modules": ".*proj"}, "within"),
+    ):
+        (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps(config))
+        with pytest.raises(ValueError, match=message):
+            rank_8.check_release(DirectoryFiles(adapter))
+    (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps({"r": 4, "target_modules": ["q_proj"]}))
+    rank_8.check_release(DirectoryFiles(adapter))
+    # ``("all",)`` takes any target modules.
+    StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("all",))).check_release(DirectoryFiles(adapter))
+    with pytest.raises(ValueError, match="takes no imported releases"):
+        StubTrainingComponent(release_format=None).check_release(DirectoryFiles(full))

@@ -31,8 +31,8 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     says (the Tinker component's ``RolloutSettings``), which the recipe
     requires.
 
-    Enabled rounds save each task and its train/eval split in the scenario's task store before their episodes run.
-    Eval tasks stay in the store without episodes or training feedback.
+    Enabled rounds save each task and its train/eval split in the scenario's task store before their rollouts run.
+    Eval tasks stay in the store without rollouts or training feedback.
     """
 
     name: str = "generated-tasks"
@@ -49,7 +49,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
         except ValueError as exc:
             raise RecipeConfigError(
                 "the generated-task recipe trains task jobs, whose recipe.config.job_parameters.rollout names the "
-                f"episodes of each task and the agent that runs them: {exc}"
+                f"rollouts of each task and the agent that runs them: {exc}"
             ) from exc
 
     @classmethod

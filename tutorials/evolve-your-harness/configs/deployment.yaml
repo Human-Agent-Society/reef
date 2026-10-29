@@ -1,9 +1,9 @@
 # Run from the repository root:
 # reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 # This is the long-running pi deployment: it takes training requests
-# (hybrid) and holds extensions for a promote. The separate serve.yaml and
-# serve-native.yaml files remain inputs to the short-lived ./run.sh demo for
-# its pi and native variants.
+# (hybrid) and holds extensions until a person activates them. The separate
+# serve.yaml and serve-native.yaml files remain inputs to the short-lived
+# ./run.sh demo for its pi and native variants.
 reef:
   host: 127.0.0.1
   port: 8901
@@ -23,8 +23,6 @@ recipe:
       # One call to the served model rewrites rules.md from the failing traces, and from the request when a
       # person asks with POST /reef/train.
       method: tutorials.evolve-your-harness.harness.plugins:RulesMethod
-      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
-      review_kinds: [code_extension]
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi. Set evolution.binary to a path to use an install of your own instead.
       # The first tree: the starter rules.md (run from the repository root).
@@ -64,6 +62,13 @@ recipe:
             Reply with the median as a plain integer alone on the last line.'
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
+
+# Every kept tree serves at once, except one that changes an extension: an evolved extension runs in pi's process
+# with your privileges, so a person activates it (POST /reef/scenarios/{scenario}/activate).
+activation:
+  module: always
+  config:
+    review_kinds: [code_extension]
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

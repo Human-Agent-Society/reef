@@ -6,10 +6,7 @@
 2. Its own task jobs: the train tasks of the scenario's ``imported-tasks`` store that have not trained, up to
    ``tasks_per_job`` of them in one job. The tasks arrive by ``POST /reef/scenarios/{scenario}/tasks`` or by
    the deployment's ``task-import`` section. The training component rolls them out on its own sampler and
-   trains on their episodes.
-
-``ImportedTaskEvaluation`` evaluates every artifact that the trainer publishes on the store's eval tasks: an
-evaluation job from the artifact's checkpoint, which rolls the tasks out and trains nothing.
+   trains on their rollouts.
 
 The training pipeline gives held samples priority, so a scenario trains the trajectories it holds before it
 trains tasks. ``SFTThenRLJobPlan`` gives a job of trajectories the SFT parameters and a task job the RL
@@ -26,8 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.evaluation import CheckpointCandidate
-from reef.core.job_data import JobData, JobOutcome, Sample, TaskSample
+from reef.core.job_data import JobOutcome, Sample, TaskSample
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.rollout import (
     HandedOutTasks,
@@ -40,8 +36,8 @@ from reef.recipe.sft.processor import SFTJobData
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.sample2job import Sample2JobSettings, imported_task_sample
-from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
-from reef.train.jobs import ArtifactEvaluation, EvaluationJob, JobPlan, JobPlanContext, JobRequest
+from reef.storage.tasks import IMPORTED_TASK_STORE
+from reef.train.jobs import JobPlan, JobPlanContext, JobRequest
 
 #: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
 DEFAULT_TASKS_PER_JOB = 8
@@ -187,35 +183,3 @@ class SFTThenRLJobPlan(JobPlan):
             "sft_parameters": dict(self.sft.parameters),
             "rl_parameters": dict(self.rl.parameters),
         }
-
-
-class ImportedTaskEvaluation(ArtifactEvaluation):
-    """Evaluate every artifact on the eval tasks of the scenario's ``imported-tasks`` store.
-
-    Values: ``task_store`` is that store, and ``parameters`` the RL task job parameters (with ``rollout``),
-    a mapping. Operation: ``evaluation_job(candidate)`` is ``None`` while the store holds no eval task, and else
-    the job of every eval task, in publication order, with ``parameters`` and ``evaluation_of`` set to the
-    candidate's ``candidate_id``, which the training component scores without training. Purpose:
-    ``SFTThenRLRecipe.artifact_evaluation`` makes it, and the weight trainer's job loop asks it at each decision.
-    """
-
-    def __init__(self, task_store: TaskStore, parameters: Mapping[str, Any]) -> None:
-        self.task_store = task_store
-        self.parameters = dict(parameters)
-
-    @classmethod
-    def for_storage(
-        cls, task_storage: TaskStorage | None, parameters: Mapping[str, Any]
-    ) -> ImportedTaskEvaluation | None:
-        """The evaluation over ``task_storage``'s imported tasks, or ``None`` without task storage."""
-        return None if task_storage is None else cls(task_storage.open(IMPORTED_TASK_STORE), parameters)
-
-    def evaluation_job(self, candidate: CheckpointCandidate) -> EvaluationJob | None:
-        held_out = self.task_store.tasks(split="eval")
-        if not held_out:
-            return None
-        items = tuple(imported_task_sample(self.task_store, stored) for stored in held_out)
-        return EvaluationJob(
-            JobData(f"{candidate.candidate_id}:evaluation", items),
-            {**self.parameters, "evaluation_of": candidate.candidate_id},
-        )

@@ -51,8 +51,8 @@ model. Reef reads none of the parameters. The component contract is:
    Stop the job; it then reports ``failed``.
 ``import_start(release)``
    Copy a published release into the component's own storage and return it
-   as a start. Reef calls this for a rollback. Raise ``ValueError`` when the
-   component cannot start from those weights.
+   as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
+   when the component cannot start from those weights.
 ``fresh_start(start)``
    Return a start with the weights of ``start`` and no training state. Reef
    calls this for a ``JobRequest`` with ``restart=True``. The default raises
@@ -83,10 +83,12 @@ through ``reef.train.jobs.JobLoop``:
    served.
 #. A failed job ends like a finished one. Reef consumed the records of its data
    when it submitted the job, so they do not train again.
-#. For a rollback, Reef first imports the release with ``import_start``. It
-   then writes the rollback commit and cancels the running job. The next job
-   starts from the imported release. A component that cannot load a release
-   refuses it, and Reef answers the rollback request with HTTP 409.
+#. For a ``train-from``, Reef first imports the release with
+   ``import_start`` and cancels the running job. It then writes the
+   ``train_from`` commit. The next job starts from the imported release. A
+   component that cannot load a release refuses it, and Reef answers the
+   request with HTTP 400. Activating an artifact changes only what serves; the
+   component never sees it.
 
 The trainer stores its state, a ``JobLoopState``, in the scenario's commit
 record. The state holds ``start``, ``job``, ``finished_jobs`` and
@@ -114,8 +116,8 @@ Serving saved weights
 ---------------------
 
 Serving loads only the weights that a job saved and Reef published. It loads
-them when a scenario starts, when a release is committed, and when a release
-is rolled back. No trainer holds a serving engine.
+them when a scenario starts, when a committed release is activated, and when
+a person activates a release. No trainer holds a serving engine.
 
 ``reef.runtime.serving`` has two runtimes over an ``InferenceBackend``:
 
@@ -126,9 +128,9 @@ is rolled back. No trainer holds a serving engine.
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. After it serves a release, it cannot return to the base model,
-  because the engines do not keep the base model's files. Roll back to a
-  saved release instead.
+  weights. The engines start with the base model. Activating the base
+  artifact after another release loads its files from the artifact
+  repository.
 
 Each load gets a new runtime load ID, and every engine reports it afterwards.
 The IDs of one runtime belong to a fresh incarnation, so a restart never
@@ -150,7 +152,7 @@ The serving runtime checks the component's health every 30 seconds. The
 component names its process in each health report, so the control plane sees
 a component that restarted and runs no engines. After a failed check, the
 runtime pauses generation, starts the lost engines again (or replaces the
-dead ones), loads each scenario's served release into them, and resumes.
+dead ones), loads each scenario's active release into them, and resumes.
 
 Engine supervision
 ------------------
@@ -250,8 +252,8 @@ the component's latest checkpoint. A ``None`` start names the weights that
 the workers loaded at startup, which they hold only until they save their
 first rollout. The component checks the start when Reef submits the job and
 again when the job runs: a queued job whose start an earlier job moved past
-fails. ``import_start`` refuses every release, so a Slime scenario cannot
-roll back. Because the workers hold one set of
+fails. ``import_start`` refuses every release, so a Slime scenario refuses
+``train-from``. Because the workers hold one set of
 weights, a Slime deployment trains one scenario. After a restart, the workers
 load the latest checkpoint again. A restarted job continues after its last
 recorded checkpoint. A restart can also stop a job after Megatron saved a
@@ -428,7 +430,7 @@ Harness evolution: worker executor selection
 --------------------------------------------
 
 Harness evolution evaluates external model endpoints, so it does not require
-a local GPU. ``EpisodeScorer.execution_requirements()`` declares local worker
+a local GPU. ``RolloutScorer.execution_requirements()`` declares local worker
 needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
 supplies the worker count and resources from ``execution.evolution``. The
 selector chooses ``uni`` for one local worker and ``mp`` for multiple local
@@ -450,7 +452,7 @@ explicitly for a cluster.
 ``execution.evolution`` accepts a backend, named profile, or inline object.
 Its backend defaults to ``auto``. Omitted resources keep the scorer's
 declared requirements (by default one CPU and zero GPUs per worker). ``workers`` is the
-fixed worker-group size. It is not an episode count or a separate
+fixed worker-group size. It is not a rollout count or a separate
 business-level concurrency limit. For ``uni/mp``, CPU requests describe
 capacity but do not reserve cores or enforce a CPU quota. Ray maps them to
 ``num_cpus``/``num_gpus`` per actor. These are scheduling reservations, not
@@ -458,28 +460,28 @@ hard CPU limits.
 
 Set workers and resources under ``execution.evolution``. In Python, pass
 ``worker_executor=ExecutorSettings(workers=..., resources=WorkerResources(...))``.
-``evolution.executor`` still means ``local`` or ``sandbox`` episode isolation;
+``evolution.executor`` still means ``local`` or ``sandbox`` rollout isolation;
 it is NOT renamed to ``uni``/``mp``. Sandbox preflight runs on the execution
-node too. A custom episode executor must preserve its own isolation and
-owner-loss cleanup. Built-in local episodes in remote/process workers use a
-POSIX owner lease, so loss of a worker also kills the episode process group.
-Commands must not detach. Worker loss can leave temporary episode
+node too. A custom rollout executor must preserve its own isolation and
+owner-loss cleanup. Built-in local rollouts in remote/process workers use a
+POSIX owner lease, so loss of a worker also kills the rollout process group.
+Commands must not detach. Worker loss can leave temporary rollout
 directories.
 
 To retain an in-process callback, choose ``uni`` with exactly one worker.
 With ``mp`` each rank gets its own copy of the scorer. Mutable scorer state is
 not shared or merged back into the recipe. The parent keeps ownership of
-the method's step, composition, selection and publication. Only episode execution and
+the method's step, composition, selection and publication. Only rollout execution and
 scoring cross the worker boundary. Candidate and current results keep their
 pairing order.
 
 Each backend/scenario starts one fixed pool of
 ``execution.evolution.workers`` ranks on its first nonempty evaluation. It
 reuses the pool across evaluations. Workers and lazy scorer/model
-initialization persist. Each episode still gets a fresh harness subprocess
+initialization persist. Each rollout still gets a fresh harness subprocess
 and temporary directory.
 
-Reef keeps the upstream step records and per-episode stage paths. Uni/MP
+Reef keeps the upstream step records and per-rollout stage paths. Uni/MP
 workers write records on the same host. Ray/custom workers return a
 compressed record with each successful RPC, so the parent process owns the
 durable path without shared storage. Reef extracts archives with Python's

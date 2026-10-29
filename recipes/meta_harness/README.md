@@ -2,7 +2,7 @@
 
 Meta-Harness is full-history search over a fixed model's harness. This method
 represents every candidate as a complete Reef harness tree, so the same search
-works with any Reef adapter and any episode scorer. `MetaHarness` has no
+works with any Reef adapter and any rollout scorer. `MetaHarness` has no
 Harbor, Terminal-Bench, Terminus, or coding-agent dependency.
 
 The method is a Reef harness evolution method (`Method`) in the standard
@@ -23,7 +23,7 @@ meta_harness/
 agent that reads the whole search as files; [`agent/`](agent/README.md) runs
 that proposer as a method made of prompts, on the deployment's coding agent.
 
-Reef owns tree validation, adapter rendering, model binding, episode
+Reef owns tree validation, adapter rendering, model binding, rollout
 execution, timeouts, residue policy, finite-score checks, the score cache,
 selection, publication, and scenario commits. Meta-Harness adds the proposal:
 what the proposer model sees and how its reply becomes a candidate.
@@ -45,7 +45,7 @@ recipe:
         config:
           mode: full_history
           max_candidates: 20
-          max_target_episodes: 42
+          max_target_rollouts: 42
       models:
         proposer:
           url: https://api.openai.com
@@ -55,7 +55,7 @@ recipe:
         tasks:
           - First validation task
           - Second validation task
-        scorer: my_harness.scoring:EpisodeScore
+        scorer: my_harness.scoring:RolloutScore
         policy: compare
         statistic: mean
 
@@ -64,11 +64,11 @@ inference:
 ```
 
 `seed` is a directory of tree files, such as `rules.md` with the starting
-rules. `evaluation.scorer` names a standard Reef episode scorer class:
+rules. `evaluation.scorer` names a standard Reef rollout scorer class:
 
 ```python
-class EpisodeScore(EpisodeScorer):
-    def score(self, task: str, result: EpisodeResult) -> float:
+class RolloutScore(RolloutScorer):
+    def score(self, task: str, result: RolloutResult) -> float:
         ...
 ```
 
@@ -80,7 +80,7 @@ class EpisodeScore(EpisodeScorer):
 | `model` | `proposer` | the `evolution.models` binding that proposes; `served` is refused |
 | `components` | every kind the adapter renders | the tree kinds a proposal may change |
 | `max_candidates` | `0` (no limit) | the candidates the method proposes |
-| `max_target_episodes` | `0` (no limit) | the evaluation episodes after which the method proposes nothing |
+| `max_target_rollouts` | `0` (no limit) | the evaluation rollouts after which the method proposes nothing |
 | `max_files` | `32` | the files of one proposed tree |
 | `max_traces` | `16` | the traces whose record files one prompt shows |
 | `trace_chars` | `4000` | the characters one prompt shows of one trace's record files |
@@ -98,7 +98,7 @@ these items, as data:
   files, the parent it branched from, the proposer's hypothesis and changes,
   its outcome (served, selected, rejected, or undecided), and its scores on
   the evaluation tasks.
-- Excerpts of the episode records that the history keeps, and of the step's
+- Excerpts of the rollout records that the history keeps, and of the step's
   own traces. The step's traces come first. Then the candidates take turns,
   the served one first and the others newest first, each with its lowest
   scores first. A long record keeps its beginning and its end.
@@ -122,18 +122,18 @@ proposer's hypothesis, changes, and parent, so the next step shows it.
 ## Selection and budgets
 
 Select with `policy: compare` and `statistic: mean`. The candidate is
-published when its mean score is strictly higher than the head's; an episode
+published when its mean score is strictly higher than the head's; a rollout
 that could not run counts as zero. The score cache keeps the first scores of each tree,
 so the head's mean is the one it was admitted on, and the head does not run
-again. The exception is an episode that could not run: it runs again in the
+again. The exception is a rollout that could not run: it runs again in the
 next evaluation. This reproduces upstream's frontier: it keeps the highest recorded
 mean, and a tie keeps the current choice. The seed runs once with the first
 candidate, and then each candidate runs once.
 
 The budgets count the history: `max_candidates` counts the trees the method
-proposed, and `max_target_episodes` counts the evaluation episodes that ran,
-the episodes of a client's proposal included. A spent budget ends the search
-before the model call; the last evaluation may pass `max_target_episodes`.
+proposed, and `max_target_rollouts` counts the evaluation rollouts that ran,
+the rollouts of a client's proposal included. A spent budget ends the search
+before the model call; the last evaluation may pass `max_target_rollouts`.
 Zero turns a budget off. Reef's own `max_steps`, `max_model_calls_per_step`,
 executor, timeout, and residue options apply as usual.
 
@@ -143,14 +143,14 @@ comparable: do not combine this method with task promotion or rechecks.
 ## State and commits
 
 The history directory under `evolution.state_dir` holds every candidate, its
-episodes and records, and each step's decision. The method's own state,
+rollouts and records, and each step's decision. The method's own state,
 committed with each step, is `state/attempts.jsonl`: one line per reply that
 proposed no candidate.
 
 The history keeps an attempt whose step never committed, such as an
 evaluation or a commit that failed. A retry of that step does not count the
 attempt's tree, does not show it, and does not refuse it as a known tree. If
-the proposer returns it again, the cache scores it; only the episodes that
+the proposer returns it again, the cache scores it; only the rollouts that
 could not run are run again.
 
 ## Terminus 2 code evolution

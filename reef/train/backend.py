@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from reef.artifact.artifact import Artifact
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import JobData, TrainStepResult
 
@@ -59,7 +60,7 @@ class ReleaseFiles:
     each relative path of the component's view of that release to its UTF-8
     text, without the repository's own files.
     Purpose: ``CommittedReleases`` makes it; a candidate backend builds its
-    head, or a rollback target, from ``files``.
+    head, or a recheck target, from ``files``.
     """
 
     release_id: str
@@ -75,10 +76,11 @@ class CommittedReleases(ABC):
 
     Purpose: a candidate backend that builds each candidate from the committed
     head reads it here, and the scenario layer implements it over its commit
-    history and artifact repository. A component's head is the release of its
-    latest commit that published one (a pending release included) or that
-    moved the head (a rollback or a promote). Before any such commit, the head
-    is the base release.
+    history and artifact repository. A component's head is its training
+    start: the release of the later of its newest ``train_from`` record and
+    its newest training commit that made an artifact, active or not. An
+    ``activate`` record moves what serves, not the head. Before any such
+    record, the head is the base release.
     """
 
     @abstractmethod
@@ -140,6 +142,16 @@ class CandidateBackend(CandidateEvaluator, ABC):
         speculative prepare/evaluate work escape Reef's commit boundary.
         """
         return
+
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """The state whose next step starts from ``artifact``, given the current ``state``.
+
+        Reef calls this when a person sets the training start (``train-from``).
+        ``artifact`` is the backend's component of a release, materialized.
+        Raise ``ValueError`` when the backend cannot start from ``artifact``.
+        The default refuses every artifact.
+        """
+        raise ValueError(f"the {type(self).__name__} backend cannot start from a published artifact")
 
     def experiment_config(self) -> Mapping[str, Any]:
         """Non-secret backend identity/config attached to experiment runs."""

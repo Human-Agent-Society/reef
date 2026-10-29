@@ -1,4 +1,4 @@
-"""Guarantees of the tutorials/evolve-your-harness example, hermetic: the served model is stubbed, episodes run a
+"""Guarantees of the tutorials/evolve-your-harness example, hermetic: the served model is stubbed, rollouts run a
 fake pi binary, and the boot tests read the serve files the way run.sh and ``reef serve`` do.
 
 This file covers what the tutorial owns: its grader, its two methods (``RulesMethod`` on pi, ``NativeMethod`` on the
@@ -25,11 +25,12 @@ from tests.support.harness_service import backend_step
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 
 from reef.core.training_request import TrainingRequest
+from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, validate_patch
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import load_recipe_config
@@ -104,8 +105,8 @@ def method_backend(tmp_path: Path, method, served: Served, **fields):
     return backend
 
 
-def episode(trajectory: tuple[dict, ...]) -> EpisodeResult:
-    return EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
+def rollout(trajectory: tuple[dict, ...]) -> RolloutResult:
+    return RolloutResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
 
 
 def pi_message(text: str) -> dict:
@@ -122,25 +123,25 @@ def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
 def test_evaluate_grades_exact_final_lines(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
-    assert evolution.evaluate(task, episode((pi_message(f"Working...\n\n{answer}"),))) == 1.0
-    assert evolution.evaluate(task, episode(({"role": "assistant", "content": answer},))) == 1.0
+    assert evolution.evaluate(task, rollout((pi_message(f"Working...\n\n{answer}"),))) == 1.0
+    assert evolution.evaluate(task, rollout(({"role": "assistant", "content": answer},))) == 1.0
 
 
 def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
-    assert evolution.evaluate(task, episode((pi_message(f"{answer}!"),))) == 0.0
-    assert evolution.evaluate(task, episode((pi_message(f"The answer is {answer}"),))) == 0.0
-    assert evolution.evaluate(task, episode(())) == 0.0
-    assert evolution.evaluate("no such prefix", episode((pi_message(answer),))) == 0.0
+    assert evolution.evaluate(task, rollout((pi_message(f"{answer}!"),))) == 0.0
+    assert evolution.evaluate(task, rollout((pi_message(f"The answer is {answer}"),))) == 0.0
+    assert evolution.evaluate(task, rollout(())) == 0.0
+    assert evolution.evaluate("no such prefix", rollout((pi_message(answer),))) == 0.0
 
 
 def test_the_tutorial_grader_keeps_its_own_answers(evolution) -> None:
     """The tutorial's grader knows the three arithmetic answers its deployments run, and no other task; it reads
     the trajectory through the built-in reader."""
     assert set(evolution.ANSWERS) == {"[sieve]", "[fib]", "[csv]"}
-    assert evolution.evaluate("[health] Run `echo reef-ok`.", episode((pi_message("reef-ok"),))) == 0.0
-    assert evolution.evaluate("[sieve] count the primes", episode((pi_message("Sieving...\n\n9592"),))) == 1.0
+    assert evolution.evaluate("[health] Run `echo reef-ok`.", rollout((pi_message("reef-ok"),))) == 0.0
+    assert evolution.evaluate("[sieve] count the primes", rollout((pi_message("Sieving...\n\n9592"),))) == 1.0
     assert final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 
@@ -317,12 +318,13 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
         "skills/answer-style/SKILL.md",
     } == set(NATIVE_SEED.files)
     # A fresh scenario's base release is the seed's source tree, which names no endpoint.
-    assert built.base_artifact_files() == dict(NATIVE_SEED.files)
+    assert built.base_artifact_source().files == dict(NATIVE_SEED.files)
     assert not any("upstream" in text for text in NATIVE_SEED.files.values())
     assert built.build_surface("demo").harness.served_model == "qwen3-8b"
     empty = tmp_path / "empty-seed"
     empty.mkdir()
-    assert boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml", seed=str(empty)).base_artifact_files() is None
+    emptied = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml", seed=str(empty))
+    assert emptied.base_artifact_source().files == {}
 
 
 @pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])
@@ -357,6 +359,9 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, HarnessEvolutionRecipe) and built.evolution.adapter == "pi"
+    # The preset file's top-level activation section reaches the recipe.
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
@@ -373,10 +378,9 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
 
 
 def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> None:
-    """The long-running deployment takes requests and holds a win that touches a code extension for a promote;
-    the two demo files run in auto, where a request is refused, and hold nothing back."""
-    from reef.recipe.registry import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
+    """The long-running deployment takes requests and holds a win that touches a code extension until a person
+    activates it; the two demo files run in auto, where a request is refused, and hold nothing back."""
+    from reef.service.assembly import _serving_recipe
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
@@ -386,16 +390,16 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
     monkeypatch.chdir(REPO_ROOT)
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
     assert config["data"]["training_mode"] == "hybrid"
-    assert config["evolution"]["review_kinds"] == ["code_extension"]
+    assert config["activation"] == {"module": "always", "config": {"review_kinds": ["code_extension"]}}
     for name in ("serve", "serve-native"):
         demo = load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
-        assert demo["data"]["training_mode"] == "auto" and "review_kinds" not in demo["evolution"]
-    built = build_named_recipe(
-        "deployment",
-        {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
-        default_runtime=_upstream_runtime(service_config_from_mapping(config)),
-    )
-    assert built.evolution.review_kinds == ("code_extension",)
+        assert demo["data"]["training_mode"] == "auto" and "activation" not in demo
+    # The recipe that reef serve builds from the deployment, whose top-level activation section it reads.
+    service = service_config_from_mapping(config)
+    built = _serving_recipe(service.recipe, service, dict(os.environ))
+    assert isinstance(built, HarnessEvolutionRecipe)
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"code_extension"}
     # The seed is the starter tree alone: Reef adds no entries of its own to it.
     assert built.seed == PI_SEED
 
@@ -524,11 +528,11 @@ def test_native_evaluate_reads_the_last_assistant_message_with_content(native_ev
         "time": 0,
         "data": {"content": "", "tool_calls": [{}], "finish": "x"},
     }
-    assert native_evolution.evaluate(task, episode((call, native_message("Sieving...\n\n9592")))) == 1.0
+    assert native_evolution.evaluate(task, rollout((call, native_message("Sieving...\n\n9592")))) == 1.0
     # A tool-call message carries no text; the last text answer is the one graded.
-    assert native_evolution.evaluate(task, episode((native_message("9592"), call))) == 1.0
-    assert native_evolution.evaluate(task, episode((native_message("The count is 9592"),))) == 0.0
-    assert native_evolution.evaluate(task, episode(())) == 0.0
+    assert native_evolution.evaluate(task, rollout((native_message("9592"), call))) == 1.0
+    assert native_evolution.evaluate(task, rollout((native_message("The count is 9592"),))) == 0.0
+    assert native_evolution.evaluate(task, rollout(())) == 0.0
 
 
 # -- the replay page ------------------------------------------------------------------------------
@@ -671,24 +675,26 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "removed": [],
     }
 
-    # A rollback row is not a step: it is shown as its own kind, with no result, over the files it followed.
-    rollback = {
+    # An activation row is not a step: it is shown as its own kind, with no result, over the files of the release it
+    # activated, here the seed.
+    activation = {
         "recorded_at": 1060.0,
-        "operation": "rollback",
+        "operation": "activate",
         "step": 2,
-        "artifact_ref": {"release_id": "r1", "parent_release_id": "r2"},
+        "artifact_ref": {"release_id": "r1", "parent_release_id": None},
         "metrics": None,
         "algorithm_state": None,
     }
-    write_commits(work / "agent-record", commit, rollback)
-    with_rollback = replay.collect(work)
-    assert [(release["kind"], release["step"], release["release_id"]) for release in with_rollback["releases"]] == [
+    write_commits(work / "agent-record", commit, activation)
+    with_activation = replay.collect(work)
+    assert [(release["kind"], release["step"], release["release_id"]) for release in with_activation["releases"]] == [
         ("seed", 0, "seed"),
         ("published", 1, "r2"),
-        ("rollback", 2, "r1"),
+        ("activate", 2, "r1"),
     ]
-    assert with_rollback["releases"][2]["result"] is None
-    assert with_rollback["releases"][2]["files"] == with_rollback["releases"][1]["files"]
+    assert with_activation["releases"][2]["result"] is None
+    assert with_activation["releases"][2]["files"] == with_activation["releases"][0]["files"]
+    assert with_activation["releases"][2]["files"] != with_activation["releases"][1]["files"]
 
     # An empty work directory still renders a page: the pi variant's seed alone.
     empty = replay.collect(tmp_path / "nothing")

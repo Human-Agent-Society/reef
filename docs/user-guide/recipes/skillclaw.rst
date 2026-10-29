@@ -44,7 +44,7 @@ How Reef implements it
 skillclaw is a method package on the harness evolution engine
 (``reef/train/harness_backend/``); `Evolve your harness
 <../evolve-your-harness.rst>`__ describes the mechanism it runs on. The
-package supplies a ``Method`` (``NightMethod``) and an ``EpisodeScorer``
+package supplies a ``Method`` (``NightMethod``) and an ``RolloutScorer``
 (``ProbeScorer``) in ``harness/plugins.py``. In each step, ``NightMethod``
 runs the night flow over the step's traffic traces and writes the night's
 pool changes into the step's workspace as one patch: one

@@ -47,7 +47,7 @@ from recipes.beta.spade.generation import (
 )
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
-from reef.harness.episodes.tasks import rewards_of
+from reef.harness.rollouts.tasks import rewards_of
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -292,7 +292,7 @@ class SpadeTaskGenerator(TaskGenerator):
         Staging the task again returns the copy that the recipe ran. The plays report on the ``hint`` arm,
         which the recipe does not train on.
         """
-        episodes = await self.service.run_episodes(
+        rollouts = await self.service.run_rollouts(
             (await self.service.write_task(task)).path,
             scenario=self.scenario,
             arm=HINT_ARM,
@@ -301,7 +301,7 @@ class SpadeTaskGenerator(TaskGenerator):
             tags={"generation": str(generation)},
             model=self.served_model,
         )
-        return rewards_of(episodes)
+        return rewards_of(rollouts)
 
     async def write(self, task: HarborTask) -> WrittenTask:
         """Write a task; only a description-based generation's rerun may replace a conflicting name."""

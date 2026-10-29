@@ -23,7 +23,7 @@ class MemoryArtifactBackend(CachedRepositoryBackendFactory, ConfigurableReposito
         self.label = label
         self.base_directory = context.work_dir / "base"
         self.base_directory.mkdir(parents=True, exist_ok=True)
-        for name, text in context.bootstrap_files.items():
+        for name, text in context.base.files.items():
             path = self.base_directory / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")

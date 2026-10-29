@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
-from reef.evaluation.harness import EpisodeScorer, EvaluationWorkerPool, evaluation_selection
-from reef.evaluation.harness.runner import EpisodeRun
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
+from reef.evaluation.harness import EvaluationWorkerPool, RolloutScorer, evaluation_selection
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
@@ -18,14 +18,22 @@ from reef.train.backend import ComponentReleases
 from reef.train.trainer import Trainer
 
 
+def rollout_requests(evaluator, *pairings):
+    """One rollout request for each ``(files, task)``, on the evaluator's adapter and served model."""
+    return [
+        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
+        for files, task in pairings
+    ]
+
+
 class StatefulWorker:
-    """Counts its calls; each episode is a ``(value, delay)`` pair, and the models are not read."""
+    """Counts its calls; each rollout is a ``(value, delay)`` pair, and the models are not read."""
 
     def __init__(self):
         self.calls = 0
 
-    def run(self, episode, models):
-        value, delay = episode
+    def run(self, rollout, models):
+        value, delay = rollout
         time.sleep(delay)
         self.calls += 1
         if value == "bad":
@@ -35,7 +43,7 @@ class StatefulWorker:
         return os.getpid(), self.calls, value
 
 
-class Scorer(EpisodeScorer):
+class Scorer(RolloutScorer):
     def score(self, task, result):
         return 1.0
 
@@ -90,20 +98,20 @@ def test_unused_pool_close_does_not_launch_workers():
         pool.run([("never", 0)], None)
 
 
-class IsolationScorer(EpisodeScorer):
+class IsolationScorer(RolloutScorer):
     def __init__(self):
         self.calls = 0
 
     def score(self, task, result):
         row = result.trajectory[-1]
         if Path(row["workspace"]).exists() or row["rules"] != task:
-            raise ValueError("episode files leaked or were not cleaned")
+            raise ValueError("rollout files leaked or were not cleaned")
         self.calls += 1
         return float(self.calls)
 
 
 @pytest.mark.parametrize("executor_backend, workers", [("uni", 1), ("mp", 2)])
-def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, executor_backend, workers):
+def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, executor_backend, workers):
     binary = tmp_path / "isolation-pi"
     roots = tmp_path / "roots"
     binary.write_text(
@@ -125,7 +133,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         binary=str(binary),
     )
     backend = recipe.build_backend("test", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
-    pool, models = backend.evaluator.worker_pool, backend.evaluator.models
+    pool = backend.evaluator.worker_pool
     records = SQLiteRecordStore()
     trainer = Trainer(
         scenario="test",
@@ -137,13 +145,21 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     )
     try:
         for cycle in range(2):
-            episodes = [
-                EpisodeRun({"pi-agent/AGENTS.md": "candidate"}, "candidate", tmp_path / "records" / f"{cycle}-0"),
-                EpisodeRun({}, "", tmp_path / "records" / f"{cycle}-1"),
-            ]
-            scores = pool.run(episodes, models)
+            requests = rollout_requests(
+                backend.evaluator,
+                ({"pi-agent/AGENTS.md": "candidate"}, "candidate"),
+                ({"pi-agent/AGENTS.md": "current"}, "current"),
+            )
+            scores = backend.evaluator.run_rollouts(requests)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
-            assert [row.score for row in scores] == expected
+            assert [row.score.value for row in scores] == expected
+        evaluator = backend.evaluator
+        for request, message in (
+            (RolloutRequest(PolicyHarness("claude"), evaluator.served_model, "task"), "adapter"),
+            (RolloutRequest(PolicyHarness("pi"), PolicyModel("another-model"), "task"), "serves"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                evaluator.run_rollouts([request])
         paths = roots.read_text().splitlines()
         assert len(paths) == len(set(paths)) == 4
         assert all(not Path(path).exists() for path in paths)
@@ -153,4 +169,4 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     trainer.close()
     assert pool.closed
     with pytest.raises(RuntimeError, match="closed"):
-        pool.run([EpisodeRun({}, "", tmp_path / "records" / "late")], models)
+        backend.evaluator.run_rollouts(rollout_requests(backend.evaluator, ({}, "current")))

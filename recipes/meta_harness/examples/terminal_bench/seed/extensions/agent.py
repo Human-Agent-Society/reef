@@ -1,4 +1,4 @@
-"""The unevolved Terminus 2 seed, loaded only inside Reef's episode sandbox."""
+"""The unevolved Terminus 2 seed, loaded only inside Reef's rollout sandbox."""
 
 from harbor.agents.terminus_2 import Terminus2
 

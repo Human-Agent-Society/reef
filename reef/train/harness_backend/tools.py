@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from reef.evaluation.harness import EpisodeRecord, HarnessEpisodeEvaluator, History
+from reef.evaluation.harness import HarnessRolloutEvaluator, History, RolloutRecord
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.gateway import ModelCalls
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend.agent.run import AgentExecution, run_agent
 from reef.train.harness_backend.calls import StepCalls, budgeted_bindings
@@ -31,9 +31,9 @@ class StepTools(Tools):
     run it. ``history`` is the scenario's history; a tree the method
     evaluates joins it as a ``method`` candidate of the workspace's step
     whose parent is ``head``, the checksum of the head tree. ``step_calls``
-    is the step's call meter. ``max_episodes`` ≥ 0 bounds the episodes
-    ``evaluate`` starts in the step, 0 for no bound. ``episodes_run`` counts
-    the episodes started so far, also those of a call whose scorer raised,
+    is the step's call meter. ``max_rollouts`` ≥ 0 bounds the rollouts
+    ``evaluate`` starts in the step, 0 for no bound. ``rollouts_run`` counts
+    the rollouts started so far, also those of a call whose scorer raised,
     so a method that retries after an error stays within the bound.
     Purpose: the backend makes one per step and passes it to ``Method.step``.
     """
@@ -43,12 +43,12 @@ class StepTools(Tools):
         *,
         workspace: Workspace,
         descriptor: AdapterDescriptor,
-        evaluator: HarnessEpisodeEvaluator | None,
+        evaluator: HarnessRolloutEvaluator | None,
         history: History,
         head: str,
         models: ModelBindings,
         step_calls: StepCalls,
-        max_episodes: int = 0,
+        max_rollouts: int = 0,
         agent: AgentExecution | None = None,
     ) -> None:
         self.workspace = workspace
@@ -58,8 +58,8 @@ class StepTools(Tools):
         self.head = head
         self.step_calls = step_calls
         self.budgeted = budgeted_bindings(models, step_calls)
-        self.max_episodes = max_episodes
-        self.episodes_run = 0
+        self.max_rollouts = max_rollouts
+        self.rollouts_run = 0
         self.agent = agent
 
     @property
@@ -73,7 +73,7 @@ class StepTools(Tools):
     def check(self, tree: HarnessTree) -> ValidationResult:
         return validate_tree(tree, self.descriptor)
 
-    def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple[EpisodeRecord, ...]:
+    def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple[RolloutRecord, ...]:
         if self.evaluator is None:
             raise RuntimeError("the deployment configured no evolution.evaluation.scorer, so no tree can be scored")
         if isinstance(tasks, str):
@@ -82,18 +82,18 @@ class StepTools(Tools):
         if not validation.passed:
             raise ValueError(f"the tree fails validation: {validation.message()}")
         # The budget is checked before the tree joins the history, so a refused call adds nothing.
-        needed = self.evaluator.episodes_to_run(tree, tasks, repeats=repeats)
-        left = self.max_episodes - self.episodes_run
-        if self.max_episodes and needed > left:
-            raise RuntimeError(f"{needed} episodes must run, and the step's episode budget has {left} left")
+        needed = self.evaluator.rollouts_to_run(tree, tasks, repeats=repeats)
+        left = self.max_rollouts - self.rollouts_run
+        if self.max_rollouts and needed > left:
+            raise RuntimeError(f"{needed} rollouts must run, and the step's rollout budget has {left} left")
         self.history.add_candidate(tree, step=self.workspace.step, origin="method", parent=self.head)
         self.step_calls.note("evaluate", f"scoring a tree on {len(tasks)} task(s), {repeats} repeat(s) each")
-        started = self.history.next_episode
+        started = self.history.next_rollout
         try:
-            return self.evaluator.episodes(tree, tasks, repeats=repeats, step=self.workspace.step)
+            return self.evaluator.rollouts(tree, tasks, repeats=repeats, step=self.workspace.step)
         finally:
-            # Each episode that started counts, also in a batch that raised: a retry spends the same budget.
-            self.episodes_run += self.history.next_episode - started
+            # Each rollout that started counts, also in a batch that raised: a retry spends the same budget.
+            self.rollouts_run += self.history.next_rollout - started
 
     def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
         if self.agent is None:

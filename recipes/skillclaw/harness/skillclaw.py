@@ -8,13 +8,13 @@ bucket - ``improve_skill``, ``optimize_description``, ``create_skill``, or
 ``skip``, exactly the sealed action set. The decisions land on a scratch
 pool (night.night_step, merge and registry semantics included) and the
 pool diff maps to one patch: one ``skills/<name>/SKILL.md`` file per added
-or rewritten skill, published as one candidate tree. The sealed night never
+or rewritten skill, kept as one candidate tree. The sealed night never
 removes a skill, so the patch removes no file. A night that applies nothing
 returns ``None`` and the served pool stands.
 
-``evaluate`` grades the probe episodes by exact final answer. The night's
-step notes keep those scores, but they do not decide the publish:
-skillclaw.yaml's ``policy: none`` publishes every non-skip night and the
+``evaluate`` grades the probe rollouts by exact final answer. The night's
+step notes keep those scores, but they do not decide which tree is kept:
+skillclaw.yaml's ``policy: none`` keeps every non-skip night and the
 next day's traffic judges the pool, which is the method's own regime.
 
 The day's task metadata (score, success, error, breakdown) travels through
@@ -34,8 +34,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import TrajectorySample
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import TreePatch
 
 from . import evolver, night, prompts
@@ -210,8 +210,8 @@ def propose(
         shutil.rmtree(incumbent, ignore_errors=True)
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    """Grade the last line of the probe episode's final assistant text, 1.0 exact."""
+def evaluate(task: str, result: RolloutResult) -> float:
+    """Grade the last line of the probe rollout's final assistant text, 1.0 exact."""
     return grade_probe(task, _final_assistant_text(result.trajectory))
 
 

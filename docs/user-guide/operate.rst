@@ -36,17 +36,19 @@ The committed outcome includes the recipe-owned metrics. You can therefore tell 
 
 The service and every process ``reef serve`` started write logs under ``reef.run-dir`` (``.reef/run/`` by default), one ``<service>.log`` and one ``<service>.pid`` each.
 
-Read the release chain
-----------------------
+Read the artifacts
+------------------
 
 .. code:: bash
 
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
-     "$REEF_URL/reef/scenarios/code-repair/releases"
+     "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``promote``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Every release's content is saved in the repository as a Git LFS commit.
+An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one, and so does each import (`Import an artifact`_). The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
 
-For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
+A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations and train-from operations. ``GET /reef/scenarios/{scenario}/commits`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
+
+For harness scenarios, ``GET /reef/harness/releases`` lists the release chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. It lists every training step, also a rejected or skipped step, which has ``checkpoint: false`` and carries the active release's ID. A new release that the activation rule did not activate sits in the catalog with its evaluation metrics, ``active: false`` and ``activated: false``. No session gets it until a person activates it. Clients label such a release ``Waiting for activation``.
 
 Read the proposal inbox
 -----------------------
@@ -56,7 +58,7 @@ Read the proposal inbox
    ls -R .reef/harness/code-repair/harness/proposals
    cat .reef/harness/code-repair/harness/proposals/settled/*.json
 
-A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``<evolution.state_dir>/<scenario>/<component>/proposals/``, where ``evolution.state_dir`` defaults to ``.reef/harness`` and ``<component>`` is the release component the recipe evolves: ``harness`` for ``HarnessEvolutionRecipe``, as in the commands above (see `History <evolve-your-harness.rst#history>`__). Each file holds the body the agent sent (``patch``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
+A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``<evolution.state_dir>/<scenario>/<component>/proposals/``, where ``evolution.state_dir`` defaults to ``.reef/harness`` and ``<component>`` is the release component the recipe evolves: ``harness`` for ``HarnessEvolutionRecipe``, as in the commands above (see `History <evolve-your-harness.rst#history>`__). Each file holds the body the agent sent (``patch``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the active release that it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
 
 .. list-table::
    :header-rows: 1
@@ -69,53 +71,135 @@ A harness scenario keeps the proposals its agents sent through ``POST /reef/harn
    * - ``claimed/``
      - taken by the step now running; a step that failed before it settled leaves the file here, and no later step takes it again
    * - ``refused/``
-     - the step's own validation refused it, because the head had moved; ``refused`` holds the problems
+     - the step's own validation refused it, because the step's training start had moved; ``refused`` holds the problems
    * - ``settled/``
      - the evaluation settled it; ``result`` holds the step, whether it was selected, and the selection's reason
 
-The commit that settled a proposal carries ``proposal: {id, session, release_id, reason}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. An automatic step takes the oldest pending proposal in place of running the method; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
+The commit that settled a proposal carries ``proposal: {id, session, release_id, reason}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed the tree of a release. An automatic step takes the oldest pending proposal in place of running the method; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
 
 Read what a release requires
 ----------------------------
 
-A request sent to ``POST /reef/train`` may name what its change needs where the harness runs, and the method may add items of its own. The commit that answered the request carries the merged list as ``training_request.requires``: ``{name, kind, check, prompt}`` items, where ``kind`` is ``permission``, ``env``, ``service`` or ``binary``. A releases row in ``GET /reef/harness/releases`` carries its own step's list. The ``requires`` of ``GET /reef/harness`` is the union over the release's chain (a promote continues at the release it promoted), the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. Each step's page shows both under Setup.
+A request sent to ``POST /reef/train`` may name what its change needs where the harness runs, and the method may add items of its own. The commit that answered the request carries the merged list as ``training_request.requires``: ``{name, kind, check, prompt}`` items, where ``kind`` is ``permission``, ``env``, ``service`` or ``binary``. A releases row in ``GET /reef/harness/releases`` carries its own step's list. The ``requires`` of ``GET /reef/harness`` is the union over the release's chain, the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. Each step's page shows both under Setup.
 
 Reef runs no check. A client checks each item where the harness runs before it runs the release: an ``env`` item's variable is set, a ``binary`` item's program is on the PATH, and any other ``check`` command exits 0. A person should read a check before the client runs it. ``recipes/beta/reefine/examples/run.py`` shows one such client: it refuses to install a release with an unmet item and prints each item's ``prompt``.
+
+The base artifact
+-----------------
+
+Every scenario starts from the deployment's base artifact. Reef imports it once, when the artifact repository is new, from the configuration:
+
+- A weight recipe imports its training component's untrained checkpoint, with the layout of the component's other checkpoints:
+
+  - The ``slime`` backend with full weights imports the model that ``inference.model-path`` names. The artifact repository keeps a full copy of the model's files, about 2 bytes per parameter in bf16.
+  - The ``slime`` backend with LoRA imports an adapter whose weights are zero. It serves the model unchanged.
+  - The ``tinker`` backend imports the checkpoint of its untrained adapter, which stays on the Tinker service.
+- A harness recipe imports the files of its seed tree: ``evolution.seed``, else the recipe's own seed. Without a seed, the base harness is empty.
+- A recipe of several components imports each component's base under its name.
+
+The base artifact's ``artifact_id`` is the ID of the repository's base release. Activate it to serve the base model or the base harness again. Train from it to start training again from the base weights or the seed. The ``slime`` backend refuses this, as it refuses every artifact (`Train from an artifact`_).
+
+Reef reads the model and the seed only to make the base artifact. When a restart configures another model path or another seed, Reef refuses to start and names both values. To change the base, restore the configuration, or start a new deployment with a new artifact repository. Reef also refuses an artifact repository that an older Reef made, because its base was not imported. Start such a deployment with a new artifact repository.
 
 Choose a starting release
 -------------------------
 
-Inference always answers from the scenario's current release. No request header keeps a client on an older release.
+Inference always answers from the scenario's active release. No request header keeps a client on an older release.
 
-A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
+A new scenario starts from the base artifact. A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
 
-To pull a specific harness release, add ``?release_id=<id>`` to the harness manifest route. To serve an earlier release again, see the next section, Roll back. It also says which releases can be restored.
+To pull a specific harness release, add ``?release_id=<id>`` to the harness manifest route. To serve an earlier artifact again, activate it as `Activate an artifact`_ describes.
 
-Roll back
----------
+Import an artifact
+------------------
+
+To serve or train an artifact that was made outside Reef, such as an adapter that you fine-tuned elsewhere, a checkpoint on S3, or a harness that you wrote, import it by a URI that Reef reads:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"release_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/rollback"
+     -d '{"source": "s3://my-bucket/checkpoints/step-400/"}' \
+     "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints.
+Reef reads ``hf://org/model@revision``, ``s3://bucket/prefix/`` and ``file:///absolute/path``, a directory on the service's machine. To import a directory from your own machine, upload it to one of these places first. S3 needs the ``s3`` extra (``uv pip install 'reef-infra[s3]'``) and reads with boto3's standard credentials: the environment, a profile or an instance role. Reef stores no credential. A reader can read whatever the service can read, so only give import access to callers that may train the scenario. ``storage.artifact-sources`` adds readers for other schemes (`Python API <../reference/python-api.rst#artifact-imports>`__).
 
-A weight rollback also moves where training continues. Reef first imports the target release into the training component. Reef then writes the rollback commit and cancels the running job. The next job starts from the imported release. The ``tinker`` backend imports the release's checkpoint manifest, so a Tinker scenario can roll back. The ``slime`` backend refuses every import, because its workers continue from their own latest checkpoint. Reef then refuses the rollback with HTTP 409. Harness releases roll back without a training component.
+The directory must have the layout of the scenario's releases: the training component's weight files, a Tinker manifest whose saved state is on the configured service, or a harness source tree whose files are UTF-8 text and pass validation for the adapter. Otherwise Reef answers HTTP 400 and changes nothing. `Import an artifact <../reference/http-api.rst#import-an-artifact>`__ in the HTTP API lists each layout and status.
 
-Reef cannot move a Slime scenario back to an earlier checkpoint. To train again from one, start a new deployment for a new scenario:
+The import adds an ``import`` row to the artifact list, with the URI and the version that Reef read in ``source``. It does not serve the artifact and does not change a training start, and the activation rule does not run. Activate it, or train from it, as any other artifact. Reef copies the files into the artifact store, so a later change at the source does not change the artifact. An import needs the model's size in disk space twice while it runs: once under ``storage.artifact-cache-dir`` and once in the artifact store.
+
+To import model weights from Hugging Face without a copy, name a full commit SHA: ``hf://org/model@<40-digit commit>``. Reef then keeps a reference to that revision, and downloads its weights only when a serving engine loads them. A commit names fixed files, so the artifact cannot change, but it can be lost: keep the repo on the Hub while you serve or train the artifact. A branch or a tag can move, so Reef copies those.
+
+Activate an artifact
+--------------------
+
+The active release is the one that Reef serves. Inference answers from it, and the harness routes serve its tree. It binds one active artifact for each component. To serve another artifact, activate it:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"artifact_id": "<id>"}' \
+     "$REEF_URL/reef/scenarios/code-repair/activate"
+
+The target is any row of the artifact list: an artifact that a training step or an import made, or the creation artifact. Reef loads the artifact into serving and makes it the active artifact of its component. What Reef writes depends on the scenario:
+
+- In a scenario of one component, Reef writes no artifact or release. It appends an ``activate`` record. The release that made the artifact serves again.
+- In a scenario of several components, Reef publishes a release: the active release with ``component`` bound to the artifact. This release makes no new content. The other components stay as they serve.
+
+The answer's ``artifact_id`` names the activated artifact, and its ``release_id`` names the active release. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
+
+A full-weight serving runtime that activates the base artifact after it served a checkpoint loads the base artifact's files from the artifact repository. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
+
+The deployment's `activation section <../reference/configuration.rst#the-activation-section>`__ names the rule that decides whether Reef activates each new artifact:
+
+- ``always``, the default, activates each new artifact when the training step makes it. Its ``review_kinds`` holds back a harness tree that changes one of the listed tree kinds.
+- ``never`` makes each new artifact but does not activate it. A person activates it.
+- ``evaluated`` activates an artifact once an evaluation of it reaches ``min_mean_score``.
+
+A scenario can select one of these rules for itself with ``POST /reef/scenarios/{scenario}/update`` and ``{"activation": {"module": "never"}}``. Send ``"activation": null`` to follow the deployment's rule again. ``GET /reef/scenarios/{scenario}/settings`` reads back the scenario's rule and the rule that applies (`Scenario updates <../reference/http-api.rst#scenario-updates>`__).
+
+An artifact that the rule does not activate still becomes the start of the next training job.
+
+Train from an artifact
+----------------------
+
+Each trainer continues from its own newest output: a weight trainer from its newest saved checkpoint, a harness trainer from the tree it kept. That artifact is the trainer's training start. To make a trainer continue from another artifact, set its training start:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"artifact_id": "<id>"}' \
+     "$REEF_URL/reef/scenarios/code-repair/train-from"
+
+Reef cancels the running job. The next training job, or the next evolve step, starts from the artifact. Train-from never changes the active release. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as the base artifact, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
+
+Whether a trainer can start from an artifact depends on the backend:
+
+- The ``tinker`` backend imports the artifact's checkpoint manifest, so a Tinker scenario can train from any of its artifacts. The import includes the saved training state with the optimizer state.
+- The ``slime`` backend refuses every artifact with HTTP 400, because its workers continue from their own latest checkpoint.
+- A harness trainer starts its next evolve step from the artifact's tree.
+
+Reef cannot move the training of a Slime scenario back to an earlier checkpoint, although it can activate one of its artifacts. To train again from an earlier checkpoint, start a new deployment for a new scenario:
 
 - Give the deployment its own ``save`` and ``save-hf`` directories. The Slime component does not overwrite a rollout that it saved before.
 - Point Slime at the old checkpoint with its own options in ``training.options``: ``load`` names the old ``save`` directory, and ``ckpt-step`` names the saved rollout.
 
 The new scenario's first job continues from the weights that the workers loaded. An existing scenario cannot move to the new deployment: its committed start names a checkpoint of the old one, so the Slime component refuses its jobs.
 
+Go back to an older artifact
+----------------------------
+
+Activation alone does not last under the default rule. The trainer still continues from its training start, and Reef activates the next artifact that it makes. To go back to an older artifact for good, activate it and do one of these:
+
+- Send ``train-from`` with the same artifact, so that the next artifact descends from it.
+- Switch to manual activation, so that no new artifact serves until a person activates it.
+
 Set the checkpoint cadence
 --------------------------
 
-Reef serves only weights that a training job saved and that passed candidate evaluation. Every checkpoint that a job saves is a candidate. Without an ``evaluation`` section, Reef publishes every candidate as a release. The next job always starts from the last saved checkpoint, whether or not evaluation selected it.
+Every checkpoint that a job saves becomes an artifact. Without an ``evaluation`` section, Reef activates each of them. The next job always starts from the last saved checkpoint, whether or not evaluation selected it.
 
 How often a job saves depends on the backend:
 
@@ -137,7 +221,7 @@ Track experiments with W&B
 
 Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and Reef refuses Slime's ``--wandb-key`` flag so a credential never enters a command line or a run config.
 
-What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
+What you see in W&B: one group per scenario and one run per scenario, plus a new run after every train-from, so the training from each new start is its own curve. An activation does not end a run. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
@@ -166,7 +250,7 @@ What survives a restart, provided the storage paths are persistent:
    * - the commit history
      - append-only per scenario; the database transaction that adds a step is the commit point
    * - checkpointed versions
-     - in the Git LFS repository; the recovered head is what is served
+     - in the Git LFS repository; Reef serves the active release that the commit history names
    * - algorithm state and record progress
      - restored from the head record of the commit history
    * - a training job in flight
@@ -185,9 +269,10 @@ What survives a restart, provided the storage paths are persistent:
        rows train then, with no new record needed
 
 After a step commits, ``/reef/status`` reports its scenario's
-``artifact_head_sync`` with the checkpoint ``release_id`` and any ``error``.
-The ``state`` is ``synchronized`` when the backend head is current, ``pending``
-when updating it failed, or ``conflict`` when another writer moved it to an
+``artifact_head_sync`` with the ``release_id`` of the `chain tip
+<../advanced_topics/state-model.rst#the-release-chain>`__ and any ``error``.
+The ``state`` is ``synchronized`` when the backend head names the chain tip,
+``pending`` when updating it failed, or ``conflict`` when another writer moved it to an
 unrelated release. The committed step remains successful. Before another commit,
 Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
@@ -199,10 +284,12 @@ Choose the storage backend
 --------------------------
 
 The storage backend keeps the records, commits, and settings of each scenario.
-The settings are the model configuration and the selected training mode. You
-set both with ``POST /reef/scenarios/{scenario}/update``. After a restart, the
-scenario uses its stored training mode. If the recipe does not support that
-mode, the scenario uses the default mode and Reef logs a warning.
+The settings are the model configuration, the selected training mode, the
+automatic evaluation settings and the activation rule. You set them with
+``POST /reef/scenarios/{scenario}/update`` and read them back with
+``GET /reef/scenarios/{scenario}/settings``. After a restart, the scenario uses
+its stored settings. If the recipe does not support the stored training mode,
+the scenario uses the default mode and Reef logs a warning.
 
 Select the backend with ``storage.record-backend``:
 
@@ -308,6 +395,33 @@ refuses that configuration, because the plugin reads its own config.
 A change from one backend to another does not move releases. Keep the old
 store readable while scenarios refer to its releases, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
+
+To keep the Git LFS repository on Hugging Face, give the built-in factory with
+its options. Reef still reads every release from its local clone, and pushes
+each release to the Hub as it publishes it:
+
+.. code-block:: yaml
+
+   storage:
+     artifact-backend:
+       module: reef.artifact.git_lfs:GitLFSRepositoryBackendFactory
+       config:
+         repository: https://huggingface.co/org/reef-artifacts
+         refs: branches-and-tags
+         token_env: HF_TOKEN
+
+- ``refs: branches-and-tags`` keeps each release on a tag
+  ``reef/releases/<release_id>``, and the refs that move on branches under
+  ``reef/``, because the Hub accepts no other refs. The default, ``reef``,
+  keeps every ref under ``refs/reef/``. A repository keeps the layout it
+  started with, and Reef refuses the other.
+- A release's ID is its commit, so ``hf://org/reef-artifacts@<release_id>``
+  names the release on the Hub, for a serving runtime or an import.
+- ``token_env`` names the variable of a token that can write the repository.
+  Reef sends it to the repository's host only, as an HTTP header, so it
+  appears in no URL, file or log. Keep the repository private unless you mean
+  to publish what Reef trains.
+- Archiving a deleted scenario's ref works with a local repository only.
 
 Choose the task file store
 --------------------------

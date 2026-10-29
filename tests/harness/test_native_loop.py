@@ -27,17 +27,21 @@ from tests.harness.test_native_serve import (
     _typed,
     _wait,
 )
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import NATIVE_SEED_FILES, NATIVE_SEED_TOOLS, native_loop, native_tool, write_rendered
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import MODEL, harness_backend
 
-from reef.evaluation.harness import EpisodeEvaluationWorker
+from reef.core.activation import MadeArtifact
+from reef.core.evaluation import RolloutScore
+from reef.evaluation.activation import AlwaysActivate
+from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import stage_path
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.trajectory import stage_path
 from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
@@ -47,7 +51,6 @@ from reef.harness.runners.native.selftools import SelfTools, ServeState
 from reef.harness.tree import HarnessTree, RenderError, TreeKind, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
 from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
-from reef.sandbox.process import LocalExecutor
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.types import JobData
 
@@ -78,7 +81,7 @@ events = [
 
 
 def _write_root(tmp_path: Path, files: dict[str, str]) -> Path:
-    """A rendered native root of ``files``, as the episode engine lays one out; the native directory inside."""
+    """A rendered native root of ``files``, as the rollout engine lays one out; the native directory inside."""
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="fake", api_key="dummy")
     write_rendered(tmp_path / "root", HarnessTree(files), NATIVE, binding)
     return tmp_path / "root" / "native"
@@ -350,7 +353,7 @@ def test_harness_try_refuses_any_patch_that_touches_a_loop_file(tmp_path: Path) 
         {**native_tool("whisper", "def run(args, workdir):\n    return 'quiet'\n"), **LOOP_FILE},
         {"native/loops/main.py": None},
     ):
-        with pytest.raises(ToolFailed, match=r"native/loops/.*is reviewed code: propose it, a person promotes it"):
+        with pytest.raises(ToolFailed, match=r"native/loops/.*is reviewed code: propose it, a person activates it"):
             SelfTools(trial, "try").try_({"patch": patch}, str(tmp_path))
     assert trial.tried == []
     result = SelfTools(trial, "try").try_({"patch": {"skills/s/SKILL.md": "# s"}}, str(tmp_path))
@@ -389,21 +392,23 @@ def batch() -> JobData:
     return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
-def test_a_win_that_touches_a_loop_is_pending_whatever_review_kinds_lists(tmp_path: Path) -> None:
+def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_lists(tmp_path: Path) -> None:
+    """A kept tree names the kinds it changes; the always rule holds a loop change whatever review_kinds lists."""
     loop = TreePatch(LOOP_FILE)
     skill = TreePatch({"skills/marker/SKILL.md": "# marker"})
+    default, skill_reviewed = AlwaysActivate(), AlwaysActivate(frozenset({TreeKind.SKILL}))
     held = loop_backend(tmp_path, "held", lambda workspace, tools: loop)
-    result = backend_step(held, batch(), held.initial_state())
-    assert result.metrics["selected"] is True and result.pending is True
+    with_loop = backend_step(held, batch(), held.initial_state())
+    assert with_loop.metrics["selected"] is True and with_loop.changed_kinds == {TreeKind.NATIVE_LOOP}
+    # A list that names another kind holds the loop just the same.
+    assert not default.activates(MadeArtifact(None, with_loop.changed_kinds))
+    assert not skill_reviewed.activates(MadeArtifact(None, with_loop.changed_kinds))
     free = loop_backend(tmp_path, "free", lambda workspace, tools: skill)
     result = backend_step(free, batch(), free.initial_state())
-    assert result.metrics["selected"] is True and result.pending is False
-    listed = loop_backend(tmp_path, "listed", lambda workspace, tools: skill, review_kinds=(TreeKind.SKILL,))
-    assert backend_step(listed, batch(), listed.initial_state()).pending is True
-    # A list that names another kind holds the loop just the same, and so does the step that takes the loop out.
-    unlisted = loop_backend(tmp_path, "unlisted", lambda workspace, tools: loop, review_kinds=(TreeKind.SKILL,))
-    with_loop = backend_step(unlisted, batch(), unlisted.initial_state())
-    assert with_loop.metrics["selected"] is True and with_loop.pending is True
+    assert result.metrics["selected"] is True and result.changed_kinds == {TreeKind.SKILL}
+    assert default.activates(MadeArtifact(None, result.changed_kinds))
+    assert not skill_reviewed.activates(MadeArtifact(None, result.changed_kinds))
+    # The step that takes the loop out changes it too.
     without = loop_backend(
         tmp_path,
         "without",
@@ -412,7 +417,8 @@ def test_a_win_that_touches_a_loop_is_pending_whatever_review_kinds_lists(tmp_pa
         seed={**NATIVE_SEED_FILES, **LOOP_FILE},
     )
     removed = backend_step(without, batch(), without.initial_state())
-    assert removed.metrics["selected"] is True and removed.pending is True
+    assert removed.metrics["selected"] is True and removed.changed_kinds == {TreeKind.NATIVE_LOOP}
+    assert not default.activates(MadeArtifact(None, removed.changed_kinds))
     assert removed.metrics["patch"] == {"native/loops/main.py": None}
 
 
@@ -902,7 +908,7 @@ def test_harness_try_refuses_a_native_loop_patch_on_a_served_loop(tmp_path: Path
     assert _typed(streamed, "loop/enter") == [{"name": "main"}]
     results = _typed(streamed, "tool/result")
     assert [r["error"]["code"] for r in results] == ["TOOL_FAILED"] * 3
-    assert all("is reviewed code: propose it, a person promotes it" in r["content"] for r in results)
+    assert all("is reviewed code: propose it, a person activates it" in r["content"] for r in results)
     # The refusal is whole: the tool beside the loop file did not mount either, and nothing was tried.
     assert [m["source"] for m in _typed(streamed, "harness/mount")] == []
     assert "harness/unmount" not in {event["type"] for event in streamed}
@@ -1039,9 +1045,9 @@ def _loop_error_trajectory(loop: str | None) -> tuple[dict[str, Any], ...]:
 
 
 def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
-    worker = EpisodeEvaluationWorker(
+    worker = RolloutEvaluationWorker(
         descriptor=get_adapter("native"),
-        scorer=resolve_episode_scorer(_score),
+        scorer=resolve_rollout_scorer(_score),
         binary=None,
         timeout=10,
         executor=LocalExecutor(),
@@ -1049,9 +1055,9 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     )
     observed = {}
     for loop in ("main", None):
-        result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
+        result = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
         scored = worker.score_result(result, "task one", ModelBindings(MODEL))
-        assert scored.score is None and scored.failure is not None
+        assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {
         "main": ("loop", "LOOP_ERROR: RuntimeError: boom"),
