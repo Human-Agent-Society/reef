@@ -1,8 +1,9 @@
 """The commit history in the record database of a scenario, for each SQL backend.
 
-The commit table is in the same database as the records. Each operation uses
-one transaction of the record store. The adapters build the table with
-:func:`commit_table` and supply their namespace.
+The commit table is in the same database as the records and the samples. Each
+operation uses one transaction of the record store. An append also counts the
+samples that the commit consumed in the same transaction. The adapters build
+the table with :func:`commit_table` and supply their namespace.
 """
 
 from __future__ import annotations
@@ -12,11 +13,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select, update
 from sqlalchemy.engine import Connection
 
 from reef.storage.commit_history import CommitHistory, same_commit
 from reef.storage.commits import CommitHistoryError, CommitRecord
+from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 
 
@@ -49,12 +51,18 @@ class SQLCommitHistory(CommitHistory):
 
     Values: ``record_store`` is the open record store whose transactions the
     history uses. ``table`` is the commit table and the namespace of this
-    generation. ``label`` names the table for error messages, and ``durable``
+    generation. ``samples`` is the sample table (``sample_table``) in the same
+    namespace. ``label`` names the table for error messages, and ``durable``
     is true when the database outlives the process. ``records()`` is the rows
     of the namespace in step order, decoded. The cached records are always a
     prefix of those rows, so a read fetches only the steps after them; a
     locked block that rolls back clears the cache. A row deleted by anything
     but this class is outside the contract.
+
+    ``append`` stores a new commit and adds one to the ``train_count`` of each
+    sample whose ``consumed_sample_id`` the commit lists, in one transaction. An
+    append of a commit that is already stored changes nothing, so a retry
+    counts no sample twice.
 
     Purpose: a SQL record store makes it in ``commit_history()``.
     ``CommitHistoryScenarioStore`` reads and appends through it.
@@ -69,9 +77,12 @@ class SQLCommitHistory(CommitHistory):
     session do.
     """
 
-    def __init__(self, record_store: SQLRecordStore, table: ScopedTable, *, label: str, durable: bool) -> None:
+    def __init__(
+        self, record_store: SQLRecordStore, table: ScopedTable, samples: ScopedTable, *, label: str, durable: bool
+    ) -> None:
         self.record_store = record_store
         self.table = table
+        self.samples = samples
         self._label = label
         self._durable = durable
         self._lock = RLock()
@@ -119,6 +130,18 @@ class SQLCommitHistory(CommitHistory):
             connection.execute(
                 self.table.table.insert().values(**self.table.scope, step=record.step, commit_json=encoded)
             )
+            sample_ids = sorted(
+                consumed.removeprefix(CONSUMED_SAMPLE_PREFIX)
+                for consumed in record.consumed_ids
+                if consumed.startswith(CONSUMED_SAMPLE_PREFIX)
+            )
+            if sample_ids:
+                samples = self.samples.table
+                connection.execute(
+                    update(samples)
+                    .where(self.samples.condition(), samples.c.sample_id.in_(sample_ids))
+                    .values(train_count=samples.c.train_count + 1)
+                )
 
     @contextmanager
     def _transaction(self, *, write: bool) -> Iterator[Connection]:

@@ -131,6 +131,50 @@ def migrate_record_storage(connection: Connection, records: Table, consumption: 
         operations.drop_column(records.name, "compacted_at", schema=schema)
 
 
+def migrate_uploaded_trajectories(connection: Connection, samples: Table, commits: Table) -> None:
+    """Move the rows of the old ``uploaded_trajectory`` table into ``samples``, then drop the old table.
+
+    Run in the caller's schema transaction, after ``create_all`` made ``samples``. Each trajectory keeps its ID,
+    its content and its upload order, and its ``train_count`` is the number of commits in ``commits`` that list
+    its old consumed ID, ``trajectory:<trajectory_id>``. A schema without the old table is left unchanged.
+    """
+    schema = samples.schema
+    if not inspect(connection).has_table("uploaded_trajectory", schema=schema):
+        return
+    legacy = Table("uploaded_trajectory", MetaData(), schema=schema, autoload_with=connection)
+    scoped = "storage_id" in legacy.c
+    train_counts: dict[tuple[str | None, str], int] = defaultdict(int)
+    for row in connection.execute(select(commits)).mappings():
+        progress = json.loads(row["commit_json"]).get("record_progress", {})
+        for consumed in read_consumed_ids(progress, context="commit"):
+            if consumed.startswith("trajectory:"):
+                train_counts[(row["storage_id"] if scoped else None, consumed.removeprefix("trajectory:"))] += 1
+    after_sequence = 0
+    while True:
+        rows = (
+            connection.execute(
+                select(legacy).where(legacy.c.sequence > after_sequence).order_by(legacy.c.sequence).limit(256)
+            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            break
+        for row in rows:
+            storage_id = row["storage_id"] if scoped else None
+            values: dict[str, object] = {
+                "sample_id": row["trajectory_id"],
+                "content_json": row["content_json"],
+                "content_sha256": row["content_sha256"],
+                "train_count": train_counts[(storage_id, row["trajectory_id"])],
+            }
+            if scoped:
+                values["storage_id"] = storage_id
+            connection.execute(samples.insert().values(values))
+        after_sequence = rows[-1]["sequence"]
+    legacy.drop(connection)
+
+
 def legacy_model_configs(directory: Path) -> dict[str, tuple[Mapping[str, object] | None, Path]]:
     """Read the model configuration files that older versions kept beside the records.
 

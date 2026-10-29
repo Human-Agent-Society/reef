@@ -19,9 +19,9 @@ from reef.core.errors import ReefError
 from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.storage.tasks import TaskStorage
-from reef.storage.trajectories import TrajectoryStore
 
 
 def same_commit(left: CommitRecord, right: CommitRecord) -> bool:
@@ -116,7 +116,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         commit_history: CommitHistory,
         *,
         tasks: TaskStorage,
-        trajectories: TrajectoryStore,
+        samples: SampleStore,
         evaluations: EvaluationStore,
         initial_step: int = 0,
     ) -> None:
@@ -127,7 +127,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._scenario = scenario
         self._records = records
         self._tasks = tasks
-        self._trajectories = trajectories
+        self._samples = samples
         self._evaluations = evaluations
         self._commit_history = commit_history
         self._initial_step = initial_step
@@ -153,10 +153,10 @@ class CommitHistoryScenarioStore(ScenarioStore):
             return self._tasks
 
     @property
-    def trajectories(self) -> TrajectoryStore:
+    def samples(self) -> SampleStore:
         with self._lock:
             self._ensure_open()
-            return self._trajectories
+            return self._samples
 
     @property
     def evaluations(self) -> EvaluationStore:

@@ -414,15 +414,15 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
     processor.release_job_data(batch.data_id)
     batch = processor.build_job_data(2)
     assert batch.samples == (TRAJECTORY, TRAJECTORY)
-    assert processor.acknowledge(batch.data_id) == {"trajectory:t1", "trajectory:t2"}
+    assert processor.acknowledge(batch.data_id) == {"sample:t1", "sample:t2"}
 
     # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
     processor.push_trajectory("t1", TRAJECTORY)
     processor.push_trajectory("t3", TRAJECTORY)
     batch = processor.build_job_data(2)
     assert batch.samples == (TRAJECTORY, TaskSample(Path("i1"), source_agent_record_ids=("i1",)))
-    assert processor.acknowledge(batch.data_id) == {"trajectory:t3", "i1"}
-    consumed = frozenset({"trajectory:t1", "trajectory:t2", "trajectory:t3"})
+    assert processor.acknowledge(batch.data_id) == {"sample:t3", "i1"}
+    consumed = frozenset({"sample:t1", "sample:t2", "sample:t3"})
     assert consumed <= processor.releasable_record_ids()
     processor.release_records(consumed)
     assert not processor.consumed_trajectory_ids

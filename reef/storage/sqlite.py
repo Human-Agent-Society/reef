@@ -23,14 +23,19 @@ from sqlalchemy.pool import NullPool
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
+from reef.storage.migrations import (
+    archive_imported_files,
+    legacy_model_configs,
+    migrate_record_storage,
+    migrate_uploaded_trajectories,
+)
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_samples import SQLSampleStore, sample_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 _METADATA = MetaData()
@@ -90,7 +95,7 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-TRAJECTORY_TABLE = ScopedTable(trajectory_table(_METADATA))
+SAMPLE_TABLE = ScopedTable(sample_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
@@ -185,6 +190,7 @@ class SQLiteRecordStore(SQLRecordStore):
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
                 migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
+                migrate_uploaded_trajectories(self._connection, SAMPLE_TABLE.table, COMMIT_TABLE.table)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -209,9 +215,9 @@ class SQLiteRecordStore(SQLRecordStore):
         """Open the task stores of ``scenario`` in this database, with their task files in ``files``."""
         return SQLTaskStorage(self, TASK_TABLES, files, scenario)
 
-    def trajectory_store(self) -> SQLTrajectoryStore:
-        """Open the uploaded trajectories in this database."""
-        return SQLTrajectoryStore(self, TRAJECTORY_TABLE)
+    def sample_store(self) -> SQLSampleStore:
+        """Open the training samples in this database."""
+        return SQLSampleStore(self, SAMPLE_TABLE)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -220,7 +226,11 @@ class SQLiteRecordStore(SQLRecordStore):
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history in this database; it is durable unless the database is in memory."""
         return SQLCommitHistory(
-            self, COMMIT_TABLE, label=f"{self._database}#scenario_commit", durable=self._database != ":memory:"
+            self,
+            COMMIT_TABLE,
+            SAMPLE_TABLE,
+            label=f"{self._database}#scenario_commit",
+            durable=self._database != ":memory:",
         )
 
     def close(self) -> None:
@@ -401,7 +411,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    trajectories=records.trajectory_store(),
+                    samples=records.sample_store(),
                     evaluations=records.evaluation_store(),
                 )
             except BaseException:
