@@ -26,6 +26,7 @@ from tests.reef_service.test_harness_recipe import (
 )
 from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
+from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.vendor_install import (
     DEFAULT_PREFIX_ROOT,
@@ -36,7 +37,6 @@ from reef.harness.rollouts.vendor_install import (
     resolve_binary,
 )
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.service.install_script import render_install_script
 from reef.train.cordis_backend import CordisBackend, Mutation
 
@@ -267,7 +267,7 @@ def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp
 
 
 def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch) -> None:
-    from reef.sandbox.e2b import E2BExecutor
+    from reef.execution.sandbox.e2b import E2BExecutor
 
     calls = _counting_resolver(monkeypatch, VendorInstallError("must not install locally"))
     monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)

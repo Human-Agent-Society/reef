@@ -65,8 +65,8 @@ from typing import Any
 import yaml
 
 from reef.core.errors import ReefError
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
-from reef.sandbox.process import ProgramExecutor
 
 
 class ExecutionValidator(ABC):

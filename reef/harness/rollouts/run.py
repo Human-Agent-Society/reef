@@ -31,10 +31,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from reef.core.errors import ReefError
+from reef.execution.sandbox.environment import execute
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.rollouts.trajectory import reader_for
-from reef.sandbox.environment import execute
-from reef.sandbox.process import LocalExecutor, ProgramExecutor, RolloutLaunchError, RolloutTimeout
 
 
 class RolloutError(ReefError):

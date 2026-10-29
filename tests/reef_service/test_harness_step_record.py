@@ -25,6 +25,7 @@ from tests.reef_service.test_harness_recipe import (
 from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.rollouts.run import RolloutError, TrajectoryKeepError, run_rollout
@@ -32,7 +33,6 @@ from reef.harness.tree.nodes import RECORD_TEXT_CAP
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
-from reef.sandbox.process import LocalExecutor
 from reef.train.cordis_backend import CordisBackend, Mutation
 
 # A harness shaped like the native loop: the root session, one delegated checker
