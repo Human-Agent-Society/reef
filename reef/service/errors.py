@@ -28,7 +28,6 @@ from reef.service.artifact_evaluations import EvaluationLimitReached
 from reef.service.request_service import InferenceRetryTimeout
 from reef.storage.records import RecordConflict
 from reef.storage.samples import SampleConflict
-from reef.storage.tasks import TaskConflict
 from reef.surface.weights import RuntimeLoadMismatch
 
 logger = logging.getLogger(__name__)
@@ -45,7 +44,6 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ReleaseNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
     (SampleConflict, web.HTTPConflict),
-    (TaskConflict, web.HTTPConflict),
     (EvaluationLimitReached, web.HTTPTooManyRequests),
     (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),

@@ -340,7 +340,9 @@ def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBinding
 def eval_task_paths(samples: TrainerSamples) -> tuple[str, ...]:
     """Return the local directory of each task in the eval split of ``samples``, in arrival order."""
     return tuple(
-        str(stored.sample.task_path) for stored in samples.tasks(split="eval") if isinstance(stored.sample, TaskSample)
+        str(stored.sample.task_path)
+        for stored in samples.imported_tasks(split="eval")
+        if isinstance(stored.sample, TaskSample)
     )
 
 

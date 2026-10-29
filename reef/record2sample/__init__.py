@@ -25,8 +25,9 @@ Implementations:
   the teacher's request with the served model's chat template.
 * ``GeneratedTaskSamples`` (in the built-in recipe ``reef.recipe.generated_tasks``):
   new Harbor tasks from a description and, optionally, from recorded sessions.
-  Each round generates and checks tasks. Their rollouts are not
-  records: ``GeneratedTaskJobData`` turns them into samples.
+  Each round generates and checks tasks. The stage gives each published train
+  task to the pipeline (``made_samples``), which stores it as a sample; the
+  training component rolls the tasks out.
 
 Shared parts of ``make_sample``:
 
