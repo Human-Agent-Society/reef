@@ -71,7 +71,7 @@ model:
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
   task:
-    argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
+    argv: ["chat", "-Q", "--oneshot", "-q", "{task}"]
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.

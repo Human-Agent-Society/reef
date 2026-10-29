@@ -1145,7 +1145,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
 
 .. config::
 
-   evolution.evaluation.tasks | the evaluation tasks: run prompts, or task directories for an adapter whose prompt is a task directory (``is_prompt_task_directory``)
+   evolution.evaluation.tasks | the evaluation tasks: instructions, the text the agent reads, or task directories for an adapter that takes one (``takes_task_directory``)
    evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Each task runs in its own container, and the adapter needs an npm ``install`` (`Task directories <../user-guide/evolve-your-harness.rst#task-directories>`__); startup refuses a manifest that names no eval task
    evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
    evolution.evaluation.imported_tasks | false; true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks as the step reads them, so tasks that the scenario gets later join the next step. The scenario then takes train task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter rule as ``task_manifest``

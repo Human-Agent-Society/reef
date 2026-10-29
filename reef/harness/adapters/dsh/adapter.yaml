@@ -124,7 +124,7 @@ run:
     # Two commander layers parse the command line (the launcher, then the
     # headless app); each "--" ends one layer's options, so a task that starts
     # with a dash still reaches the app as its positional.
-    argv: ["--profile", "headless", "--", "--", "{prompt}"]
+    argv: ["--profile", "headless", "--", "--", "{task}"]
     env:
       DSH_TELEMETRY_MODE: "DISABLED"
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged

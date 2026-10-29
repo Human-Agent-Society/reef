@@ -62,7 +62,7 @@ model:
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
   task:
-    argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto", "--plugin-dir", "{root}/plugin"]
+    argv: ["-p", "{task}", "--output-format", "json", "--permission-mode", "auto", "--plugin-dir", "{root}/plugin"]
     env:
       DISABLE_AUTOUPDATER: "1"
       DISABLE_UPDATES: "1"

@@ -4,7 +4,7 @@ A prompt adapter's ``run.task`` command takes the task as text. For a
 Harbor task directory, Reef runs one Harbor trial instead: Harbor starts the
 task's container, :class:`AdapterAgent` installs the adapter's pinned agent
 in it, copies in the rendered tree, and runs the adapter's command there with
-the task's instruction as ``{prompt}``, in the task's working directory. The
+the task's instruction as ``{task}``, in the task's working directory. The
 task's verifier then scores the container. The agent's session files come
 back, and the adapter's trajectory reader reads them.
 
@@ -55,11 +55,11 @@ def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
     """Whether ``descriptor``'s agent can play a Harbor task directory in the task's container.
 
     The agent needs an install that works in any glibc container (npm), and
-    its command must take the task as text: an adapter whose ``{prompt}`` is
+    its command must take the task as text: an adapter whose ``{task}`` is
     the task directory runs the task through its own runner.
     """
     return (
-        not descriptor.is_prompt_task_directory
+        not descriptor.takes_task_directory
         and descriptor.install is not None
         and descriptor.install.kind in CONTAINER_INSTALL_KINDS
     )
@@ -70,7 +70,7 @@ class AdapterAgent(BaseInstalledAgent):
 
     Values: ``package`` and ``version`` name the npm package to install;
     ``binary`` is the command the package installs; ``argv`` is the adapter's
-    ``run.task`` argument template, with ``{prompt}`` slots; ``env`` is the
+    ``run.task`` argument template, with ``{task}`` slots; ``env`` is the
     run environment, already pointed at ``CONTAINER_ROOT``;
     ``writable_paths`` are directories under the root that the agent writes;
     ``sessions`` is the session directory under the root; ``files_dir`` is a
@@ -139,8 +139,7 @@ class AdapterAgent(BaseInstalledAgent):
         # The agent may run as a user other than root, and it writes its sessions under the root.
         await self.exec_as_root(environment, command=f"chmod -R a+rwX {CONTAINER_ROOT}")
         arguments = " ".join(
-            shlex.quote(token.replace("{root}", CONTAINER_ROOT).replace("{prompt}", instruction))
-            for token in self.argv
+            shlex.quote(token.replace("{root}", CONTAINER_ROOT).replace("{task}", instruction)) for token in self.argv
         )
         assignments = " ".join(shlex.quote(f"{name}={value}") for name, value in self.env.items())
         # nvm loads from the user's own home before the run environment moves HOME to the root.

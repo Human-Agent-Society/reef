@@ -63,7 +63,7 @@ run:
       - --sandbox
       - workspace-write
       - --skip-git-repo-check
-      - "{prompt}"
+      - "{task}"
   # How a person's machine runs Codex on a release: the person's own ~/.codex stays. register
   # installs the plugin reef from the local marketplace reef at the install root, and again for
   # each release, because Codex reads a copy in its plugin cache; the plugin then loads in every

@@ -112,7 +112,7 @@ class ReefineRecipe(HarnessEvolutionRecipe):
             raise RecipeConfigError(str(exc)) from exc
         evaluation = {**EVALUATION_DEFAULTS, **evaluation}
         tasks = evaluation.get("tasks")
-        if descriptor.is_prompt_task_directory and isinstance(tasks, Sequence) and not isinstance(tasks, str):
+        if descriptor.takes_task_directory and isinstance(tasks, Sequence) and not isinstance(tasks, str):
             # The adapter's prompt is a Harbor task directory, so the health prompt runs as the same check in
             # that form, scored by its verifier.
             evaluation["tasks"] = [

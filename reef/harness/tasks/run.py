@@ -133,10 +133,10 @@ def headless_env(descriptor: AdapterDescriptor, root: Path) -> dict[str, str]:
     return env
 
 
-def headless_argv(descriptor: AdapterDescriptor, binary: str, prompt: str, root: Path) -> list[str]:
-    """The descriptor's headless invocation of ``binary``, with ``prompt`` in its ``{prompt}`` slots and ``root``,
+def headless_argv(descriptor: AdapterDescriptor, binary: str, task: str, root: Path) -> list[str]:
+    """The descriptor's headless invocation of ``binary``, with ``task`` in its ``{task}`` slots and ``root``,
     the run root, in its ``{root}`` slots, such as the path of the plugin a flag loads."""
-    return [binary, *(token.replace("{root}", str(root)).replace("{prompt}", prompt) for token in descriptor.argv)]
+    return [binary, *(token.replace("{root}", str(root)).replace("{task}", task) for token in descriptor.argv)]
 
 
 def write_rendered(descriptor: AdapterDescriptor, files: Mapping[str, str], directory: Path, root: str) -> None:
@@ -208,7 +208,7 @@ def read_session(descriptor: AdapterDescriptor, home: Path) -> list[Mapping[str,
 def run_task(
     descriptor: AdapterDescriptor,
     files: Mapping[str, str],
-    prompt: str,
+    task: str,
     *,
     binary: str | None = None,
     timeout: float = 600.0,
@@ -218,7 +218,8 @@ def run_task(
     """Run one headless run of ``descriptor``'s harness over ``files``.
 
     ``binary`` overrides the descriptor's binary name (the seam hermetic
-    tests drive a fake harness through); ``prompt`` substitutes into the
+    tests drive a fake harness through); ``task``, the instruction or the task directory the adapter takes,
+    substitutes into the
     descriptor's argv template. ``executor`` decides how the process runs
     (the default local subprocess, or a sandbox); the rendered files,
     relocation environment, trajectory read, and residue collection are the
@@ -228,7 +229,7 @@ def run_task(
     ``~/.reef/runs`` rather than the temp directory. The run root is removed before this returns, success
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
-    fails raises ``TrajectoryKeepError`` rather than an ``TaskRunError``.
+    fails raises ``TrajectoryKeepError`` rather than a ``TaskRunError``.
     """
     executor = executor or LocalExecutor()
     # Adapters can validate a conditional boundary (for example, remote task
@@ -266,7 +267,7 @@ def run_task(
                 value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
                 if value:
                     env[key] = value
-        argv = headless_argv(descriptor, binary or descriptor.binary, prompt, root)
+        argv = headless_argv(descriptor, binary or descriptor.binary, task, root)
         try:
             outcome = launch_agent(
                 descriptor, executor, argv, files, env, root=root, home=root, cwd=root / "workspace", timeout=timeout

@@ -80,7 +80,7 @@ model:
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
   task:
-    argv: ["run", "--format", "json", "--auto", "{prompt}"]
+    argv: ["run", "--format", "json", "--auto", "{task}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
   # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays.

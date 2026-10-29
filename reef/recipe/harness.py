@@ -263,7 +263,7 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(f"evolution.seed fails validation: {'; '.join(seed_problems)}")
         offline = self.runs_offline()
         task_directories = self.task_directories(descriptor)
-        if task_directories and not descriptor.is_prompt_task_directory:
+        if task_directories and not descriptor.takes_task_directory:
             # An adapter whose command takes text plays each Harbor task in the task's own container.
             if not can_run_in_task_container(descriptor):
                 raise RecipeConfigError(
@@ -299,7 +299,7 @@ class HarnessEvolutionRecipe(Recipe):
         command takes a task directory, else when the evaluation reads a task manifest or the imported tasks, or the
         steps roll out the imported train tasks."""
         return (
-            descriptor.is_prompt_task_directory
+            descriptor.takes_task_directory
             or self.evaluation.task_manifest is not None
             or self.evaluation.imported_tasks
             or self.runs_offline()

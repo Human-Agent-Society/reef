@@ -63,7 +63,7 @@ class AgentExecution:
     timeout_s: float
 
     def __post_init__(self) -> None:
-        if self.descriptor.is_prompt_task_directory:
+        if self.descriptor.takes_task_directory:
             raise ValueError(f"adapter {self.descriptor.name!r} plays task directories, so it cannot run a prompt")
         if self.timeout_s <= 0:
             raise ValueError("AgentExecution.timeout_s must be positive")

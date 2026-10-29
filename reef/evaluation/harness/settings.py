@@ -26,7 +26,7 @@ from reef.evaluation.harness.policy import POLICIES, STATISTICS
 class EvaluationSettings(Settings):
     """The parsed ``evolution.evaluation`` section of a harness evolution deployment.
 
-    Values: at most one task source is set: ``tasks`` (prompts or task
+    Values: at most one task source is set: ``tasks`` (instructions or task
     directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``;
     one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
@@ -41,7 +41,7 @@ class EvaluationSettings(Settings):
     source and the publication policy from it.
     """
 
-    tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: prompts, or task directories.")
+    tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: instructions, or task directories.")
     task_manifest: str | None = config_option(None, help="A split manifest whose eval side names the tasks.")
     tasks_root: str | None = config_option(None, help="The directory of the task manifest's task directories.")
     imported_tasks: bool = config_option(

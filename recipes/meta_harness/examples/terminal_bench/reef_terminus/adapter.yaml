@@ -10,7 +10,7 @@
 # The prompt is the task: a Harbor task directory or a registry id, which is
 # what reef-eval resolves. A run therefore needs no dataset location in
 # its environment, which run_task would not have carried anyway - it hands
-# a run only the descriptor's own env and host_env, and {root}/{prompt}
+# a run only the descriptor's own env and host_env, and {root}/{task}
 # are the only substitutions in env and argv.
 #
 # Evolved Python requires Reef's sandbox around this runner and remote E2B
@@ -70,7 +70,7 @@ run:
   task:
     argv:
       - --task
-      - "{prompt}"
+      - "{task}"
     env:
       # The run root, not the terminus directory: terminus-commands is a
       # sibling of terminus, so the runner reads the tree from one level up.
@@ -136,7 +136,7 @@ config:
       - key: llm_call_kwargs.extra_body
         match: Not(Contains(Key(IsIn(["model", "models"]))))
         reason: Reef's model binding chooses the endpoint, the credential and the model
-is_prompt_task_directory: true
+takes_task_directory: true
 # Harbor drives the task container with the docker CLI, which finds its
 # endpoint and context through these variables, else through the current
 # context in its config directory (colima and Docker Desktop set one there),

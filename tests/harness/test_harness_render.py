@@ -199,7 +199,7 @@ def test_codex_run_argv_pins_approvals_and_web_search_off_over_the_config() -> N
     assert config_toml["web_search"] == "disabled" and "approval_policy" not in config_toml
     argv = list(CODEX.argv)
     overrides = [argv[index + 1] for index, token in enumerate(argv) if token == "--config"]
-    assert overrides == ['approval_policy="never"', 'web_search="disabled"'] and argv[-1] == "{prompt}"
+    assert overrides == ['approval_policy="never"', 'web_search="disabled"'] and argv[-1] == "{task}"
 
 
 def test_codex_renders_a_command_as_a_skill_and_refuses_one_that_shares_a_skills_name() -> None:

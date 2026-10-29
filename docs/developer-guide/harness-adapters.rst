@@ -43,7 +43,7 @@ pi's ``adapter.yaml``, shortened:
    model:                                   # per API dialect: the config that binds the model
      openai: [{target: models, data: {...}}, {target: agent, data: {...}}]
    run:
-     run: {argv: ["--mode", "json", "-p", "{prompt}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
+     run: {argv: ["--mode", "json", "-p", "{task}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
      layer:                                 # a person's machine
        args: [["--model", "reef/{model}"]]
        register: [["install", "{root}/plugin"]]
@@ -74,7 +74,7 @@ pi's ``adapter.yaml``, shortened:
      - config templates per dialect (``openai``, ``responses``,
        ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
    * - ``run.task``
-     - the headless command (``{prompt}``, ``{root}``) and its variables
+     - the headless command (``{task}``, ``{root}``) and its variables
    * - ``run.layer``
      - a person's machine: the agent's own commands that install the plugin
        and remove it (``register``, ``unregister``), and the ``args`` and
@@ -88,7 +88,7 @@ pi's ``adapter.yaml``, shortened:
 An agent that isolates its own runs, such as the Terminal-Bench
 campaign's ``terminus``, may also set ``self_isolating``,
 ``execution_validator``, ``host_env``, ``is_root_bind_mounted`` and
-``is_prompt_task_directory`` (see `descriptor.py
+``takes_task_directory`` (see `descriptor.py
 <../../reef/harness/adapters/descriptor.py>`__). ``load_descriptor`` refuses
 an unknown key.
 

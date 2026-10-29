@@ -204,7 +204,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         if task_repeats < 1:
             raise ValueError("task_repeats must be at least 1")
         self.task_directories = task_directories
-        self.task_containers = task_directories and not descriptor.is_prompt_task_directory
+        self.task_containers = task_directories and not descriptor.takes_task_directory
         if self.task_containers and not can_run_in_task_container(descriptor):
             raise ValueError(
                 f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm install"

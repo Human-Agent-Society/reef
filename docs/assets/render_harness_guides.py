@@ -190,7 +190,7 @@ def adapter_modes(theme: str, fonts) -> str:
             "evaluation run, in Reef",
             [
                 ("Run root", "the rendered tree, nothing else"),
-                ("Run", "`run.task, {prompt} = a prompt"),
+                ("Run", "`run.task, {task} = an instruction"),
                 ("Trajectory", "read with the sessions reader"),
             ],
             "`dirs · model · run.task · sessions",
@@ -201,7 +201,7 @@ def adapter_modes(theme: str, fonts) -> str:
             [
                 ("Task container", "Harbor starts it with Docker"),
                 ("Install", "`npm <package>@<version>"),
-                ("Run", "`run.task, {prompt} = instruction"),
+                ("Run", "`run.task, {task} = the instruction"),
                 ("Verifier", "the task's tests give the score"),
             ],
             "`install · dirs · model · run.task · sessions",

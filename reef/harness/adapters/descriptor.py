@@ -16,7 +16,7 @@ declares four things and, optionally, the checks of the agent's config files:
   names the session log's path and reader (``trajectory_format``).
 - ``model``: per API dialect, the config templates that point the agent at a
   model endpoint (``model_binding``).
-- ``run``: ``task``, the headless invocation (``{prompt}`` substituted
+- ``run``: ``task``, the headless invocation (``{task}`` substituted
   per run) and the variables beside the relocation ones, and ``layer``,
   how a person's machine runs the agent (``AdapterLayer``).
 - ``config`` (optional checks): named JSON config files with their enforced
@@ -196,7 +196,7 @@ ADAPTER_KEYS = frozenset(
         "config",
         "host_env",
         "self_isolating",
-        "is_prompt_task_directory",
+        "takes_task_directory",
         "is_root_bind_mounted",
     }
 )
@@ -325,9 +325,9 @@ class AdapterDescriptor:
     #: True when the adapter isolates runs itself; nesting is refused
     #: unless validate_execution checks a compatible configuration.
     self_isolating: bool = False
-    #: True when the ``{prompt}`` argv slot names a task directory (a Harbor task) rather than text the
-    #: model reads, so a gate can hand the adapter task directories instead of prompts.
-    is_prompt_task_directory: bool = False
+    #: True when the ``{task}`` argv slot takes a task directory (a Harbor task) rather than an instruction, the text the
+    #: model reads, so an evaluation hands the adapter task directories instead of instructions.
+    takes_task_directory: bool = False
     #: Config templates (``target`` and ``data``) that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -435,9 +435,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
         raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
-    is_prompt_task_directory = data.get("is_prompt_task_directory", False)
-    if not isinstance(is_prompt_task_directory, bool):
-        raise DescriptorError(f"{where} 'is_prompt_task_directory' must be a boolean")
+    takes_task_directory = data.get("takes_task_directory", False)
+    if not isinstance(takes_task_directory, bool):
+        raise DescriptorError(f"{where} 'takes_task_directory' must be a boolean")
     is_root_bind_mounted = data.get("is_root_bind_mounted", False)
     if not isinstance(is_root_bind_mounted, bool):
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
@@ -469,7 +469,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         renderer=renderer,
         install=parse_install(data.get("install"), where),
         self_isolating=self_isolating,
-        is_prompt_task_directory=is_prompt_task_directory,
+        takes_task_directory=takes_task_directory,
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,

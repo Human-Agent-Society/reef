@@ -78,7 +78,7 @@ Both ways feed the same training step (4 to 8).
      - sessions that people run and score
      - runs of the next train tasks, run on the head
    * - Evaluation tasks
-     - prompts in ``evolution.evaluation.tasks``, or none (``policy: none``)
+     - instructions in ``evolution.evaluation.tasks``, or none (``policy: none``)
      - the eval split of the uploaded tasks
    * - Agents
      - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a plugin)
