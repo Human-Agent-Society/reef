@@ -30,6 +30,7 @@ from reef.runtime.deployment import close_runtimes
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
+from reef.scenario.releases import ServedArtifact
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -342,6 +343,16 @@ class Dispatcher(ScenarioLifecycle):
         """Make ``artifact_id`` the active artifact of ``component`` in ``scenario``; no training start moves."""
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).activate(artifact_id, component)
+
+    def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Serve ``artifact_id`` of ``component`` beside the active release of ``scenario``; that release stays."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).serve(artifact_id, component)
+
+    def stop_serving(self, scenario: str, artifact_id: str) -> ServedArtifact:
+        """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).stop_serving(artifact_id)
 
     def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""
