@@ -15,9 +15,9 @@ from aiohttp import web
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core.errors import (
-    ManualBufferRefused,
     CommitPending,
     InferenceUnavailable,
+    ManualBufferRefused,
     ReefError,
     ScenarioCapacityFull,
     ScenarioLimitReached,

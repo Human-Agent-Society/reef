@@ -57,7 +57,9 @@ def test_a_client_lists_the_samples_and_edits_the_buffer_only_in_manual_mode(tmp
                 assert response.status == status, await response.text()
 
             # An instruction trains the whole buffer, which the commit empties.
-            trained = await client.post("/reef/train", headers={"x-reef-scenario": "s", **AUTH}, json=instruction("r1"))
+            trained = await client.post(
+                "/reef/train", headers={"x-reef-scenario": "s", **AUTH}, json=instruction("r1")
+            )
             assert trained.status == 200, await trained.text()
             async with asyncio.timeout(5):
                 while not recipe.batches:
@@ -96,6 +98,59 @@ def test_a_listing_pages_through_the_store(tmp_path):
             assert ids(rest) == ["t3"] and rest["next"] is None
             bad = await client.get("/reef/scenarios/s/samples?limit=0", headers=AUTH)
             assert bad.status == 400
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_reload_in_manual_mode_keeps_the_manual_buffer_as_the_client_left_it(tmp_path):
+    recipe = UploadRecipe()
+
+    async def switch(dispatcher) -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1"))
+            await client.post("/reef/scenarios/s/update", headers=AUTH, json={"training_mode": "manual"})
+            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t2"))
+
+    async def read(dispatcher) -> dict:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            return await (await client.get("/reef/scenarios/s/buffer", headers=AUTH)).json()
+
+    dispatcher = dispatcher_for(tmp_path, recipe)
+    try:
+        asyncio.run(switch(dispatcher))
+    finally:
+        dispatcher.close()
+    dispatcher = dispatcher_for(tmp_path, recipe)
+    try:
+        buffer = asyncio.run(read(dispatcher))
+    finally:
+        dispatcher.close()
+    # The stored mode is restored; the upload that came after the switch did not join the manual buffer.
+    assert (buffer["training_mode"], ids(buffer)) == ("manual", ["t1"])
+
+
+def test_an_instruction_that_waits_for_an_empty_buffer_trains_once_a_client_inserts_samples(tmp_path):
+    recipe = UploadRecipe()
+    dispatcher = dispatcher_for(tmp_path, recipe)
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t0"))
+            await client.post("/reef/scenarios/s/update", headers=AUTH, json={"training_mode": "manual"})
+            await client.post("/reef/scenarios/s/buffer/remove", headers=AUTH, json={"sample_ids": ["t0"]})
+            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1"))
+            queued = await client.post("/reef/train", headers={"x-reef-scenario": "s", **AUTH}, json=instruction("r1"))
+            assert queued.status == 200, await queued.text()
+            await asyncio.sleep(0.2)
+            assert not recipe.batches, "the instruction waits while the manual buffer is empty"
+            await client.post("/reef/scenarios/s/buffer/insert", headers=AUTH, json={"sample_ids": ["t1"]})
+            async with asyncio.timeout(5):
+                while not recipe.batches:
+                    await asyncio.sleep(0.01)
+            assert [sample.trajectory["session_id"] for sample in recipe.batches[0].samples] == ["t1"]
 
     try:
         asyncio.run(run())

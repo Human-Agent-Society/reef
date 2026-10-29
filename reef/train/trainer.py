@@ -276,10 +276,10 @@ class Trainer:
     def scenario(self) -> str:
         return self._scenario
 
-    def set_training_mode(self, training_mode: str) -> None:
-        """Serialize mode selection with record push and job data reservation."""
+    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
+        """Serialize mode selection with record push and job data reservation (``TrainingPipeline.set_training_mode``)."""
         with self._lock:
-            self._pipeline.set_training_mode(training_mode)
+            self._pipeline.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
     def pending_instructions(self) -> int:
         """Instructions accepted and not yet consumed: the ones the pipeline buffers plus those unread in storage."""

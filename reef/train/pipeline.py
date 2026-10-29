@@ -279,11 +279,12 @@ class TrainingPipeline:
         """The scenario logger shared by its recipe, pipeline, and backend."""
         return self.context.experiment_logger
 
-    def set_training_mode(self, training_mode: str) -> None:
+    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
         """Select future job data while preserving the handed out job data.
 
-        A switch from ``auto`` to ``manual`` adds the buffer that automatic job data would take next to the manual
-        buffer. A switch back leaves the manual buffer stored, unused.
+        With ``fill_manual_buffer``, a switch from ``auto`` to ``manual`` adds the buffer that automatic job data
+        would take next to the manual buffer: a person who switches starts from what auto would train. A mode that
+        a reload restores fills nothing. A switch back leaves the manual buffer stored, unused.
         """
         if training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
@@ -291,8 +292,9 @@ class TrainingPipeline:
             raise NotImplementedError(
                 f"{type(self.sample2job).__name__} does not implement training_mode={training_mode!r}"
             )
-        if self.context.training_mode == "auto" and training_mode == "manual":
-            # Manual starts from what automatic job data would take next.
+        if fill_manual_buffer and self.context.training_mode == "auto" and training_mode == "manual":
+            # Manual starts from what automatic job data would take next, with the samples stored since the last read.
+            self.read_store()
             self.store.insert_into_buffer(self.buffer())
         self.context = replace(self.context, training_mode=training_mode)
         self.record2record.context_changed(self.context)
