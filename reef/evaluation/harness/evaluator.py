@@ -1,14 +1,16 @@
-"""Evaluate harness trees by running episodes, with the history as the score cache.
+"""Evaluate harness trees by running rollouts, with the history as the score cache.
 
-:class:`HarnessEpisodeEvaluator` renders a tree with the served model
-binding, runs each task as an episode in a worker pool, and scores it with
-the deployment's :class:`EpisodeScorer` (``evolution.evaluation.scorer``).
-:meth:`HarnessEpisodeEvaluator.episodes` scores any tree on any tasks, for a
+:class:`HarnessRolloutEvaluator` renders a tree with the served model
+binding, runs each task as a rollout in a worker pool, and scores it with
+the deployment's :class:`RolloutScorer` (``evolution.evaluation.scorer``).
+It is the harness tree runner of ``RolloutRunner``: :meth:`HarnessRolloutEvaluator.run_rollouts`
+runs ``RolloutRequest`` values without the cache.
+:meth:`HarnessRolloutEvaluator.rollouts` scores any tree on any tasks, for a
 method's ``tools.evaluate``.
-:meth:`HarnessEpisodeEvaluator.evaluate` scores a :class:`HarnessCandidate`
-and the head tree for a publication policy. Both run only the episodes that
-the history does not hold: a scored episode of the same tree, task, repeat
-and evaluation context is reused.
+:meth:`HarnessRolloutEvaluator.evaluate` scores a :class:`HarnessCandidate`
+and the head tree for a publication policy. Both run only the rollouts that
+the history does not hold: a rollout of the same tree, task, repeat and
+evaluation context that did not fail is reused.
 """
 
 from __future__ import annotations
@@ -25,35 +27,45 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from reef.core.evaluation import CandidateEvaluator, EvaluationResult, UpdateCandidate
-from reef.evaluation.harness.history import EpisodeRecord, History
-from reef.evaluation.harness.runner import EpisodeEvaluationWorker, EpisodeRun, EvaluationWorkerPool
-from reef.evaluation.harness.scoring import EpisodeScorer
+from reef.core.evaluation import (
+    CandidateEvaluator,
+    EvaluationResult,
+    PolicyHarness,
+    PolicyModel,
+    RolloutRequest,
+    RolloutRunner,
+    RolloutScore,
+    RolloutScores,
+    UpdateCandidate,
+)
+from reef.evaluation.harness.history import History, RolloutRecord
+from reef.evaluation.harness.runner import EvaluationWorkerPool, RolloutEvaluationWorker, RolloutRun
+from reef.evaluation.harness.scoring import RolloutScorer, ScoredRollout
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.harbor_task import can_run_in_task_container
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import TrajectoryKeepError
-from reef.harness.episodes.trajectory import sum_agents
+from reef.harness.rollouts.harbor_task import can_run_in_task_container
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import TrajectoryKeepError
+from reef.harness.rollouts.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import clip_record_text
 from reef.runtime.executor import WorkerSpec
 from reef.runtime.executor.config import ExecutorSelection
 from reef.runtime.executor.requirements import ExecutionRequirements
-from reef.sandbox.process import EpisodeExecutor
 from reef.storage.tasks import files_digest
 
 #: The trees a candidate evaluation runs, in pairing order; a policy that evaluates the candidate alone names the
 #: first.
 EVALUATION_SIDES: tuple[str, ...] = ("candidate", "current")
-#: How many candidate episodes an evaluation summarizes, and how much of each text it keeps: a summary for the
+#: How many candidate rollouts an evaluation summarizes, and how much of each text it keeps: a summary for the
 #: pages, never the traffic.
-EPISODE_SUMMARIES = 8
-EPISODE_SUMMARY_CHARS = 240
+ROLLOUT_SUMMARIES = 8
+ROLLOUT_SUMMARY_CHARS = 240
 
 
 @dataclass(frozen=True)
 class EvaluationContext:
-    """Everything an episode's score depends on besides the tree and the task.
+    """Everything a rollout's score depends on besides the tree and the task.
 
     Values: ``model`` is the served model. ``named_models`` pairs each name of
     ``evolution.models`` with its model, sorted by name, each name once: a
@@ -61,11 +73,11 @@ class EvaluationContext:
     the harness adapter and its pinned version (``None`` for an adapter
     without one); ``binary`` is the deployment's own harness binary
     (``evolution.binary``), ``None`` when the pinned one runs. ``executor`` is
-    the episode executor's configuration (``evolution.executor`` and
+    the rollout executor's configuration (``evolution.executor`` and
     ``evolution.sandbox``) as one canonical JSON text, which only ``key``
     reads. ``scorer`` names the scorer class and its configuration.
-    ``episode_timeout_s``, a finite number above 0, and ``forbid_residue``
-    are the episode settings.
+    ``rollout_timeout_s``, a finite number above 0, and ``forbid_residue``
+    are the rollout settings.
     Purpose: the evaluator makes one for the current models; ``key`` is the
     context part of every cache key, so a score is never reused across
     contexts.
@@ -78,18 +90,18 @@ class EvaluationContext:
     binary: str | None
     executor: str
     scorer: str
-    episode_timeout_s: float
+    rollout_timeout_s: float
     forbid_residue: bool
 
     def __post_init__(self) -> None:
         names = [name for name, _ in self.named_models]
         if names != sorted(set(names)):
             raise ValueError("EvaluationContext.named_models must be sorted by name, each name once")
-        timeout = self.episode_timeout_s
+        timeout = self.rollout_timeout_s
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout):
-            raise ValueError("EvaluationContext.episode_timeout_s must be a finite number")
+            raise ValueError("EvaluationContext.rollout_timeout_s must be a finite number")
         if timeout <= 0:
-            raise ValueError("EvaluationContext.episode_timeout_s must be above 0")
+            raise ValueError("EvaluationContext.rollout_timeout_s must be above 0")
 
     def key(self) -> str:
         """The first 16 hexadecimal digits of the SHA-256 digest of the context's JSON form."""
@@ -151,13 +163,15 @@ def container_binding(binding: ModelBinding, agent_host: str) -> ModelBinding:
     return replace(binding, base_url=urllib.parse.urlunsplit(parts._replace(netloc=netloc)))
 
 
-class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
-    """Score harness trees on tasks by running episodes, reusing the scores that the history holds.
+class HarnessRolloutEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRollout]):
+    """Score harness trees on tasks by running rollouts, reusing the scores that the history holds.
 
-    The episodes render each tree with the served model binding, which never
-    enters a tree's files. ``binary`` is the installed binary the episodes
+    This is the harness tree runner of ``RolloutRunner``: a request's harness
+    is this adapter with a rendered tree as its plugin, and its model is the
+    served model. The rollouts render each tree with the served model binding,
+    which never enters a tree's files. ``binary`` is the installed binary the rollouts
     run; ``binary_setting`` is the deployment's ``evolution.binary``, which
-    the evaluation context names, and ``executor_setting`` is the episode
+    the evaluation context names, and ``executor_setting`` is the rollout
     executor's configuration as canonical JSON text, which the context
     digests. ``task_directories`` says that every task is a Harbor task
     directory. An adapter whose command takes the task as text then plays
@@ -171,15 +185,15 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         self,
         *,
         descriptor: AdapterDescriptor,
-        scorer: EpisodeScorer,
+        scorer: RolloutScorer,
         scorer_name: str,
         models: ModelBindings,
         binary: str | None,
         binary_setting: str | None,
         executor_setting: str,
-        episode_timeout_s: float,
-        episode_repeats: int,
-        executor: EpisodeExecutor,
+        rollout_timeout_s: float,
+        rollout_repeats: int,
+        executor: ProgramExecutor,
         forbid_residue: bool,
         worker_selection: ExecutorSelection,
         worker_requirements: ExecutionRequirements,
@@ -187,8 +201,8 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         task_directories: bool,
         agent_host: str = "host.docker.internal",
     ) -> None:
-        if episode_repeats < 1:
-            raise ValueError("episode_repeats must be at least 1")
+        if rollout_repeats < 1:
+            raise ValueError("rollout_repeats must be at least 1")
         self.task_directories = task_directories
         self.task_containers = task_directories and not descriptor.is_prompt_task_directory
         if self.task_containers and not can_run_in_task_container(descriptor):
@@ -202,8 +216,8 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         self.scorer_name = scorer_name
         self.binary_setting = binary_setting
         self.executor_setting = executor_setting
-        self.episode_timeout_s = episode_timeout_s
-        self.episode_repeats = episode_repeats
+        self.rollout_timeout_s = rollout_timeout_s
+        self.rollout_repeats = rollout_repeats
         self.forbid_residue = forbid_residue
         self.history = history
         self.task_keys: dict[str, str] = {}
@@ -212,12 +226,12 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             worker_selection,
             worker_requirements,
             WorkerSpec(
-                EpisodeEvaluationWorker,
+                RolloutEvaluationWorker,
                 args=(
                     descriptor,
                     scorer,
                     binary,
-                    episode_timeout_s,
+                    rollout_timeout_s,
                     executor,
                     forbid_residue,
                     worker_selection.settings.backend != "uni",
@@ -231,8 +245,8 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         self.worker_pool.close()
 
     def use_models(self, models: ModelBindings) -> None:
-        """Run later episodes with ``models``: the served binding renders into each tree, and scorers receive all."""
-        # Resolving the binding here refuses an adapter without a matching model_binding before any episode runs.
+        """Run later rollouts with ``models``: the served binding renders into each tree, and scorers receive all."""
+        # Resolving the binding here refuses an adapter without a matching model_binding before any rollout runs.
         models.served.config_overlays(self.descriptor)
         self.models = models
 
@@ -246,17 +260,53 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             binary=self.binary_setting,
             executor=self.executor_setting,
             scorer=self.scorer_name,
-            episode_timeout_s=self.episode_timeout_s,
+            rollout_timeout_s=self.rollout_timeout_s,
             forbid_residue=self.forbid_residue,
         )
 
+    @property
+    def served_model(self) -> PolicyModel:
+        """The model that every request must name: the served model, which the rollouts call."""
+        return PolicyModel(self.models.served.model)
+
     def render(self, tree: HarnessTree) -> dict[str, str]:
-        """``tree``'s files for one episode, pointed at the served model: through ``agent_host`` in a task's
+        """``tree``'s files for one rollout, pointed at the served model: through ``agent_host`` in a task's
         container, which cannot reach the Reef host's loopback by its own name."""
         served = self.models.served
         if self.task_containers:
             served = container_binding(served, self.agent_host)
         return render_tree(tree, self.descriptor, served.config_overlays(self.descriptor))
+
+    def policy_harness(self, tree: HarnessTree) -> PolicyHarness:
+        """``tree`` as a rollout request's harness: this adapter, with ``tree``'s rendered files as its plugin."""
+        return PolicyHarness(self.descriptor.name, self.render(tree))
+
+    def run_rollouts(self, requests: Sequence[RolloutRequest]) -> list[ScoredRollout]:
+        """Run and score one rollout of each request in the worker pool, in request order, without the cache.
+
+        Raise ``ValueError`` before any rollout runs when a request names
+        another adapter than this one, or another model than the served one. A
+        remote worker returns the kept record as an archive; it is extracted
+        here into the request's ``record_dir``.
+        """
+        served = self.served_model
+        for request in requests:
+            if request.harness.base != self.descriptor.name:
+                raise ValueError(
+                    f"this runner runs the {self.descriptor.name!r} adapter, not {request.harness.base!r}"
+                )
+            if request.model != served:
+                raise ValueError(f"this runner serves {served}, not {request.model}")
+        runs = [RolloutRun(dict(request.harness.plugin), request.task, request.record_dir) for request in requests]
+        scored = self.worker_pool.run(runs, self.models)
+        for run, result in zip(runs, scored, strict=True):
+            # A worker returns an archive only for a run that keeps its record.
+            if result.record_archive is not None and run.record_dir is not None:
+                keep_remote_record(result.record_archive, run.record_dir)
+        return scored
+
+    def rollout_score(self, rollout: ScoredRollout) -> RolloutScore:
+        return rollout.score
 
     def task_key(self, task: str) -> str:
         """What identifies a task's content: the digest of a task directory's files, or of a prompt's text."""
@@ -269,18 +319,18 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             self.task_keys[task] = key
         return key
 
-    def run(self, requests: Sequence[tuple[HarnessTree, str, int]], *, step: int) -> list[EpisodeRecord]:
-        """One episode record per ``(tree, task, repeat)`` request, in request order.
+    def run(self, requests: Sequence[tuple[HarnessTree, str, int]], *, step: int) -> list[RolloutRecord]:
+        """One rollout record per ``(tree, task, repeat)`` request, in request order.
 
         Every tree must be a candidate of the history. A request that the
         cache holds takes the cached record. The other requests run as one
-        wave in the worker pool, in request order, and their records join the
+        wave of ``run_rollouts``, in request order, and their records join the
         history.
         """
         context = self.context().key()
         checksums = [tree.checksum() for tree, _, _ in requests]
         keys = [self.task_key(task) for _, task, _ in requests]
-        records: dict[int, EpisodeRecord] = {}
+        records: dict[int, RolloutRecord] = {}
         for index, (checksum, key, (_, _, repeat)) in enumerate(zip(checksums, keys, requests, strict=True)):
             if checksum not in self.history.candidates:
                 raise ValueError(f"tree {checksum} is not a candidate of the history")
@@ -288,61 +338,61 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             if cached is not None:
                 records[index] = cached
         missing = [index for index in range(len(requests)) if index not in records]
-        rendered: dict[str, dict[str, str]] = {}
-        episodes: list[str] = []
-        runs: list[EpisodeRun] = []
+        harnesses: dict[str, PolicyHarness] = {}
+        rollouts: list[str] = []
+        to_run: list[RolloutRequest] = []
         for index in missing:
             tree, task, _ = requests[index]
-            if checksums[index] not in rendered:
-                rendered[checksums[index]] = self.render(tree)
-            episode, record_dir = self.history.new_episode()
-            episodes.append(episode)
-            runs.append(EpisodeRun(rendered[checksums[index]], task, record_dir))
-        scored = self.worker_pool.run(runs, self.models)
-        for index, episode, run, result in zip(missing, episodes, runs, scored, strict=True):
-            if result.record_archive is not None:
-                keep_remote_record(result.record_archive, run.record_dir)
-            record = EpisodeRecord.from_scored(
+            if checksums[index] not in harnesses:
+                harnesses[checksums[index]] = self.policy_harness(tree)
+            rollout, record_dir = self.history.new_rollout()
+            rollouts.append(rollout)
+            to_run.append(RolloutRequest(harnesses[checksums[index]], self.served_model, task, record_dir))
+        scored = self.run_rollouts(to_run)
+        for index, rollout, request, result in zip(missing, rollouts, to_run, scored, strict=True):
+            record = RolloutRecord.from_scored(
                 result,
-                episode=episode,
+                rollout=rollout,
                 tree=checksums[index],
-                task=run.task,
+                task=request.task,
                 task_key=keys[index],
                 repeat=requests[index][2],
                 context=context,
                 step=step,
             )
-            self.history.add_episode(record)
+            self.history.add_rollout(record)
             records[index] = record
         return [records[index] for index in range(len(requests))]
 
-    def episodes(
+    def rollouts(
         self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int, step: int
-    ) -> tuple[EpisodeRecord, ...]:
-        """``repeats`` episode records of ``tree`` on each task, task by task; cached ones are reused."""
-        return tuple(self.run(episode_requests(tree, tasks, repeats), step=step))
+    ) -> tuple[RolloutRecord, ...]:
+        """``repeats`` rollout records of ``tree`` on each task, task by task; cached ones are reused."""
+        return tuple(self.run(rollout_requests(tree, tasks, repeats), step=step))
 
-    def episodes_to_run(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int) -> int:
-        """How many of the episodes that :meth:`episodes` asks for the cache does not hold, so they would run."""
+    def rollouts_to_run(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int) -> int:
+        """How many of the rollouts that :meth:`rollouts` asks for the cache does not hold, so they would run."""
         context = self.context().key()
         checksum = tree.checksum()
         return sum(
             self.history.cached(checksum, self.task_key(task), repeat, context) is None
-            for _, task, repeat in episode_requests(tree, tasks, repeats)
+            for _, task, repeat in rollout_requests(tree, tasks, repeats)
         )
 
-    def episode_count(self, candidate: HarnessCandidate, side_count: int) -> int:
-        """How many episodes :meth:`evaluate` asks for on ``side_count`` sides, cached ones included."""
-        return len(candidate.evaluation_tasks) * self.episode_repeats * side_count
+    def rollout_count(self, candidate: HarnessCandidate, side_count: int) -> int:
+        """How many rollouts :meth:`evaluate` asks for on ``side_count`` sides, cached ones included."""
+        return len(candidate.evaluation_tasks) * self.rollout_repeats * side_count
 
     def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
         """Score the named ``sides`` of ``candidate`` on its evaluation tasks.
 
-        The default scores the candidate and the current tree as pairs. A
-        policy that evaluates the candidate alone (a floor) passes
-        ``("candidate",)``: no current episode runs, ``current_scores`` is
+        The default scores the candidate and the current tree as pairs.
+        ``candidate_scores`` and ``current_scores`` are each side's
+        ``RolloutScores`` JSON, by task; a side without tasks has an empty list.
+        A policy that evaluates the candidate alone (a floor) passes
+        ``("candidate",)``: no current rollout runs, ``current_scores`` is
         empty, the other ``current_*`` keys are absent, and
-        ``evaluation_sides`` records the choice. The episodes that must run
+        ``evaluation_sides`` records the choice. The rollouts that must run
         interleave the sides inside each pairing, so a drift during the run
         (upstream load, rate limits) lands on both sides of a pair.
         """
@@ -355,54 +405,65 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         requests = [
             (trees[side], task, repeat)
             for task in candidate.evaluation_tasks
-            for repeat in range(self.episode_repeats)
+            for repeat in range(self.rollout_repeats)
             for side in sides
         ]
-        known = len(self.history.episodes)
+        known = len(self.history.rollouts)
         records = self.run(requests, step=candidate.step)
-        ran = len(self.history.episodes) - known
+        ran = len(self.history.rollouts) - known
         runs = {side: records[offset :: len(sides)] for offset, side in enumerate(sides)}
-        scores = {side: tuple(record.score for record in runs[side]) for side in sides}
+        scores = {side: [record.score for record in runs[side]] for side in sides}
+        tasks = candidate.evaluation_tasks
         metrics: dict[str, Any] = {
-            "candidate_scores": scores.get("candidate", ()),
-            "current_scores": scores.get("current", ()),
-            "episode_failures": sum(score is None for side in sides for score in scores[side]),
-            "episode_repeats": self.episode_repeats,
-            "episodes_run": ran,
-            "episodes_cached": len(records) - ran,
+            # The rollout scores of each side, by task.
+            **{
+                f"{side}_scores": (
+                    RolloutScores.by_task(tasks, scores[side]).to_json() if side in scores and tasks else []
+                )
+                for side in EVALUATION_SIDES
+            },
+            # Rollouts that failed or gave no answer: every failure except a scored run that exited nonzero.
+            "rollout_failures": sum(
+                record.failure is not None and record.failure.stage != "exit"
+                for side in sides
+                for record in runs[side]
+            ),
+            "rollout_repeats": self.rollout_repeats,
+            "rollouts_run": ran,
+            "rollouts_cached": len(records) - ran,
         }
         for side in sides:
             metrics[f"{side}_residue"] = sum(record.residue for record in runs[side])
-            metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
-            # Per agent sums over the side's episodes, so a result says which agent did the work.
+            metrics[f"{side}_score"] = math.fsum(score.value for score in scores[side] if score.value is not None)
+            # Per agent sums over the side's rollouts, so a result says which agent did the work.
             metrics[f"{side}_agents"] = sum_agents(record.agents for record in runs[side])
-            # Per episode, in pairing order: the root's stage path and how its turn ended.
+            # Per rollout, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(record.path for record in runs[side])
         if "candidate" in sides:
-            # What the first candidate episodes were graded on, so a rejected step names the task, the reply and why.
-            metrics["candidate_episodes"] = [
+            # What the first candidate rollouts were graded on, so a rejected step names the task, the reply and why.
+            metrics["candidate_rollouts"] = [
                 {
-                    "task": clip_record_text(record.task, EPISODE_SUMMARY_CHARS),
-                    "score": record.score,
+                    "task": clip_record_text(record.task, ROLLOUT_SUMMARY_CHARS),
+                    "score": record.score.to_json(),
                     "failure": (
                         None
                         if record.failure is None
-                        else clip_record_text(record.failure.cause, EPISODE_SUMMARY_CHARS)
+                        else clip_record_text(record.failure.cause, ROLLOUT_SUMMARY_CHARS)
                     ),
-                    "reply": None if record.reply is None else clip_record_text(record.reply, EPISODE_SUMMARY_CHARS),
-                    "episode": record.episode,
-                    # Only when missing, so a summary of an ordinary episode keeps its shape.
+                    "reply": None if record.reply is None else clip_record_text(record.reply, ROLLOUT_SUMMARY_CHARS),
+                    "rollout": record.rollout,
+                    # Only when missing, so a summary of an ordinary rollout keeps its shape.
                     **({} if record.transcript_read else {"transcript_read": False}),
                 }
-                for record in runs["candidate"][:EPISODE_SUMMARIES]
+                for record in runs["candidate"][:ROLLOUT_SUMMARIES]
             ]
         if sides != EVALUATION_SIDES:
             metrics["evaluation_sides"] = list(sides)
-        return EvaluationResult(evaluator="harness_episodes", evaluator_version="2", metrics=metrics)
+        return EvaluationResult(evaluator="harness_rollouts", evaluator_version="2", metrics=metrics)
 
 
-def episode_requests(tree: HarnessTree, tasks: Sequence[str], repeats: int) -> list[tuple[HarnessTree, str, int]]:
-    """The ``(tree, task, repeat)`` requests of ``repeats`` episodes of ``tree`` on each task, task by task.
+def rollout_requests(tree: HarnessTree, tasks: Sequence[str], repeats: int) -> list[tuple[HarnessTree, str, int]]:
+    """The ``(tree, task, repeat)`` requests of ``repeats`` rollouts of ``tree`` on each task, task by task.
 
     ``ValueError`` when ``repeats`` is below 1.
     """
@@ -422,16 +483,16 @@ def keep_remote_record(archive: bytes, record_dir: Path) -> None:
         with tarfile.open(fileobj=BytesIO(archive), mode="r:gz") as opened:
             opened.extractall(record_dir, filter="data")
     except (OSError, tarfile.TarError) as exc:
-        raise TrajectoryKeepError(f"cannot keep remote episode trajectory under {record_dir}: {exc}") from exc
+        raise TrajectoryKeepError(f"cannot keep remote rollout trajectory under {record_dir}: {exc}") from exc
 
 
 __all__ = [
-    "EPISODE_SUMMARIES",
-    "EPISODE_SUMMARY_CHARS",
     "EVALUATION_SIDES",
+    "ROLLOUT_SUMMARIES",
+    "ROLLOUT_SUMMARY_CHARS",
     "EvaluationContext",
     "HarnessCandidate",
     "HarnessCandidateEvaluator",
-    "HarnessEpisodeEvaluator",
+    "HarnessRolloutEvaluator",
     "keep_remote_record",
 ]

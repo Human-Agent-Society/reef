@@ -49,7 +49,7 @@ THEMES = {
 COL_W, GAP, BOX_H = 220, 40, 76
 X = [56 + k * (COL_W + GAP) for k in range(5)]
 WIDE = 2 * COL_W + GAP
-# The workspace stops short of the last column's right edge, so the tasks reach the episodes beside it.
+# The workspace stops short of the last column's right edge, so the tasks reach the rollouts beside it.
 WORKSPACE_W = X[4] + 150 - X[3]
 
 # Each row's top: A on the person's machine, B in Reef.
@@ -74,7 +74,7 @@ BOXES = [
     (2, "A2", WIDE, "machine", 1, "Your agent", "`claude · pi · opencode · codex"),
     (4, "A2", COL_W, "store", None, "Model provider", "OpenAI or Anthropic API"),
     (0, "B1", COL_W, "reef", None, "Client install", "the head as a plugin"),
-    (1, "B1", COL_W, "reef", None, "Client import", "merges onto the head"),
+    (1, "B1", COL_W, "reef", None, "Client sync", "merges onto the active release"),
     (2, "B1", COL_W, "reef", 3, "Feedback", "a score per session"),
     (3, "B1", COL_W, "reef", 2, "Model proxy", "forwards and records"),
     (0, "B2", WIDE, "store", None, "Releases", "every tree, in Git; the newest is the head"),
@@ -83,10 +83,10 @@ BOXES = [
     (3, "B3", WORKSPACE_W, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),
     (2, "B3", COL_W, "reef", 5, "Method", "`step(context)"),
     (1, "B3", COL_W, "reef", 6, "Check", "`validate_tree"),
-    (2, "B4", WIDE, "reef", 7, "Evaluation", "runs each task as an episode, scores it"),
-    (4, "B4", COL_W, "reef", None, "Episodes", "`run.episode"),
+    (2, "B4", WIDE, "reef", 7, "Evaluation", "runs each task as a rollout, scores it"),
+    (4, "B4", COL_W, "reef", None, "Rollouts", "`run.rollout"),
     (1, "B4", COL_W, "reef", None, "Policy", "compare or floor"),
-    (0, "B4", COL_W, "reef", 8, "Release rule", "publish, hold or drop"),
+    (0, "B4", COL_W, "reef", 8, "Activation rule", "serve or hold"),
 ]
 
 
@@ -169,10 +169,10 @@ def render(theme: str, fonts) -> str:
             f"agent's own plugin, beside the person's own configuration, and starts the agent. The agent's model calls go through "
             f"Reef's model proxy, which records them, and a report scores a session. In a training step, the "
             f"workspace gets the head and a batch of raw traces, a method edits the copy, the check and the "
-            f"evaluation test the candidate, and the release rule publishes a selected candidate as the new head. "
-            f"After a session, the client sends the changed files back, and Reef merges them onto the head. "
+            f"evaluation test the candidate, a selected candidate is a new release, and the activation rule serves it or holds it for a person. "
+            f"After a session, the client sends the changed files back, and Reef merges them onto the active release. "
             f"An offline deployment gets its traces from uploaded Harbor tasks instead: the train tasks run on the "
-            f'head as episodes, and the eval tasks score the candidates.">'
+            f'head as rollouts, and the eval tasks score the candidates.">'
         ),
         f"<style>\n{faces}</style>",
         write(40, 44, "Harness evolution: what runs where", 24, p["ink"], 600),
@@ -212,7 +212,7 @@ def render(theme: str, fonts) -> str:
         write(
             X[0] + 18,
             B5 + 57,
-            "evolve · dirs · sessions · model · run.episode · run.layer",
+            "evolve · dirs · sessions · model · run.rollout · run.layer",
             MONO,
             p["muted"],
             mono=True,
@@ -252,7 +252,7 @@ def render(theme: str, fonts) -> str:
     o.extend(path(p, [(x, B1 + BOX_H), (x, B2)]) for x in (X[1] + 110, X[2] + 110, X[3] + 110))
 
     # One training step: the workspace gets the head and a batch of raw traces; then the method, the check, the
-    # evaluation, the policy and the release rule.
+    # evaluation, the policy and the activation rule.
     route_y = B2 + BOX_H + 32
     o.append(path(p, [(X[1] + 150, B2 + BOX_H), (X[1] + 150, route_y), (X[3] + 40, route_y), (X[3] + 40, B3)]))
     o.append(write(X[1] + 164, route_y - 8, "the head", MONO, p["muted"], mono=True))
@@ -260,7 +260,7 @@ def render(theme: str, fonts) -> str:
     o.append(path(p, [(traces_x, B2 + BOX_H), (traces_x, B3)]))
     o.append(badge(p, traces_x + 26, route_y - 2, 4, "reef"))
     o.append(write(traces_x + 46, route_y + 3, "online: a batch of raw traces", BODY, p["ink"]))
-    # Offline: the tasks run as episodes, and the train tasks' episodes are the workspace's traces.
+    # Offline: the tasks run as rollouts, and the train tasks' rollouts are the workspace's traces.
     tasks_x, rollouts_x = X[4] + 190, X[4] + 60
     o.append(path(p, [(tasks_x, B2 + BOX_H), (tasks_x, B4)]))
     o.append(write(tasks_x - 8, B4 - 22, "tasks", MONO, p["muted"], anchor="end", mono=True))
@@ -286,7 +286,7 @@ def render(theme: str, fonts) -> str:
             X[0] + MODE_W + GAP,
             "reef",
             "Offline: learn from uploaded tasks",
-            "the train tasks' episodes are the traces",
+            "the train tasks' rollouts are the traces",
         )
     )
 

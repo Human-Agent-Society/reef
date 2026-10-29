@@ -25,8 +25,8 @@ import yaml
 
 import reef.harness.adapters
 from reef.harness.adapters.descriptor import ADAPTER_FILE, AdapterDescriptor
-from reef.harness.episodes import run as episode_run
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts import run as rollout_run
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.sync import TOKEN_PLACEHOLDER, LayerInstall
 from reef.harness.tree import HarnessTree, render_tree
 from reef.harness.tree.checks import NATIVE_LOOP_DEFAULT_MAX_STEPS
@@ -84,10 +84,10 @@ def write_rendered(
     root: Path, tree: HarnessTree, descriptor: AdapterDescriptor, binding: ModelBinding | None = None
 ) -> dict[str, str]:
     """``tree`` rendered for ``descriptor``, pointed at ``binding`` when one is given, and written under ``root`` as
-    an episode writes it."""
+    a rollout writes it."""
     overlays = () if binding is None else binding.config_overlays(descriptor)
     files = render_tree(tree, descriptor, overlays)
-    episode_run.write_rendered(descriptor, files, root, str(root))
+    rollout_run.write_rendered(descriptor, files, root, str(root))
     return files
 
 

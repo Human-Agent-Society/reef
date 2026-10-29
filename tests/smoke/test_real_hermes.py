@@ -1,7 +1,7 @@
-"""Smoke of the real hermes binary: render, episode, and trajectory against the
+"""Smoke of the real hermes binary: render, rollout, and trajectory against the
 real thing. The hermetic suites drive scripted fakes, so every format and
 environment assumption about the real Hermes Agent lives here: a pinned
-hermes runs one episode against a stdlib OpenAI-compatible stub and must read
+hermes runs one rollout against a stdlib OpenAI-compatible stub and must read
 our rendered config.yaml, reach the stub with the SOUL.md text and the bound
 key, write a session snapshot our reader parses, make no extra model call,
 and leave no unexplained residue. Skipped unless REEF_REAL_HERMES_BINARY
@@ -23,8 +23,8 @@ import pytest
 from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import run_episode
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import run_rollout
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_HERMES = os.environ.get("REEF_REAL_HERMES_BINARY", "")
@@ -100,7 +100,7 @@ class StubHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
 
-def test_real_hermes_episode_renders_runs_and_cleans_up() -> None:
+def test_real_hermes_rollout_renders_runs_and_cleans_up() -> None:
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
@@ -110,7 +110,7 @@ def test_real_hermes_episode_renders_runs_and_cleans_up() -> None:
         )
         files = render_tree(HarnessTree({"rules.md": RULES_SENTENCE}), descriptor, binding.config_overlays(descriptor))
         # The task starts with a dash on purpose: it must pass through -q as the query.
-        result = run_episode(
+        result = run_rollout(
             descriptor, files, "- Reply with exactly the word READY", binary=REAL_HERMES, timeout=300.0
         )
     finally:
@@ -132,9 +132,9 @@ def test_real_hermes_episode_renders_runs_and_cleans_up() -> None:
     assert result.residue == ()
 
 
-def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_beside_an_episode_home(tmp_path) -> None:
+def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_beside_a_rollout_home(tmp_path) -> None:
     """hermes's own config readers, run in its venv on the rendered home: the tirith scanner is off (it would download
-    at boot), and the commands root is found beside the episode home. It is still found when the tree sets
+    at boot), and the commands root is found beside the rollout home. It is still found when the tree sets
     skills.external_dirs itself, empty or to a directory of its own."""
     descriptor = get_adapter("hermes")
     binding = ModelBinding(base_url="http://127.0.0.1:9", model=MODEL, api_key="smoke-key-1234")
@@ -165,9 +165,9 @@ def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_beside_an_epis
         assert json.loads(result.stdout.splitlines()[-1]) == [False, found], tree
 
 
-def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_calls() -> None:
+def test_real_hermes_rollout_makes_no_background_review_call_after_ten_tool_calls() -> None:
     """hermes reviews the skill library in a background agent after ten tool calls in a turn; the defaults turn that
-    off, so an episode makes only its own model calls and writes no skill into the tree. The tree has no rules, like
+    off, so a rollout makes only its own model calls and writes no skill into the tree. The tree has no rules, like
     a scenario's seed tree, so hermes writes its default SOUL.md, which is not residue."""
     server = StubOpenAI(tool_calls=[("terminal", {"command": f"echo step-{step}"}) for step in range(10)])
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -177,7 +177,7 @@ def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_call
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
         )
         files = render_tree(HarnessTree({}), descriptor, binding.config_overlays(descriptor))
-        result = run_episode(
+        result = run_rollout(
             descriptor, files, "Run ten echo commands, then reply READY", binary=REAL_HERMES, timeout=300.0
         )
     finally:
@@ -191,9 +191,9 @@ def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_call
     assert result.residue == ()
 
 
-def test_real_hermes_episode_that_loads_a_skill_leaves_no_residue() -> None:
+def test_real_hermes_rollout_that_loads_a_skill_leaves_no_residue() -> None:
     """A skill_view of a tree skill makes hermes count the load in skills/.usage.json under a lock file, with no
-    config key to turn that off. Both are hermes's own state, so the episode reports no residue."""
+    config key to turn that off. Both are hermes's own state, so the rollout reports no residue."""
     server = StubOpenAI(tool_calls=[("skill_view", {"name": "notes"})])
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
@@ -203,7 +203,7 @@ def test_real_hermes_episode_that_loads_a_skill_leaves_no_residue() -> None:
         )
         skill = {"skills/notes/SKILL.md": "# Notes\n\nKeep notes short: NOTES-MARKER-7."}
         files = render_tree(HarnessTree(skill), descriptor, binding.config_overlays(descriptor))
-        result = run_episode(
+        result = run_rollout(
             descriptor, files, "Load the notes skill, then reply READY", binary=REAL_HERMES, timeout=300.0
         )
     finally:

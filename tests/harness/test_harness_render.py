@@ -22,7 +22,7 @@ from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
 from reef.harness.adapters.hermes.render import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.render import read_frontmatter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree import HarnessTree, RenderError, render_tree, validate_tree
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -188,13 +188,13 @@ def test_codex_binding_uses_the_responses_api() -> None:
     ],
 )
 def test_codex_takes_no_config_key_from_a_tree(data: dict) -> None:
-    """A Codex plugin carries no config key, so config.toml holds the episode's defaults and the binding alone."""
+    """A Codex plugin carries no config key, so config.toml holds the rollout's defaults and the binding alone."""
     with pytest.raises(RenderError, match=r"in codex/config\.toml"):
         render(config(data), CODEX)
 
 
-def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_config() -> None:
-    """The rendered config.toml holds no approval_policy; the episode argv pins both before the prompt."""
+def test_codex_rollout_argv_pins_approvals_and_web_search_off_over_the_config() -> None:
+    """The rendered config.toml holds no approval_policy; the rollout argv pins both before the prompt."""
     config_toml = tomllib.loads(render({}, CODEX)["codex/config.toml"])
     assert config_toml["web_search"] == "disabled" and "approval_policy" not in config_toml
     argv = list(CODEX.argv)
@@ -216,8 +216,8 @@ def test_codex_renders_a_command_as_a_skill_and_refuses_one_that_shares_a_skills
         render({**command, "skills/reefine/SKILL.md": "# reefine"}, CODEX)
 
 
-def test_codex_episode_installs_the_plugin_as_codex_plugin_add_does() -> None:
-    """An episode's CODEX_HOME holds the plugin's copy and the two config entries that codex plugin add writes."""
+def test_codex_rollout_installs_the_plugin_as_codex_plugin_add_does() -> None:
+    """A rollout's CODEX_HOME holds the plugin's copy and the two config entries that codex plugin add writes."""
     files = render({"skills/fix/SKILL.md": "# Fix"}, CODEX)
     assert files["codex/plugins/cache/reef/reef/0.0.0/skills/fix/SKILL.md"] == files["plugin/skills/fix/SKILL.md"]
     assert json.loads(files["plugin/.codex-plugin/plugin.json"])["name"] == "reef"
@@ -313,7 +313,7 @@ def test_dsh_render_steps_emit_the_patch_layer_the_env_file_and_skill_frontmatte
     files = render(SOURCES["dsh"], DSH, binding)
     patch = yaml.safe_load(files[DSH_PATCH].replace("!!js ", ""))
     by_id = {row["id"]: row for row in patch if "id" in row}
-    # Every entry in id order, the defaults that keep an episode readable and quiet, the binding, then the inserts.
+    # Every entry in id order, the defaults that keep a rollout readable and quiet, the binding, then the inserts.
     assert [row.get("id", "insert") for row in patch] == [
         "agent-default-model",
         "agent-loop",
@@ -464,7 +464,7 @@ def test_dsh_binds_both_profiles_in_every_dialect(api, route_api, base_url) -> N
     assert files["dsh/.env"] == "REEF_API_KEY=k-1\n"
 
 
-def test_dsh_locks_refuse_a_patch_that_breaks_the_episode() -> None:
+def test_dsh_locks_refuse_a_patch_that_breaks_the_rollout() -> None:
     with pytest.raises(
         RenderError,
         match=r"on session-persistence-jsonl\.config\.compression in dsh/profiles/headless/cordis\.patch\.yml",
@@ -505,7 +505,7 @@ def test_hermes_render_steps_emit_the_config_the_plugin_grants_and_skill_frontma
     # An OpenRouter host is hermes's own provider, whose key it reads from the environment or its home's .env.
     assert files["hermes/.env"] == "OPENAI_API_KEY=k-1\n"
     assert config_yaml["agent"] == {"max_turns": 40}
-    # The defaults that keep an episode hermetic and single request, and the commands root beside the episode home.
+    # The defaults that keep a rollout hermetic and single request, and the commands root beside the rollout home.
     assert config_yaml["security"] == {"tirith_enabled": False} and "approval" not in config_yaml
     assert config_yaml["auxiliary"] == {"title_generation": {"enabled": False}}
     assert config_yaml["memory"] == {"nudge_interval": 0} and config_yaml["sessions"] == {"write_json_snapshots": True}
@@ -539,7 +539,7 @@ def test_hermes_render_steps_emit_the_config_the_plugin_grants_and_skill_frontma
     assert kept.count(DEFAULT_IDENTITY) == 1
 
 
-def test_hermes_locks_refuse_a_config_that_breaks_the_episode() -> None:
+def test_hermes_locks_refuse_a_config_that_breaks_the_rollout() -> None:
     with pytest.raises(RenderError, match=r"on security\.tirith_enabled in"):
         render(config({"security": {"tirith_enabled": True}}), HERMES)
     with pytest.raises(RenderError, match=r"on auxiliary\.title_generation\.enabled in"):
@@ -614,7 +614,7 @@ def test_hermes_render_steps_add_the_commands_roots_after_the_external_dirs_a_tr
 
 
 def test_opencode_descriptor_lock_rejects_reopened_autoupdate() -> None:
-    with pytest.raises(RenderError, match=r"on autoupdate in plugin/config\.json: episodes keep autoupdate"):
+    with pytest.raises(RenderError, match=r"on autoupdate in plugin/config\.json: rollouts keep autoupdate"):
         render(config({"autoupdate": True}), OPENCODE)
 
 
@@ -682,7 +682,7 @@ def test_opencode_validation_refuses_a_tree_that_copies_the_binding() -> None:
 
 def test_opencode_runs_offer_only_the_binding_provider() -> None:
     """Without a provider list opencode also offers its own zen provider, so a model choice the check missed would
-    leave Reef; the descriptor lists only the binding's provider. An episode does not search the web, so the env
+    leave Reef; the descriptor lists only the binding's provider. A rollout does not search the web, so the env
     does not register opencode's websearch tool."""
     assert json.loads(render({}, OPENCODE)["opencode/opencode.json"])["enabled_providers"] == ["reef"]
     assert "OPENCODE_ENABLE_EXA" not in OPENCODE.env
@@ -942,7 +942,7 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
     ],
 )
 def test_claude_takes_no_setting_from_a_tree(data: dict) -> None:
-    """A Claude Code plugin carries no settings, so settings.json holds the episode's defaults and the binding."""
+    """A Claude Code plugin carries no settings, so settings.json holds the rollout's defaults and the binding."""
     with pytest.raises(RenderError, match=r"in claude/settings\.json"):
         render(config(data), CLAUDE)
 
@@ -1102,7 +1102,7 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
 
 
 def test_no_bundled_adapter_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
-    """Every bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
+    """Every bundled adapter's rollout stays hermetic: no service variable beyond PATH and TMPDIR."""
     for name in BUILTIN_ADAPTERS:
         descriptor = get_adapter(name)
         assert descriptor.host_env == {} and not descriptor.is_root_bind_mounted, name

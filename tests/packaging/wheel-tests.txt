@@ -13,7 +13,7 @@ tests/core/test_plugins.py
 tests/core/test_policy_tensors.py
 tests/core/test_reef_core_package.py
 tests/core/test_task_split.py
-tests/evaluation/test_candidate_evaluation_plugins.py
+tests/evaluation/test_activation_rules.py
 tests/evaluation/test_evaluation_worker_pool.py
 tests/evaluation/test_harness_history.py
 tests/evaluation/test_harness_tasks.py
@@ -22,11 +22,11 @@ tests/evaluation/test_selection.py
 tests/evaluation/test_verifier_reward.py
 tests/harness/test_e2b_executor.py
 tests/harness/test_e2b_tunnel.py
-tests/harness/test_episode_executor.py
+tests/harness/test_program_executor.py
 tests/harness/test_evolution_executor_ray.py
 tests/harness/test_harbor_tasks.py
 tests/harness/test_harness_contracts.py
-tests/harness/test_harness_episode.py
+tests/harness/test_harness_rollout.py
 tests/harness/test_harness_evolve_runner.py
 tests/harness/test_harness_model_route.py
 tests/harness/test_harness_read.py
@@ -38,7 +38,7 @@ tests/harness/test_native_enforce.py
 tests/harness/test_native_harness.py
 tests/harness/test_native_loop.py
 tests/harness/test_native_serve.py
-tests/harness/test_task_episode_runner.py
+tests/harness/test_task_rollout_runner.py
 tests/harness/test_tree_checks.py
 tests/inference/test_inference_control.py
 tests/inference/test_sglang_chat_capture.py
@@ -154,8 +154,8 @@ tests/runtime/test_runtime_ownership.py
 tests/runtime/test_shared_ray_runtime.py
 tests/scenario/test_commit_history.py
 tests/scenario/test_component_trainers.py
+tests/scenario/test_composite_activation_admission.py
 tests/scenario/test_composite_replay_parity.py
-tests/scenario/test_composite_rollback_admission.py
 tests/scenario/test_reef_concurrency.py
 tests/scenario/test_reef_scenarios.py
 tests/scenario/test_release_files.py
@@ -191,10 +191,11 @@ tests/train/test_objectives.py
 tests/train/test_record_stage.py
 tests/train/test_record_stage_job_data_parity.py
 tests/train/test_reef_trainer_contracts.py
-tests/train/test_release.py
 tests/train/test_reported_feedback_processor.py
 tests/train/test_sample_task_metadata.py
 tests/train/test_step_schedule.py
 tests/train/test_trainer.py
 tests/train/test_training_data_samples.py
 tests/sandbox/test_environment.py
+tests/sandbox/test_task_environment.py
+tests/sandbox/test_process_lifecycle.py

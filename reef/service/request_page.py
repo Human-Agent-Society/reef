@@ -30,8 +30,8 @@ from reef.service.release_page import (
     floor_tasks_note,
     method_notes,
     method_summary,
-    missed_episode_text,
-    missed_episodes,
+    missed_rollout_text,
+    missed_rollouts,
     recorded_patch,
     result_of,
     served_step,
@@ -106,7 +106,7 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 STATE_WORDS = {
     "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
     "proposing": "the method is making the change; the activity shows what it has done so far",
-    "evaluating": "the evaluation is running the candidate through its episodes",
+    "evaluating": "the evaluation is running the candidate through its rollouts",
     "running": "the step holds the request and reports no phase; its row follows",
 }
 
@@ -127,17 +127,17 @@ class NextAction:
 
 
 def next_action(scenario: str, release_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
-    """The next action of a settled step: promote a release held for review, or pull a published one.
+    """The next action of a settled step: activate a release that is not active, or pull an active one.
 
     ``requires`` names what the release needs where the harness runs (see
     ``reef.core.requirements.required_by``). ``None`` for a rejected,
-    skipped, failed or promoted step: nothing waits on the person then.
+    skipped or failed step: nothing waits on the person then.
     """
-    if selection_result == "pending":
+    if selection_result == "inactive":
         return NextAction(
-            "Read this page, then promote it",
-            (f'POST /reef/scenarios/{scenario}/promote {{"release_id": "{release_id}"}}',),
-            "The change touches files a person reviews before Reef serves them; promoting it serves it.",
+            "Read this page, then activate it",
+            (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{release_id}"}}',),
+            "The scenario's activation rule did not make this release active; activating it serves it.",
         )
     if selection_result != "selected":
         return None
@@ -151,8 +151,8 @@ def next_action(scenario: str, release_id: str, selection_result: str, requires:
 
 def rejection_text(metrics: Mapping[str, object]) -> str:
     """Why a rejected step published nothing and what the person can do, as one sentence without its subject: the
-    evaluation's cause when no candidate episode was scored, else the selection's reason and the first missed
-    episode. An episode that failed was the harness's run, not the request, so no rephrasing is advised then."""
+    evaluation's cause when no candidate rollout was scored, else the selection's reason and the first missed
+    rollout. A rollout that failed was the harness's run, not the request, so no rephrasing is advised then."""
     unscored = unscored_failures(metrics)
     if unscored:
         return (
@@ -161,16 +161,16 @@ def rejection_text(metrics: Mapping[str, object]) -> str:
         )
     selection = metrics.get("selection")
     reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
-    missed = missed_episodes(metrics)
+    missed = missed_rollouts(metrics)
     if not missed:
         return f"did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
-    if any(episode.get("failure") for episode in missed):
-        advice = "the episode failed, so the change itself was not judged"
-    elif any(episode.get("transcript_read") is False for episode in missed):
+    if any(rollout.get("failure") for rollout in missed):
+        advice = "the rollout failed, so the change itself was not judged"
+    elif any(rollout.get("transcript_read") is False for rollout in missed):
         advice = "no transcript was read, so the change itself was not judged"
     else:
         advice = "rephrase or split the request"
-    return f"did not pass the checks ({reason}): {missed_episode_text(missed[0])}. Nothing changed; {advice}."
+    return f"did not pass the checks ({reason}): {missed_rollout_text(missed[0])}. Nothing changed; {advice}."
 
 
 def settled_step(rows: Sequence[Mapping[str, object]], record_id: str) -> int | None:
@@ -273,9 +273,9 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
         lines.append(
             f"<div><dt>Step time</dt><dd>{escape(elapsed(now - progress.started_at))} into the step</dd></div>"
         )
-        if progress.episodes_total is not None:
+        if progress.rollouts_total is not None:
             lines.append(
-                f"<div><dt>Evaluation episodes</dt><dd>{progress.episodes_total} in the evaluation</dd></div>"
+                f"<div><dt>Evaluation rollouts</dt><dd>{progress.rollouts_total} in the evaluation</dd></div>"
             )
         lines.append(f'<div><dt>Step record</dt><dd class="id">{escape(progress.step_record)}</dd></div>')
     else:
@@ -294,10 +294,11 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     release = str(row.get("release_id") or "-")[:8]
     if selection_result == "selected":
         return f"Published as release {release}. GET /reef/harness serves it from now on."
-    if selection_result == "pending":
-        return f"Release {release} is ready. The change touches files a person reviews before Reef serves them."
-    if selection_result.startswith("promoted"):
-        return f"passed the checks and was {selection_result}; the release that step published serves it"
+    if selection_result == "inactive":
+        return (
+            f"Release {release} is ready but does not serve yet. The scenario's activation rule left it for a "
+            "person to review and activate."
+        )
     if selection_result == "rejected":
         return rejection_text(metrics)
     if selection_result == "skipped":
@@ -313,7 +314,7 @@ def result_html(
     row = rows[step]
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
-    selection_result = result_of(row, rows)
+    selection_result = result_of(row)
     parts = [
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
         f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>",
@@ -401,7 +402,7 @@ def build_request_page(
     record_id = str(record["agent_record_id"])
     now = time.time() if now is None else now
     step = settled_step(rows, record_id)
-    state = result_of(rows[step], rows) if step is not None else request_state(record, progress, consumed)
+    state = result_of(rows[step]) if step is not None else request_state(record, progress, consumed)
     head = "" if step is not None else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
     if step is None:
         body = f'<section class="card outcome-card">\n<h2>Progress</h2>\n{progress_html(record, state, progress, now)}</section>\n'
@@ -414,7 +415,7 @@ def build_request_page(
     else:
         metrics = rows[step].get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
-        change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
+        change_label = "Proposed changes" if state in ("inactive", "rejected", "skipped", "failed") else "What changed"
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, scenario)}</section>\n'
             f"{summary_html(metrics)}"
@@ -451,7 +452,7 @@ def build_request_page(
         eyebrow="Harness evolution",
         heading="Request details",
         subtitle=escape(subtitle),
-        # The served head is this scenario's home, the version this request is asked against.
+        # The active release is this scenario's home, the version this request is asked against.
         home="" if served is None else step_href(served, link_query),
         head=head,
         body=(

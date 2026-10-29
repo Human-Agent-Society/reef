@@ -69,15 +69,15 @@ with its prompt, tools, and tool executor taken from the pinned checkout in
 the task image and its model calls served by Reef; the two simulator roles
 stay outside Reef, the verifier scores the run from its `world.nmdb`, and
 each finished week's change in company value is reported against the
-week's decision turns while the episode runs. It demonstrates how to adopt
+week's decision turns while the rollout runs. It demonstrates how to adopt
 a benchmark's agent as a Reef harness and how to shape an online,
-per-period reward for one long episode.
+per-period reward for one long rollout.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method on the same mechanism: each step is one GEPA iteration - Pareto
 sample a parent from the method's own archive, reflect on one component with a
 stronger model over the parent's run of the minibatch (the recorded traffic
-when the parent is the served tree, new episodes on the same tasks for any
+when the parent is the served tree, new rollouts on the same tasks for any
 other parent), and accept the child only if it beats its parent on the
 minibatch - and the `compare` policy
 with `statistic: mean` publishes only on a strict mean improvement over the full
@@ -91,7 +91,7 @@ its seed-1 run gained the official 12 points.
 
 [Meta-Harness](meta_harness/README.md) searches complete harness trees
 using all retained candidates and scores. Its population is the scenario's
-history of candidates, scores and episode records, and the `compare` policy with
+history of candidates, scores and rollout records, and the `compare` policy with
 `statistic: mean` publishes a strict mean-score improvement. See the
 [Terminal-Bench example](meta_harness/examples/terminal_bench/README.md),
 [results](meta_harness/RESULTS.md), and selected harness.
@@ -116,7 +116,7 @@ hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
 contains only the harness side.
 
 [ACE](ace/README.md) and [ReasoningBank](reasoning_bank/README.md) learn from
-traffic without ground truth and run no evaluation episode (`policy: none`).
+traffic without ground truth and run no evaluation rollout (`policy: none`).
 ACE grows a playbook of lessons in `rules.md` from a reflector and a curator
 model; ReasoningBank distills strategies and lessons from judged runs into one
 Agent Skill per memory item, which the harness's skill list retrieves.
@@ -159,7 +159,7 @@ Around those stacks, the loop on the Harbor task standard: a
 Harbor agent harness that records its model call through Reef and reports
 the verifier reward back at trial end (`harness/`), the loop written out
 (`run.py` — [reef-eval](https://github.com/Human-Agent-Society/reef-eval)'s
-`Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
+`Lab.run`, one rollout), and a launcher (`run.sh`) that starts Reef from
 `external-provider.yaml` with local overrides and runs it.
 
 ## Beta recipes

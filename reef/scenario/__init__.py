@@ -15,7 +15,7 @@ The modules follow these responsibilities:
   opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.
   It returns a complete ``Scenario`` and closes owned resources on failure.
-- ``committer`` orders commit, rollback, retries, and artifact publication
+- ``committer`` orders commits, activations, new training starts, retries, and artifact publication
   around store settlement. Trainer state is exposed only after settlement.
 - ``releases`` queries releases, artifact content, and committed training metadata.
   It shares the committer's publication lock. Writers take the operation lock

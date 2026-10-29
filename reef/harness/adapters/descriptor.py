@@ -16,8 +16,8 @@ declares four things and, optionally, the checks of the agent's config files:
   names the session log's path and reader (``trajectory_format``).
 - ``model``: per API dialect, the config templates that point the agent at a
   model endpoint (``model_binding``).
-- ``run``: ``episode``, the headless invocation (``{prompt}`` substituted
-  per episode) and the variables beside the relocation ones, and ``layer``,
+- ``run``: ``rollout``, the headless invocation (``{prompt}`` substituted
+  per rollout) and the variables beside the relocation ones, and ``layer``,
   how a person's machine runs the agent (``AdapterLayer``).
 - ``config`` (optional checks): named JSON config files with their enforced
   defaults (a ``primary`` target is required) and their checks (a key of the
@@ -26,17 +26,17 @@ declares four things and, optionally, the checks of the agent's config files:
   root as ``{root}/...``; the program that writes the rendered files puts the
   root there (``AdapterDescriptor.place_root``).
 - ``install`` (optional): the vendor's install channel for the binary at a
-  pinned version, which Reef installs on the host that runs the episodes,
+  pinned version, which Reef installs on the host that runs the rollouts,
   and a client installs on a person's machine that lacks the agent; Reef
   never hosts or proxies binary bytes.
-- ``self_isolating`` (optional): the adapter runs episodes inside its own
+- ``self_isolating`` (optional): the adapter runs rollouts inside its own
   container, so nesting in Reef's jail is refused unless its
   ``execution_validator`` accepts the configuration (such as a remote task
   environment).
-- ``host_env`` (optional): service environment variables a local episode
+- ``host_env`` (optional): service environment variables a local rollout
   keeps, for a host tool the relocated ``HOME`` would otherwise hide.
 - ``is_root_bind_mounted`` (optional): the binary bind-mounts paths below the
-  episode root into a container, so on macOS a local episode makes its root
+  rollout root into a container, so on macOS a local rollout makes its root
   under the home directory, which Docker's VM shares with the host.
 
 A descriptor may name a ``renderer``, an :class:`AdapterRenderer` subclass
@@ -64,19 +64,19 @@ import yaml
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
 from reef.harness.adapters.parts import TreeLayout, TreeLayoutError, layout_from_evolve
-from reef.sandbox.process import EpisodeExecutor
 
 
 class ExecutionValidator(Plugin, ABC):
-    """Adapter-specific constraints checked by the shared episode lifecycle.
+    """Adapter-specific constraints checked by the shared rollout lifecycle.
 
     A descriptor names the class in ``execution_validator``; the loader builds it with no arguments.
     """
 
     @abstractmethod
-    def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
+    def __call__(self, files: Mapping[str, str], executor: ProgramExecutor) -> None: ...
 
 
 class AdapterRenderer(Plugin):
@@ -239,7 +239,7 @@ class ConfigTarget:
     checks: tuple[ConfigCheck, ...] = ()
 
 
-#: Vendor install kinds Reef can install for episodes: an npm
+#: Vendor install kinds Reef can install for rollouts: an npm
 #: package at a version, or a git checkout at a ref installed editable into
 #: a venv (the channel of a Python agent that publishes no wheel).
 INSTALL_KINDS = ("npm", "git")
@@ -307,7 +307,7 @@ class AdapterLayer:
 
 @dataclass(frozen=True)
 class AdapterDescriptor:
-    """Everything the shared render and episode engines know about one harness."""
+    """Everything the shared render and rollout engines know about one harness."""
 
     name: str
     binary: str
@@ -322,7 +322,7 @@ class AdapterDescriptor:
     #: The adapter's own render steps; the base class changes nothing.
     renderer: type[AdapterRenderer] = AdapterRenderer
     install: InstallSpec | None = None
-    #: True when the adapter isolates episodes itself; nesting is refused
+    #: True when the adapter isolates rollouts itself; nesting is refused
     #: unless validate_execution checks a compatible configuration.
     self_isolating: bool = False
     #: True when the ``{prompt}`` argv slot names a task directory (a Harbor task) rather than text the
@@ -331,16 +331,16 @@ class AdapterDescriptor:
     #: Config templates (``target`` and ``data``) that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
-    #: the matching set when it runs evaluation episodes, so the served tree
+    #: the matching set when it runs evaluation rollouts, so the served tree
     #: never carries a provider binding.
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
-    #: Service environment variables an episode under the local executor keeps: the service's own value, else
+    #: Service environment variables a rollout under the local executor keeps: the service's own value, else
     #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
     #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as a docker CLI.
     host_env: Mapping[str, str] = field(default_factory=dict)
-    #: True when the binary bind-mounts paths below the episode root into a container. On macOS Docker runs in a VM
-    #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
-    #: then makes its root under ``~/.reef/episodes``; on other platforms the root stays in the temp directory.
+    #: True when the binary bind-mounts paths below the rollout root into a container. On macOS Docker runs in a VM
+    #: that shares the home directory, and colima does not share ``$TMPDIR``, so a rollout under the local executor
+    #: then makes its root under ``~/.reef/rollouts``; on other platforms the root stays in the temp directory.
     is_root_bind_mounted: bool = False
     #: Checks the executor against the rendered tree before launch, in place of the blanket self_isolating
     #: refusal; ``None`` keeps that refusal.
@@ -351,7 +351,7 @@ class AdapterDescriptor:
 
     def place_root(self, files: Mapping[str, str], root: str) -> dict[str, str]:
         """``files`` with ``{root}`` in each config file replaced by ``root``, the directory that holds the render
-        roots: the episode root, or a client's install. The root is escaped as a JSON string's content."""
+        roots: the rollout root, or a client's install. The root is escaped as a JSON string's content."""
         config_paths = {target.path for target in self.config_targets.values()}
         placed = json.dumps(root)[1:-1]
         return {path: text.replace("{root}", placed) if path in config_paths else text for path, text in files.items()}
@@ -375,7 +375,7 @@ def relative_paths(value: Any, where: str) -> tuple[str, ...]:
     for path in paths:
         pure = PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] == "workspace":
-            raise DescriptorError(f"{where} entries must stay below the episode root and outside workspace")
+            raise DescriptorError(f"{where} entries must stay below the rollout root and outside workspace")
     return paths
 
 
@@ -409,20 +409,20 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'dirs' must map directories to the variable that moves each, or null")
     state = relative_paths([str(directory) for directory in dirs], f"{where} 'dirs'")
     run = data.get("run")
-    if not isinstance(run, Mapping) or not set(run) <= {"episode", "layer"}:
-        raise DescriptorError(f"{where} requires 'run': its episode, and optionally its layer")
-    episode = run.get("episode")
-    if not isinstance(episode, Mapping) or not set(episode) <= {"argv", "env"}:
-        raise DescriptorError(f"{where} run 'episode' must be an object of argv and env")
-    flags = episode.get("env", {})
+    if not isinstance(run, Mapping) or not set(run) <= {"rollout", "layer"}:
+        raise DescriptorError(f"{where} requires 'run': its rollout, and optionally its layer")
+    rollout = run.get("rollout")
+    if not isinstance(rollout, Mapping) or not set(rollout) <= {"argv", "env"}:
+        raise DescriptorError(f"{where} run 'rollout' must be an object of argv and env")
+    flags = rollout.get("env", {})
     if not isinstance(flags, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in flags.items()
     ):
-        raise DescriptorError(f"{where} run episode 'env' must map strings to strings")
+        raise DescriptorError(f"{where} run rollout 'env' must map strings to strings")
     env = {str(variable): f"{{root}}/{directory}" for directory, variable in dirs.items() if variable}
     moved = sorted(set(env) & set(flags))
     if moved:
-        raise DescriptorError(f"{where} run episode 'env' sets variables that 'dirs' sets: {', '.join(moved)}")
+        raise DescriptorError(f"{where} run rollout 'env' sets variables that 'dirs' sets: {', '.join(moved)}")
     env.update(flags)
     host_env = data.get("host_env", {})
     if not isinstance(host_env, Mapping) or not all(
@@ -432,7 +432,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     overlap = sorted(set(host_env) & set(env))
     if overlap:
         raise DescriptorError(
-            f"{where} 'host_env' names variables the episode 'env' already sets: {', '.join(overlap)}"
+            f"{where} 'host_env' names variables the rollout 'env' already sets: {', '.join(overlap)}"
         )
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
@@ -460,7 +460,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     return AdapterDescriptor(
         name=name,
         binary=require_str(data, "binary", where),
-        argv=str_list(episode.get("argv"), f"{where} run episode 'argv'"),
+        argv=str_list(rollout.get("argv"), f"{where} run rollout 'argv'"),
         env=env,
         config_targets=config_targets,
         layout=layout,

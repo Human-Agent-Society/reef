@@ -7,7 +7,7 @@ One pass on pi (``./run.sh``):
     report - the reply is graded with the same grader the evaluation uses
              and the score is reported against the receipt; every valid report
              batches and triggers one evolve step - the method has the model
-             rewrite rules.md from the failing attempts, real episodes score
+             rewrite rules.md from the failing attempts, real rollouts score
              the new tree, a win publishes
     pull   - GET /reef/harness returns the winning tree; the files the
              winning step changed are printed
@@ -57,7 +57,7 @@ MOUNT_TIMEOUT_S = 120.0
 
 WORK = Path(__file__).resolve().parent / "work"
 # run.sh copies serve.yaml's evolution.evaluation.tasks here; the recorded traffic and
-# the evolve episodes run the same three tasks.
+# the evolve rollouts run the same three tasks.
 TASKS_FILE = WORK / "tasks.json"
 # The native variant: the pulled tree the serve process runs, and the workspace its tools work in.
 TREE_DIR = WORK / "tree"
@@ -99,7 +99,7 @@ def main():
 
     print(
         f"{batched} report(s) batched ({failures} of them failing); "
-        "each triggers one evolve step (episodes take minutes)"
+        "each triggers one evolve step (rollouts take minutes)"
     )
 
     # The seed tree is served from the start, so the manifest alone never says whether a step
@@ -270,7 +270,7 @@ def native_main():
 
     print(
         f"{batched} report(s) batched ({failures} of them failing); "
-        "each triggers one evolve step (episodes take minutes)"
+        "each triggers one evolve step (rollouts take minutes)"
     )
 
     # Only a win moves the head off the seed release, and a step that is rejected or skipped never does: wait for

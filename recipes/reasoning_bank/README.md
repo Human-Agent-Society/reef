@@ -81,7 +81,7 @@ set `evolution.max_model_calls_per_step`, allow two calls per run. A step that r
 
 - The `pipeline` section names the inference stages. Every model call that a client sends through Reef is a
   trace, and no client has to report a score. The judge labels each run.
-- `evolution.evaluation.policy: none` runs no episodes. Every step whose tree passes validation publishes.
+- `evolution.evaluation.policy: none` runs no rollouts. Every step whose tree passes validation publishes.
 - The served model judges and extracts, as in the paper.
 
 The example serves `qwen3-8b` from `http://127.0.0.1:8000`; edit the `inference` section for another model. Start
@@ -100,7 +100,7 @@ Other setups change one part of the example:
   then a scored run, and its score sets the outcome.
 - For a stronger judge, declare the model under `evolution.models` (`url`, `model`, `api_key_env`) and set
   `judge_model` to its name.
-- With `evaluation.policy: compare` or `floor`, Reef runs episodes on each new tree before it publishes. The bank
+- With `evaluation.policy: compare` or `floor`, Reef runs rollouts on each new tree before it publishes. The bank
   keeps every item that it learned, whether or not the tree was published, and each step proposes the whole bank
   again.
 

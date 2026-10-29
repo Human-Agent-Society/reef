@@ -1,4 +1,4 @@
-"""The model bindings reef hands to methods and episodes: one value per
+"""The model bindings reef hands to methods and rollouts: one value per
 endpoint, translated per API dialect, with the named set a method may call."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 from tests.support.harness_steps import evolution_config
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -353,7 +353,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
 
 
 def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
 
     binding = ModelBinding("http://up", "m")
     _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "answer", "reasoning": "old"}}]})
@@ -365,7 +365,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 
 def test_a_failed_call_retains_reasoning_when_the_provider_returns_no_final_text(monkeypatch) -> None:
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
     from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
     record: list[dict[str, Any]] = []
@@ -470,7 +470,7 @@ def test_unknown_api_is_refused() -> None:
         ModelBinding("http://up", "m", api="cohere")
 
 
-def test_episode_templates_follow_the_dialect() -> None:
+def test_rollout_templates_follow_the_dialect() -> None:
     openai = bound_files(ModelBinding("http://up", "m", api_key="k"), "pi")
     responses = bound_files(ModelBinding("http://up", "m", api_key="k", api="responses"), "pi")
     anthropic = bound_files(ModelBinding("http://up", "m", api_key="k", api="anthropic"), "pi")
@@ -487,7 +487,7 @@ def test_episode_templates_follow_the_dialect() -> None:
 def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> None:
     """A local endpoint needs no key, but pi refuses to start without one.
 
-    Rendering the empty string made every evaluation episode exit 1 with
+    Rendering the empty string made every evaluation rollout exit 1 with
     "No API key found for the selected model" before reaching the endpoint,
     so both sides of the evaluation scored 0 and no candidate could ever publish.
     """
@@ -591,7 +591,7 @@ def test_provider_metadata_is_selected_by_exact_model_and_cached(
     monkeypatch: pytest.MonkeyPatch, parameters: list[str], reasoning: bool
 ) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.episodes.model_binding import provider_model_metadata
+    from reef.harness.rollouts.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
     reply = {
@@ -620,7 +620,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.episodes.model_binding import provider_model_metadata
+    from reef.harness.rollouts.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
 
@@ -654,7 +654,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
 
 def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pytest.LogCaptureFixture) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.episodes.model_binding import provider_model_metadata
+    from reef.harness.rollouts.model_binding import provider_model_metadata
 
     complete_body = json.dumps(
         {"data": [{"id": "served", "context_length": 640_000, "supported_parameters": []}]}

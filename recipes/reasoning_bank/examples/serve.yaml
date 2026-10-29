@@ -35,7 +35,7 @@ recipe:
           max_items: 50
       state_dir: .reef/reasoning-bank/harness
       evaluation:
-        # No episodes: every step whose tree passes validation publishes.
+        # No rollouts: every step whose tree passes validation publishes.
         policy: none
 
 pipeline:

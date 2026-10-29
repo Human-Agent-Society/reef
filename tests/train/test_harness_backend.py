@@ -3,7 +3,7 @@
 Each step runs through the phases the trainer runs (``backend_step``) on an
 in-memory commit history whose base release is the pi seed; the test
 records a published tree as the next release, as the scenario committer
-does. Episodes run the fake pi binary, whose score prefers rules that hold
+does. Rollouts run the fake pi binary, whose score prefers rules that hold
 the marker.
 """
 
@@ -29,12 +29,13 @@ from tests.support.harness_steps import (
 )
 
 import reef.evaluation.harness.runner as harness_runner
+from reef.core.evaluation import RolloutScore
 from reef.core.job_data import TaskSample
 from reef.core.tasks import HarborTask, write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import EpisodeRecord, FloorPolicy
+from reef.evaluation.harness import FloorPolicy, RolloutRecord
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.backend import ComponentReleases
@@ -72,7 +73,8 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
 
     backend, _ = harness_backend(tmp_path, step)
     result = backend_step(backend, data(1), backend.initial_state())
-    assert result.metrics["selected"] is True and result.pending is False
+    # The step names the tree kinds its patch changes; the scenario's activation rule decides from them.
+    assert result.metrics["selected"] is True and result.changed_kinds == {"rules"}
     assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_release_id"] == "base"
     assert result.metrics["method_summary"] == "added the marker" and result.metrics["method_notes"] == {
         "why": "it scores"
@@ -80,8 +82,9 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
     assert HarnessTree.read(result.artifact.local_path) == PI_SEED.apply(MARKER)
     selection = result.metrics["selection"]
     assert (selection["policy"], selection["candidate_id"]) == ("compare", "demo:1:candidate")
-    assert (result.metrics["wins"], result.metrics["losses"]) == (1, 0)
-    # The history holds the head and the candidate, the episodes of both, and the decision.
+    # No pair had a failed rollout, so the comparison dropped none.
+    assert (result.metrics["wins"], result.metrics["losses"], result.metrics["dropped"]) == (1, 0, 0)
+    # The history holds the head and the candidate, the rollouts of both, and the decision.
     history = backend.history
     candidate = history.candidates[PI_SEED.apply(MARKER).checksum()]
     assert (candidate.origin, candidate.parent, candidate.summary) == (
@@ -90,7 +93,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
         "added the marker",
     )
     assert history.candidates[PI_SEED.checksum()].origin == "seed"
-    assert [record.score for record in history.episodes] == [1.0, 0.0]
+    assert [record.score.value for record in history.rollouts] == [1.0, 0.0]
     assert [(decision.step, decision.selected) for decision in history.decisions] == [(1, True)]
     # The committer publishes; the backend's own copy goes once the commit is durable.
     backend.commit_applied(result.state)
@@ -101,11 +104,11 @@ def test_the_cache_reuses_the_head_scores_in_the_next_step(tmp_path: Path) -> No
     patches = iter((MARKER, PLAIN))
     backend, releases = harness_backend(tmp_path, lambda workspace, services: next(patches))
     first = backend_step(backend, data(1), backend.initial_state())
-    assert (first.metrics["episodes_run"], first.metrics["episodes_cached"]) == (2, 0)
+    assert (first.metrics["rollouts_run"], first.metrics["rollouts_cached"]) == (2, 0)
     published(releases, "r1", first)
     second = backend_step(backend, data(2), first.state)
     # The head is the candidate of step 1: its score comes from the history, only the new candidate runs.
-    assert (second.metrics["episodes_run"], second.metrics["episodes_cached"]) == (1, 1)
+    assert (second.metrics["rollouts_run"], second.metrics["rollouts_cached"]) == (1, 1)
     assert second.metrics["selected"] is False and state_of(second).failure_streak == 1
 
 
@@ -253,20 +256,20 @@ def test_a_trace_that_ends_on_a_tool_call_has_no_reply(tmp_path: Path) -> None:
     assert trace.task == "q" and trace.reply is None and trace.score is None
 
 
-def test_a_method_scores_trees_through_the_cache_within_its_episode_budget(tmp_path: Path) -> None:
+def test_a_method_scores_trees_through_the_cache_within_its_rollout_budget(tmp_path: Path) -> None:
     runs: list[list[float | None]] = []
 
     def step(workspace, services):
         tree = workspace.tree().apply(MARKER)
-        runs.append([record.score for record in services.evaluate(tree, ("one", "two"))])
-        runs.append([record.score for record in services.evaluate(tree, ("one", "two"))])
+        runs.append([record.score.value for record in services.evaluate(tree, ("one", "two"))])
+        runs.append([record.score.value for record in services.evaluate(tree, ("one", "two"))])
         with pytest.raises(RuntimeError, match="budget has 1 left"):
             services.evaluate(tree, ("one", "two"), repeats=2)
         return
 
-    backend, _ = harness_backend(tmp_path, step, max_episodes_per_step=3)
+    backend, _ = harness_backend(tmp_path, step, max_rollouts_per_step=3)
     result = backend_step(backend, data(1), backend.initial_state())
-    assert runs == [[1.0, 1.0], [1.0, 1.0]] and result.metrics["method_episodes"] == 2
+    assert runs == [[1.0, 1.0], [1.0, 1.0]] and result.metrics["method_rollouts"] == 2
 
 
 #: Calls ``services.evaluate`` refuses whole, by why: whether the deployment has a scorer, the tree, the tasks, and the
@@ -275,7 +278,7 @@ REFUSED_CALLS = {
     "no-scorer": (False, PI_SEED.apply(MARKER), ("one",), "RuntimeError: the deployment configured no"),
     "invalid-tree": (True, PI_SEED.apply(TreePatch({"notes.txt": "x"})), ("one",), "ValueError: the tree fails"),
     "one-string": (True, PI_SEED.apply(MARKER), "one", "TypeError: tasks must be a sequence of tasks"),
-    "over-budget": (True, PI_SEED.apply(MARKER), ("one", "two"), "RuntimeError: 2 episodes must run, and the step's"),
+    "over-budget": (True, PI_SEED.apply(MARKER), ("one", "two"), "RuntimeError: 2 rollouts must run, and the step's"),
 }
 
 
@@ -292,16 +295,16 @@ def test_a_refused_evaluate_call_adds_no_candidate(
             refusals.append(f"{type(exc).__name__}: {exc}")
         return
 
-    recipe = harness_recipe(tmp_path, step, max_episodes_per_step=1, evaluation={} if scored else {"policy": "none"})
+    recipe = harness_recipe(tmp_path, step, max_rollouts_per_step=1, evaluation={} if scored else {"policy": "none"})
     recipe = recipe if scored else replace(recipe, scorer=None)
     backend = recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
     result = backend_step(backend, data(1), backend.initial_state())
     assert len(refusals) == 1 and refusals[0].startswith(refusal)
-    # The history holds the head alone, and no episode ran.
-    assert list(backend.history.candidates) == [PI_SEED.checksum()] and result.metrics["method_episodes"] == 0
+    # The history holds the head alone, and no rollout ran.
+    assert list(backend.history.candidates) == [PI_SEED.checksum()] and result.metrics["method_rollouts"] == 0
 
 
-def test_a_method_that_retries_after_a_scorer_error_stays_within_its_episode_budget(tmp_path: Path) -> None:
+def test_a_method_that_retries_after_a_scorer_error_stays_within_its_rollout_budget(tmp_path: Path) -> None:
     scored: list[str] = []
     errors: list[str] = []
 
@@ -317,11 +320,11 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_episode_bud
                 errors.append(str(exc))
         return
 
-    backend, _ = harness_backend(tmp_path, step, score=score, max_episodes_per_step=1)
+    backend, _ = harness_backend(tmp_path, step, score=score, max_rollouts_per_step=1)
     result = backend_step(backend, data(1), backend.initial_state())
-    # The episode whose scorer raised spent the budget, so the retries run nothing.
-    assert scored == ["one"] and result.metrics["method_episodes"] == 1
-    assert errors == ["the scorer broke"] + ["1 episodes must run, and the step's episode budget has 0 left"] * 2
+    # The rollout whose scorer raised spent the budget, so the retries run nothing.
+    assert scored == ["one"] and result.metrics["method_rollouts"] == 1
+    assert errors == ["the scorer broke"] + ["1 rollouts must run, and the step's rollout budget has 0 left"] * 2
 
 
 def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -> None:
@@ -332,25 +335,12 @@ def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -
     assert failed["failed_stage"] == "evaluating" and failed["patch"] == MARKER.to_json()
 
 
-@pytest.mark.parametrize(
-    ("fields", "patch", "pending"),
-    [
-        ({"publish": "review"}, MARKER, True),
-        (
-            {"review_parts": ("extension",)},
-            TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"}),
-            True,
-        ),
-        ({"review_parts": ("extension",)}, MARKER, False),
-    ],
-    ids=["publish-review", "reviewed-part", "other-part"],
-)
-def test_a_win_waits_for_review_under_publish_review_or_when_it_changes_a_reviewed_part(
-    tmp_path: Path, fields: dict, patch: TreePatch, pending: bool
-) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, services: patch, **fields)
+def test_a_win_names_the_parts_its_patch_changes_for_the_activation_rule(tmp_path: Path) -> None:
+    patch = TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"})
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: patch)
     result = backend_step(backend, data(1), backend.initial_state())
-    assert result.metrics["selected"] is True and result.artifact is not None and result.pending is pending
+    assert result.metrics["selected"] is True and result.artifact is not None
+    assert result.changed_kinds == {"rules", "extension"}
 
 
 def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> None:
@@ -359,12 +349,12 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
 
     def step(workspace, services):
         progress = holder["backend"].step_progress
-        seen.append((progress.phase, progress.request_id, progress.episodes_total))
+        seen.append((progress.phase, progress.request_id, progress.rollouts_total))
         return MARKER
 
     def score(task, result):
         progress = holder["backend"].step_progress
-        seen.append((progress.phase, progress.request_id, progress.episodes_total))
+        seen.append((progress.phase, progress.request_id, progress.rollouts_total))
         return 1.0
 
     backend, _ = harness_backend(tmp_path, step, score=score)
@@ -379,7 +369,7 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
 
     def phase() -> tuple[str, int | None]:
         progress = backend.step_progress
-        return progress.phase, progress.episodes_total
+        return progress.phase, progress.rollouts_total
 
     def step(workspace, services):
         seen["phases"].append(phase())
@@ -406,9 +396,9 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
         ("rollout", "train one", 0.0, None),
         ("rollout", "train two", 0.0, None),
     ]
-    # Each trace names its episode of the head tree; the history keeps the episode's files.
-    episodes = {record.episode: record for record in backend.history.episodes}
-    assert [(episodes[trace.record].task, episodes[trace.record].tree) for trace in traces] == [
+    # Each trace names its rollout of the head tree; the history keeps the rollout's files.
+    rollouts = {record.rollout: record for record in backend.history.rollouts}
+    assert [(rollouts[trace.record].task, rollouts[trace.record].tree) for trace in traces] == [
         ("train one", PI_SEED.checksum()),
         ("train two", PI_SEED.checksum()),
     ]
@@ -422,7 +412,7 @@ def test_a_rollout_of_a_task_directory_gives_the_method_the_task_instruction(tmp
         environment={"Dockerfile": "FROM python:3.12-slim\n"},
     )
     directory = write_harbor_task(task, tmp_path / "tasks")
-    record = EpisodeRecord("e1", PI_SEED.checksum(), str(directory), "key", 0, "context", 1, 1.0)
+    record = RolloutRecord("e1", PI_SEED.checksum(), str(directory), "key", 0, "context", 1, RolloutScore.scored(1.0))
     workspace = Workspace.create(
         tmp_path / "step",
         history_dir=tmp_path / "history",
@@ -539,15 +529,15 @@ def test_a_methods_requires_item_meets_the_screens_a_persons_item_meets(tmp_path
 # -- the floor: the candidate alone ----------------------------------------------------------------------------------
 
 
-def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(tmp_path: Path, monkeypatch) -> None:
+def test_a_candidate_only_evaluation_runs_no_current_rollout_and_still_settles(tmp_path: Path, monkeypatch) -> None:
     sides: list[str] = []
-    original = harness_runner.run_episode
+    original = harness_runner.run_rollout
 
     def spy(descriptor, files, prompt, **kwargs):
         sides.append("candidate" if "marker" in files.get("plugin/rules.md", "") else "current")
         return original(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(harness_runner, "run_episode", spy)
+    monkeypatch.setattr(harness_runner, "run_rollout", spy)
     backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
     prepared = backend.prepare_step(data(1), backend.initial_state(), 0)
     candidate = prepared.candidate
@@ -558,35 +548,38 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
 
     evaluation = backend.evaluate(candidate, sides=("candidate",))
     assert sides == ["candidate"]
-    assert evaluation.metrics["candidate_scores"] == (1.0,) and evaluation.metrics["current_scores"] == ()
+    # The scores of each side, by task, as RolloutScores JSON; the current side ran nothing.
+    assert evaluation.metrics["candidate_scores"] == [{"task": "task one", "scores": [1.0]}]
+    assert evaluation.metrics["current_scores"] == []
     assert evaluation.metrics["evaluation_sides"] == ["candidate"]
     assert set(evaluation.metrics) == {
         "candidate_scores",
         "current_scores",
-        "episode_failures",
-        "episode_repeats",
-        "episodes_run",
-        "episodes_cached",
+        "rollout_failures",
+        "rollout_repeats",
+        "rollouts_run",
+        "rollouts_cached",
         "candidate_residue",
         "candidate_score",
         "candidate_agents",
         "candidate_paths",
-        # What each candidate episode was graded on, so a rejected step names the task and the reply.
-        "candidate_episodes",
+        # What each candidate rollout was graded on, so a rejected step names the task and the reply.
+        "candidate_rollouts",
         "evaluation_sides",
     }
-    (episode,) = evaluation.metrics["candidate_episodes"]
-    assert set(episode) == {"task", "score", "failure", "reply", "episode"} and episode["score"] == 1.0
-    # The default pair records no evaluation_sides, and the candidate's episode comes from the cache.
+    (rollout,) = evaluation.metrics["candidate_rollouts"]
+    assert set(rollout) == {"task", "score", "failure", "reply", "rollout"} and rollout["score"] == 1.0
+    # The default pair records no evaluation_sides, and the candidate's rollout comes from the cache.
     paired = backend.evaluate(candidate).metrics
     assert sides == ["candidate", "current"] and "evaluation_sides" not in paired
-    assert paired["current_scores"] == (0.0,) and paired["current_score"] == 0.0
-    assert (paired["episodes_run"], paired["episodes_cached"]) == (1, 1)
+    assert paired["current_scores"] == [{"task": "task one", "scores": [0.0]}] and paired["current_score"] == 0.0
+    assert (paired["rollouts_run"], paired["rollouts_cached"]) == (1, 1)
 
     policy = FloorPolicy(backend)
     result = backend.settle_step(prepared, policy.decide(candidate, evaluation))
     assert result.metrics["selected"] is True and result.metrics["selection"]["policy"] == "floor"
-    assert (result.metrics["passed"], result.metrics["failed"], result.metrics["floor_score"]) == (1, 0, 1.0)
+    assert (result.metrics["passed"], result.metrics["failed"], result.metrics["failed_rollouts"]) == (1, 0, 0)
+    assert result.metrics["floor_score"] == 1.0
     assert result.metrics["evaluation_sides"] == ["candidate"] and result.metrics["candidate_score"] == 1.0
     # The current side ran nothing, so the commit has no current metric; the scores themselves are in the history.
     assert not [key for key in result.metrics if key.startswith("current_") or key == "candidate_scores"]

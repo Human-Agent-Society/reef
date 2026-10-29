@@ -3,7 +3,7 @@
 ``RulesMethod`` is the pi variant's method and ``NativeMethod`` the native
 variant's. A step of either one shows the served model the step's failing
 traces in one call and writes the change the model answers into the step's
-workspace. The scorers grade an episode's final answer with the grader of
+workspace. The scorers grade a rollout's final answer with the grader of
 ``evolution.py``. These classes import Reef, so they live apart from
 ``evolution.py``, which ``run.py`` imports with only reef-client installed.
 """
@@ -17,9 +17,9 @@ from pathlib import Path
 from string import Template
 
 from reef.core.prompts import untrusted_text
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.model_binding import ModelBindingError
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.model_binding import ModelBindingError
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend import Method, StepContext, Trace
 
@@ -133,15 +133,15 @@ class NativeMethod(Method):
         )
 
 
-class AnswerScorer(EpisodeScorer):
-    """``evolution.evaluate``: exact last-line answer grading of the episode's final assistant text."""
+class AnswerScorer(RolloutScorer):
+    """``evolution.evaluate``: exact last-line answer grading of the rollout's final assistant text."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return evolution.evaluate(task, result)
 
 
-class NativeAnswerScorer(EpisodeScorer):
+class NativeAnswerScorer(RolloutScorer):
     """``native_evolution.evaluate``: the same grading over the native-jsonl trajectory."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return native_evolution.evaluate(task, result)

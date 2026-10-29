@@ -149,7 +149,7 @@ When you and Reef change the same file
 
 You can edit Reef's files too, for example the rules in
 ``~/.local/share/reef-client/harness/my-agent/plugin/rules.md``. The client
-sends your edit with the next sync, and Reef merges it onto the head. Text
+sends your edit with the next sync, and Reef merges it onto the active release. Text
 files merge line by line:
 
 +---------------------------------+--------------------------------------+

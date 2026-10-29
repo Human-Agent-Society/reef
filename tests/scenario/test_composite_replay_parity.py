@@ -31,9 +31,9 @@ from tests.support.component_trainers import (
 
 from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.record2record import (
     GroupDecision,

@@ -22,7 +22,7 @@ from recipes.reasoning_bank.method import FOCUS
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -179,7 +179,7 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_run_and_an_item_with_a_cre
     assert validate_tree(workspace.tree(), PI).passed
 
 
-def test_the_example_deploys_the_method_without_episodes_and_a_bad_setting_is_refused() -> None:
+def test_the_example_deploys_the_method_without_rollouts_and_a_bad_setting_is_refused() -> None:
     config = recipe_config_from_file_layout(yaml.safe_load(EXAMPLE.read_text(encoding="utf-8")))
     recipe = HarnessEvolutionRecipe.from_environment({}, config=config)
     assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, ReasoningBank)

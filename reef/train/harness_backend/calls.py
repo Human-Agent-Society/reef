@@ -15,8 +15,8 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.gateway import ModelCalls
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.checks import clip_record_value, redact_secret_shaped
 
 #: The most activity lines a step keeps; the oldest go first.

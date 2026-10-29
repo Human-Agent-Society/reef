@@ -115,7 +115,7 @@ async function startSession(reason = "startup") {
     models: [{ id: "trial", name: "trial", reasoning: false, input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1000 }],
   });
-  // The release is a pi package under the root, which pi's episode command loads with -e {root}/plugin.
+  // The release is a pi package under the root, which pi's rollout command loads with -e {root}/plugin.
   const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
     additionalExtensionPaths: [join(root, "plugin")],
     extensionFactories: [pi => {

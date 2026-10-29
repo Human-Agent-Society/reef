@@ -129,7 +129,7 @@ def test_uploaded_tasks_join_the_split_and_a_retry_changes_nothing(tmp_path: Pat
         dispatcher.close()
 
 
-def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> None:
+def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upload_does_not(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, TaskRecipe(batch_stage=RecordOnlyJobData))
 
     async def run() -> None:
@@ -138,9 +138,15 @@ def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> N
                 "/reef/scenarios/s/tasks?split=train", headers=GZIP, data=archive(tmp_path, "t")
             )
             assert response.status == 400
-            assert "does not use imported tasks" in await response.text()
+            assert "does not train on imported tasks" in await response.text()
             store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
             assert store.tasks() == ()
+            # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
+            evaluated = await client.post(
+                "/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=archive(tmp_path, "t")
+            )
+            assert evaluated.status == 200
+            assert [task.name for task in store.tasks(split="eval")] == ["t"]
 
     try:
         asyncio.run(run())
@@ -153,10 +159,12 @@ def test_an_upload_needs_a_recipe_that_reads_imported_tasks(tmp_path: Path) -> N
     [({"tasks": [], "task_store": IMPORTED_TASK_STORE}, ["held-out"]), ({}, [])],
     ids=["evaluation-reads-imported-tasks", "nothing-reads-them"],
 )
-def test_a_harness_scenario_takes_an_upload_when_its_evaluation_reads_imported_tasks(
+def test_a_harness_scenario_takes_a_train_upload_when_it_reads_imported_tasks(
     tmp_path: Path, evaluation: dict, published: list[str]
 ) -> None:
-    """Harness evolution's default job data reads no imported task: only an evaluation on them takes the upload."""
+    """Harness evolution's default job data reads no imported task: only an evaluation on them takes a train upload.
+
+    An eval upload is open to every recipe, because an artifact evaluation runs it."""
     config = evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state"))
     dispatcher = dispatcher_for(
         tmp_path, HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
@@ -165,10 +173,10 @@ def test_a_harness_scenario_takes_an_upload_when_its_evaluation_reads_imported_t
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             body = archive(tmp_path, "held-out")
-            response = await client.post("/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=body)
+            response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=body)
             assert response.status == (200 if published else 400), await response.text()
             store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
-            assert [task.name for task in store.tasks(split="eval")] == published
+            assert [task.name for task in store.tasks(split="train")] == published
 
     try:
         asyncio.run(run())

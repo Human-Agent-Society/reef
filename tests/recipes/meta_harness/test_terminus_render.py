@@ -10,7 +10,7 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, RenderError, render_tree
 
 GOLDEN = Path(__file__).parent / "data" / "terminus_golden"
@@ -90,6 +90,6 @@ def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
 
 
 def test_terminus_keeps_the_docker_cli_settings_and_a_bind_mounted_root() -> None:
-    """Its runner starts Docker task containers, so the episode keeps the service's Docker variables."""
+    """Its runner starts Docker task containers, so the rollout keeps the service's Docker variables."""
     assert TERMINUS.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
     assert TERMINUS.is_root_bind_mounted

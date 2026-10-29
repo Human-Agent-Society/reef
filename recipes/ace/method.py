@@ -25,7 +25,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.prompts import untrusted_text
 from reef.core.trajectories import atif_messages
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import TreePatch
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.train.harness_backend import Method, StepContext, Trace

@@ -20,14 +20,14 @@ from reef.train.backend import CommittedReleases, ReleaseFiles
 class ScenarioReleaseFiles(CommittedReleases):
     """One scenario's releases, read through its commit history and artifact repository.
 
-    A component's head is the release of the latest commit that published
-    one for it (a training commit with a checkpoint, a pending one included)
-    or that moved the head (a rollback or a promote). A training commit that
-    published nothing records the served head, so it never moves the head
-    here: under review, the next step still builds on the latest pending
-    release. Before any such commit, and without a durable history, the head
-    is the repository's current release: the release the scenario was created
-    on, as the catalog lists it.
+    A component's head is its training start, as the scenario committer keeps
+    it: the release of the newest ``"train_from"`` or ``"sync"`` record for
+    the component or of the newest training commit that made an artifact for
+    it, whichever is later. An activation moves what serves, not the head, so a step builds on
+    the latest tree it made even when the activation rule held that tree.
+    Before any such record, and without a durable history, the head is the
+    repository's current release: the release the scenario was created on, as
+    the catalog lists it.
     """
 
     def __init__(self, *, name: str, store: ScenarioStore, repository: Repository, surface: Surface) -> None:
@@ -64,10 +64,11 @@ def component_files(surface: Surface, artifact: Artifact, component: str) -> dic
 
 
 def moves_head(record: CommitRecord, component: str) -> bool:
-    """Whether ``record`` makes its release ``component``'s head: a rollback, a promote, or a publish of it."""
-    if record.operation in ("rollback", "promote"):
-        return True
-    return record.checkpoint and record.component in (None, component)
+    """Whether ``record`` makes its release ``component``'s head: a ``"train_from"`` or ``"sync"`` record for it, or
+    a training commit that made an artifact for it (``CommitRecord.sets_training_start``)."""
+    if record.component not in (None, component):
+        return False
+    return record.sets_training_start
 
 
 __all__ = ["ScenarioReleaseFiles", "component_files", "moves_head"]

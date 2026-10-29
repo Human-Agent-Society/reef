@@ -2,7 +2,7 @@
 
 Render refuses every Terminus 2 argument that chooses the endpoint, the
 provider, the credential or the model, in the tree alone (as validation
-renders it) and with the binding's overlays (as an episode renders it).
+renders it) and with the binding's overlays (as a rollout renders it).
 Arguments that tune a run stay admitted.
 """
 
@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, RenderError, render_tree, validate_tree
 
 OTHER_URL = "http://127.0.0.1:9/v1"

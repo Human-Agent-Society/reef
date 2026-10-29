@@ -4,7 +4,7 @@ The component (``python -m reef.inference.remote``) runs in its own process
 with its own Ray session that declares two pretend GPUs, and starts the stub
 engine (``tests.support._stub_engine``). The test process is the control
 plane: it builds Tinker's training component and the serving runtime of its
-exported adapters as the HTTP service does and drives one
+adapters as the HTTP service does and drives one
 TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
 cookbook converter are faked unless ``REEF_TEST_TINKER_REAL=1`` and
 ``TINKER_API_KEY`` are set, in which case the trainer, the checkpoint download
@@ -40,8 +40,8 @@ SCENARIO = "erdos"
 
 FAKE_SDK = textwrap.dedent(
     '''
-    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, exported adapter files as local files."""
-    import json, os, uuid
+    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, checkpoint archives as local tar files."""
+    import io, json, os, tarfile, uuid
     from types import SimpleNamespace
 
     # Settings live beside the module: Ray workers share the import path, not the driver's environment.
@@ -76,7 +76,6 @@ FAKE_SDK = textwrap.dedent(
             return _Future(SimpleNamespace(path=path))
         def save_state(self, name, ttl_seconds=None): return self._save(name, "weights")
         def save_weights_for_sampler(self, name, ttl_seconds=None): return self._save(name, "sampler_weights")
-        def save_weights_external(self, name, ttl_seconds=None): return self._save(name, "external_weights")
 
     class _Tokenizer:
         # The component's sampler holds a tokenizer for task jobs; a job of trajectories renders nothing.
@@ -91,16 +90,15 @@ FAKE_SDK = textwrap.dedent(
     class _Rest:
         def get_weights_info_by_tinker_path(self, path):
             return _Future(SimpleNamespace(base_model=MODEL, is_lora=True, lora_rank=32))
-        def get_external_weights_urls(self, path):
-            directory = os.path.join(ROOT, uuid.uuid4().hex)
-            os.makedirs(directory)
-            urls = {}
-            for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
-                               ("adapter_model.safetensors", path.encode())):
-                with open(os.path.join(directory, name), "wb") as file:
-                    file.write(body)
-                urls[name] = "file://" + os.path.join(directory, name)
-            return _Future(SimpleNamespace(urls=urls))
+        def get_checkpoint_archive_url_from_tinker_path(self, path):
+            archive = os.path.join(ROOT, uuid.uuid4().hex + ".tar")
+            with tarfile.open(archive, "w") as tar:
+                for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
+                                   ("adapter_model.safetensors", path.encode())):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(body)
+                    tar.addfile(info, io.BytesIO(body))
+            return _Future(SimpleNamespace(url="file://" + archive))
 
     class ServiceClient:
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})
@@ -243,7 +241,6 @@ def control_plane(tmp_path, monkeypatch, url, repository):
                 "lora-rank": 32,
                 "batch-size": 4,
                 "kl-coef": 0.0,
-                "export-adapter": True,
             },
         },
     }
@@ -333,9 +330,8 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    repository = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    # The base artifact is the component's untrained adapter release, which the component writes when it starts.
+    repository = InMemoryRepositoryBackend.factory(tmp_path / "tinker" / "base", root=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":
             monkeypatch.delenv(key)
@@ -359,7 +355,8 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
                     "initialize",
                     "restore",
                 ]
-                assert events[-1]["event"] == "forward_backward" and events[-1]["rows"] == 4
+                # Serving downloads the adapter after training, in a session of its own.
+                assert [event["rows"] for event in events if event["event"] == "forward_backward"][-1] == 4
         # Closing the control plane stops the engines; the component keeps serving.
         with pytest.raises(RuntimeError, match="409"):
             control.call("GET", "runtime-load-ids")

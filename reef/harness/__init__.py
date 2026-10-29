@@ -14,11 +14,11 @@ The map, one subpackage per job:
     render steps. pi, opencode, claude, codex, dsh, hermes, and native, the
     program Reef ships. Another distribution adds an adapter through the
     ``reef.harness_adapters`` entry point group.
-``episodes/``
+``rollouts/``
     one headless run and its reading: launch on a rendered root through any
-    ``reef.sandbox`` executor (``run``), the adapter as the program that
+    ``reef.execution.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
-    the trajectory readers, Harbor task episodes that report to Reef
+    the trajectory readers, Harbor task rollouts that report to Reef
     (``tasks``), and one adapter's agent playing a Harbor task in the task's
     container (``harbor_task``).
 ``runners/``
@@ -36,23 +36,23 @@ The map, one subpackage per job:
 This package depends on core values, runtime and surface contracts, and
 sandbox execution, never on training, recipes, scenario coordination, or the
 HTTP service. The evolution loop is ``reef.train.harness_backend``; versioning
-(staging, publishing, the commit history, recovery and rollback) is Reef's
+(staging, publishing, the commit history, recovery and activation) is Reef's
 artifact stack (``reef.artifact``, ``reef.scenario``).
 """
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError, read_opencode_session, read_pi_session
+from reef.harness.rollouts.run import RolloutError, RolloutResult, TrajectoryKeepError, run_rollout
+from reef.harness.rollouts.trajectory import TrajectoryError, read_opencode_session, read_pi_session
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 
 __all__ = [
     "AdapterDescriptor",
     "ConfigTarget",
     "DescriptorError",
-    "EpisodeError",
-    "EpisodeResult",
     "HarnessTree",
     "RenderError",
+    "RolloutError",
+    "RolloutResult",
     "TrajectoryError",
     "TrajectoryKeepError",
     "TreePatch",
@@ -60,6 +60,6 @@ __all__ = [
     "read_opencode_session",
     "read_pi_session",
     "render_tree",
-    "run_episode",
+    "run_rollout",
     "validate_tree",
 ]

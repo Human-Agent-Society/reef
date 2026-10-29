@@ -1,26 +1,26 @@
-# opencode, driven headless per episode.
+# opencode, driven headless per rollout.
 #
 # A release is an opencode plugin in plugin/. Reef's own plugin there
 # (index.ts) gives opencode the release's rules, skills, commands and config
 # through its config hook, and the hooks and tools of the release's
-# extensions. An episode loads it through OPENCODE_CONFIG_CONTENT; a person's
+# extensions. A rollout loads it through OPENCODE_CONFIG_CONTENT; a person's
 # machine adds it to the global plugin list with opencode plugin -g, and
 # opencode loads it in place in every session.
 #
 # OPENCODE_CONFIG_DIR points config discovery at the rendered directory and
 # suppresses global config seeding; the XDG overrides relocate data, cache,
-# and state so sessions land inside the episode root, and npm_config_cache
+# and state so sessions land inside the rollout root, and npm_config_cache
 # moves the npm cache of opencode's boot install from the root's .npm into
 # the relocated cache. Permissions auto-reject in `opencode run` without
 # --auto, so --auto is part of the canonical invocation. The config defaults
 # pin the benchmarking traps: autoupdate off, sharing off, permissions
-# allowed (episodes are isolated roots), and only provider reef, the model
+# allowed (rollouts are isolated roots), and only provider reef, the model
 # binding's, so a model choice the render check misses cannot reach
 # opencode's own zen provider.
 name: opencode
 binary: opencode
 # The vendor's install channel at the pinned version. Harness evolution startup
-# installs it for the episodes unless evolution.binary names a binary.
+# installs it for the rollouts unless evolution.binary names a binary.
 install:
   kind: npm
   package: "opencode-ai"
@@ -49,7 +49,7 @@ dirs:
 sessions: {format: opencode-session-sqlite, path: xdg-data/opencode}
 # How to point opencode at a model endpoint, per API dialect (its
 # custom-provider config shape). Reef renders the set matching its model
-# binding's api into evaluation episodes; the served tree never carries a
+# binding's api into evaluation rollouts; the served tree never carries a
 # provider.
 model:
   openai:
@@ -76,10 +76,10 @@ model:
             models:
               "{model}": {}
         model: "reef/{model}"
-# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  episode:
+  rollout:
     argv: ["run", "--format", "json", "--auto", "{prompt}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
@@ -110,8 +110,8 @@ config:
         reason: Reef's model binding chooses the model
       - key: [autoupdate, share]
         match: IsAbsent()
-        reason: episodes keep autoupdate and sharing off
-  # opencode's own opencode.json: the episode's defaults and the model binding.
+        reason: rollouts keep autoupdate and sharing off
+  # opencode's own opencode.json: the rollout's defaults and the model binding.
   agent:
     path: "opencode/opencode.json"
     defaults:
@@ -124,6 +124,6 @@ config:
       - key: "."
         match: Each(Key(IsIn(["autoupdate", "share", "enabled_providers", "permission", "provider", "model"])))
         reason: the release's config is config/primary.json
-      # Keep a benchmark episode hermetic and on the binding's provider only.
+      # Keep a benchmark rollout hermetic and on the binding's provider only.
       - key: [autoupdate, share, enabled_providers, permission]
         match: IsDefault()

@@ -2,12 +2,12 @@
 #
 # A release is a Codex plugin in plugin/, named reef, in the local marketplace
 # reef at the root: its skills and commands load as reef:<name>. A plugin
-# carries no rules and no config keys, so a tree holds neither. An episode's
+# carries no rules and no config keys, so a tree holds neither. A rollout's
 # render writes the plugin into CODEX_HOME as codex plugin add would; a
 # person's machine installs it with codex plugin add. CODEX_HOME relocates the
-# configuration and the session rollouts into the episode root. The CLI keeps
+# configuration and the session rollouts into the rollout root. The CLI keeps
 # model-generated commands in a workspace-write sandbox and never waits for an
-# approval during a benchmark episode.
+# approval during a benchmark rollout.
 name: codex
 binary: codex
 install:
@@ -46,11 +46,11 @@ model:
     - target: models
       data:
         models: "{model_metadata}"
-# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  episode:
-    # An episode never waits for an approval and never searches the web: these
+  rollout:
+    # A rollout never waits for an approval and never searches the web: these
     # overrides win over config.toml.
     argv:
       - exec
@@ -111,7 +111,7 @@ config:
         trace_exporter: none
       sandbox_workspace_write:
         network_access: false
-    # A Codex plugin carries no config key, so the file holds the episode's
+    # A Codex plugin carries no config key, so the file holds the rollout's
     # defaults and the keys Reef's model binding writes, which the render
     # refuses from a tree without the binding.
     checks:

@@ -1,7 +1,7 @@
-"""Smoke of the real pi binary: render, episode, and trajectory against the
+"""Smoke of the real pi binary: render, rollout, and trajectory against the
 real thing. The hermetic suites drive a scripted fake, so every format and
 environment assumption about the real binary lives here: a pinned pi runs one
-episode against a stdlib OpenAI-compatible stub and must read our rendered
+rollout against a stdlib OpenAI-compatible stub and must read our rendered
 tree, reach the stub with the rules text, write a session our reader
 parses, and leave no unexplained residue. Skipped unless REEF_REAL_PI_BINARY
 points at an installed pi (.github/workflows/harness-smoke.yml provides one)."""
@@ -20,8 +20,8 @@ from tests.support.harness_render import write_layer
 from tests.support.openai_stub import MODEL, StubOpenAI
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import run_episode
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import run_rollout
 from reef.harness.sync import layer_install
 from reef.harness.tree import HarnessTree, render_tree
 
@@ -35,7 +35,7 @@ RULES_SENTENCE = "The reef smoke marker phrase is TIDEPOOL-STONE-41."
 def capturing_wrapper(tmp_path: Path, capture: Path) -> str:
     """Wrap the real pi so the raw session file survives the root teardown.
 
-    ``run_episode`` deletes the episode root before returning, so the raw
+    ``run_rollout`` deletes the rollout root before returning, so the raw
     bytes pi wrote are copied out by the wrapper first: they are the artifact
     the workflow uploads and the refresh source of the hermetic fixture
     (tests/harness/data/pi_session_real/README.md).
@@ -52,17 +52,17 @@ def capturing_wrapper(tmp_path: Path, capture: Path) -> str:
     return str(wrapper)
 
 
-def test_real_pi_episode_renders_runs_and_cleans_up(tmp_path: Path) -> None:
+def test_real_pi_rollout_renders_runs_and_cleans_up(tmp_path: Path) -> None:
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        # The model comes through Reef's binding, as in every episode: a tree may not name a provider of its own.
+        # The model comes through Reef's binding, as in every rollout: a tree may not name a provider of its own.
         binding = ModelBinding(base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="dummy")
         descriptor = get_adapter("pi")
         files = render_tree(HarnessTree({"rules.md": RULES_SENTENCE}), descriptor, binding.config_overlays(descriptor))
         capture = Path(os.environ.get("REEF_REAL_PI_SESSION_OUT", tmp_path / "real-pi-session.jsonl"))
         binary = capturing_wrapper(tmp_path, capture)
-        result = run_episode(
+        result = run_rollout(
             get_adapter("pi"), files, "Reply with exactly the word READY", binary=binary, timeout=120.0
         )
     finally:
@@ -100,17 +100,17 @@ MARKERS = ("TIDEPOOL-STONE-41", "TIDEPOOL-SKILL-23", "TIDEPOOL-COMMAND-31", "TID
 
 
 def first_request(tmp_path: Path, form: str, tree: HarnessTree, prompt: str) -> dict[str, Any]:
-    """The first request pi sends for ``tree``, as an episode or on a person's machine, where pi loads the person's
+    """The first request pi sends for ``tree``, as a rollout or on a person's machine, where pi loads the person's
     own directory, empty here, and the release as the adapter's layer over it."""
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
     descriptor = get_adapter("pi")
     try:
-        if form == "episode":
+        if form == "rollout":
             binding = ModelBinding(base_url=url, model=MODEL, api_key="dummy")
             files = render_tree(tree, descriptor, binding.config_overlays(descriptor))
-            result = run_episode(descriptor, files, prompt, binary=REAL_PI, timeout=120.0)
+            result = run_rollout(descriptor, files, prompt, binary=REAL_PI, timeout=120.0)
             assert result.exit_code == 0, (result.stdout, result.stderr)
         else:
             layer = layer_install(tree, descriptor, ModelBinding(base_url=url, model=MODEL), url, str(tmp_path))
@@ -126,15 +126,15 @@ def first_request(tmp_path: Path, form: str, tree: HarnessTree, prompt: str) -> 
     return json.loads(server.bodies[0])
 
 
-@pytest.mark.parametrize("form", ["episode", "layer"])
-def test_real_pi_takes_every_part_of_a_tree_in_an_episode_and_over_a_persons_own_config(
+@pytest.mark.parametrize("form", ["rollout", "layer"])
+def test_real_pi_takes_every_part_of_a_tree_in_an_rollout_and_over_a_persons_own_config(
     tmp_path: Path, form: str
 ) -> None:
     request = json.dumps(first_request(tmp_path, form, HarnessTree(PARTS), "/ship"))
     assert [marker for marker in MARKERS if marker not in request] == []
 
 
-@pytest.mark.parametrize("form", ["episode", "layer"])
+@pytest.mark.parametrize("form", ["rollout", "layer"])
 def test_real_pi_offers_no_built_in_tool_when_the_settings_name_none(tmp_path: Path, form: str) -> None:
     tree = HarnessTree({"extensions/probe.ts": PROBE_TOOL, "config/primary.json": json.dumps({"defaultTools": []})})
     request = first_request(tmp_path, form, tree, "Reply with exactly the word READY")

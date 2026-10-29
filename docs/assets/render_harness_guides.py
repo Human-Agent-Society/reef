@@ -68,7 +68,8 @@ def method_step(theme: str, fonts) -> str:
         "One training step from the method's view. Reef writes the workspace: a copy of the head in harness, "
         "the step's material, and the method's state from the last step. Reef calls step(context) once; the "
         "method reads the workspace, calls the services, and writes the candidate tree, its state and its output. "
-        "Reef then checks the candidate, evaluates it, and the release rule publishes, holds or drops it.",
+        "Reef then checks the candidate and evaluates it; a selected candidate is a release, which the activation "
+        "rule serves or holds for a person.",
         "One training step, from the method's view",
         "Numbers 5 to 8 are the steps of the architecture figure in Evolve your harness.",
         [("you write", "machine"), ("Reef", "reef"), ("files", "store")],
@@ -116,13 +117,13 @@ def method_step(theme: str, fonts) -> str:
     o.append(pair(p, service_x, STEP_ROWS[0] + 8 + BOX_H, STEP_ROWS[-1] + 8))
     o.append(write(service_x + 26, STEP_ROWS[1] + 46, "context.services", MONO, p["muted"], mono=True))
 
-    # After step returns: the check, the evaluation and the release rule, right to left.
+    # After step returns: the check, the evaluation and the activation rule, right to left.
     o.append(zone(p, 40, BAND_TOP, STEP_W - 40, BAND_TOP + 140, "reef", p["band"]))
     o.append(cap(56, BAND_TOP + 24, "after step returns, Reef runs", p["reef"]))
     band_row = BAND_TOP + 44
     o.append(card(p, right, band_row, STEP_COL, "reef", "Check", "`validate_tree", number=6))
     o.append(card(p, middle, band_row, STEP_COL, "reef", "Evaluation", "`compare · floor · none", number=7))
-    o.append(card(p, left, band_row, STEP_COL, "reef", "Release rule", "publish, hold or drop", number=8))
+    o.append(card(p, left, band_row, STEP_COL, "reef", "Activation rule", "serve or hold", number=8))
     o.append(path(p, [(right + STEP_COL // 2, zone_bottom), (right + STEP_COL // 2, band_row)]))
     o.append(write(right + STEP_COL // 2 + 12, zone_bottom + 26, "the candidate", MONO, p["muted"], mono=True))
     o.append(path(p, [(right, band_row + BOX_H // 2), (middle + STEP_COL, band_row + BOX_H // 2)]))
@@ -157,9 +158,9 @@ def adapter_modes(theme: str, fonts) -> str:
         MODES_W,
         MODES_H,
         "One adapter.yaml, three ways an agent runs. Reef renders the harness tree with the adapter. For an "
-        "evaluation episode, the rendered tree is the agent's whole configuration in a fresh root, and run.episode "
+        "evaluation rollout, the rendered tree is the agent's whole configuration in a fresh root, and run.rollout "
         "runs one prompt. For a Harbor task, Reef installs the pinned agent in the task's container, copies the "
-        "rendered tree in, runs run.episode with the task's instruction, and the task's verifier scores it. On a "
+        "rendered tree in, runs run.rollout with the task's instruction, and the task's verifier scores it. On a "
         "person's machine, the agent's own command installs the rendered tree as its plugin, beside the person's own "
         "configuration, the client runs the agent with run.layer, and sends the changed files back.",
         "One adapter.yaml, three ways an agent runs",
@@ -186,13 +187,13 @@ def adapter_modes(theme: str, fonts) -> str:
     modes = [
         (
             "reef",
-            "evaluation episode, in Reef",
+            "evaluation rollout, in Reef",
             [
-                ("Episode root", "the rendered tree, nothing else"),
-                ("Run", "`run.episode, {prompt} = a prompt"),
+                ("Rollout root", "the rendered tree, nothing else"),
+                ("Run", "`run.rollout, {prompt} = a prompt"),
                 ("Trajectory", "read with the sessions reader"),
             ],
-            "`dirs · model · run.episode · sessions",
+            "`dirs · model · run.rollout · sessions",
         ),
         (
             "reef",
@@ -200,10 +201,10 @@ def adapter_modes(theme: str, fonts) -> str:
             [
                 ("Task container", "Harbor starts it with Docker"),
                 ("Install", "`npm <package>@<version>"),
-                ("Run", "`run.episode, {prompt} = instruction"),
+                ("Run", "`run.rollout, {prompt} = instruction"),
                 ("Verifier", "the task's tests give the score"),
             ],
-            "`install · dirs · model · run.episode · sessions",
+            "`install · dirs · model · run.rollout · sessions",
         ),
         (
             "machine",

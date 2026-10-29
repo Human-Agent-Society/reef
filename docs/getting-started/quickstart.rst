@@ -146,15 +146,15 @@ with no GPU.
            -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
          # x-reef-agent-record-id: ee5aa401634b4567bf9dae21816abde4
 
-   #. **Read the release chain.**
+   #. **Read the artifacts.**
 
       .. code:: bash
 
          curl -sS -H "Authorization: Bearer reef-local" \
-           http://127.0.0.1:8900/reef/scenarios/hello-reef/releases
-         # {"scenario": "hello-reef", "releases": [{"release_id": "...", "operation": "creation", "current": true, ...}]}
+           http://127.0.0.1:8900/reef/scenarios/hello-reef/artifacts
+         # {"scenario": "hello-reef", "artifacts": [{"artifact_id": "...", "operation": "creation", "active": true, ...}]}
 
-      One release, and it will stay at one: this deployment's recipe is the
+      One artifact, and it will stay at one: this deployment's recipe is the
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,

@@ -21,12 +21,13 @@ One step runs in the trainer's three phases:
        the screens a person's items pass.
 ``evaluate``
     Score the sides that the publication policy names with
-    ``HarnessEpisodeEvaluator`` (``reef.evaluation.harness``), which reuses
+    ``HarnessRolloutEvaluator`` (``reef.evaluation.harness``), which reuses
     the scores the history holds.
 ``settle_step``
-    Fold the decision into the state and the history, then make the step's
-    release by ``reef.train.release.ReleaseRules``, as a weight trainer does:
-    a selected tree is the artifact that the scenario committer publishes.
+    Fold the decision into the state and the history. A selected tree is
+    the step's kept tree: an ``Artifact.local`` of its source tree, which the
+    scenario committer stores as a git commit. The scenario's activation rule
+    decides whether it serves, from the tree kinds it changes.
 
 Nothing is restored on a rejection or an abort: the candidate is a new value,
 and the head stays the committed release.
@@ -49,16 +50,16 @@ from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
     DecisionRecord,
-    EpisodeRecord,
     EvaluationTasks,
     HarnessCandidate,
     HarnessCandidateEvaluator,
-    HarnessEpisodeEvaluator,
+    HarnessRolloutEvaluator,
     History,
+    RolloutRecord,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
-from reef.harness.tree import HarnessTree, TreePatch, validate_tree
+from reef.harness.rollouts.model_binding import ModelBindings, ModelBindingsResolver
+from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
 from reef.train.harness_backend.agent.run import AgentExecution
@@ -68,7 +69,6 @@ from reef.train.harness_backend.records import CALLS_FILE, StepRecord
 from reef.train.harness_backend.services import StepServices
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput, Workspace
-from reef.train.release import ReleaseRules
 from reef.train.types import JobData, TrainStepResult
 
 #: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
@@ -83,13 +83,13 @@ class StepProgress:
     for an automatic step. ``phase`` is one of
     ``STEP_PHASES``: ``"rolling out"`` while an offline step runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
-    episodes run, and ``"proposing"`` at any other time from the moment the
+    rollouts run, and ``"proposing"`` at any other time from the moment the
     step claims its record directory until a candidate exists.
     ``started_at`` is the step's start in seconds since the epoch.
     ``step_record`` is the step's record directory, which the step claims
     before it reports any progress.
-    ``episodes_total`` ≥ 0 is the episode count of the rollouts or of the
-    evaluation once its episodes are laid out, else ``None``. ``activity``
+    ``rollouts_total`` ≥ 0 is the rollout count of the rollouts or of the
+    evaluation once its rollouts are laid out, else ``None``. ``activity``
     is what the method did so far, oldest first, each ``{at, kind, text}``
     with ``failed`` on a line that went wrong.
     Purpose: the backend replaces it at each phase change; the request page
@@ -100,7 +100,7 @@ class StepProgress:
     phase: str
     started_at: float
     step_record: str
-    episodes_total: int | None = None
+    rollouts_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -108,9 +108,9 @@ class StepProgress:
             raise ValueError(f"StepProgress.phase must be one of {', '.join(STEP_PHASES)}")
         if not isinstance(self.step_record, str) or not self.step_record:
             raise ValueError("StepProgress.step_record must name the step's record directory")
-        total = self.episodes_total
+        total = self.rollouts_total
         if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
-            raise ValueError("StepProgress.episodes_total must be an integer of at least 0 or None")
+            raise ValueError("StepProgress.rollouts_total must be an integer of at least 0 or None")
 
 
 @dataclass(frozen=True)
@@ -121,7 +121,7 @@ class StepLimits:
     ``max_steps`` caps automatic steps; ``max_failure_streak`` skips
     automatic steps after that many rejections in a row;
     ``max_model_calls_per_step`` caps one step's model calls;
-    ``max_episodes_per_step`` caps the episodes the method's
+    ``max_rollouts_per_step`` caps the rollouts the method's
     ``services.evaluate`` runs in one step.
     Purpose: ``HarnessEvolutionRecipe`` builds it from ``evolution``; the
     backend reads it in every step.
@@ -130,14 +130,14 @@ class StepLimits:
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
-    max_episodes_per_step: int = 0
+    max_rollouts_per_step: int = 0
 
     def __post_init__(self) -> None:
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
-            ("max_episodes_per_step", self.max_episodes_per_step),
+            ("max_rollouts_per_step", self.max_rollouts_per_step),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 turns the limit off)")
@@ -150,9 +150,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
     that is not Reef's; methods never subclass the backend. ``agent`` is the
     deployment's coding agent, ``None`` when it configured none or the method
     does not run it. ``evaluator`` is ``None`` when the deployment configured
-    no scorer; then no episode runs. ``rules`` make each decision a release,
-    and ``review_parts`` name the parts whose change waits for a person
-    besides the parts the adapter always reviews. ``task_directories`` says
+    no scorer; then no rollout runs. ``task_directories`` says
     that the tasks are Harbor task directories.
     Purpose: ``HarnessEvolutionRecipe.build_backend`` makes one per scenario
     component; the trainer runs its steps, and the service reads its step
@@ -166,14 +164,12 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         releases: ComponentReleases,
         method: Method,
         agent: AgentExecution | None,
-        evaluator: HarnessEpisodeEvaluator | None,
+        evaluator: HarnessRolloutEvaluator | None,
         tasks: EvaluationTasks,
         history: History,
         models: ModelBindings,
         model_resolver: ModelBindingsResolver | None = None,
         limits: StepLimits,
-        rules: ReleaseRules,
-        review_parts: frozenset[str] = frozenset(),
         records: StepRecord,
         task_directories: bool,
     ) -> None:
@@ -187,8 +183,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         self.models = models
         self.model_resolver = model_resolver
         self.limits = limits
-        self.rules = rules
-        self.review_parts = review_parts
         self.records = records
         self.task_directories = task_directories
         # The selected tree of the step in flight, until the committer stored it.
@@ -203,6 +197,21 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
 
     def initial_state(self) -> Mapping[str, Any]:
         return HarnessState().to_json()
+
+    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
+        """``state`` unchanged, once ``artifact``'s tree passes validation.
+
+        The next step builds on the head that ``ComponentReleases`` reads, which
+        a ``"train_from"`` or ``"sync"`` record moves to ``artifact``.
+        ``ValueError`` when ``artifact`` has no local files or its tree does
+        not pass validation.
+        """
+        if artifact.local_path is None:
+            raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
+        validation = validate_tree(HarnessTree.read(artifact.local_path), self.descriptor)
+        if not validation.passed:
+            raise ValueError(f"the tree of release {artifact.ref.release_id!r} is refused: {validation.message()}")
+        return state
 
     def close(self) -> None:
         if self.evaluator is not None:
@@ -271,7 +280,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             descriptor=self.descriptor,
             task_directories=self.task_directories,
             tasks=step_tasks.tasks,
-            repeats=0 if self.evaluator is None else self.evaluator.episode_repeats,
+            repeats=0 if self.evaluator is None else self.evaluator.rollout_repeats,
             samples=samples,
             rollouts=rollouts,
             request=data.request,
@@ -302,7 +311,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
 
         The candidate is evaluated on ``evaluation_tasks``. ``state`` is the step's state, and the returned step's
         state carries the method's files from ``state/``. ``calls`` is the step's call record, and ``metrics``
-        gains the method's calls, episodes and words.
+        gains the method's calls, rollouts and words.
         """
         services = StepServices(
             workspace=workspace,
@@ -312,7 +321,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             head=head.checksum(),
             models=self.models,
             step_calls=calls,
-            max_episodes=self.limits.max_episodes_per_step,
+            max_rollouts=self.limits.max_rollouts_per_step,
             agent=self.agent,
         )
         try:
@@ -324,7 +333,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             metrics["model_calls"] = len(calls.entries)
             metrics["model_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in calls.entries), 3)
             metrics["model_input_tokens"], metrics["model_output_tokens"] = call_tokens(calls.entries)
-            metrics["method_episodes"] = services.episodes_run
+            metrics["method_rollouts"] = services.rollouts_run
         output = self.read_output(workspace, metrics)
         try:
             state = replace(state, method_files=workspace.state_files())
@@ -374,36 +383,40 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             metrics["method_output_refused"] = dict(output.refused)
         return output
 
-    def roll_out(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[EpisodeRecord, ...]:
-        """One episode record of ``head`` on each of an offline step's train ``tasks``, in task order.
+    def roll_out(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[RolloutRecord, ...]:
+        """One rollout record of ``head`` on each of an offline step's train ``tasks``, in task order.
 
-        The episodes go through the score cache, as an evaluation's do: an episode of the same tree, task and
+        The rollouts go through the score cache, as an evaluation's do: a rollout of the same tree, task and
         evaluation context that the history holds is reused. ``RuntimeError`` without a scorer.
         """
         if self.evaluator is None:
             raise RuntimeError("an offline step rolls out its train tasks, which needs evolution.evaluation.scorer")
         if self.progress is not None:
-            self.progress = replace(self.progress, phase="rolling out", episodes_total=len(tasks))
-        records = self.evaluator.episodes(head, tasks, repeats=1, step=step)
+            self.progress = replace(self.progress, phase="rolling out", rollouts_total=len(tasks))
+        records = self.evaluator.rollouts(head, tasks, repeats=1, step=step)
         if self.progress is not None:
-            self.progress = replace(self.progress, phase="proposing", episodes_total=None)
+            self.progress = replace(self.progress, phase="proposing", rollouts_total=None)
         return records
 
     def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
         harness_candidate = require_harness_candidate(candidate)
         if self.evaluator is None:
-            raise RuntimeError("the deployment configured no evolution.evaluation.scorer, so no episode can run")
+            raise RuntimeError("the deployment configured no evolution.evaluation.scorer, so no rollout can run")
         if self.progress is not None:
-            total = self.evaluator.episode_count(harness_candidate, len(tuple(sides)))
-            self.progress = replace(self.progress, phase="evaluating", episodes_total=total)
+            total = self.evaluator.rollout_count(harness_candidate, len(tuple(sides)))
+            self.progress = replace(self.progress, phase="evaluating", rollouts_total=total)
         return self.evaluator.evaluate(harness_candidate, sides=sides)
 
     def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
-        """Fold ``decision`` into the state and the history, then make the step's release by ``rules``.
+        """Fold ``decision`` into the state and the history; a selected tree is the step's kept tree.
 
-        The head the step prepared against is ``prepared.metrics["head_release_id"]``; no rollback, promote or
-        import moves it while a step runs. The commit keeps the evaluation's sums, not its score vectors: the
-        history holds every episode.
+        The head the step prepared against is ``prepared.metrics["head_release_id"]``; no activation, new training
+        start, import or sync moves it while a step runs. The commit keeps the evaluation's sums, not its score
+        vectors: the history holds every rollout. The metrics gain ``selected`` and ``selection``: the candidate
+        id, the decision's ``selected``, ``policy``, ``reason`` and ``metrics``, and the ``evaluation`` that the
+        decision read without its metrics (``evaluator``, ``evaluator_version``, ``metadata``). A rejected
+        candidate makes no artifact. A selected one is the result's artifact, and its ``changed_kinds`` are the
+        names of the parts its patch changes, from which the scenario's activation rule decides whether it serves.
         """
         self.progress = None
         candidate = require_harness_candidate(prepared.candidate)
@@ -424,32 +437,39 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             for key, value in decision.evaluation.metrics.items()
             if key not in ("candidate_scores", "current_scores")
         }
+        patch_parts = self.descriptor.layout.part_names(candidate.patch.changes)
         metrics = {
             **prepared.metrics,
             **evaluation,
             **decision.metrics,
             "evaluation_context": None if self.evaluator is None else self.evaluator.context().key(),
             "patch": clip_record_value(candidate.patch.to_json()),
-            "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
+            "patch_parts": patch_parts,
+            "selected": decision.selected,
+            "selection": {
+                "candidate_id": candidate.candidate_id,
+                "selected": decision.selected,
+                "policy": decision.policy,
+                "reason": decision.reason,
+                "metrics": dict(decision.metrics),
+                "evaluation": {
+                    "evaluator": decision.evaluation.evaluator,
+                    "evaluator_version": decision.evaluation.evaluator_version,
+                    "metadata": dict(decision.evaluation.metadata),
+                },
+            },
         }
-        artifact = None
-        if self.rules.released(decision):
-            directory = Path(tempfile.mkdtemp(prefix="reef-harness-"))
-            candidate.candidate_tree.write(directory)
-            artifact = Artifact.local(directory)
-        result = self.rules.release(
-            candidate.candidate_id,
-            decision,
-            state=state.to_json(),
-            metrics=metrics,
-            artifact=artifact,
-            held=self.reviewed(candidate.patch),
+        if not decision.selected:
+            return TrainStepResult(state.to_json(), metrics)
+        directory = Path(tempfile.mkdtemp(prefix="reef-harness-"))
+        candidate.candidate_tree.write(directory)
+        artifact = Artifact.local(directory)
+        if self.pending_artifact is not None:
+            self.pending_artifact.discard()
+        self.pending_artifact = artifact
+        return TrainStepResult(
+            state.to_json(), metrics, artifact=artifact, changed_kinds=frozenset(patch_parts.values())
         )
-        if result.artifact is not None:
-            if self.pending_artifact is not None:
-                self.pending_artifact.discard()
-            self.pending_artifact = result.artifact
-        return result
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.progress = None
@@ -483,15 +503,6 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         if progress is None or calls is None:
             return progress
         return replace(progress, activity=calls.activity())
-
-    def reviewed(self, patch: TreePatch) -> bool:
-        """Whether ``patch`` changes a part that waits for a person: one the adapter reviews, or one that
-        ``review_parts`` names."""
-        for path in patch.changes:
-            location = self.descriptor.layout.locate(path)
-            if location is not None and (location.part.review or location.part.name in self.review_parts):
-                return True
-        return False
 
 
 def screened_requires(

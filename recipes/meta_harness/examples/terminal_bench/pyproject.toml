@@ -11,7 +11,7 @@ dependencies = [
     "reef-client>=0.2.0",
     "reef-eval[harbor]>=0.1.1",
     "harbor[e2b]==0.20.0",
-    "litellm==1.99.0",
+    "litellm==1.100.4",
     "openai==2.54.0",
     "e2b==2.46.4",
     "pyyaml",

@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.sandbox.config import REMOTE_EXECUTORS, remote_executor
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.train.harness_backend.agent.run import AgentExecution
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class AgentSettings:
     """
 
     adapter: str
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     timeout_s: float
     binary: str | None = None
 

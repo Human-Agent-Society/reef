@@ -26,7 +26,7 @@ from reef_terminus.runner import AGENT_NAME, agent_spec
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.matchers import Each, IsIn, Key
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 pytest.importorskip("harbor", reason="harbor is not installed")
@@ -223,7 +223,7 @@ def test_terminus_2_reads_the_context_limit_under_the_served_name(tmp_path: Path
 def test_extension_must_remain_a_terminus_agent(monkeypatch) -> None:
     from reef_terminus.tree import ENVIRONMENT_ENV, TerminusTreeError
 
-    from reef.sandbox.process import ISOLATION_ENV
+    from reef.execution.sandbox.process import ISOLATION_ENV
 
     monkeypatch.setenv(ISOLATION_ENV, "bwrap")
     monkeypatch.setenv(ENVIRONMENT_ENV, "e2b")

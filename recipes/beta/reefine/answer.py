@@ -35,7 +35,7 @@ from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import Format, TreeLayout
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.train.harness_backend import ModelCalls, Services, Trace
 

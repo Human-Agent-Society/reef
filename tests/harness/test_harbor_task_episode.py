@@ -12,11 +12,11 @@ import pytest
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.harbor_task import CONTAINER_ROOT, can_run_in_task_container, run_task_episode
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeError
-from reef.harness.episodes.tasks import EpisodeRow, TaskLab
-from reef.harness.episodes.trajectory import failed_trial_error
+from reef.harness.rollouts.harbor_task import CONTAINER_ROOT, can_run_in_task_container, run_task_rollout
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutError
+from reef.harness.rollouts.tasks import RolloutRow, TaskLab
+from reef.harness.rollouts.trajectory import failed_trial_error
 
 SESSION_EVENT = {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "391"}]}}
 
@@ -32,7 +32,7 @@ class StandInLab(TaskLab):
         self.error = error
         self.agents: list[Mapping[str, object]] = []
 
-    async def run(self, task_path, agent, *, key, tags, overrides) -> EpisodeRow:
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         self.agents.append(agent)
         trial = self.trials / key
         if self.ran:
@@ -42,7 +42,7 @@ class StandInLab(TaskLab):
             (trial / "agent" / "command.json").write_text(json.dumps({"exit_code": 0, "stdout": "", "stderr": ""}))
         else:
             trial.mkdir(parents=True)
-        return EpisodeRow(rewards=dict(self.rewards), error=self.error, trial_uri=trial.as_uri())
+        return RolloutRow(rewards=dict(self.rewards), error=self.error, trial_uri=trial.as_uri())
 
 
 def harbor_task(root: Path) -> Path:
@@ -58,7 +58,7 @@ def test_the_agent_plays_the_task_in_its_container_and_the_verifier_reward_score
     pi = get_adapter("pi")
     task = harbor_task(tmp_path)
     lab = StandInLab(tmp_path / "trials", {"reward": 1.0})
-    result = run_task_episode(
+    result = run_task_rollout(
         pi, {"pi-agent/AGENTS.md": "Be exact.\n"}, str(task), keep_dir=tmp_path / "kept", lab=lab
     )
 
@@ -68,17 +68,17 @@ def test_the_agent_plays_the_task_in_its_container_and_the_verifier_reward_score
     assert (tmp_path / "kept" / "session.jsonl").is_file()
     (agent,) = lab.agents
     kwargs = agent["kwargs"]
-    assert agent["import_path"] == "reef.harness.episodes.harbor_task:AdapterAgent"
+    assert agent["import_path"] == "reef.harness.rollouts.harbor_task:AdapterAgent"
     assert (kwargs["package"], kwargs["version"]) == (pi.install.package, pi.install.version)
     assert kwargs["argv"] == list(pi.argv) and kwargs["sessions"] == pi.trajectory_path
-    # The episode's environment points the agent at the root in the container, where the tree lands.
+    # The rollout's environment points the agent at the root in the container, where the tree lands.
     assert kwargs["env"]["PI_CODING_AGENT_DIR"] == f"{CONTAINER_ROOT}/pi-agent"
-    assert not Path(kwargs["files_dir"]).exists()  # the staged tree goes with the episode
+    assert not Path(kwargs["files_dir"]).exists()  # the staged tree goes with the rollout
 
 
 def test_a_trial_that_never_ran_the_agent_is_a_failed_trial_with_its_error(tmp_path: Path) -> None:
     lab = StandInLab(tmp_path / "trials", {}, ran=False, error="the image did not build")
-    result = run_task_episode(get_adapter("pi"), {}, str(harbor_task(tmp_path)), lab=lab)
+    result = run_task_rollout(get_adapter("pi"), {}, str(harbor_task(tmp_path)), lab=lab)
 
     assert result.exit_code == 1 and result.stderr == "the image did not build"
     assert failed_trial_error(result.trajectory) == "the image did not build"
@@ -89,10 +89,10 @@ def test_only_an_adapter_with_an_npm_install_and_a_text_prompt_plays_a_task_in_a
     # An adapter whose own command takes the task directory runs it itself; hermes installs from git.
     assert not can_run_in_task_container(replace(get_adapter("pi"), is_prompt_task_directory=True))
     assert not can_run_in_task_container(get_adapter("hermes"))
-    with pytest.raises(EpisodeError, match="'hermes' cannot play a Harbor task directory"):
-        run_task_episode(get_adapter("hermes"), {}, str(harbor_task(tmp_path)))
-    with pytest.raises(EpisodeError, match="is not a Harbor task directory"):
-        run_task_episode(get_adapter("pi"), {}, str(tmp_path / "missing"))
+    with pytest.raises(RolloutError, match="'hermes' cannot play a Harbor task directory"):
+        run_task_rollout(get_adapter("hermes"), {}, str(harbor_task(tmp_path)))
+    with pytest.raises(RolloutError, match="is not a Harbor task directory"):
+        run_task_rollout(get_adapter("pi"), {}, str(tmp_path / "missing"))
 
 
 def test_a_container_reaches_a_loopback_model_route_at_the_agent_host() -> None:

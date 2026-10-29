@@ -1,16 +1,18 @@
-"""The history of one scenario's harness evolution: every tree it evaluated, every episode, every decision.
+"""The history of one scenario's harness evolution: every tree it evaluated, every rollout, every decision.
 
 The history is one directory::
 
     candidates.jsonl   one CandidateRecord per tree, the first time a step proposes or evaluates it; a second
                        line adds the method's summary and notes when a step proposes a tree it scored first
-    episodes.jsonl     one EpisodeRecord per episode that ran
+    rollouts.jsonl     one RolloutRecord per rollout that ran
     decisions.jsonl    one DecisionRecord per step whose candidate the evaluation decided
     trees/<tree>/      the files of each tree, written once
-    episodes/<id>/     the record of each episode: its trajectory files and episode.json
+    rollouts/<id>/     the record of each rollout: its trajectory files and rollout.json
 
-The episodes are the score cache. An episode of the same tree, task, repeat
-and evaluation context runs again only when the earlier one could not run.
+The rollouts are the score cache. A rollout of the same tree, task, repeat
+and evaluation context runs again only when the earlier one failed (the
+environment could not run it); the latest one that did not fail is the cached
+one.
 Methods read the history. Only the harness backend writes it, from the
 training thread. The history keeps what happened, also in a step that did not
 commit (its method, its evaluation or its commit failed): such a step runs
@@ -25,7 +27,6 @@ it off, so the next append starts a line of its own.
 from __future__ import annotations
 
 import json
-import math
 import os
 import shutil
 from collections.abc import Mapping, Sequence
@@ -34,14 +35,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Self
 
-from reef.evaluation.harness.scoring import FailureObservation, ScoredEpisode
+from reef.core.evaluation import RolloutScore
+from reef.evaluation.harness.scoring import FailureObservation, ScoredRollout
 from reef.harness.tree import HarnessTree
 
 CANDIDATES_FILE = "candidates.jsonl"
-EPISODES_FILE = "episodes.jsonl"
+ROLLOUTS_FILE = "rollouts.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
 TREES_DIR = "trees"
-EPISODES_DIR = "episodes"
+ROLLOUTS_DIR = "rollouts"
 #: Where a candidate came from: the seed tree, a method's step, or an earlier release.
 ORIGINS = ("seed", "method", "release")
 
@@ -92,33 +94,34 @@ class CandidateRecord:
 
 
 @dataclass(frozen=True)
-class EpisodeRecord:
-    """One episode that ran, and its scored result.
+class RolloutRecord:
+    """One rollout that ran, and its scored result.
 
-    Values: ``episode`` names its record directory under ``episodes/``.
+    Values: ``rollout`` names its record directory under ``rollouts/``.
     ``tree`` is the checksum of the tree it ran. ``task`` is the task as the
     evaluation names it (a prompt or a task directory) and ``task_key``
     identifies its content. ``repeat`` ≥ 0 is the sample index of the
     (tree, task) pair. ``context`` is the key of the evaluation context
     (``EvaluationContext``: the served and the named models, the adapter, the
-    binary, the episode executor, the scorer and the episode settings).
-    ``step`` ≥ 1 is the step that ran it. ``score`` is a finite number, or
-    ``None`` when the episode could not run, and then ``failure`` says why; a
-    scored episode may also carry a ``failure`` (a nonzero exit). The other
-    fields are those of ``ScoredEpisode``: ``reply``, ``residue`` ≥ 0,
+    binary, the rollout executor, the scorer and the rollout settings).
+    ``step`` ≥ 1 is the step that ran it. ``score`` is its ``RolloutScore``:
+    failed when the environment could not run it, and then ``failure`` says
+    why; a rollout that ran may also carry a ``failure`` (no answer, or a
+    nonzero exit). The other
+    fields are those of ``ScoredRollout``: ``reply``, ``residue`` ≥ 0,
     ``agents``, ``path`` and ``transcript_read``.
-    Purpose: the evaluator makes one per episode; the cache reuses a scored
+    Purpose: the evaluator makes one per rollout; the cache reuses a scored
     one, the evaluation's metrics are built from them, and methods read them.
     """
 
-    episode: str
+    rollout: str
     tree: str
     task: str
     task_key: str
     repeat: int
     context: str
     step: int
-    score: float | None
+    score: RolloutScore
     failure: FailureObservation | None = None
     reply: str | None = None
     residue: int = 0
@@ -127,34 +130,32 @@ class EpisodeRecord:
     transcript_read: bool = True
 
     def __post_init__(self) -> None:
-        if not (self.episode and self.tree and self.task_key and self.context):
-            raise ValueError("EpisodeRecord needs an episode id, a tree, a task key and a context")
+        if not (self.rollout and self.tree and self.task_key and self.context):
+            raise ValueError("RolloutRecord needs a rollout id, a tree, a task key and a context")
         for label, value, least in (("repeat", self.repeat, 0), ("step", self.step, 1), ("residue", self.residue, 0)):
             if isinstance(value, bool) or not isinstance(value, int) or value < least:
-                raise ValueError(f"EpisodeRecord.{label} must be an integer of at least {least}")
-        if self.score is not None and (
-            isinstance(self.score, bool) or not isinstance(self.score, (int, float)) or not math.isfinite(self.score)
-        ):
-            raise ValueError("EpisodeRecord.score must be a finite number or None")
-        if self.score is None and self.failure is None:
-            raise ValueError("an EpisodeRecord without a score must say why it failed")
+                raise ValueError(f"RolloutRecord.{label} must be an integer of at least {least}")
+        if not isinstance(self.score, RolloutScore):
+            raise TypeError("RolloutRecord.score must be a RolloutScore")
+        if self.score.is_failed and self.failure is None:
+            raise ValueError("a failed RolloutRecord must say why it failed")
 
     @classmethod
     def from_scored(
         cls,
-        scored: ScoredEpisode,
+        scored: ScoredRollout,
         *,
-        episode: str,
+        rollout: str,
         tree: str,
         task: str,
         task_key: str,
         repeat: int,
         context: str,
         step: int,
-    ) -> EpisodeRecord:
-        """The record of one scored episode of ``tree``."""
+    ) -> RolloutRecord:
+        """The record of one scored rollout of ``tree``."""
         return cls(
-            episode=episode,
+            rollout=rollout,
             tree=tree,
             task=task,
             task_key=task_key,
@@ -173,14 +174,21 @@ class EpisodeRecord:
     def to_json(self) -> dict[str, Any]:
         """The JSONL row of this record; ``from_json`` reads it back as an equal record."""
         row = asdict(self)
+        row["score"] = self.score.to_json()
         row["agents"] = {name: dict(work) for name, work in self.agents.items()}
         row["path"] = None if self.path is None else dict(self.path)
         return row
 
     @classmethod
-    def from_json(cls, row: Mapping[str, Any]) -> EpisodeRecord:
+    def from_json(cls, row: Mapping[str, Any]) -> RolloutRecord:
         failure = row.get("failure")
-        return cls(**{**row, "failure": None if failure is None else FailureObservation.from_dict(failure)})
+        return cls(
+            **{
+                **row,
+                "score": RolloutScore.from_json(row["score"]),
+                "failure": None if failure is None else FailureObservation.from_dict(failure),
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -189,9 +197,9 @@ class DecisionRecord:
 
     Values: ``step`` ≥ 1 is the step; ``tree`` is the candidate's checksum
     and ``head`` the checksum of the head tree the step started from, which
-    a comparison measured it against; ``selected`` says whether it was
-    published (or held for review); ``policy`` names the publication policy
-    and ``reason`` explains it.
+    a comparison measured it against; ``selected`` says whether the step
+    kept it, as a new artifact that the activation rule may serve;
+    ``policy`` names the publication policy and ``reason`` explains it.
     Purpose: the backend writes one when it settles a step; a method reads
     them to learn what happened to its earlier candidates.
     """
@@ -251,11 +259,11 @@ class History:
     """One scenario's history directory, loaded into memory and appended to.
 
     Values: ``root`` is the directory. ``candidates`` maps each tree's
-    checksum to its record; ``episodes`` and ``decisions`` hold the records
+    checksum to its record; ``rollouts`` and ``decisions`` hold the records
     of their JSONL files in file order; ``scored`` maps (tree, task key,
-    repeat, context) to the latest scored episode of that key. ``next_episode``
-    is above the number of every episode directory and record, so a new
-    episode never reuses the directory of one that a crash left behind.
+    repeat, context) to the latest rollout of that key that did not fail. ``next_rollout``
+    is above the number of every rollout directory and record, so a new
+    rollout never reuses the directory of one that a crash left behind.
     Purpose: the harness backend opens one per scenario and writes it during
     each step; the evaluator reads and fills the score cache through it; a
     method opens one on ``Workspace.history_dir`` to read it.
@@ -267,20 +275,20 @@ class History:
             record.tree: record
             for record in (CandidateRecord(**row) for row in read_jsonl(self.root / CANDIDATES_FILE))
         }
-        self.episodes: list[EpisodeRecord] = [
-            EpisodeRecord.from_json(row) for row in read_jsonl(self.root / EPISODES_FILE)
+        self.rollouts: list[RolloutRecord] = [
+            RolloutRecord.from_json(row) for row in read_jsonl(self.root / ROLLOUTS_FILE)
         ]
         self.decisions: list[DecisionRecord] = [
             DecisionRecord(**row) for row in read_jsonl(self.root / DECISIONS_FILE)
         ]
-        self.scored: dict[tuple[str, str, int, str], EpisodeRecord] = {}
-        for record in self.episodes:
+        self.scored: dict[tuple[str, str, int, str], RolloutRecord] = {}
+        for record in self.rollouts:
             self.cache(record)
-        numbers = [int(record.episode) for record in self.episodes]
-        episodes_dir = self.root / EPISODES_DIR
-        if episodes_dir.is_dir():
-            numbers.extend(int(path.name) for path in episodes_dir.iterdir() if path.name.isdigit())
-        self.next_episode = max(numbers, default=0) + 1
+        numbers = [int(record.rollout) for record in self.rollouts]
+        rollouts_dir = self.root / ROLLOUTS_DIR
+        if rollouts_dir.is_dir():
+            numbers.extend(int(path.name) for path in rollouts_dir.iterdir() if path.name.isdigit())
+        self.next_rollout = max(numbers, default=0) + 1
 
     @classmethod
     def open(cls, root: Path) -> Self:
@@ -290,7 +298,7 @@ class History:
         """
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
-        for name in (CANDIDATES_FILE, EPISODES_FILE, DECISIONS_FILE):
+        for name in (CANDIDATES_FILE, ROLLOUTS_FILE, DECISIONS_FILE):
             cut_torn_line(root / name)
         return cls(root)
 
@@ -303,29 +311,31 @@ class History:
             raise KeyError(f"the history holds no tree {checksum}")
         return HarnessTree.read(directory)
 
-    def episodes_of(self, checksum: str) -> tuple[EpisodeRecord, ...]:
-        """The episodes of one tree, in the order they ran."""
-        return tuple(record for record in self.episodes if record.tree == checksum)
+    def rollouts_of(self, checksum: str) -> tuple[RolloutRecord, ...]:
+        """The rollouts of one tree, in the order they ran."""
+        return tuple(record for record in self.rollouts if record.tree == checksum)
 
     def scores(self, checksum: str, tasks: Sequence[str], *, repeats: int = 1) -> tuple[float | None, ...]:
-        """The scores of one tree on ``tasks``, task by task and repeat by repeat, as a method reads them.
+        """The score values of one tree on ``tasks``, task by task and repeat by repeat, as a method reads them.
 
-        Each (task, repeat) takes the score of its latest episode in any context; ``None`` where no episode
-        ran or the latest one could not run.
+        Each (task, repeat) takes the value of its latest rollout in any context; ``None`` where no rollout ran
+        or the latest one failed.
         """
-        latest = {(record.task, record.repeat): record.score for record in self.episodes if record.tree == checksum}
+        latest = {
+            (record.task, record.repeat): record.score.value for record in self.rollouts if record.tree == checksum
+        }
         return tuple(latest.get((task, repeat)) for task in tasks for repeat in range(repeats))
 
     def decision(self, step: int) -> DecisionRecord | None:
         """The decision on the candidate of ``step``; ``None`` when the step decided no candidate."""
         return next((record for record in reversed(self.decisions) if record.step == step), None)
 
-    def episode_dir(self, episode: str) -> Path:
-        """The record directory of one episode."""
-        return self.root / EPISODES_DIR / episode
+    def rollout_dir(self, rollout: str) -> Path:
+        """The record directory of one rollout."""
+        return self.root / ROLLOUTS_DIR / rollout
 
-    def cached(self, checksum: str, task_key: str, repeat: int, context: str) -> EpisodeRecord | None:
-        """The scored episode of this tree, task, repeat and context, or ``None`` when none ran or none scored."""
+    def cached(self, checksum: str, task_key: str, repeat: int, context: str) -> RolloutRecord | None:
+        """The latest rollout of this tree, task, repeat and context that did not fail; ``None`` when there is none."""
         return self.scored.get((checksum, task_key, repeat, context))
 
     # -- writing ---------------------------------------------------------------------------------------------------
@@ -369,18 +379,18 @@ class History:
         self.candidates[checksum] = record
         return record
 
-    def new_episode(self) -> tuple[str, Path]:
-        """A fresh episode id and its record directory, which does not exist yet."""
-        episode = f"{self.next_episode:08d}"
-        self.next_episode += 1
-        return episode, self.episode_dir(episode)
+    def new_rollout(self) -> tuple[str, Path]:
+        """A fresh rollout id and its record directory, which does not exist yet."""
+        rollout = f"{self.next_rollout:08d}"
+        self.next_rollout += 1
+        return rollout, self.rollout_dir(rollout)
 
-    def add_episode(self, record: EpisodeRecord) -> None:
-        """Append one episode; a scored one joins the cache."""
+    def add_rollout(self, record: RolloutRecord) -> None:
+        """Append one rollout; one that did not fail joins the cache."""
         if record.tree not in self.candidates:
-            raise ValueError(f"episode {record.episode} ran a tree the history does not hold")
-        append_jsonl(self.root / EPISODES_FILE, record.to_json())
-        self.episodes.append(record)
+            raise ValueError(f"rollout {record.rollout} ran a tree the history does not hold")
+        append_jsonl(self.root / ROLLOUTS_FILE, record.to_json())
+        self.rollouts.append(record)
         self.cache(record)
 
     def add_decision(self, record: DecisionRecord) -> None:
@@ -388,21 +398,22 @@ class History:
         append_jsonl(self.root / DECISIONS_FILE, asdict(record))
         self.decisions.append(record)
 
-    def cache(self, record: EpisodeRecord) -> None:
-        """Make a scored episode the cache entry of its tree, task, repeat and context; the latest one wins."""
-        if record.score is not None:
+    def cache(self, record: RolloutRecord) -> None:
+        """Make a rollout that did not fail the cache entry of its tree, task, repeat and context; the latest one
+        wins."""
+        if not record.score.is_failed:
             self.scored[(record.tree, record.task_key, record.repeat, record.context)] = record
 
 
 __all__ = [
     "CANDIDATES_FILE",
     "DECISIONS_FILE",
-    "EPISODES_DIR",
-    "EPISODES_FILE",
     "ORIGINS",
+    "ROLLOUTS_DIR",
+    "ROLLOUTS_FILE",
     "TREES_DIR",
     "CandidateRecord",
     "DecisionRecord",
-    "EpisodeRecord",
     "History",
+    "RolloutRecord",
 ]

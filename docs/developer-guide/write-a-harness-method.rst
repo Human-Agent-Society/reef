@@ -19,15 +19,17 @@ Meta-Harness in ``recipes/`` are methods.
        def step(self, context: StepContext) -> None: ...
 
 Reef calls ``step`` once per training step. ``context.workspace`` holds a
-copy of the head tree and the step's material; ``context.services`` are what
-Reef does for the method. The tree that the method leaves is the candidate:
-Reef checks it, evaluates it and applies the release rule.
+copy of the head tree, the component's training start, and the step's
+material; ``context.services`` are what Reef does for the method. The tree
+that the method leaves is the candidate: Reef checks it and evaluates it
+under the publication policy. A selected candidate becomes a new release, and
+the deployment's activation rule decides whether that release serves.
 
 .. diagram::
-   :caption: Reef writes the workspace, calls step(context) once, and reads back the tree, the state and the output that the method left. Then Reef checks the candidate, evaluates it, and the release rule publishes, holds or drops it.
+   :caption: Reef writes the workspace, calls step(context) once, and reads back the tree, the state and the output that the method left. Then Reef checks the candidate and evaluates it; a selected candidate becomes a release, which the activation rule activates or leaves inactive.
 
-   <img class="fig-light" src="../assets/harness-method-step-light.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the release rule">
-   <img class="fig-dark" src="../assets/harness-method-step-dark.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the release rule">
+   <img class="fig-light" src="../assets/harness-method-step-light.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule">
+   <img class="fig-dark" src="../assets/harness-method-step-dark.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule">
 
 An example: add a tool
 ----------------------
@@ -76,19 +78,21 @@ the tool only when it scores better than the head:
 
 
    def mean_score(records) -> float:
-       return sum(record.score or 0.0 for record in records) / max(len(records), 1)
+       # A failed rollout (score.value None) counts as 0 here.
+       return sum(record.score.value or 0.0 for record in records) / max(len(records), 1)
 
 It uses each piece a method has:
 
 - **Material**: ``workspace.traces()`` and ``workspace.tasks()``.
 - **Services**: a model call, ``check`` before it returns, and ``evaluate``
-  to compare trees. A scored episode is reused, so the head's scores are
+  to compare trees. A scored rollout is reused, so the head's scores are
   usually free.
 - **Result**: ``write_tree`` for the candidate, ``write_output`` for what
   the step did.
 
-A tool is code from client traffic, so the deployment holds it for a person
-with ``review_parts: [extension]`` (see `Configure a deployment`_). Another
+A tool is code from client traffic, so the deployment leaves it inactive
+until a person activates it, with the activation rule's ``review_kinds:
+[extension]`` (see `Configure a deployment`_). Another
 adapter takes code in another form: ``workspace.host()["parts"]`` says what
 each part holds.
 
@@ -143,7 +147,7 @@ step record.
      - read-write
      - what the step did (`What the method says`_)
 
-A ``Trace`` is a client's request (``source`` is ``traffic``) or an episode
+A ``Trace`` is a client's request (``source`` is ``traffic``) or a rollout
 of an offline step (``rollout``):
 
 .. list-table::
@@ -163,7 +167,7 @@ of an offline step (``rollout``):
    * - ``failure``
      - why a rollout failed, else ``None``
    * - ``record``, ``client``
-     - the agent record or episode id; the client's tag, else ``untagged``
+     - the agent record or rollout id; the client's tag, else ``untagged``
    * - ``trajectory()``
      - a traffic trace's ATIF trajectory, else ``None``
 
@@ -186,8 +190,11 @@ The services
    * - ``check(tree)``
      - the ``ValidationResult``: ``passed``, ``problems``, ``message()``
    * - ``evaluate(tree, tasks, repeats=1)``
-     - scored ``EpisodeRecord`` values (``task``, ``repeat``, ``score``,
-       ``reply``, ``failure``), run like the step's evaluation
+     - scored ``RolloutRecord`` values (``task``, ``repeat``, ``score``,
+       ``reply``, ``failure``), run like the step's evaluation. ``score`` is
+       a ``RolloutScore``: ``score.value`` is the scorer's value, or 0 when
+       the tree gave no answer; it is ``None`` for a failed rollout, which the
+       environment could not run, and then ``failure`` says why
    * - ``run_agent(prompt, tree=, model=)``
      - one run of the deployment's coding agent (`Run a coding agent`_)
    * - ``calls``
@@ -196,7 +203,7 @@ The services
 - Each model call counts against ``evolution.max_model_calls_per_step`` and
   lands in the step record's ``calls.json``.
 - ``evaluate`` refuses the whole call, and runs nothing, without a scorer,
-  past ``evolution.max_episodes_per_step`` (reused episodes are free), for a
+  past ``evolution.max_rollouts_per_step`` (reused rollouts are free), for a
   tree that fails ``check`` (``ValueError``), and for one string as ``tasks``
   (``TypeError``).
 
@@ -261,7 +268,7 @@ text, at most 16 MiB together.
 Read the history
 ----------------
 
-``workspace.history()`` holds every tree, episode and decision, read-only:
+``workspace.history()`` holds every tree, rollout and decision, read-only:
 
 .. list-table::
    :header-rows: 1
@@ -272,13 +279,14 @@ Read the history
    * - ``candidates``
      - each tree's record by checksum: ``step``, ``origin``, ``parent``,
        ``summary``, ``notes``
-   * - ``episodes``, ``decisions``
-     - every ``EpisodeRecord``; every decision (``step``, ``tree``, ``head``,
+   * - ``rollouts``, ``decisions``
+     - every ``RolloutRecord``; every decision (``step``, ``tree``, ``head``,
        ``selected``, ``reason``)
-   * - ``tree(checksum)``, ``episode_dir(episode)``
-     - a tree's files; an episode's trajectory files
+   * - ``tree(checksum)``, ``rollout_dir(rollout)``
+     - a tree's files; a rollout's trajectory files
    * - ``scores(checksum, tasks, repeats=1)``
-     - the latest score per task and repeat, ``None`` where none ran
+     - the latest score per task and repeat, ``None`` where none ran or the
+       latest failed
    * - ``decision(step)``
      - the decision on that step's candidate
 
@@ -298,24 +306,24 @@ Evaluation
 ``evolution.evaluation`` names the tasks, the scorer and the policy (`the
 publication policy
 <../user-guide/evolve-your-harness.rst#evaluation-the-publication-policy>`__).
-Episodes that the method already ran through ``services.evaluate`` count:
+Rollouts that the method already ran through ``services.evaluate`` count:
 the evaluation reuses them.
 
-Score an episode
+Score a rollout
 ~~~~~~~~~~~~~~~~
 
-An ``EpisodeScorer`` returns a finite score for one finished episode;
+An ``RolloutScorer`` returns a finite score for one finished rollout;
 higher is better:
 
 .. code:: python
 
-   from reef.evaluation.harness import EpisodeScorer
-   from reef.harness.episodes.trajectory import final_assistant_text
+   from reef.evaluation.harness import RolloutScorer
+   from reef.harness.rollouts.trajectory import final_assistant_text
 
    EXPECTED = {"[fib]": "2880067194370816120"}
 
 
-   class ExactAnswer(EpisodeScorer):
+   class ExactAnswer(RolloutScorer):
        def score(self, task, result):
            """1.0 when the final assistant text ends with the task's expected answer."""
            text = final_assistant_text(result.trajectory) or ""
@@ -343,12 +351,15 @@ Configure a deployment
          adapter: pi
          seed: methods/seed            # the first tree; it must pass validation
          method: methods.add_tool:AddTool
-         review_parts: [extension]     # a tool waits for a person
          evaluation:
            tasks:
              - "[fib] Compute fib(90) exactly. Reply with the integer alone on the last line."
            scorer: methods.scoring:ExactAnswer
            policy: compare
+   activation:
+     module: always
+     config:
+       review_kinds: [extension]       # a tool waits for a person
    inference:
      upstream-url: ${REEF_UPSTREAM_URL}
      upstream-model: qwen3-8b
@@ -404,7 +415,9 @@ Untrusted input
   ``reef.core.prompts.untrusted_text`` before it enters a prompt.
 - Trust ``trace.client`` as an identity only when a gateway sets the tag.
 - Client text can shape code parts (``extension``, ``native_tool``,
-  ``native_hook``). Name them in ``evolution.review_parts``. A
+  ``native_hook``). Name them in the ``always`` activation rule's
+  ``review_kinds`` (`Configuration
+  <../reference/configuration.rst#the-activation-section>`__). A
   ``native_loop`` change always waits for a person.
 
 .. warning::

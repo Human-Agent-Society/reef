@@ -51,8 +51,9 @@ installs 5.12.1. The build fails if the image has a version outside 5.12 and
 5.13, because the change then does nothing.
 
 The build also applies `docker/patch/slime_thd_cp1_indices.patch`. Without it,
-Slime's Qwen3.5 vision-language trainer fails in the first training step when
-the context parallel size is 1 and a packed sequence has an odd length.
+Slime's Qwen3.5 vision-language trainer fails in the first training step.
+This happens when the context parallel size is 1 and a packed sequence has an
+odd length.
 THUDM/slime#2376 fixes the call site. This patch is a helper-side variant
 with the same result.
 

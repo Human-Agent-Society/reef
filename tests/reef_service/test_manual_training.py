@@ -22,7 +22,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.harness.tree import TreePatch
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
@@ -678,7 +677,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
         workspace.write_output("one rules entry", {"entries": 1})
 
     def score(task, result):
-        raise ValueError("the scorer could not read the episode")
+        raise ValueError("the scorer could not read the rollout")
 
     dispatcher = harness_dispatcher(tmp_path, recipe_in("manual", tmp_path, method, score=score))
     try:
@@ -687,7 +686,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
         assert _wait(lambda: _committed_skip(dispatcher, "broken scorer") == "instruction failed")
         row = _committed_row(dispatcher, "broken scorer")
         assert row["failed_stage"] == "evaluating"
-        assert row["error"] == "ValueError: the scorer could not read the episode"
+        assert row["error"] == "ValueError: the scorer could not read the rollout"
         assert row["method_notes"] == {"entries": 1}
         assert row["patch"] == changed_rules("marker rules\n")
         assert failed_words(row).startswith("The step failed during its evaluation")
@@ -976,7 +975,6 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest()),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,

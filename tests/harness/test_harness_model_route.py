@@ -3,7 +3,7 @@
 For claude, hermes, dsh and pi, render refuses every config key the
 pinned harness reads to choose the endpoint, the provider, the credential or
 the model, in the tree alone (as validation renders it) and with the binding's
-overlays (as an episode renders it). A request body a tree passes to the
+overlays (as a rollout renders it). A request body a tree passes to the
 bound endpoint may not name a model either. Keys that tune a run stay
 admitted, and the binding itself always renders.
 """
@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, RenderError, render_tree, validate_tree
 
 OTHER_URL = "http://127.0.0.1:9/v1"

@@ -52,8 +52,8 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
                 "rules.md": "Mine.\n",
                 "skills/fix/SKILL.md": SKILL,
             }
-            rows = (await (await client.get("/reef/scenarios/delivery/releases")).json())["releases"]
-            assert rows[0]["operation"] == "import" and rows[0]["metrics"]["patch_parts"] == {
+            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
+            assert rows[0]["operation"] == "sync" and rows[0]["metrics"]["patch_parts"] == {
                 "rules.md": "rules",
                 "skills/fix/SKILL.md": "skill",
             }
@@ -108,7 +108,7 @@ def test_a_client_install_calls_the_scenario_route_and_the_call_is_recorded(tmp_
             assert manifest["run"]["binary"] == "pi" and manifest["run"]["args"] == ["--model", "reef/qwen3-8b"]
             assert manifest["run"]["register"] == [["install", "/home/a/install/plugin"]]
             assert "plugin/skills/{name}/SKILL.md" in manifest["synced"]
-            # The agent's pinned install, so a client without pi can install the version the episodes run.
+            # The agent's pinned install, so a client without pi can install the version the rollouts run.
             assert manifest["run"]["install"]["package"] == "@earendil-works/pi-coding-agent"
             for missing in ("service_url", "root"):
                 partial = {key: value for key, value in params.items() if key != missing}

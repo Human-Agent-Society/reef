@@ -20,7 +20,7 @@ minibatch order) say so in `harness/aime.py`.
 | --- | --- |
 | Candidate prompt | a harness tree; the evolvable file here is `rules.md`, rendered into Pi's package as `plugin/rules.md` |
 | Pareto-sample a parent from the archive | `Archive.select_parent` over per-problem fronts, dominated candidates pruned |
-| Evaluate the parent on a train minibatch, with traces | the served tree's own recorded traffic: the driver runs the minibatch through the service, so the method gets the transcripts free; any other parent runs as episodes through `services.evaluate` |
+| Evaluate the parent on a train minibatch, with traces | the served tree's own recorded traffic: the driver runs the minibatch through the service, so the method gets the transcripts free; any other parent runs as rollouts through `services.evaluate` |
 | Reflect on one component and propose a rewrite | `models["reflection"]` (gpt-5) with GEPA's own prompt, over `Inputs` / `Generated Outputs` / `Feedback` records |
 | Accept the child iff it beats the parent on the minibatch | the method runs the child through `services.evaluate` and leaves `harness/` unchanged on a reject, so the step publishes nothing and commits the archive |
 | Full validation pass, then Pareto update | `evolution.evaluation.tasks` is the validation set: the step's evaluation scores the child on it, and the next step reads the per-task scores from the history into the archive |
@@ -51,8 +51,8 @@ embedded service keeps its artifacts in memory under `./work`.
 OPENAI_API_KEY=... REEF_PI_BINARY=/path/to/pi ./run.sh
 ```
 
-A live run is roughly 150 search episodes plus the evaluation's validation
-passes, then 300 test episodes. Episodes are independent, so `REEF_GEPA_WORKERS`
+A live run is roughly 150 search rollouts plus the evaluation's validation
+passes, then 300 test rollouts. Rollouts are independent, so `REEF_GEPA_WORKERS`
 (default 128) run at once everywhere: the evaluation's validation pass through
 `execution.evolution.workers`, the driver's minibatch, and the test passes. It
 changes wall time only. `--budget` lowers the search budget for a
@@ -60,7 +60,7 @@ shorter run. `REEF_GEPA_MULTI=1` adds an `aime-solver` skill to the seed tree
 and evolves it alongside `rules.md`, which is the extension case, not the
 comparison. The credential is read once, handed to the embedded service as its
 upstream, and never written into a candidate, a checkpoint, or a published
-tree; the Pi episodes authenticate to the local service with a placeholder.
+tree; the Pi rollouts authenticate to the local service with a placeholder.
 
 The validation pool defaults to `auto`: one worker selects `uni`, multiple
 workers select `mp` (or Ray in an existing multi-worker placement group).
@@ -74,7 +74,7 @@ the driver replaces the configured scorer and feedback classes with one
 `AIMEScorer` built from a serializable snapshot of the answer and context
 tables. Workers do not rely on driver globals, and later
 registrations do not change an existing recipe. Labels stay in scorer state,
-not in the task prompts or rendered harness files. Episode subprocesses and
+not in the task prompts or rendered harness files. Rollout subprocesses and
 temporary directories remain isolated. Custom hooks are preserved; they must
 carry their own serializable state when used across processes.
 
@@ -96,12 +96,12 @@ Ray runtime, provision that package there yourself; the driver neither
 reconfigures nor shuts down a runtime it does not own.
 
 Ray affects **only the evaluation's worker pool**, which runs the validation
-passes and the method's own episodes (every child, and a parent that never
+passes and the method's own rollouts (every child, and a parent that never
 served). The
 driver's minibatch and held-out test passes still use local threads. Validation
 workers call the configured upstream model directly; they do not need access
 to the embedded loopback service. They do need network access to the provider,
-and receive the model credential in their transient episode binding, so use
+and receive the model credential in their transient rollout binding, so use
 only trusted Ray nodes. The embedded service remains bound to `127.0.0.1`.
 
 Size the Ray pool to available resources and provider rate limits: each worker
@@ -117,7 +117,7 @@ One round is: pull the served source tree (`GET /reef/harness?form=source`),
 read the archive from the latest commit, settle it from the history, and draw
 the iteration's plan as the method will (its parent choice and its three
 training problems), render the tree with a model binding pointed back at the
-embedded service, run each problem as a Pi episode, score it, find its
+embedded service, run each problem as a Pi rollout, score it, find its
 recorded request by problem text, and report the score against it. The third
 report fills the step's job data (`evolution.batch_size: 3`) and schedules the
 training step, which is where the method proposes, the evaluation validates,
@@ -136,12 +136,12 @@ Everything under `./work`, and a rerun resumes from it:
   uses, drawn in upstream's own order, so seed 0 here shows the reflection
   model the same problems the official seed-0 run showed it.
 - `harness/` - the scenario's history (every candidate tree, every scored
-  episode, every decision) and its step records. The history is the score
+  rollout, every decision) and its step records. The history is the score
   cache, and the next step settles the archive from it. Each step record's
   `calls.json` keeps the reflection's prompt and reply.
 - `artifacts/` - the release chain.
 - `heldout/{frozen,selected}/example-NNNN.json` - one checkpoint per test
-  episode, keyed by the problem and the tree it ran on; a checkpoint written
+  rollout, keyed by the problem and the tree it ran on; a checkpoint written
   for a different tree is refused, never folded into the score.
 - `seed/`, `bootstrap/`, `served/`, `selected/` - the seed tree the recipe
   boots from, the base release's tree, and the source trees the last round
@@ -189,16 +189,16 @@ iteration.
 
 ## Deviations
 
-- Every episode goes through the score cache. A (tree, problem) pair that the
-  history holds a score for is not run again, except an episode that could not
+- Every rollout goes through the score cache. A (tree, problem) pair that the
+  history holds a score for is not run again, except a rollout that could not
   run, which runs again: the served tree's validation is its stored one, as
   upstream keeps it, and a parent that ran a minibatch problem before reuses
   that score where upstream would sample it again. The archive charges every
   metric call that upstream charges, cached or not, so the budget means what
   it means upstream. A change of the evaluation context starts a new cache.
   The context is the served model and the named models, the adapter and its
-  version, the harness binary (`evolution.binary`), the scorer, the episode
-  settings (`episode_timeout_s`, `forbid_residue`), and the episode executor
+  version, the harness binary (`evolution.binary`), the scorer, the rollout
+  settings (`rollout_timeout_s`, `forbid_residue`), and the rollout executor
   (`evolution.executor`, `evolution.sandbox`).
 - The training minibatch is real recorded traffic through the service rather
   than a direct evaluation call, which is the point of the exercise but means

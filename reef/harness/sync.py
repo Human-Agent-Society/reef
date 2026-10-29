@@ -18,13 +18,15 @@ Client to Reef
     are not read back. They hold the endpoints and credentials that the model
     binding owns, so the import keeps the config parts of the release the
     client installed. ``merge_trees`` then puts the client's changes on the
-    head, which may have moved on since that release.
+    active release, which may have moved on since that release. The service
+    commits the merged tree as a ``"sync"``: it becomes the active release
+    and the training start (``ScenarioCommitter.sync_release``).
 
 For a tree whose files are each in the form their render writes,
 ``import_files(render_tree(tree))`` is the tree again.
 
 The merge is per file, with ``b``, ``h`` and ``c`` a path's text in the base,
-the head and the client's tree, absent counting as a value. Where both sides
+the active release and the client's tree, absent counting as a value. Where both sides
 changed a file, its part's ``merge`` decides: ``file`` refuses, and ``lines``
 merges the lines each side changed, refusing only lines both changed
 (``merge_lines``).
@@ -47,9 +49,9 @@ from difflib import SequenceMatcher
 from reef.artifact.artifact import Artifact
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import Format, TreeLayout
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
-from reef.surface.base import ComponentSurface, FileTree, Surface
+from reef.surface.base import ArtifactLayout, ComponentSurface, FileTree, Surface
 from reef.surface.files import TextFileTree
 
 #: The component name a harness surface binds.
@@ -76,9 +78,16 @@ class HarnessFiles(FileTree):
         return render_tree(HarnessTree(files), self.descriptor)
 
 
-def create_harness_surface(descriptor: AdapterDescriptor) -> Surface:
-    """A surface that serves each release of the ``harness`` component as ``descriptor``'s rendered files."""
-    return Surface(components={HARNESS_COMPONENT: ComponentSurface(files=HarnessFiles(descriptor))})
+def create_harness_surface(descriptor: AdapterDescriptor, *, layout: ArtifactLayout | None = None) -> Surface:
+    """A surface that serves each release of the ``harness`` component as ``descriptor``'s rendered files.
+
+    ``layout`` checks an imported harness artifact (``ComponentSurface.layout``); ``None`` takes no import.
+    """
+    return Surface(
+        components={
+            HARNESS_COMPONENT: ComponentSurface(files=HarnessFiles(descriptor), kind="harness_plugin", layout=layout)
+        }
+    )
 
 
 @dataclass(frozen=True)

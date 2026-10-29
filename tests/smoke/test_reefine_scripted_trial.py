@@ -11,9 +11,9 @@ import pytest
 
 from recipes.beta.reefine.agent import AGENT_TOOLS, AGENT_TOOLS_PATH, launch_pi
 from recipes.beta.reefine.trial import trial_script
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
-from reef.sandbox.process import LocalExecutor
 
 REAL_PI = os.environ.get("REEF_REAL_PI_BINARY", "")
 pytestmark = pytest.mark.skipif(not REAL_PI, reason="REEF_REAL_PI_BINARY does not name a real pi binary")

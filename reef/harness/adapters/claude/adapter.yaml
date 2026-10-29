@@ -1,22 +1,22 @@
-# Claude Code, driven headless per episode.
+# Claude Code, driven headless per rollout.
 #
 # CLAUDE_CONFIG_DIR relocates the whole config tree (settings.json, CLAUDE.md,
 # skills/, commands/, plugins/, and the session transcripts under projects/)
-# into the episode root, so nothing is read from or written to the user's real
+# into the rollout root, so nothing is read from or written to the user's real
 # ~/.claude. DISABLE_AUTOUPDATER, DISABLE_TELEMETRY and
 # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC stop the startup network work
 # (auto-update, telemetry, and the non-essential background traffic) that
-# would otherwise make episodes non-deterministic. DISABLE_UPDATES makes
-# Claude Code's own update and install commands refuse, so an episode's shell
+# would otherwise make rollouts non-deterministic. DISABLE_UPDATES makes
+# Claude Code's own update and install commands refuse, so a rollout's shell
 # commands cannot replace the pinned version either. `-p --output-format json`
 # is Claude Code's headless mode, which skips the folder trust prompt;
 # `--permission-mode auto` matches opencode's `--auto` and pi's json
 # mode — auto-approve without dropping every safety check, which is the
-# right level for a hermetic episode root.
+# right level for a hermetic rollout root.
 name: claude
 binary: claude
 # The vendor's install channel at the pinned version. Harness evolution startup
-# installs it for the episodes unless evolution.binary names a binary.
+# installs it for the rollouts unless evolution.binary names a binary.
 install:
   kind: npm
   package: "@anthropic-ai/claude-code"
@@ -24,7 +24,7 @@ install:
   binary_path: "node_modules/.bin/claude"
 renderer: reef.harness.adapters.claude.render:ClaudeAdapterRenderer
 # A release is a Claude Code plugin in plugin/, named reef: its skills and commands load as
-# reef:<name>, its rules as the plugin's output style, and its extensions as hooks. An episode
+# reef:<name>, its rules as the plugin's output style, and its extensions as hooks. A rollout
 # loads it with --plugin-dir; a person's machine installs it from the local marketplace reef at
 # the install root, and Claude Code loads it in place in every session. A plugin carries no
 # settings and no memory, so a tree holds neither.
@@ -49,7 +49,7 @@ sessions: {format: claude-session-jsonl, path: claude/projects}
 # Anthropic Messages API natively, so only the anthropic dialect is bound:
 # settings.json's `env` block redirects the client at Reef's endpoint, which
 # is Anthropic-compatible at {base_url}/v1/messages. Reef appends this set
-# when it runs evaluation episodes; the served tree never carries a provider.
+# when it runs evaluation rollouts; the served tree never carries a provider.
 model:
   anthropic:
     - target: primary
@@ -58,10 +58,10 @@ model:
           ANTHROPIC_BASE_URL: "{base_url}"
           ANTHROPIC_AUTH_TOKEN: "{api_key}"
           ANTHROPIC_MODEL: "{model}"
-# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  episode:
+  rollout:
     argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto", "--plugin-dir", "{root}/plugin"]
     env:
       DISABLE_AUTOUPDATER: "1"
@@ -85,12 +85,12 @@ run:
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.
 config:
-  # Claude Code's own settings.json: the episode's defaults and the model binding alone, since a
+  # Claude Code's own settings.json: the rollout's defaults and the model binding alone, since a
   # plugin carries no setting a tree could evolve.
   primary:
     path: "claude/settings.json"
     defaults:
-      # No Co-Authored-By trailer written into commits an episode makes;
+      # No Co-Authored-By trailer written into commits a rollout makes;
       # the updater is off through env, not here.
       includeCoAuthoredBy: false
       disableDeepLinkRegistration: "disable"

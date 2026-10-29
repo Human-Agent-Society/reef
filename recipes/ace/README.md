@@ -9,7 +9,7 @@ additions, so it keeps detail instead of collapsing into a short summary.
 ACE needs no correct answer. The Reflector judges a trajectory from what happened in it, such as errors, failed
 commands and retries, and it uses a score or feedback only when the trace has one. In Reef, this method is a
 small acceptance case for the method protocol: it learns from traces, keeps what it learns as method state and
-one block of `rules.md`, and runs no evaluation episodes.
+one block of `rules.md`, and runs no evaluation rollouts.
 
 - Paper: [arXiv:2510.04618](https://arxiv.org/abs/2510.04618)
 - Upstream code, for reference only: [ace-agent/ace](https://github.com/ace-agent/ace). The method does not
@@ -61,7 +61,7 @@ whole run, so the step skips the middle one. For each run, in order, and at most
 
 1. The Reflector reads the playbook and the trace. The trace shows the messages, the tool calls and their
    results without the system prompt, and the score, the feedback and the failure when the trace has them.
-   The trace of a rollout (an episode of an offline step) has no trajectory, so it shows its task and its
+   The trace of a rollout (a rollout of an offline step) has no trajectory, so it shows its task and its
    reply instead. A trace longer than 30,000 characters keeps its start and its end.
 2. Each tag adds 1 to the `helpful` or the `harmful` count of its bullet. A tag for an id that is not in the
    playbook has no effect.
@@ -104,7 +104,7 @@ The keys go under `evolution.method.config`:
 ### Online, on pi
 
 [examples/serve.yaml](examples/serve.yaml) evolves the rules of pi from live sessions, with
-`evaluation.policy: none`: Reef runs no episode and publishes every new playbook that passes validation. Its
+`evaluation.policy: none`: Reef runs no rollout and publishes every new playbook that passes validation. Its
 seed, [examples/seed/rules.md](examples/seed/rules.md), holds base rules that the agent reads from the first
 release; the method adds its block below them. Run it from the repository root:
 

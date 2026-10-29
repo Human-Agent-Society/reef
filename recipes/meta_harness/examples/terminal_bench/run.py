@@ -19,7 +19,7 @@ from recipes.meta_harness.method import search_population
 from reef.artifact import GitLFSRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.harness import run_episode
+from reef.harness import run_rollout
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
@@ -38,7 +38,7 @@ SEED = HERE / "seed"
 
 
 def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int | None) -> dict[str, Any]:
-    """Fill the stack's dataset and keep the evaluation episode budget consistent with it."""
+    """Fill the stack's dataset and keep the evaluation rollout budget consistent with it."""
     sections = recipe_config_from_file_layout(load_config(HERE / "terminal_bench.yaml"))
     evolution = sections["evolution"]
     evaluation = evolution["evaluation"]
@@ -51,7 +51,7 @@ def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int |
         method["max_candidates"] = iterations
         evolution["max_steps"] = 2 * iterations
     # The cache keeps the incumbent's scores: the seed runs once, then each candidate once.
-    method["max_target_episodes"] = len(tasks) * evaluation["repeats"] * (method["max_candidates"] + 1)
+    method["max_target_rollouts"] = len(tasks) * evaluation["repeats"] * (method["max_candidates"] + 1)
     return sections
 
 
@@ -73,7 +73,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
         model_path=os.environ["REEF_MODEL"],
         base_url=os.environ["REEF_UPSTREAM_URL"],
         api_key=os.environ.get("REEF_UPSTREAM_API_KEY") or None,
-        inference_timeout_s=config["evolution"]["evaluation"]["episode_timeout_s"],
+        inference_timeout_s=config["evolution"]["evaluation"]["rollout_timeout_s"],
     )
     recipe = build_recipe(config["implementation"], config=config, runtime=runtime)
     if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, MetaHarness):
@@ -95,7 +95,7 @@ def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher
             directory / "artifacts.git",
             work_dir=directory / "artifact-work",
             cache_dir=directory / "artifact-cache",
-            bootstrap_files=recipe.base_artifact_files() or {},
+            base=recipe.base_artifact_source(),
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,
@@ -117,10 +117,10 @@ def served_tree(scenario: Scenario) -> HarnessTree:
 
 
 def record_rollout(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
-    """Record one real served-harness episode and its verifier feedback.
+    """Record one real served-harness rollout and its verifier feedback.
 
     Stable ids let a restart finish an interrupted report without rerunning an
-    already recorded episode. The next task is a function of the committed step.
+    already recorded rollout. The next task is a function of the committed step.
     """
     if recipe.scorer is None:
         raise ValueError("the example scores its rollouts with evolution.evaluation.scorer, which is not set")
@@ -133,12 +133,12 @@ def record_rollout(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
         descriptor = get_adapter(recipe.evolution.adapter)
         tree = served_tree(scenario)
         files = render_tree(tree, descriptor, recipe.model_binding().config_overlays(descriptor))
-        result = run_episode(
+        result = run_rollout(
             descriptor,
             files,
             task,
             binary=recipe.evolution.binary,
-            timeout=recipe.evaluation.episode_timeout_s,
+            timeout=recipe.evaluation.rollout_timeout_s,
             executor=recipe.executor,
         )
         littered = recipe.evaluation.forbid_residue and bool(result.residue)
@@ -151,10 +151,10 @@ def record_rollout(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
                 agent_record_id=inference_id,
                 request_type=RequestType.INFERENCE,
                 payload={
-                    "source": "terminus_episode",
+                    "source": "terminus_rollout",
                     "task": task,
                     "tree": dict(tree.files),
-                    "episode": dataclasses.asdict(result),
+                    "rollout": dataclasses.asdict(result),
                     "score": score,
                 },
             )
@@ -188,13 +188,13 @@ def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory:
         "step": committed.step,
         "served_id": head,
         "generated_candidates": sum(member.record.origin == "method" for member in members),
-        "evaluation_episodes": sum(episode.step < step for episode in history.episodes),
+        "evaluation_rollouts": sum(rollout.step < step for rollout in history.rollouts),
         "candidates": [
             {
                 "id": member.record.tree,
                 "parent_id": member.parent,
                 "outcome": member.outcome,
-                "scores": [episode.score for episode in member.episodes],
+                "scores": [rollout.score.to_json() for rollout in member.rollouts],
                 "mean": member.mean_score,
             }
             for member in members
@@ -230,7 +230,7 @@ def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) 
         summary = write_summary(scenario, recipe, directory)
         print(
             json.dumps(
-                {key: summary[key] for key in ("step", "generated_candidates", "evaluation_episodes", "served_id")}
+                {key: summary[key] for key in ("step", "generated_candidates", "evaluation_rollouts", "served_id")}
             )
         )
     return summary
@@ -269,7 +269,7 @@ def main() -> None:
                 "tasks": len(tasks),
                 "repeats": evolution["evaluation"]["repeats"],
                 "candidate_limit": method["max_candidates"],
-                "evaluation_episode_limit": method["max_target_episodes"],
+                "evaluation_rollout_limit": method["max_target_rollouts"],
                 "rollout_limit": evolution["max_steps"],
                 "seed_files": sorted(files),
             },

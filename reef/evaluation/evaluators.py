@@ -1,12 +1,13 @@
-"""Built-in candidate-evaluation mixins and the default plugins.
+"""Built-in candidate-evaluation mixins, the default plugin, and the rules that read rollout scores.
 
 A harness recipe builds its publication policy from ``evolution.evaluation``
-(``reef.evaluation.harness.policy``); this module serves weight trainers'
-plugins and the trainers' defaults.
+(``reef.evaluation.harness.policy``). The policies decide by the rules here:
+``compare_scores`` pairs two sides' rollouts and ``check_floor`` checks one
+side against a floor score.
 
 A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
-publish it (``decide``). Rather than composing an evaluator object with a
+select it (``decide``). Rather than composing an evaluator object with a
 selector object, a plugin mixes in the methods it needs: a *decide* mixin
 (:class:`AlwaysSelectMixin`, :class:`RegressionCheckMixin`) and, when the
 measurement comes from the candidate backend rather than the plugin's own code,
@@ -30,23 +31,100 @@ plugin is only concrete once both halves are supplied.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Self
+from dataclasses import dataclass
+from typing import Any
 
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
-    CheckpointCandidate,
     EvaluationResult,
+    RolloutScores,
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.core.plugins import PluginConfigError
-from reef.evaluation.config import ConfiguredEvaluationPlugin
-from reef.runtime.interfaces import InferenceRuntime
+
+
+@dataclass(frozen=True)
+class ScoreComparison:
+    """How a candidate's rollouts compare with the current release's, pair by pair.
+
+    Values: ``wins``, ``losses``, ``ties`` and ``dropped`` are non-negative ints, and their sum is the number of
+    pairs. Purpose: ``compare_scores`` makes it; the ``compare`` policy reads it.
+    """
+
+    wins: int
+    losses: int
+    ties: int
+    dropped: int
+
+    def __post_init__(self) -> None:
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in self.counts()):
+            raise ValueError("ScoreComparison counts are non-negative ints")
+
+    def counts(self) -> tuple[int, int, int, int]:
+        return self.wins, self.losses, self.ties, self.dropped
+
+
+def compare_scores(candidate: RolloutScores, current: RolloutScores) -> ScoreComparison:
+    """Compare two releases' rollouts pair by pair: the same task and the same run on each side.
+
+    The rollouts of a pair rank by their values. A pair with a failed side is dropped: the environment, not
+    either policy, decided it. ``ValueError`` when the two did not run the same tasks the same number of times.
+    """
+    if [task for task, _ in candidate.tasks] != [
+        task for task, _ in current.tasks
+    ] or candidate.count != current.count:
+        raise ValueError("compared releases run the same tasks the same number of times")
+
+    wins = losses = ties = dropped = 0
+    for mine, theirs in zip(candidate.rollouts(), current.rollouts(), strict=True):
+        if mine.value is None or theirs.value is None:
+            dropped += 1
+        elif mine.value > theirs.value:
+            wins += 1
+        elif mine.value < theirs.value:
+            losses += 1
+        else:
+            ties += 1
+    return ScoreComparison(wins, losses, ties, dropped)
+
+
+@dataclass(frozen=True)
+class FloorCheck:
+    """Which tasks of a candidate met a floor score.
+
+    Values: ``passed`` and ``failed`` are non-negative ints whose sum is the number of tasks, and
+    ``failed_rollouts`` is the non-negative number of rollouts that failed. Purpose: ``check_floor`` makes it;
+    the ``floor`` policy reads it.
+    """
+
+    passed: int
+    failed: int
+    failed_rollouts: int
+
+    def __post_init__(self) -> None:
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in self.counts()):
+            raise ValueError("FloorCheck counts are non-negative ints")
+
+    def counts(self) -> tuple[int, int, int]:
+        return self.passed, self.failed, self.failed_rollouts
+
+
+def check_floor(candidate: RolloutScores, floor_score: float) -> FloorCheck:
+    """Check each task of ``candidate`` against ``floor_score``.
+
+    A task passes when at least one of its rollouts did not fail and every such rollout is at least
+    ``floor_score``. A failed rollout does not fail its task, but a task whose rollouts all failed does not pass.
+    """
+    passed = 0
+    for _, scores in candidate.tasks:
+        values = [score.value for score in scores if score.value is not None]
+        if values and all(value >= floor_score for value in values):
+            passed += 1
+    return FloorCheck(passed, len(candidate.tasks) - passed, candidate.failed_count())
 
 
 class AlwaysSelectMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that publishes every evaluated candidate.
+    """Give a plugin a ``decide()`` that selects every evaluated candidate.
 
     Abstract on its own: ``evaluate`` is inherited unimplemented, so this
     mixes into a plugin rather than standing up as one.
@@ -64,7 +142,7 @@ class AlwaysSelectMixin(CandidateEvaluationPlugin):
 class RegressionCheckMixin(CandidateEvaluationPlugin):
     """Give a plugin a best-checkpoint ``decide()`` over one scalar metric.
 
-    Where :class:`AlwaysSelectMixin` publishes every evaluated candidate, this
+    Where :class:`AlwaysSelectMixin` selects every evaluated candidate, this
     reads one scalar metric from the evaluation and selects a candidate only
     while that score stays within ``margin`` of the best score selected so far;
     otherwise it rejects, and serving holds the last selected weights. That makes
@@ -144,10 +222,9 @@ class BackendEvaluateMixin(CandidateEvaluationPlugin):
 class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
     """The default plugin of a trainer with a candidate backend and no evaluation plugin.
 
-    It evaluates through the candidate backend and publishes every candidate.
+    It evaluates through the candidate backend and selects every candidate.
     A harness recipe always names its own publication policy, so a trainer
-    gets this default only when it is built without one, as in tests. A
-    weight trainer's default is ``AlwaysSelectCheckpointPlugin``.
+    gets this default only when it is built without one, as in tests.
     """
 
     def __init__(self, candidate_backend: Any) -> None:
@@ -155,52 +232,13 @@ class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
         self._candidate_backend = candidate_backend
 
 
-class AlwaysSelectCheckpointPlugin(AlwaysSelectMixin):
-    """The default candidate evaluation of a weight trainer: serve every checkpoint that a job saves.
-
-    ``evaluate`` measures nothing: its result has no metrics, since the commit of the decision already carries
-    the checkpoint's training metrics. It takes a ``CheckpointCandidate`` and raises ``TypeError`` for another
-    candidate.
-    """
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        if not isinstance(candidate, CheckpointCandidate):
-            raise TypeError(f"{type(self).__name__} evaluates a CheckpointCandidate, got {type(candidate).__name__}")
-        return EvaluationResult(evaluator="training_job", evaluator_version="1", metrics={})
-
-
-class ManualPromotionPlugin(ConfiguredEvaluationPlugin):
-    """Hold every checkpoint for review: a person promotes each release (``POST /reef/scenarios/{s}/promote``).
-
-    ``evaluate`` measures nothing, as ``AlwaysSelectCheckpointPlugin`` does, and ``decide`` selects no candidate,
-    so each checkpoint is a pending release. A deployment names it in its ``evaluation`` section, which takes no
-    config. It takes a ``CheckpointCandidate`` and raises ``TypeError`` for another candidate.
-    """
-
-    @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, runtime: InferenceRuntime, scenario: str, environ: Mapping[str, str]
-    ) -> Self:
-        if config:
-            raise PluginConfigError(f"manual promotion takes no config, got {', '.join(sorted(map(str, config)))}")
-        return cls()
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        if not isinstance(candidate, CheckpointCandidate):
-            raise TypeError(f"{type(self).__name__} evaluates a CheckpointCandidate, got {type(candidate).__name__}")
-        return EvaluationResult(evaluator="manual_promotion", evaluator_version="1", metrics={})
-
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        return SelectionDecision(
-            selected=False, policy="manual", reason="a person promotes each release", evaluation=evaluation
-        )
-
-
 __all__ = [
-    "AlwaysSelectCheckpointPlugin",
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
-    "ManualPromotionPlugin",
+    "FloorCheck",
     "RegressionCheckMixin",
+    "ScoreComparison",
+    "check_floor",
+    "compare_scores",
 ]

@@ -25,8 +25,8 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 from recipes.beta.reefine.multimodal import MultimodalProvider
-from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.gateway import AgentGateway, AgentTool, ModelCalls, refuse, relay
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
 
 #: How much of a provider's refusal a trial reports back to the agent.

@@ -1,5 +1,5 @@
-"""Guarantees of the evolve step record and the episode records, hermetic: the method's model calls, its result
-and its candidate land in the step's record directory, and every evaluation episode's trajectory lands in the
+"""Guarantees of the evolve step record and the rollout records, hermetic: the method's model calls, its result
+and its candidate land in the step's record directory, and every evaluation rollout's trajectory lands in the
 scenario's history, where a reader can rebuild the decision. A fake native binary writes a session tree shaped
 like the native loop's, so the stage path metric is checked against a kept file; the served model is a stub
 endpoint behind ``urllib.request.urlopen``."""
@@ -14,7 +14,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import (
     COMPONENT,
@@ -28,15 +28,15 @@ from tests.support.harness_steps import (
     make_pi_binary,
 )
 
-from reef.evaluation.harness import EpisodeEvaluationWorker
-from reef.evaluation.harness.runner import EpisodeRun
+from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.evaluation.harness.runner import RolloutRun
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
+from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.rollouts.run import RolloutError, TrajectoryKeepError, run_rollout
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import LocalExecutor
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
@@ -161,20 +161,20 @@ def served_model(monkeypatch):
 def test_remote_worker_returns_records_without_touching_driver_path(tmp_path):
     blocker = tmp_path / "driver-only"
     blocker.write_text("this path cannot be a directory on the worker")
-    worker = EpisodeEvaluationWorker(
+    worker = RolloutEvaluationWorker(
         get_adapter("native"),
-        resolve_episode_scorer(native_score),
+        resolve_rollout_scorer(native_score),
         str(make_native_binary(tmp_path)),
         10,
         LocalExecutor(),
         False,
         transfer_records=True,
     )
-    scored = worker.run(EpisodeRun({}, "one", blocker / "episode"), ModelBindings(served=MODEL))
+    scored = worker.run(RolloutRun({}, "one", blocker / "rollout"), ModelBindings(served=MODEL))
     assert scored.record_archive is not None
     assert blocker.read_text() == "this path cannot be a directory on the worker"
     with tarfile.open(fileobj=BytesIO(scored.record_archive), mode="r:gz") as archive:
-        assert {"./session.jsonl", "./agents/002-checker.jsonl", "./episode.json"} <= set(archive.getnames())
+        assert {"./session.jsonl", "./agents/002-checker.jsonl", "./rollout.json"} <= set(archive.getnames())
 
 
 # -- the method's calls -----------------------------------------------------
@@ -264,11 +264,11 @@ def test_a_rejected_removal_keeps_its_null_in_the_metrics(tmp_path: Path) -> Non
     assert "rules.md" not in HarnessTree.read(steps_dir(tmp_path) / "1" / "harness").files
 
 
-# -- the episode records and the stage path ---------------------------------
+# -- the rollout records and the stage path ---------------------------------
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_the_history_keeps_every_episode_and_the_path_matches_the_kept_trajectory(
+def test_the_history_keeps_every_rollout_and_the_path_matches_the_kept_trajectory(
     tmp_path: Path,
     workers: int,
 ) -> None:
@@ -280,18 +280,18 @@ def test_the_history_keeps_every_episode_and_the_path_matches_the_kept_trajector
 
     history = backend.history
     candidate = NATIVE_SEED.apply(MARKER).checksum()
-    assert sorted((record.tree == candidate, record.repeat) for record in history.episodes) == [
+    assert sorted((record.tree == candidate, record.repeat) for record in history.rollouts) == [
         (False, 0),
         (False, 1),
         (True, 0),
         (True, 1),
     ]
-    for record in history.episodes:
-        kept = history.episode_dir(record.episode)
+    for record in history.rollouts:
+        kept = history.rollout_dir(record.rollout)
         assert (kept / "session.jsonl").is_file() and (kept / "agents" / "002-checker.jsonl").is_file()
 
     # The path metric is what the kept file says: the root's stage/exit names and how its turn ended.
-    first = history.episode_dir(next(record.episode for record in history.episodes if record.tree == candidate))
+    first = history.rollout_dir(next(record.rollout for record in history.rollouts if record.tree == candidate))
     kept = [json.loads(line) for line in (first / "session.jsonl").read_text().splitlines()]
     stages = [event["data"]["stage"] for event in kept if event["type"] == "stage/exit"]
     reasons = [event["data"]["reason"]["kind"] for event in kept if event["type"] == "turn/end"]
@@ -324,23 +324,23 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     assert read_json(first / "calls.json") == []
 
 
-def test_an_episode_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
+def test_an_rollout_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
     backend, _ = native_backend(tmp_path)
     prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
     assert prepared.candidate is not None
-    # A file where the episode records go stands in for a full or unwritable history volume.
-    (backend.history.root / "episodes").write_text("in the way")
-    with pytest.raises(TrajectoryKeepError, match="cannot keep episode trajectory"):
+    # A file where the rollout records go stands in for a full or unwritable history volume.
+    (backend.history.root / "rollouts").write_text("in the way")
+    with pytest.raises(TrajectoryKeepError, match="cannot keep rollout trajectory"):
         backend.evaluate(prepared.candidate)
     backend.abort_step(prepared)
     assert backend.failed_step_metrics()["failed_stage"] == "evaluating"
 
-    # The failure is not an episode failure: run_episode raises it past the launch mapping, and the episode
+    # The failure is not a rollout failure: run_rollout raises it past the launch mapping, and the rollout
     # root is still removed on the way out.
-    from reef.harness.episodes import run as episode_module
+    from reef.harness.rollouts import run as rollout_module
 
     removed: list[Path] = []
-    remove = episode_module._remove_episode_root
+    remove = rollout_module._remove_rollout_root
 
     def observed(root: Path) -> None:
         removed.append(root)
@@ -351,17 +351,17 @@ def test_an_episode_record_that_cannot_be_kept_aborts_the_step_instead_of_scorin
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(episode_module, "_remove_episode_root", observed)
+        patch.setattr(rollout_module, "_remove_rollout_root", observed)
         with pytest.raises(TrajectoryKeepError) as caught:
-            run_episode(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=blocker / "kept")
-    assert not isinstance(caught.value, EpisodeError)
+            run_rollout(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=blocker / "kept")
+    assert not isinstance(caught.value, RolloutError)
     assert len(removed) == 1 and not removed[0].exists()
 
 
-def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stages(tmp_path: Path) -> None:
+def test_a_rollout_that_could_not_run_has_no_path_and_a_pi_session_has_no_stages(tmp_path: Path) -> None:
     missing, _ = native_backend(tmp_path, binary=str(tmp_path / "no-such-binary"))
     result = step(missing)
-    assert result.metrics["episode_failures"] == 2
+    assert result.metrics["rollout_failures"] == 2
     assert result.metrics["candidate_paths"] == (None,) and result.metrics["current_paths"] == (None,)
 
     (tmp_path / "pi").mkdir()
@@ -370,14 +370,14 @@ def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stage
     assert result.metrics["candidate_paths"] == ({"stages": [], "reason": None},)
 
 
-# -- the episode seam -------------------------------------------------------
+# -- the rollout seam -------------------------------------------------------
 
 
-def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: Path) -> None:
+def test_run_rollout_keeps_the_trajectory_before_the_root_is_removed(tmp_path: Path) -> None:
     descriptor = get_adapter("pi")
     files = render_tree(HarnessTree({"rules.md": "keep me\n"}), descriptor, MODEL.config_overlays(descriptor))
     keep = tmp_path / "kept"
-    result = run_episode(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=keep)
+    result = run_rollout(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=keep)
     kept = [json.loads(line) for line in (keep / "session.jsonl").read_text().splitlines()]
     assert kept == list(result.trajectory) and kept[-1]["rules"] == "keep me\n"
 
@@ -385,7 +385,7 @@ def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: P
     silent = tmp_path / "silent"
     silent.write_text("#!/bin/sh\nexit 0\n")
     silent.chmod(0o755)
-    empty = run_episode(descriptor, files, "task", binary=str(silent), keep_dir=tmp_path / "none")
+    empty = run_rollout(descriptor, files, "task", binary=str(silent), keep_dir=tmp_path / "none")
     assert empty.trajectory == () and not (tmp_path / "none").exists()
 
     # A link an evolved tool left in the session directory is kept as a link: the outside file never enters.
@@ -396,19 +396,19 @@ def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: P
         f'#!/bin/sh\nmkdir -p "$PI_CODING_AGENT_SESSION_DIR"\nln -s {outside} "$PI_CODING_AGENT_SESSION_DIR/pulled"\n'
     )
     linker.chmod(0o755)
-    run_episode(descriptor, files, "task", binary=str(linker), keep_dir=tmp_path / "linked")
+    run_rollout(descriptor, files, "task", binary=str(linker), keep_dir=tmp_path / "linked")
     assert (tmp_path / "linked" / "pulled").is_symlink()
 
-    # A kept record is never merged over: an existing episode directory refuses the copy.
+    # A kept record is never merged over: an existing rollout directory refuses the copy.
     taken = tmp_path / "taken"
     taken.mkdir()
     (taken / "session.jsonl").write_text("earlier record\n")
-    with pytest.raises(TrajectoryKeepError, match="cannot keep episode trajectory"):
-        run_episode(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=taken)
+    with pytest.raises(TrajectoryKeepError, match="cannot keep rollout trajectory"):
+        run_rollout(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=taken)
     assert (taken / "session.jsonl").read_text() == "earlier record\n"
 
 
-# -- what the checks never saw, the raw request seam, and the episode record ------------------------
+# -- what the checks never saw, the raw request seam, and the rollout record ------------------------
 
 
 def test_the_record_redacts_credential_shaped_text_from_the_model_calls(tmp_path: Path, served_model) -> None:
@@ -466,24 +466,24 @@ def test_a_long_reply_is_clipped_with_the_marker(tmp_path: Path, served_model) -
     assert reply.startswith("y" * RECORD_TEXT_CAP) and reply.endswith("... [clipped 3 chars]")
 
 
-def test_every_episode_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path: Path) -> None:
+def test_every_rollout_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path: Path) -> None:
     backend, _ = native_backend(tmp_path)
     result = step(backend)
     candidate = NATIVE_SEED.apply(MARKER).checksum()
-    first = next(record for record in backend.history.episodes if record.tree == candidate)
-    record = read_json(backend.history.episode_dir(first.episode) / "episode.json")
+    first = next(record for record in backend.history.rollouts if record.tree == candidate)
+    record = read_json(backend.history.rollout_dir(first.rollout) / "rollout.json")
     assert record["task"] == "task one" and record["exit_code"] == 0 and record["failure"] is None
     assert record["score"] == 1.0 and result.metrics["selected"] is True
     assert record["path"] == result.metrics["candidate_paths"][0]
     assert record["residue"] == [] and isinstance(record["stdout"], str) and isinstance(record["stderr"], str)
 
-    # An episode that could not run still leaves its record: the failure, and no output to show.
+    # A rollout that could not run still leaves its record: the failure, and no output to show.
     (tmp_path / "broken").mkdir()
     broken, _ = native_backend(tmp_path / "broken", binary=str(tmp_path / "missing"))
     step(broken)
-    first = next(record for record in broken.history.episodes if record.tree == candidate)
-    record = read_json(broken.history.episode_dir(first.episode) / "episode.json")
-    assert record["score"] is None and record["failure"]["stage"] == "launch"
+    first = next(record for record in broken.history.rollouts if record.tree == candidate)
+    record = read_json(broken.history.rollout_dir(first.rollout) / "rollout.json")
+    assert record["score"] == "failed" and record["failure"]["stage"] == "launch"
     assert record["exit_code"] is None and record["stdout"] is None and record["residue"] is None
 
 
@@ -491,7 +491,7 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
     """Per agent, the usage on the assistant messages and compactions of a
     native trajectory adds up beside the turn and tool counters, and the
     side's sum keeps every counter."""
-    from reef.harness.episodes.trajectory import agent_work, sum_agents
+    from reef.harness.rollouts.trajectory import agent_work, sum_agents
 
     trajectory = [
         {"type": "session", "data": {"agent": "root"}},

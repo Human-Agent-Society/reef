@@ -25,14 +25,14 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
-from reef.evaluation.harness.history import EPISODES_DIR
+from reef.evaluation.harness.history import ROLLOUTS_DIR
+from reef.execution.sandbox.environment import download_directory
+from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.gateway import AgentGateway, AgentTool
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.tree import HarnessTree, render_tree
-from reef.sandbox.environment import download_directory
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
 from reef.train.harness_backend.contract import AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
@@ -58,7 +58,7 @@ class AgentExecution:
     """
 
     descriptor: AdapterDescriptor
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     binary: str
     timeout_s: float
 
@@ -99,7 +99,7 @@ class AgentRun:
         self.workspace = workspace
         self.services = services
         self.root = Path(os.path.commonpath([workspace.root.resolve(), workspace.history_dir.resolve()]))
-        self.session: EpisodeExecutor | None = None
+        self.session: ProgramExecutor | None = None
         self.lock = threading.Lock()
 
     def read_tree(self, arguments: Mapping[str, Any]) -> HarnessTree:
@@ -153,9 +153,9 @@ class EvaluateTool(AgentTool):
 
     name = "evaluate"
     description = (
-        "Score a tree of the step's workspace on tasks, repeats episodes each. A scored episode in the history is "
-        "reused; new episodes spend the step's episode budget. Answers tree (its checksum) and episodes: one "
-        "record per episode with its task, repeat, score (null when it could not run), failure, reply, and "
+        "Score a tree of the step's workspace on tasks, repeats rollouts each. A scored rollout in the history is "
+        "reused; new rollouts spend the step's rollout budget. Answers tree (its checksum) and rollouts: one "
+        "record per rollout with its task, repeat, score (null when it could not run), failure, reply, and "
         "directory (its files, from the workspace)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
@@ -185,19 +185,19 @@ class EvaluateTool(AgentTool):
         with self.run.lock:
             tree = self.run.read_tree(arguments)
             records = self.run.services.evaluate(tree, tasks, repeats=repeats)
-        history = self.run.workspace.history_dir / EPISODES_DIR
-        episodes = [
+        history = self.run.workspace.history_dir / ROLLOUTS_DIR
+        rollouts = [
             {
                 "task": record.task,
                 "repeat": record.repeat,
-                "score": record.score,
+                "score": record.score.to_json(),
                 "failure": None if record.failure is None else record.failure.cause,
                 "reply": record.reply,
-                "directory": os.path.relpath(history / record.episode, self.run.workspace.root),
+                "directory": os.path.relpath(history / record.rollout, self.run.workspace.root),
             }
             for record in records
         ]
-        return {"tree": tree.checksum(), "episodes": episodes}
+        return {"tree": tree.checksum(), "rollouts": rollouts}
 
 
 def run_agent(
@@ -249,9 +249,9 @@ def run_agent(
                 # The executor copies the agent's files back, also after a time out.
                 run.session.close()
             outcome = AgentOutcome(process.exit_code, False, None, round(time.monotonic() - started, 1))
-        except EpisodeTimeout:
+        except RolloutTimeout:
             outcome = AgentOutcome(None, True, None, round(time.monotonic() - started, 1))
-        except EpisodeLaunchError as exc:
+        except RolloutLaunchError as exc:
             outcome = AgentOutcome(None, False, str(exc), round(time.monotonic() - started, 1))
     finally:
         gateway.stop()

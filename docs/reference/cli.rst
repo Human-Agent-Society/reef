@@ -4,7 +4,7 @@ Reef CLI: serve
 ``reef serve`` reads a deployment config and starts every
 process the config declares, in dependency order. (The wheel also installs
 ``reef-native``, the loop runner that the ``native`` adapter launches per
-episode; nothing calls it by hand.)
+rollout; nothing calls it by hand.)
 
 .. code:: bash
 

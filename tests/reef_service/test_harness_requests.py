@@ -1,5 +1,5 @@
 """Harness instructions through ``POST /reef/train`` and its mode switch, and the ``requires`` a request carries
-through the route, the commit, the manifest and the promote."""
+through the route, the commit, the manifest and the activation."""
 
 from __future__ import annotations
 
@@ -15,8 +15,10 @@ from tests.support.harness_service import backend_step, harness_dispatcher
 from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
 
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
 from reef.core.training_request import TrainingRequest
+from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
@@ -582,11 +584,10 @@ def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp
         dispatcher.close()
 
 
-def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path) -> None:
-    """Under review a release waits for a promote, and the promote row carries no request of its own: the manifest
-    follows the promote to its target, so the served head lists what the pending release named and serves its
-    tree."""
-    # The seed holds defaultTools; the pending release's setting leaves the built-in tools on.
+def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
+    """Under the never activation rule a release waits for a person to activate it; the activation serves that
+    release itself, so the served head lists what the release named and serves its tree."""
+    # The seed holds defaultTools; the release's setting leaves the built-in tools on.
     tuned = json.dumps({}) + "\n"
 
     def method(workspace, services):
@@ -594,7 +595,9 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             return None
         return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": tuned})
 
-    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, method, publish="review"))
+    dispatcher = harness_dispatcher(
+        tmp_path, growing_recipe(tmp_path, method, activation=PluginReference(NeverActivate, {}))
+    )
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -608,24 +611,27 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             assert response.status == 200, await response.text()
             await committed(scenario, 1)
             rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
-            (pending,) = [row for row in rows if row["pending"]]
-            assert pending["metrics"]["training_request"]["requires"] == REQUIRES
-            # Nothing served yet: the head is still the base and needs nothing; the pending release by id does.
+            (inactive,) = [row for row in rows if row["operation"] == "training"]
+            assert not inactive["active"] and inactive["metrics"]["training_request"]["requires"] == REQUIRES
+            # Nothing served yet: the head is still the base and needs nothing; the inactive release by id does.
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] == base and head["requires"] == []
-            waiting = await client.get("/reef/harness", params={"release_id": pending["release_id"]}, headers=headers)
+            waiting = await client.get("/reef/harness", params={"release_id": inactive["release_id"]}, headers=headers)
             assert (await waiting.json())["requires"] == REQUIRES
-            response = await client.post("/reef/scenarios/agents/promote", json={"release_id": pending["release_id"]})
+            response = await client.post(
+                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["release_id"]}
+            )
             assert response.status == 200
-            promoted = (await response.json())["release_id"]
-            assert promoted not in (base, pending["release_id"])
+            assert (await response.json())["release_id"] == inactive["release_id"]
             head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] == promoted and head["evaluation"] is None and head["requires"] == REQUIRES
+            assert head["release_id"] == inactive["release_id"] and head["requires"] == REQUIRES
+            assert head["evaluation"] == inactive["metrics"]
             rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
-            (row,) = [row for row in rows if row["release_id"] == promoted]
-            assert row["operation"] == "promote" and row["rollback_target_release_id"] == pending["release_id"]
-            assert "metrics" not in row
-            # The promote serves the pending release's source tree, the evolved setting included.
+            assert [(row["release_id"], row["active"]) for row in rows] == [
+                (base, False),
+                (inactive["release_id"], True),
+            ]
+            # The activation serves the release's source tree, the evolved setting included.
             source = await client.get("/reef/harness", params={"form": "source"}, headers=headers)
             assert (await source.json())["files"]["config/primary.json"] == tuned
         finally:

@@ -1,7 +1,7 @@
-"""Terminus 2 for the generator's episodes: an episode the agent itself ends badly is still verified.
+"""Terminus 2 for the generator's rollouts: a rollout the agent itself ends badly is still verified.
 
 Harbor runs a task's verifier after the agent only when the agent finished, timed out or exited nonzero; any
-other agent error skips it, so the episode has no reward and the episode runner files no report.
+other agent error skips it, so the rollout has no reward and the rollout runner files no report.
 :class:`VerifiedTerminus2` ends the run instead on two such errors, so the verifier scores the workspace as the
 agent left it: the agent filled its context window, or a send-keys to its tmux pane failed. Every other error
 still fails the trial.
@@ -17,8 +17,8 @@ from harbor.environments.base import BaseEnvironment
 from harbor.llms.base import ContextLengthExceededError
 from harbor.models.agent.context import AgentContext
 
-#: The agent context metadata key that names why a verified episode ended early.
-EPISODE_END_KEY = "reef_episode_end"
+#: The agent context metadata key that names why a verified rollout ended early.
+ROLLOUT_END_KEY = "reef_rollout_end"
 
 
 class VerifiedTerminus2(Terminus2):
@@ -37,5 +37,5 @@ class VerifiedTerminus2(Terminus2):
             if ": failed to send " not in message or " keys: command=" not in message:
                 raise
             reason = "terminal_lost"
-        self.logger.warning("ending the episode for verification: %s", reason)
-        context.metadata = {**(context.metadata or {}), EPISODE_END_KEY: reason}
+        self.logger.warning("ending the rollout for verification: %s", reason)
+        context.metadata = {**(context.metadata or {}), ROLLOUT_END_KEY: reason}

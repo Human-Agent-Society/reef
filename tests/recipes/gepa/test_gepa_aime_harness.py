@@ -1,7 +1,7 @@
 """Deterministic coverage for the GEPA AIME example.
 
 Nothing here calls a model or launches Pi: the scorer and the feedback hook run
-on synthetic episode results, and the driver's record lookup and
+on synthetic rollout results, and the driver's record lookup and
 report run against a real embedded Reef service with a stubbed inference
 backend, exactly as the campaign driver's suite does.
 """
@@ -20,11 +20,21 @@ from types import SimpleNamespace
 import pytest
 from tests.support.harness_steps import TreeReleases
 
-from reef.harness import EpisodeResult
+from reef.core.evaluation import PolicyHarness, RolloutRequest
+from reef.harness import RolloutResult
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 from reef.train.backend import ComponentReleases
+
+
+def rollout_requests(evaluator, *pairings):
+    """One rollout request for each ``(files, task)``, on the evaluator's adapter and served model."""
+    return [
+        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
+        for files, task in pairings
+    ]
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"
@@ -64,9 +74,9 @@ def aime(load):
     return module
 
 
-def pi_episode(answer: str, *, exit_code: int = 0, residue: tuple[str, ...] = ()) -> EpisodeResult:
+def pi_rollout(answer: str, *, exit_code: int = 0, residue: tuple[str, ...] = ()) -> RolloutResult:
     trajectory = ({"message": {"role": "assistant", "content": [{"type": "text", "text": answer}]}},)
-    return EpisodeResult(exit_code, "", "", trajectory, residue)
+    return RolloutResult(exit_code, "", "", trajectory, residue)
 
 
 # The scorer and the feedback hook ----------------------------------------
@@ -79,19 +89,19 @@ def pi_episode(answer: str, *, exit_code: int = 0, residue: tuple[str, ...] = ()
 def test_scorer_matches_the_upstream_expected_string(aime, response, score):
     aime.register([{"input": "problem", "answer": "### 17"}])
 
-    assert aime.evaluate("problem", pi_episode(response)) == score
+    assert aime.evaluate("problem", pi_rollout(response)) == score
 
 
 @pytest.mark.parametrize(("exit_code", "residue"), [(1, ()), (0, ("pi-agent/stray.json",))])
-def test_a_dirty_episode_scores_zero_however_it_answered(aime, exit_code, residue):
+def test_a_dirty_rollout_scores_zero_however_it_answered(aime, exit_code, residue):
     aime.register([{"input": "problem", "answer": "### 17"}])
 
-    assert aime.evaluate("problem", pi_episode("### 17", exit_code=exit_code, residue=residue)) == 0.0
+    assert aime.evaluate("problem", pi_rollout("### 17", exit_code=exit_code, residue=residue)) == 0.0
 
 
 def test_an_unregistered_task_refuses_rather_than_scoring_zero(aime):
     with pytest.raises(RuntimeError, match="no AIME answer is registered"):
-        aime.evaluate("never seen", pi_episode("### 17"))
+        aime.evaluate("never seen", pi_rollout("### 17"))
 
 
 def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aime):
@@ -101,12 +111,12 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
     evaluate, feedback = pickle.loads(pickle.dumps((scorer.score, scorer.feedback)))
     aime.ANSWERS.clear()
     aime.CONTEXTS.clear()
-    assert evaluate("problem", pi_episode("### 17")) == 1.0
+    assert evaluate("problem", pi_rollout("### 17")) == 1.0
     assert "solution: explanation" in feedback("problem", "wrong", 0.0)
-    assert evaluate("problem", pi_episode("### 17", exit_code=1)) == 0.0
-    assert evaluate("problem", pi_episode("### 17", residue=("stray",))) == 0.0
+    assert evaluate("problem", pi_rollout("### 17", exit_code=1)) == 0.0
+    assert evaluate("problem", pi_rollout("### 17", residue=("stray",))) == 0.0
     with pytest.raises(RuntimeError, match="no AIME answer is registered"):
-        evaluate("unknown", pi_episode("### 17"))
+        evaluate("unknown", pi_rollout("### 17"))
 
 
 def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
@@ -130,20 +140,18 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     assert config["execution"]["evolution"]["backend"] == "auto"
     config["execution"]["evolution"]["workers"] = 1
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    monkeypatch.setattr("reef.evaluation.harness.runner.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
+    monkeypatch.setattr("reef.evaluation.harness.runner.run_rollout", lambda *args, **kwargs: pi_rollout("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records, releases=releases_of(recipe))
         try:
-            backend = trainer.candidate_backend
-            evaluator = backend.evaluator
+            evaluator = trainer.candidate_backend.evaluator
             assert evaluator.worker_pool.selection.settings.backend == "uni"
-            backend.history.add_candidate(recipe.seed, step=1, origin="seed")
-            requests = [(recipe.seed, "problem", 0), (recipe.seed, "problem", 1)]
-            assert [record.score for record in evaluator.run(requests, step=1)] == [1.0, 1.0]
+            rows = evaluator.run_rollouts(rollout_requests(evaluator, ({}, "problem"), ({}, "problem")))
+            assert [row.score.value for row in rows] == [1.0, 1.0]
             # A later registration does not reach the snapshot the recipe scores with.
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert evaluator.run([(recipe.seed, "problem", 2)], step=1)[0].score == 1.0
+            assert evaluator.run_rollouts(rollout_requests(evaluator, ({}, "problem")))[0].score.value == 1.0
         finally:
             trainer.close()
 
@@ -190,14 +198,12 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
         trainer = recipe.build("isolated", records, releases=releases_of(recipe))
         try:
-            backend = trainer.candidate_backend
-            evaluator = backend.evaluator
+            evaluator = trainer.candidate_backend.evaluator
             assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)
-            backend.history.add_candidate(recipe.seed, step=1, origin="seed")
-            rows = evaluator.run([(recipe.seed, "problem", 0), (recipe.seed, "problem", 1)], step=1)
-            assert [row.score for row in rows] == [1.0, 1.0]
+            rows = evaluator.run_rollouts(rollout_requests(evaluator, ({}, "problem"), ({}, "problem")))
+            assert [row.score.value for row in rows] == [1.0, 1.0]
             with pytest.raises(Exception, match="no AIME answer is registered"):
-                evaluator.run([(recipe.seed, "unknown", 0)], step=1)
+                evaluator.run_rollouts(rollout_requests(evaluator, ({}, "unknown")))
         finally:
             trainer.close()
 
@@ -319,11 +325,11 @@ def test_the_seed_tree_carries_the_quickstart_envelope():
     assert "rules.md" in extension and "You are a helpful assistant" not in extension
 
 
-def test_episode_files_render_the_served_tree_with_the_transient_binding(load):
+def test_rollout_files_render_the_served_tree_with_the_transient_binding(load):
     driver = load("run")
     served = HarnessTree({"rules.md": "rules\n", "config/primary.json": json.dumps({"defaultTools": []})})
 
-    merged = driver.episode_files(served, ModelBinding("http://service.test", "task-model", "k"), get_adapter("pi"))
+    merged = driver.rollout_files(served, ModelBinding("http://service.test", "task-model", "k"), get_adapter("pi"))
 
     assert merged["plugin/rules.md"] == "rules\n"
     # The served tree's own settings stay in the package; the endpoint goes to pi's own directory.
@@ -347,7 +353,7 @@ def stub_backend():
 
 
 def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypatch, tmp_path):
-    """The record path end to end on the real service: an episode's model call
+    """The record path end to end on the real service: a rollout's model call
     is recorded against the served composition, the driver finds it by problem
     text, and the report references it. Two of the three reports leave the
     batch open, so no training step runs and no Pi binary is needed."""
@@ -388,7 +394,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         floor = driver.max_sequence(service.records(), service.scenario)
         references = []
         for problem in problems:
-            # What a Pi episode does: an OpenAI-compatible call with no reef
+            # What a Pi rollout does: an OpenAI-compatible call with no reef
             # headers, which the service stamps with this run's scenario.
             request = urllib.request.Request(
                 f"{service.base_url}/v1/chat/completions",
