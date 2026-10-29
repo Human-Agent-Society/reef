@@ -3,7 +3,7 @@
 ``SFTThenRLJobData`` holds two kinds of job data:
 
 1. Held samples: the SFT samples of reports and of uploaded ATIF trajectories, as ``SFTJobData`` holds them.
-2. Its own task jobs: the train tasks of the scenario's ``imported-tasks`` store that have not trained, up to
+2. Its own task jobs: the train tasks of the scenario's sample store that have not trained, up to
    ``tasks_per_job`` of them in one job. The tasks arrive by ``POST /reef/scenarios/{scenario}/tasks`` or by
    the deployment's ``task-import`` section. The training component rolls them out on its own sampler and
    trains on their rollouts.
@@ -11,8 +11,9 @@
 The training pipeline gives held samples priority, so a scenario trains the trajectories it holds before it
 trains tasks. ``SFTThenRLJobPlan`` gives a job of trajectories the SFT parameters and a task job the RL
 parameters. Each job starts from the last checkpoint of the job before it, so an RL job starts from the weights
-that SFT trained. A task trains in one task job: the commit that submits the job lists ``rollout:<task use>``
-for each task, and the store marks the tasks trained once that commit is durable. Eval tasks never train.
+that SFT trained. A task trains in one task job of any trainer of the scenario: the commit that submits the job
+lists ``sample:<task name>`` for each task, and the sample store counts it in the transaction of that commit.
+Eval tasks never train.
 """
 
 from __future__ import annotations
@@ -25,18 +26,12 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.job_data import JobOutcome, Sample, TaskSample
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks.rollout import (
-    HandedOutTasks,
-    PooledTask,
-    SubmittedTaskJob,
-    TaskPool,
-    consumed_rollout_id,
-)
+from reef.recipe.generated_tasks.rollout import HandedOutTasks, PooledTask, TaskPool
 from reef.recipe.sft.processor import SFTJobData
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.sample2job import Sample2JobSettings
-from reef.storage.tasks import IMPORTED_TASK_STORE, StoredTask, TaskStore
+from reef.storage.samples import SampleStore, consumed_sample_id
 from reef.train.jobs import JobPlan, JobPlanContext, JobRequest
 
 #: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
@@ -59,27 +54,20 @@ class SFTThenRLJobSettings(Sample2JobSettings):
             raise ValueError("tasks_per_job must be a positive int")
 
 
-def imported_task_item(store: TaskStore, stored: StoredTask) -> TaskSample:
-    """The task that a task job rolls out for the imported task ``stored``: its directory, named by its task name."""
-    return TaskSample(
-        store.path(stored.files_digest),
-        metadata={"task": {"name": stored.name, "files_digest": stored.files_digest, "split": stored.split}},
-    )
-
-
 class SFTThenRLJobData(SFTJobData):
     """``SFTJobData`` that also hands the scenario's imported train tasks to the training component as task jobs.
 
-    Values: ``tasks_per_job`` is a positive int. ``task_store`` is the scenario's ``imported-tasks`` store, or
-    None for a trainer without task storage, which makes no task job. ``task_pool`` holds the train tasks that
-    wait for a task job and the tasks of the task jobs submitted in this process that did not end;
-    ``handed_out`` is the tasks of the next task job, from hand-out until the trainer commits its submission.
+    Values: ``tasks_per_job`` is a positive int. ``samples`` is the scenario's sample store, or None for a
+    trainer without a scenario session, which makes no task job. ``task_pool`` holds the train tasks that wait
+    for a task job and the tasks of the task jobs submitted in this process that did not end; ``handed_out`` is
+    the tasks of the next task job, from hand-out until the trainer commits its submission.
 
-    Operations: ``advance`` with nothing handed out adds the store's untrained train tasks that the pool does not
-    hold, then hands out the oldest ``tasks_per_job`` of them. ``own_job_data`` is the handed-out tasks.
-    ``own_job_data_submitted`` returns ``rollout:<task use>`` for each, and ``release_own_ids`` marks them
-    trained in the store once one of those IDs is durable. ``job_ended`` drops the ended job's tasks from the
-    pool. A restart rebuilds the pool from the store, so a task whose submission did not commit trains again.
+    Operations: ``advance`` with nothing handed out adds the store's train tasks that no committed job of any
+    trainer trained (no train count) and that the pool does not hold, then hands out the oldest
+    ``tasks_per_job`` of them. ``own_job_data`` is the handed-out tasks. ``own_job_data_submitted`` returns
+    ``sample:<task name>`` for each, so the commit that submits the job counts them. ``job_ended`` drops the
+    ended job's tasks from the pool. A restart rebuilds the pool from the store, so a task whose submission did
+    not commit trains again.
 
     Purpose: the SFT-then-RL recipe's sample-to-job stage (``pipeline.sample2job``).
     """
@@ -101,24 +89,22 @@ class SFTThenRLJobData(SFTJobData):
     def __init__(self, context: PipelineContext, settings: SFTThenRLJobSettings) -> None:
         super().__init__(context, settings.buffer_size, settings.job_samples)
         self.tasks_per_job = settings.tasks_per_job
-        self.task_store = None if context.task_storage is None else context.task_storage.open(IMPORTED_TASK_STORE)
+        self.samples: SampleStore | None = context.samples
         self.task_pool = TaskPool()
         self.handed_out: HandedOutTasks | None = None
-        #: The submitted task jobs whose submission's commit is not yet durable.
-        self.trained_rollouts: list[SubmittedTaskJob] = []
         #: The tasks of the task jobs submitted in this process that did not end.
         self.submitted_tasks: tuple[PooledTask, ...] = ()
 
     def advance(self) -> None:
         """Hand out the next task job's tasks when none are handed out and untrained train tasks wait."""
         super().advance()
-        if self.handed_out is not None or self.task_store is None:
+        if self.handed_out is not None or self.samples is None:
             return
         pooled = {*self.task_pool.waiting, *self.task_pool.taken}
-        trained = self.task_store.trained_task_names()
-        for stored in self.task_store.tasks(split="train"):
-            if stored.name not in trained and stored.name not in pooled:
-                self.task_pool.add(stored.name, imported_task_item(self.task_store, stored))
+        for stored in self.samples.tasks(split="train"):
+            task = stored.sample
+            if isinstance(task, TaskSample) and not stored.train_counts and stored.sample_id not in pooled:
+                self.task_pool.add(stored.sample_id, task)
         taken = self.task_pool.take(self.tasks_per_job)
         if not taken:
             return
@@ -134,18 +120,9 @@ class SFTThenRLJobData(SFTJobData):
         handed_out = self.handed_out
         if handed_out is None:
             raise RuntimeError("no imported tasks were handed out")
-        ids = frozenset(consumed_rollout_id(task_use) for task_use in handed_out.task_uses)
-        self.trained_rollouts.append(SubmittedTaskJob(tuple(str(task.task_id) for task in handed_out.tasks), ids))
         self.submitted_tasks = (*self.submitted_tasks, *handed_out.tasks)
         self.handed_out = None
-        return ids
-
-    def release_own_ids(self, ids: frozenset[str]) -> None:
-        durable = [job for job in self.trained_rollouts if job.consumed_ids & ids]
-        if self.task_store is not None:
-            for job in durable:
-                self.task_store.mark_trained(task_names=job.task_names)
-        self.trained_rollouts = [job for job in self.trained_rollouts if job not in durable]
+        return frozenset(consumed_sample_id(str(task.task_id)) for task in handed_out.tasks)
 
     def job_ended(self, outcome: JobOutcome) -> None:
         """The ended job's imported tasks leave the pool; they trained, and their rewards are in its metrics."""

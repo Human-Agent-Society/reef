@@ -26,6 +26,7 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     archive_imported_files,
     legacy_model_configs,
+    migrate_imported_tasks,
     migrate_record_storage,
     migrate_uploaded_trajectories,
 )
@@ -194,6 +195,14 @@ class SQLiteRecordStore(SQLRecordStore):
                 migrate_uploaded_trajectories(
                     self._connection, SAMPLE_TABLE.table, SAMPLE_TRAIN_COUNT_TABLE.table, COMMIT_TABLE.table
                 )
+                migrate_imported_tasks(
+                    self._connection,
+                    SAMPLE_TABLE.table,
+                    SAMPLE_TRAIN_COUNT_TABLE.table,
+                    COMMIT_TABLE.table,
+                    TASK_TABLES.published,
+                    TASK_TABLES.trained,
+                )
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -218,9 +227,9 @@ class SQLiteRecordStore(SQLRecordStore):
         """Open the task stores of ``scenario`` in this database, with their task files in ``files``."""
         return SQLTaskStorage(self, TASK_TABLES, files, scenario)
 
-    def sample_store(self) -> SQLSampleStore:
-        """Open the training samples in this database."""
-        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE)
+    def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
+        """Open the training samples of ``scenario`` in this database, with its task files in ``files``."""
+        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE, files, scenario)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -414,7 +423,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    samples=records.sample_store(),
+                    samples=records.sample_store(self.task_files, scenario),
                     evaluations=records.evaluation_store(),
                 )
             except BaseException:

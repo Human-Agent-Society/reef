@@ -181,7 +181,12 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
     assert all(
         any(
             target == contract or target.startswith(contract + ".")
-            for contract in ("reef.storage.records", "reef.storage.scenario", "reef.storage.tasks")
+            for contract in (
+                "reef.storage.records",
+                "reef.storage.samples",
+                "reef.storage.scenario",
+                "reef.storage.tasks",
+            )
         )
         for target in _imports_of(imported, "reef.storage")
     )
@@ -209,7 +214,7 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
-        "reef.storage.samples": ("reef.core",),
+        "reef.storage.samples": ("reef.core", "reef.storage.tasks"),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",
@@ -605,6 +610,7 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
         "reef.pipeline_context",
         "reef.record2record",
         "reef.record2sample",
+        "reef.storage.samples",
         "reef.storage.tasks",
         "reef.sample2job",
     )

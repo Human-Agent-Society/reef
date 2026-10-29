@@ -439,7 +439,7 @@ def upload_pipeline(context: PipelineContext) -> TrainingPipeline:
 def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() -> None:
     storage = SQLiteScenarioStorage(None)
     session = storage.open("s")
-    session.samples.add((("t1", TRAJECTORY), ("t2", TRAJECTORY)))
+    session.samples.add_trajectories((("t1", TRAJECTORY), ("t2", TRAJECTORY)))
     session.commit_step(
         expected_step=0,
         commit=CommitRecord(

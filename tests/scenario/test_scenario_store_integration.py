@@ -132,6 +132,7 @@ class FailingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         raise RuntimeError("injected recipe failure")
 

@@ -13,7 +13,6 @@ from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.surface import Surface
 from reef.train.pipeline import TrainingPipeline
 
@@ -50,11 +49,16 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
         dispatcher.close()
 
 
-def test_each_composite_component_opens_its_own_task_stores_and_reads_the_imported_tasks() -> None:
+def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sample_store() -> None:
     first, second = ContextRecipe(), ContextRecipe()
     with closing(SQLiteScenarioStorage()) as storage, closing(storage.open("math")) as session:
         trainers = CompositeRecipe(components={"first": first, "second": second}).build_trainers(
-            "math", session.records, surface=Surface(), algorithm_states={}, task_storage=session.tasks
+            "math",
+            session.records,
+            surface=Surface(),
+            algorithm_states={},
+            task_storage=session.tasks,
+            samples=session.samples,
         )
         for component_trainer in trainers:
             component_trainer.trainer.close()
@@ -64,8 +68,5 @@ def test_each_composite_component_opens_its_own_task_stores_and_reads_the_import
 
         assert second_storage.open("tasks").generations() == ()
         assert session.tasks.open("first/tasks").generation(0) is not None
-        # The scenario's imported tasks are one store that every component reads.
-        session.tasks.open(IMPORTED_TASK_STORE).begin_generation(generation=0, source_record_ids=("record-1",))
-        assert all(
-            storage.open(IMPORTED_TASK_STORE).generation(0) is not None for storage in (first_storage, second_storage)
-        )
+        # The scenario's samples, such as its imported tasks, are one store that every component reads.
+        assert first.contexts[-1].samples is session.samples and second.contexts[-1].samples is session.samples
