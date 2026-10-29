@@ -10,6 +10,7 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.task_service_stubs import task_for
 
+from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.core.tasks import write_harbor_task
@@ -54,8 +55,10 @@ def import_tasks(storage: TaskStorage, root: Path, split: str, *names: str) -> N
         store.add_task(directory=directory, split=split)
 
 
-def pipeline_for(storage: TaskStorage, *, tasks_per_job: int = 2, job_samples: int = 2) -> TrainingPipeline:
-    context = PipelineContext("support", TeacherContextReport, task_storage=storage)
+def pipeline_for(
+    storage: TaskStorage, *, tasks_per_job: int = 2, job_samples: int = 2, training_mode: str = "auto"
+) -> TrainingPipeline:
+    context = PipelineContext("support", TeacherContextReport, task_storage=storage, training_mode=training_mode)
     settings = SFTThenRLJobSettings(job_samples=job_samples, tasks_per_job=tasks_per_job)
     return TrainingPipeline(
         context,
@@ -109,6 +112,29 @@ def test_a_task_whose_submission_did_not_commit_trains_again_after_a_restart(tmp
     pipeline.acknowledge(data.data_id)
     restarted = pipeline_for(storage)
     assert task_names(restarted.build_job_data(2)) == ["task-a"]
+
+
+def instruction(record_id: str) -> AgentRecord:
+    return AgentRecord.create(
+        scenario="support",
+        request_type=RequestType.TRAIN,
+        agent_record_id=record_id,
+        payload={"text": record_id, "session": "session-1", "release_id": "release-1"},
+    )
+
+
+def test_in_manual_mode_an_imported_task_job_waits_for_an_instruction_and_consumes_it(tmp_path: Path) -> None:
+    storage = SQLiteScenarioStorage(tmp_path / "records").open("support").tasks
+    import_tasks(storage, tmp_path / "tasks", "train", "task-a")
+    pipeline = pipeline_for(storage, training_mode="manual")
+    assert not pipeline.ready(2), "manual mode starts no task job without an instruction"
+    pipeline.push(instruction("train-1"))
+    data = pipeline.build_job_data(2)
+    assert task_names(data) == ["task-a"]
+    assert data.request is not None and data.request.id == "train-1"
+    assert "train-1" in pipeline.acknowledge(data.data_id)
+    assert pipeline.buffered_requests() == 0
+    pipeline.close()
 
 
 def test_the_plan_gives_a_task_job_the_rl_request_and_any_other_job_the_sft_request(tmp_path: Path) -> None:
