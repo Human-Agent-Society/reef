@@ -8,7 +8,7 @@ on a copy under the generator service's tasks root. ``generate`` keeps the open 
 adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
 a restart: it places each task that ran against the band ``[band_low, band_high]`` and writes the generation report.
 A second call for a closed generation does nothing.
-Eval tasks run no episodes and receive no band measurement. A task that could not run is an outage, not a band
+Eval tasks run no rollouts and receive no band measurement. A task that could not run is an outage, not a band
 measurement. The generator reports nothing to the Designer, which is not trained here. A cursor under the state
 directory lets a restart continue with the next session.
 """
@@ -42,6 +42,8 @@ from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewC
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError
+from reef.execution.sandbox.config import remote_executor
+from reef.execution.sandbox.process import SandboxUnavailable
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -65,8 +67,6 @@ from reef.record2sample.generator.harbor import (
     harbor_task,
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sandbox.config import remote_executor
-from reef.sandbox.process import SandboxUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ DEFAULT_MAX_MODEL_CALLS = 250
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700.0
 DEFAULT_AGENT_API = "openai"
 DEFAULT_AGENT_TOKEN_ENV = "REEF_TOKEN"
-# The cloud sandbox the agent runs in: a provider of reef.sandbox.config.REMOTE_EXECUTORS.
+# The cloud sandbox the agent runs in: a provider of reef.execution.sandbox.config.REMOTE_EXECUTORS.
 DEFAULT_AGENT_SANDBOX = "e2b"
 # The Designer: the coding agent, or the generator service's one-reply prompt Designer on the same sessions.
 AUTHORS = ("agent", "prompt")

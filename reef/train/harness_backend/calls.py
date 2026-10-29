@@ -15,8 +15,8 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.gateway import ModelCalls
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.checks import redact_secret_shaped
 from reef.train.harness_backend.records import bounded
 

@@ -1,6 +1,6 @@
 # The harness tree Hermes Agent takes. A method writes each part at its path;
 # Reef checks the file as its format and renders it to its renders path,
-# inside the hermes home of an episode or of an install. A tree file that no
+# inside the hermes home of a rollout or of an install. A tree file that no
 # part takes is refused.
 parts:
   # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
@@ -18,7 +18,7 @@ parts:
   # Every skill is also a /name command in the interactive CLI, and hermes has
   # no other command surface, so a command is a skill under a second root.
   # The quirks module adds that root to skills.external_dirs, beside the home
-  # for an episode and at the install root for a reef-hermes session.
+  # for a rollout and at the install root for a reef-hermes session.
   command:
     path: commands/{name}.md
     format: command

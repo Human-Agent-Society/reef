@@ -72,7 +72,7 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
                 "operation_verified": commit.operation_verified,
                 "recorded_at": commit.recorded_at,
                 "artifact_ref": encode_artifact_ref(commit.artifact_ref),
-                "pending": commit.pending,
+                "activated": commit.activated,
                 "consumed_ids": sorted(commit.consumed_ids),
                 "metrics": commit.metrics,
             }

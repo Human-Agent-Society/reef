@@ -97,7 +97,7 @@ def experience_text(experience: Sequence[PlayRecord]) -> str:
     out_of_reach = [r for r in experience if r.outcome == "out_of_reach"]
     lines = [
         (
-            "WHAT THE AGENT DID LAST TIME (mean episode returns in [0, 1] over its attempts; a hint is a few "
+            "WHAT THE AGENT DID LAST TIME (mean rollout returns in [0, 1] over its attempts; a hint is a few "
             "sentences of strategy the agent was given on a second set of attempts):"
         )
     ]
@@ -191,7 +191,7 @@ def skill_tag(skill: str | None) -> dict[str, str]:
 
 
 def mean_reward(rewards: Sequence[float]) -> float:
-    """The mean reward of an arm's episodes that ran; an arm without any counts as 0, like a loss."""
+    """The mean reward of an arm's rollouts that ran; an arm without any counts as 0, like a loss."""
     return statistics.fmean(rewards) if rewards else 0.0
 
 

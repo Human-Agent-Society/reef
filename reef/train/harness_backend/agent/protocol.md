@@ -13,7 +13,7 @@ the deployment's policy selects it. Leave `harness/` unchanged to skip the step.
 | `state/` | read-write | your files for later steps; Reef keeps at most 16 MiB of them |
 | `output/` | read-write | files Reef keeps with the step's record |
 | `scratch/` | read-write | temporary files; Reef removes them when the step ends |
-| `{history}/` | read-only | every tree, episode and decision of the evolution so far |
+| `{history}/` | read-only | every tree, rollout and decision of the evolution so far |
 
 Before you exit, write `output/summary.md`: what you changed and why, in a few lines. You can also write
 `output/notes.json`, a JSON object that Reef records with the step, and `output/requires.json`, a JSON array of what
@@ -30,7 +30,8 @@ Reef serves the tools at `$REEF_AGENT_URL`. A `tree` argument is a directory of 
 - `curl -s "$REEF_AGENT_URL/check" -H 'Content-Type: application/json' -d '{"tree": "harness"}'` validates a tree
   and answers `passed` and `problems`. Reef evaluates only a tree that passes.
 - `curl -s "$REEF_AGENT_URL/evaluate" -H 'Content-Type: application/json' -d '{"tree": "harness", "tasks": ["..."]}'`
-  scores a tree on tasks and answers one record per episode, with the directory of its files. A scored episode in
-  the history is reused; each new episode spends the step's episode budget.
+  scores a tree on tasks and answers one record per rollout, with the directory of its files. A record's `score`
+  is a number, or `"failed"` when the environment could not run the rollout; `failure` then says why. A scored
+  rollout in the history is reused; each new rollout spends the step's rollout budget.
 
 Your model calls go through the same address and spend the step's model-call budget.

@@ -1,6 +1,6 @@
 # The harness tree Codex takes. A method writes each part at its path; Reef
 # checks the file as its format and renders it to its renders path, inside
-# the Codex home of an episode or of an install. A tree file that no part
+# the Codex home of a rollout or of an install. A tree file that no part
 # takes is refused.
 #
 # Codex can run lifecycle hooks, but hook processes do not share Codex's own

@@ -103,7 +103,7 @@ async def _relay_inference_stream(
         if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
     }
     if record:
-        # Only a resident harness reads the head; an evaluation episode runs a candidate, not the served tree.
+        # Only a resident harness reads the head; an evaluation rollout runs a candidate, not the served tree.
         response_headers.update(await _release_header(request_service, headers))
     content_type = next(
         (value for name, value in response_headers.items() if name.lower() == "content-type"),
@@ -228,9 +228,9 @@ def register_inference_routes(
         return await serve(request, request.headers, request.path, record=True)
 
     async def rollout(request: web.Request) -> web.StreamResponse:
-        """A call of a rollout episode that Reef runs itself (``ROLLOUT_HEADER``): the served release, kept by nobody.
+        """A call of a rollout that Reef runs itself (``ROLLOUT_HEADER``): the served release, kept by nobody.
 
-        The response keeps its training block, so the episode's caller assembles its samples. The call does
+        The response keeps its training block, so the rollout's caller assembles its samples. The call does
         not stream: the training block is complete only with the whole response.
         """
         payload = await read_object(request)
@@ -242,9 +242,9 @@ def register_inference_routes(
         return web.json_response(response_payload)
 
     async def evaluation(request: web.Request) -> web.StreamResponse:
-        """An evaluation episode's call: the scenario's release, served like any other and kept by nobody.
+        """An evaluation rollout's call: the scenario's release, served like any other and kept by nobody.
 
-        The episode runs its own candidate of one component, named in the path
+        The rollout runs its own candidate of one component, named in the path
         of a composed release, so that component's served hooks stay out.
         """
         path = "/v1/" + request.match_info["route"]

@@ -26,7 +26,7 @@ from reef.core.job_data import TrajectorySample
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend import AgentOutcome, Method, Tools, Trace, Workspace
 from reef.train.harness_backend.calls import StepCalls

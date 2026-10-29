@@ -48,7 +48,7 @@ for _ in $(seq 1 720); do
 done
 [ "$ready" = 1 ] || { echo "run.sh: Reef did not become ready; see $SDPO_RUN_DIR/reef.log" >&2; exit 1; }
 
-# The episode, in an ephemeral uv environment: reef-eval with Harbor, the
+# The rollout, in an ephemeral uv environment: reef-eval with Harbor, the
 # reef-client protocol, and this directory's harness package.
 uv run --no-project --python 3.12 \
     --with "reef-eval[harbor]" --with reef-client --with-editable "$PWD" \

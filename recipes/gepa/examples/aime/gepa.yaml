@@ -1,7 +1,7 @@
 # The recipe the AIME driver boots: run.py loads this file, fills
 # evolution.evaluation.tasks with the pinned validation split, builds the
 # implementation below, and serves it from its own embedded Reef service. The
-# Pi episodes the driver runs point at that service, so the problems it solves
+# Pi rollouts the driver runs point at that service, so the problems it solves
 # are recorded traffic and the method reflects on the served tree's own
 # transcripts.
 #
@@ -20,7 +20,7 @@ recipe:
       # The third report closes the minibatch. Both correct and incorrect
       # transcripts contribute to reflection.
       batch_size: 3
-      # The harness binary the evaluation episodes run headless, from the environment.
+      # The harness binary the evaluation rollouts run headless, from the environment.
       binary: ${REEF_PI_BINARY}
       # The first tree, beside this file: rules.md is the quickstart's system
       # prompt and the only evolvable file; config/primary.json (Pi starts with
@@ -28,7 +28,7 @@ recipe:
       # makes the rules Pi's whole system prompt reproduce the quickstart's
       # request envelope and never change. run.py resolves the path.
       seed: seed
-      # The scenario's history (every candidate, episode and decision) and its
+      # The scenario's history (every candidate, rollout and decision) and its
       # step records. A resumed run reads the history from here.
       state_dir: ${REEF_WORK}/harness
       models:
@@ -61,7 +61,7 @@ recipe:
         # Left empty here because it is data, not configuration: run.py fills it
         # with the 45 validation problems from the pinned split before build_recipe.
         tasks: []
-        # The quickstart's containment score over one episode, in the harness/
+        # The quickstart's containment score over one rollout, in the harness/
         # package. run.py binds this scorer and the feedback hook to a
         # serializable answer and context snapshot after it builds the recipe.
         scorer: harness.aime:AIMEAnswerScorer

@@ -1,8 +1,8 @@
-# DeepSeek Harness (dsh), driven headless per episode.
+# DeepSeek Harness (dsh), driven headless per rollout.
 #
 # DSH_HOME relocates the whole harness home (the headless and web profiles
 # and their patch layers, sessions, storages, the user AGENTS.md and skills)
-# under the episode root, and DSH_AGENTS_HOME relocates the second skill
+# under the rollout root, and DSH_AGENTS_HOME relocates the second skill
 # root, where commands render as user invocable skills (dsh has
 # no other command surface). DSH_TELEMETRY_MODE stops the OTLP session
 # telemetry. The default workspace-write permission runs tools inside the
@@ -12,7 +12,7 @@
 name: dsh
 binary: dsh
 # The vendor's install channel at the pinned version. Harness evolution startup
-# installs it for the episodes unless evolution.binary names a binary. The pin
+# installs it for the rollouts unless evolution.binary names a binary. The pin
 # follows the alpha tag: the source line that was mapped and the binary that
 # was measured.
 install:
@@ -36,7 +36,7 @@ config:
     # A patched config replaces the plugin's whole config, so every key
     # the adapter relies on rides along: the session log stays where the
     # bundle put it and uncompressed (the reader cannot parse zstd), and
-    # the LLM title call (one extra model request per episode) and the
+    # the LLM title call (one extra model request per rollout) and the
     # telemetry stay off.
     defaults:
       session-persistence-jsonl:
@@ -51,7 +51,7 @@ config:
     # profiles are held to them.
     checks: &patch_checks
       # The session log stays uncompressed (the reader cannot parse zstd),
-      # and the LLM title call (one extra model request per episode) and
+      # and the LLM title call (one extra model request per rollout) and
       # the telemetry stay off.
       - key: [session-persistence-jsonl.config.compression, session-title-llm.disabled, session-telemetry-otel.disabled]
         match: IsDefault()
@@ -151,7 +151,7 @@ config:
       - key: dsh.profile.patchReload
         match: IsDefault()
 trajectory:
-  # One session per episode under sessions/<cwd slug>/session-<id>/session.jsonl,
+  # One session per rollout under sessions/<cwd slug>/session-<id>/session.jsonl,
   # the {type, seq, time, data} envelope; the deepseek-session-jsonl reader lifts data beside the other three.
   format: deepseek-session-jsonl
   path: "dsh/sessions"
@@ -164,7 +164,7 @@ quirks: reef.harness.adapters.dsh.quirks
 # apiKeyEnv and supplied through the .env file. Each profile's patch carries
 # the route.
 # Reef renders the set matching its model binding's api into evaluation
-# episodes; the served tree never carries a provider or a key.
+# rollouts; the served tree never carries a provider or a key.
 model_binding:
   openai:
     - target: primary

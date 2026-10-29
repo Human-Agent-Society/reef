@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Hashable, Iterator, Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from tests.support._threshold_processor import threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 from tests.support.component_trainers import (
     HARNESS,
+    HELD,
     WEIGHTS,
     HybridThresholdJobData,
     JudgedAtOnce,
@@ -38,12 +39,12 @@ from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
+from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2record import (
@@ -77,7 +78,7 @@ from reef.train.types import JobData, Sample
 
 
 class _SlowBackend(_ComponentBackend):
-    """The same cycle whose evaluation waits for the test to let it go, as a minutes long episode run would."""
+    """The same cycle whose evaluation waits for the test to let it go, as a minutes long rollout run would."""
 
     def __init__(self, component: str, artifact_dir: Path) -> None:
         super().__init__(component, artifact_dir)
@@ -459,7 +460,7 @@ def test_a_failed_instruction_of_a_scenario_that_is_gone_starts_no_worker(
     old = _scenario(dispatcher)
     dispatcher.delete_scenario("agent")
     monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_instruction", lambda error: True)
-    dispatcher.local_workers.fail_instruction(old, RuntimeError("episode failed"), HARNESS)
+    dispatcher.local_workers.fail_instruction(old, RuntimeError("rollout failed"), HARNESS)
     with dispatcher.local_workers.lock:
         assert dispatcher.local_workers.workers == {}
 
@@ -929,7 +930,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
 
 
 @pytest.mark.unit
-def test_a_rollback_to_the_creation_after_a_rejected_first_step(dispatchers: _Dispatchers) -> None:
+def test_an_activation_of_the_creation_after_a_rejected_first_step(dispatchers: _Dispatchers) -> None:
     """A rejected step records the creation without a checkpoint; the creation still has its own bytes."""
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher)
@@ -940,7 +941,7 @@ def test_a_rollback_to_the_creation_after_a_rejected_first_step(dispatchers: _Di
         assert _commit_step(scenario, HARNESS) is not None
     assert scenario.current_artifact_ref().release_id != creation
     assert next(row for row in scenario.releases() if row["operation"] == "creation")["restorable"] is True
-    scenario.rollback(creation)
+    scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS)
     assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness seed"
 
 
@@ -1068,7 +1069,11 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     assert manifest["release_id"] == harness_release
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_releases(headers)["releases"]
-    assert [row.get("component") for row in catalog] == [None, HARNESS]
+    assert [row["operation"] for row in catalog] == ["creation", "training"]
+    # The creation carries the base artifact; the harness step made its own.
+    base = scenario.repository.backend.resolve_release("base").release_id
+    assert [row["artifact_id"] for row in catalog] == [f"{base}:{HARNESS}", f"{harness_release}:{HARNESS}"]
+    assert [row["active"] for row in catalog] == [False, True]
 
 
 @pytest.mark.unit
@@ -1092,7 +1097,7 @@ def test_each_components_step_reaches_the_tracker_under_its_name(dispatchers: _D
 
 @pytest.mark.unit
 def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) -> None:
-    """A rejected step, an unlisted weights step and a promote at step 1 never move the head or break the chain."""
+    """A rejected step, an unlisted weights step and an activation never break the chain or list a new row."""
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher)
     service = RequestService(dispatcher)
@@ -1142,41 +1147,96 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     page = service.harness_release_page(headers, 3)
     assert h2 in page
 
-    # A rollback to the unlisted weights release restores h1's tree: the row names the listed release
-    # that target carried, so the requires chain walks on through it. The rejected step recorded w1's
-    # reference without a checkpoint, which must not hide the checkpoint w1 has.
-    scenario.rollback(w1)
-    restored = scenario.current_artifact_ref().release_id
+    # Activating h1's harness serves h1's tree again on the weights served now: the activation publishes that
+    # combination, which the catalog does not list, and the head is the listed release h1.
+    activated = scenario.activate(f"{h1}:{HARNESS}", HARNESS)
+    assert activated.release_id not in (h1, h2)
     catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, restored]
-    assert catalog[-1]["rollback_target_release_id"] == h1
-    assert catalog[-1]["composed_rollback_target_release_id"] == w1
-    assert required_by(catalog, restored) == [{"name": "TOKEN", "kind": "env"}]
-    assert service.harness_head(headers) == restored
+    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
+    assert service.harness_head(headers) == h1
+    assert service.harness_manifest(headers)["release_id"] == h1
+    assert required_by(catalog, h1) == [{"name": "TOKEN", "kind": "env"}]
 
-    # A rollback to weights held for review, which carried the restored tree, names the listed release
-    # that carried it.
+    # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
+    # release and names no weights release or combination.
     _append_records(scenario, 4)
     backends[WEIGHTS].hold_next = True
     weights = scenario.prepare_training_step(WEIGHTS)
-    assert weights is not None and weights.pending
+    assert weights is not None and weights.changed_kinds == {HELD}
     scenario.commit(weights, component=WEIGHTS)
-    held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+    held = scenario.store.history()[-1].artifact_ref.release_id
     _append_records(scenario, 5)
     assert _commit_step(scenario, HARNESS) is not None
-    scenario.rollback(held)
+    h3 = scenario.current_artifact_ref().release_id
+    combined = scenario.activate(f"{held}:{WEIGHTS}", WEIGHTS).release_id
+    assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 3"
     catalog = service.harness_releases(headers)["releases"]
-    assert held not in {row["release_id"] for row in catalog}
-    assert catalog[-1]["operation"] == "rollback"
-    assert catalog[-1]["rollback_target_release_id"] == restored
-    assert catalog[-1]["composed_rollback_target_release_id"] == held
-    assert required_by(catalog, catalog[-1]["release_id"]) == [{"name": "TOKEN", "kind": "env"}]
-    assert service.harness_head(headers) == catalog[-1]["release_id"] not in (w1, w2, held)
+    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, h3]
+    assert service.harness_head(headers) == h3 not in (w1, w2, held, combined, activated.release_id)
+    assert required_by(catalog, h3) == [{"name": "TOKEN", "kind": "env"}]
+
+
+@pytest.mark.unit
+def test_a_training_step_carries_the_active_release_and_keeps_an_activated_component(
+    dispatchers: _Dispatchers,
+) -> None:
+    """After an older weights artifact is activated, a harness step carries the active weights, not the chain tip's."""
+    dispatcher, _ = dispatchers.open()
+    scenario = _scenario(dispatcher, 1)
+    assert _commit_step(scenario, WEIGHTS) is not None
+    assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
+    scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
+    assert _commit_step(scenario, HARNESS) is not None
+    assert component_files(scenario, scenario.current_artifact_ref()) == {
+        WEIGHTS: "weights seed",
+        HARNESS: "harness step 1",
+    }
+    active = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
+    assert active == {
+        WEIGHTS: f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}",
+        HARNESS: f"{scenario.current_artifact_ref().release_id}:{HARNESS}",
+    }
+
+
+@pytest.mark.unit
+def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activates_a_row(
+    dispatchers: _Dispatchers,
+) -> None:
+    """Each catalog row names its harness artifact; exactly one row is active, and posting a row's artifact_id and
+    component to the activate route makes that row the active one."""
+    from aiohttp.test_utils import TestClient
+
+    dispatcher, _ = dispatchers.open()
+    scenario = _scenario(dispatcher, 1)
+    assert _commit_step(scenario, HARNESS) is not None
+    assert _commit_step(scenario, WEIGHTS) is not None
+    _append_records(scenario, 2)
+    assert _commit_step(scenario, HARNESS) is not None
+    headers = {"x-reef-scenario": "agent"}
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            assert [row["active"] for row in rows] == [False, False, True]
+            assert all(row["component"] == HARNESS and row["activated"] for row in rows)
+            first = rows[1]
+            body = {"artifact_id": first["artifact_id"], "component": first["component"]}
+            answer = await client.post("/reef/scenarios/agent/activate", json=body)
+            assert answer.status == 200, await answer.text()
+            assert (await answer.json())["artifact_id"] == first["artifact_id"]
+            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            assert [row["artifact_id"] for row in rows if row["active"]] == [first["artifact_id"]]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, dispatchers: _Dispatchers) -> None:
-    """One failed read of the creation artifact must not refuse every later promote for the process lifetime."""
+    """One failed read of the creation artifact must not hide the creation's manifest for the process lifetime."""
     dispatcher, _ = dispatchers.open()
     scenario = _scenario(dispatcher)
     original = ArtifactReleaseChain.resolve
@@ -1201,8 +1261,8 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
 
 
 @pytest.mark.unit
-def test_a_promote_of_weights_held_at_step_one_is_no_harness_release(dispatchers: _Dispatchers) -> None:
-    """The creation artifact has no record; its manifest still says the promoted tree did not change."""
+def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatchers: _Dispatchers) -> None:
+    """The creation artifact has no record; its manifest still says the activated tree did not change."""
     dispatcher, backends = dispatchers.open()
     backends[WEIGHTS].hold_next = True
     scenario = _scenario(dispatcher)
@@ -1211,18 +1271,18 @@ def test_a_promote_of_weights_held_at_step_one_is_no_harness_release(dispatchers
     creation = scenario.current_artifact_ref().release_id
     _append_records(scenario, 1)
     weights = scenario.prepare_training_step(WEIGHTS)
-    assert weights is not None and weights.pending
+    assert weights is not None and weights.changed_kinds == {HELD}
     scenario.commit(weights, component=WEIGHTS)
-    held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
-    scenario.rollback(held, operation="promote")
+    held = scenario.store.history()[-1].artifact_ref.release_id
+    scenario.activate(f"{held}:{WEIGHTS}", WEIGHTS)
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
     assert service.harness_head(headers) == creation
     assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [creation]
 
 
 @pytest.mark.unit
-def test_a_rollback_under_the_same_tree_is_no_new_harness_head(dispatchers: _Dispatchers) -> None:
-    """A rollback or promote that changed only the weights is not announced or listed as a harness release."""
+def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _Dispatchers) -> None:
+    """An activation that changes only the weights names the same harness release; none adds a row."""
     dispatcher, _ = dispatchers.open()
     scenario = _scenario(dispatcher)
     service = RequestService(dispatcher)
@@ -1237,22 +1297,17 @@ def test_a_rollback_under_the_same_tree_is_no_new_harness_head(dispatchers: _Dis
     assert _commit_step(scenario, WEIGHTS) is not None
 
     # Back to the first weights under the same tree: nothing to pull.
-    scenario.rollback(first_weights)
+    scenario.activate(f"{first_weights}:{WEIGHTS}", WEIGHTS)
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
     assert service.harness_head(headers) == harness_release
     assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
 
-    # Back to the base: the seed tree is served again, and that is a harness release.
-    scenario.rollback(base)
-    restored = scenario.current_artifact_ref().release_id
-    assert service.harness_head(headers) == restored
-    assert service.harness_manifest(headers)["release_id"] == restored
+    # Back to the base's harness: the seed tree is served again, named by the base release.
+    scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS)
+    assert service.harness_head(headers) == base
+    assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [
-        base,
-        harness_release,
-        restored,
-    ]
+    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
 
 
 @pytest.mark.unit
@@ -1344,19 +1399,20 @@ def test_commit_record_carries_its_component() -> None:
     assert encoded["component"] == HARNESS
     assert CommitRecord.from_dict(encoded) == record
     assert "component" not in CommitRecord.from_dict({**encoded, "component": None}).to_dict()
-    with pytest.raises(CommitHistoryError, match="only training commits may carry component"):
-        CommitRecord(
-            scenario="agent",
-            step=4,
-            artifact_ref=ArtifactRef("c", "r4", "r3"),
-            checkpoint=True,
-            algorithm_state=None,
-            high_water_sequence=0,
-            high_water_offset=0,
-            operation="rollback",
-            rollback_target_release_id="r1",
-            component=HARNESS,
-        )
+    start = CommitRecord(
+        scenario="agent",
+        step=4,
+        artifact_ref=ArtifactRef("c", "r1", None),
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation="train_from",
+        component=HARNESS,
+    )
+    assert CommitRecord.from_dict(start.to_dict()) == start
+    with pytest.raises(CommitHistoryError, match="an activate commit names"):
+        replace(start, operation="activate")
 
 
 @pytest.mark.unit
@@ -1404,14 +1460,14 @@ def test_a_surface_built_with_the_flat_keywords_serves_one_component() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("held", [False, True])
 def test_recorded_release_survives_backend_completion_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers, pending: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers, held: bool
 ) -> None:
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher, 1)
     backend = backends[HARNESS]
-    backend.hold_next = pending
+    backend.hold_next = held
     original_head = scenario.current_artifact_ref()
     result = scenario.prepare_training_step(HARNESS)
     assert result is not None
@@ -1426,7 +1482,8 @@ def test_recorded_release_survives_backend_completion_failure(
         with pytest.raises(OSError, match="backend completion unavailable"):
             scenario.commit(result, component=HARNESS)
     (record,) = scenario.store.history()
-    expected_head = original_head if pending else record.artifact_ref
+    assert record.activated is not held
+    expected_head = original_head if held else record.artifact_ref
     assert scenario.current_artifact_ref() == expected_head
     assert scenario.scenario_step == 0
     assert trainer.state == original_state
@@ -1595,20 +1652,19 @@ def test_a_restart_whose_component_lost_the_running_job_ends_it_failed(
     scenario = _scenario(restarted)
     assert _wait_for(lambda: _job_events(scenario) == ["submitted", "failed"])
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert (state.job, state.start, state.finished_jobs) == (None, None, 1)
+    assert (state.job, state.start, state.finished_jobs) == (None, "stub:base", 1)
     assert state.last_job is not None and "no such job" in state.last_job.error
 
 
 @pytest.mark.unit
-def test_a_weights_rollback_cancels_the_running_job_and_moves_the_next_jobs_start(
+def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """A rollback that restores older weights imports that release into the training component and cancels the
-    running job. The next job starts from the imported release, not from the last checkpoint."""
+    """A new start imports the release into the training component and cancels the running job. The next job
+    starts from the imported release, not from the last checkpoint, and serving does not change."""
     training = HeldJobs(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _scenario(dispatcher, 1)
-    base = scenario.current_artifact_ref().release_id
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     training.finish(training.submitted[0])
     _settle_weights_job(scenario)
@@ -1617,10 +1673,14 @@ def test_a_weights_rollback_cancels_the_running_job_and_moves_the_next_jobs_star
     running = training.submitted[-1]
     assert running.start == str(tmp_path / "checkpoints" / "1")
 
-    scenario.rollback(base)
+    served = scenario.current_artifact_ref()
+    scenario.train_from(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
     assert training.statuses[running.job_id].error == "cancelled"
     [imported] = training.imported
-    assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
+    assert scenario.current_artifact_ref() == served
+    assert component_files(scenario, served)[WEIGHTS] == "weights job 1"
+    # The harness trainer's start is its own: it does not move.
+    assert scenario.store.history()[-1].component == WEIGHTS
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
     assert (state.job, state.start) == (None, str(imported))
     _append_records(scenario, 3)
@@ -1629,27 +1689,27 @@ def test_a_weights_rollback_cancels_the_running_job_and_moves_the_next_jobs_star
 
 
 @pytest.mark.unit
-def test_a_restart_between_a_rollback_and_its_new_start_imports_the_release_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers
+def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
+    tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """The process dies after the rollback's commit record and before the trainer takes its start. The trainer's
-    state recovers from its earlier commit, so the restarted scenario imports the rolled-back release again."""
+    """The process stops after the ``train_from`` record and before the trainer's next commit records the start.
+    The trainer's state recovers from its earlier commit, so the restarted scenario imports the release again."""
     training = HeldJobs(tmp_path / "checkpoints")
     factory = _seeded_repository(tmp_path)
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
     scenario = _scenario(dispatcher, 1)
-    base = scenario.current_artifact_ref().release_id
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     training.finish(training.submitted[0])
     _settle_weights_job(scenario)
-    monkeypatch.setattr(scenario.trainer_for(WEIGHTS), "apply_rollback_start", lambda start: None)
-    scenario.rollback(base)
-    assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start == str(tmp_path / "checkpoints" / "1")
+    served = scenario.current_artifact_ref()
+    scenario.train_from(f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}", WEIGHTS)
+    assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start == str(training.imported[0])
     dispatcher.close()
 
     restarted, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
     scenario = _scenario(restarted, 2)
     assert len(training.imported) == 2
+    assert scenario.current_artifact_ref() == served
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
     assert state.start == str(training.imported[-1])
     assert _commit_step(scenario, WEIGHTS) == [("i2", "r2")]

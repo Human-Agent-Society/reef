@@ -56,13 +56,13 @@ class StepProgress:
     for an automatic step or a client's proposal. ``phase`` is one of
     ``STEP_PHASES``: ``"rolling out"`` while an offline step runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
-    episodes run, and ``"proposing"`` at any other time from the moment the
+    rollouts run, and ``"proposing"`` at any other time from the moment the
     step claims its record directory until a candidate exists.
     ``started_at`` is the step's start in seconds since the epoch.
     ``step_record`` is the step's record directory, which the step claims
     before it reports any progress.
-    ``episodes_total`` ≥ 0 is the episode count of the rollouts or of the
-    evaluation once its episodes are laid out, else ``None``. ``activity``
+    ``rollouts_total`` ≥ 0 is the rollout count of the rollouts or of the
+    evaluation once its rollouts are laid out, else ``None``. ``activity``
     is what the method did so far, oldest first, each ``{at, kind, text}``
     with ``failed`` on a line that went wrong.
     Purpose: the backend replaces it at each phase change; the request page
@@ -73,7 +73,7 @@ class StepProgress:
     phase: str
     started_at: float
     step_record: str
-    episodes_total: int | None = None
+    rollouts_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -81,9 +81,9 @@ class StepProgress:
             raise ValueError(f"StepProgress.phase must be one of {', '.join(STEP_PHASES)}")
         if not isinstance(self.step_record, str) or not self.step_record:
             raise ValueError("StepProgress.step_record must name the step's record directory")
-        total = self.episodes_total
+        total = self.rollouts_total
         if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
-            raise ValueError("StepProgress.episodes_total must be an integer of at least 0 or None")
+            raise ValueError("StepProgress.rollouts_total must be an integer of at least 0 or None")
 
 
 class StepProgressReader(ABC):

@@ -26,7 +26,7 @@ import yaml
 import reef.harness.adapters
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import TREE_FILE
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 from reef.harness.tree.checks import NATIVE_LOOP_DEFAULT_MAX_STEPS
 

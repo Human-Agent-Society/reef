@@ -3,12 +3,12 @@
 ``ReefineRecipe`` answers a person's training instructions, one step per
 instruction (``training_mode: manual``), with ``ReefineMethod``. It merges
 Reefine's defaults into the deployment's ``evolution`` section: the method,
-the seed beside this module, extensions held for a promote (``review_parts``),
-and an evaluation that runs the candidate alone on the deployment's tasks,
-scored by ``AnswerScorer``, and publishes it when every task meets the floor.
-On the health task the floor checks that the tree still works, not that the
-requested change does; the step's design and review and the person judge
-that.
+the seed beside this module, and an evaluation that runs the candidate alone
+on the deployment's tasks, scored by ``AnswerScorer``, and keeps it when every
+task meets the floor. On the health task the floor checks that the tree still
+works, not that the requested change does; the step's design and review and
+the person judge that. By default, a person activates a tree that changes an
+extension (the ``activation`` rule's ``review_kinds``).
 
 ``evolution.agent`` says where the coding agent that answers a request on
 pi runs (``reef.train.harness_backend.agent.settings``); Reefine adds
@@ -62,7 +62,7 @@ DEFAULT_TRIAL_TIMEOUT_S = 300.0
 
 @dataclass(frozen=True, kw_only=True)
 class ReefineRecipe(HarnessEvolutionRecipe):
-    """Refine a harness once per instruction, with extensions held for review.
+    """Refine a harness once per instruction; a person activates a tree that changes an extension.
 
     Values: the fields of ``HarnessEvolutionRecipe``, read with Reefine's
     defaults merged in. ``multimodal`` is ``evolution.multimodal`` read,
@@ -73,7 +73,7 @@ class ReefineRecipe(HarnessEvolutionRecipe):
     cannot jail it), and ``trial_timeout_s`` > 0 bounds each of its trials.
     Purpose: a deployment names it as its recipe; it builds each scenario's
     backend with ``ReefineMethod``. Override ``evolution.evaluation.policy``
-    to compare scores against the current release, and ``training-mode`` to
+    to compare scores against the head tree, and ``training-mode`` to
     learn from reports too.
     """
 
@@ -138,9 +138,15 @@ class ReefineRecipe(HarnessEvolutionRecipe):
             binary = section.get("binary")
             agent = {**({"binary": binary} if binary else {}), **agent}
         reviewed = [part for part in REVIEWED_PARTS if part in descriptor.layout.parts]
-        defaults = {**EVOLUTION_DEFAULTS, "review_parts": reviewed}
         kwargs = super()._recipe_kwargs(
-            {**settings, "evolution": {**defaults, **own, "agent": agent, "evaluation": evaluation}}, values
+            {
+                **settings,
+                "evolution": {**EVOLUTION_DEFAULTS, **own, "agent": agent, "evaluation": evaluation},
+                # An extension runs in the harness's process with the user's privileges, so by default a person
+                # activates a tree that changes one.
+                "activation": settings.get("activation", {"module": "always", "config": {"review_kinds": reviewed}}),
+            },
+            values,
         )
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(section.get("multimodal"), values)

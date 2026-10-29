@@ -3,7 +3,7 @@
 The agent is a stand-in for pi: a script that reads its prompt and rules,
 calls the gateway's tools and model route, edits the workspace and writes
 what it saw to ``output/notes.json``. The gateway relays its model call to a
-local stand-in upstream. Episodes run the fake pi of ``harness_steps``.
+local stand-in upstream. Rollouts run the fake pi of ``harness_steps``.
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ from tests.support.harness_service import backend_step
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
 from reef.core.plugins import PluginConfigError
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.execution.sandbox.e2b import E2BExecutor
+from reef.execution.sandbox.modal import ModalExecutor
+from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.remote import deployment_owner
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.recipe.errors import RecipeConfigError
-from reef.sandbox.e2b import E2BExecutor
-from reef.sandbox.modal import ModalExecutor
-from reef.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
-from reef.sandbox.remote import deployment_owner
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
@@ -153,8 +153,8 @@ def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_th
     assert seen["skill"] and seen["tools"] == ["check", "evaluate"]
     assert seen["outside"][0] == 400 and "outside the step's workspace" in seen["outside"][1]["error"]
     assert seen["check"] == [200, {"passed": True, "problems": []}]
-    (episode,) = seen["evaluate"][1]["episodes"]
-    assert seen["evaluate"][0] == 200 and episode["score"] == 1.0 and episode["directory"].startswith("../../history/")
+    (rollout,) = seen["evaluate"][1]["rollouts"]
+    assert seen["evaluate"][0] == 200 and rollout["score"] == 1.0 and rollout["directory"].startswith("../../history/")
     # The model call went to the method's binding, metered and recorded with the step.
     assert seen["model"][0] == 200 and upstream.requests[0]["body"]["model"] == "proposer-model"
     step_dir = Path(first.metrics["step_record"])

@@ -10,7 +10,7 @@
     adapter, in one result.
 ``render``
     ``render_tree``: a tree and an optional model binding to the files an
-    adapter's binary reads, for an episode or for a client.
+    adapter's binary reads, for a rollout or for a client.
 
 The paths a tree may hold for one adapter, and what each one is, are the
 adapter's parts (``reef.harness.adapters.parts``), declared in its

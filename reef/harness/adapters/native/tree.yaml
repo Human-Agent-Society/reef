@@ -1,6 +1,6 @@
 # The harness tree of native, Reef's own loop. A method writes each part at
 # its path; Reef checks the file as its format and renders it to its renders
-# path, inside the native directory of an episode or of an install. A tree
+# path, inside the native directory of a rollout or of an install. A tree
 # file that no part takes is refused.
 #
 # The loop reads no prompt directory and loads no vendor plugin, so native

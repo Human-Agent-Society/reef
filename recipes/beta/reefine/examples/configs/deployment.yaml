@@ -19,8 +19,6 @@ recipe:
       # No agent: the recipe's method, recipes.beta.reefine:ReefineMethod, answers a request in text, with the
       # skills, rules, commands and extensions a request may write on pi.
       agent: null
-      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
-      review_parts: [extension]
       # Each step's workspace (its tree, material, calls and output), the history of every candidate, and the
       # proposal inbox of POST /reef/harness/proposals, one directory per scenario.
       state_dir: recipes/beta/reefine/examples/work/deployment/harness
@@ -39,6 +37,13 @@ recipe:
       # No seed: the first tree is the recipe's own (recipes/beta/reefine/seed), the starter skill.
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual
+
+# Every kept tree serves at once, except one that changes an extension: an evolved extension runs in pi's process
+# with your privileges, so a person activates it (POST /reef/scenarios/{scenario}/activate).
+activation:
+  module: always
+  config:
+    review_kinds: [extension]
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

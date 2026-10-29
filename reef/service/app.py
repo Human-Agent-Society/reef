@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import tempfile
 from collections.abc import Iterable
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
 
+from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.runtime.interfaces import InferenceHandler
+from reef.service.artifact_evaluations import ArtifactEvaluations
+from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
@@ -59,6 +64,8 @@ def create_app(
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
     open_local_cycles_at: str | None = None,
+    evaluations: ArtifactEvaluations | None = None,
+    artifact_imports: ArtifactImports | None = None,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -66,6 +73,11 @@ def create_app(
     a connection, the dispatcher's held local cycles open (see
     ``Dispatcher(hold_local_cycles=True)``). ``evaluation_tokens`` open the
     evaluation routes only (see ``create_authentication_middleware``).
+    ``evaluations`` runs the artifact evaluations of the evaluation routes, and
+    the automatic ones while the app runs; None runs the routes' evaluations
+    with reef-eval's Harbor lab and evaluates no new artifact.
+    ``artifact_imports`` reads and holds artifact imports; None reads the
+    built-in sources into the system's temporary directory.
     """
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     app = web.Application(
@@ -74,11 +86,27 @@ def create_app(
     )
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
+    artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
     register_routes(
         app,
         request_service=request_service,
         inference_handler=inference_handler,
+        evaluations=artifact_evaluations,
+        imports=(
+            ArtifactImports(ArtifactSources.from_setting(()), Path(tempfile.gettempdir()) / "reef-artifact-imports")
+            if artifact_imports is None
+            else artifact_imports
+        ),
     )
+
+    async def evaluate_new_artifacts(app: web.Application):
+        artifact_evaluations.open()
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(artifact_evaluations.close)
+
+    app.cleanup_ctx.append(evaluate_new_artifacts)
     if record_retention is not None:
 
         async def maintain_records(app: web.Application):

@@ -1,6 +1,6 @@
 # The harness tree opencode takes. A method writes each part at its path;
 # Reef checks the file as its format and renders it to its renders path,
-# inside the opencode configuration directory of an episode or of an install.
+# inside the opencode configuration directory of a rollout or of an install.
 # A tree file that no part takes is refused.
 parts:
   rules:

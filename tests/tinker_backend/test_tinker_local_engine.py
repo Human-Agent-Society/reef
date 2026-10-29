@@ -1,10 +1,12 @@
-"""Tinker training in process, its exported adapters served by Reef's engines on an inference component (CPU contracts)."""
+"""Tinker training in process, its adapters served by Reef's engines on an inference component (CPU contracts)."""
 
 from __future__ import annotations
 
-import json
+import hashlib
+import sys
 import time
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -14,7 +16,7 @@ from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime
+from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -23,43 +25,35 @@ from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.adapter import adapter_name
 from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.tinker.weights import TinkerSamplerWeights
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
 from reef.train.types import JobData, TrajectorySample
 
 TOKENS = ("REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN")
-#: The release format of Tinker's exported adapters at the configs' LoRA rank.
-EXPORTED_ADAPTERS = ReleaseFormat("adapter", 16, ("all",))
+#: What the engines load: the adapter at each release's sampler path, at the configs' LoRA rank.
+ENGINE_ADAPTERS = ReleaseFormat("adapter", 16, ("all",))
 
 
 class RemoteClient:
-    """The Tinker SDK boundary as an offline double: trains, and writes a fake PEFT adapter on download."""
+    """The Tinker SDK boundary as an offline double: trains, and saves nothing but manifests."""
 
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         self.calls = []
-        self.downloads = []
         self.closed = False
 
     def initialize(self):
         return TinkerCheckpoint("Qwen/Qwen3-8B", 16, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef, export_adapter):
+    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef):
         self.calls.append(checkpoint)
         number = len(self.calls)
         return TinkerCheckpoint(
             checkpoint.base_model, 16, f"tinker://update-{number}/state", f"tinker://update-{number}/sampler"
         ), {"loss": -1.0}
-
-    def download(self, checkpoint, release):
-        self.downloads.append(checkpoint)
-        for name in (ADAPTER_DIR, TINKER_ADAPTER_DIR):
-            (release / name).mkdir(parents=True)
-            (release / name / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 16}))
-            (release / name / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def close(self):
         self.closed = True
@@ -142,6 +136,32 @@ def environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture
+def downloads(monkeypatch):
+    """The sampler paths that the engines' weights download, in order; the download and conversion are doubles."""
+    paths = []
+
+    def download(self, path, directory):
+        paths.append(path)
+        directory.mkdir(parents=True)
+        (directory / "adapter_model.safetensors").write_bytes(path.encode())
+
+    def build_lora_adapter(*, base_model, adapter_path, output_path):
+        Path(output_path).mkdir(parents=True)
+        (Path(output_path) / "adapter_config.json").write_text('{"peft_type": "LORA", "r": 16}')
+
+    monkeypatch.setattr(TinkerSamplerWeights, "download", download)
+    cookbook = ModuleType("tinker_cookbook")
+    cookbook.weights = SimpleNamespace(build_lora_adapter=build_lora_adapter)
+    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
+    return paths
+
+
+def cached_adapter(tmp_path, sampler_path):
+    """Where the engines' weights keep the converted adapter of ``sampler_path``."""
+    return tmp_path / "state" / "sampler-weights" / hashlib.sha256(sampler_path.encode()).hexdigest() / "adapter"
+
+
 def item(sample):
     # ``sample`` makes another rollout: a job is its rows, so a new step trains new rows.
     return TrajectorySample(
@@ -169,7 +189,7 @@ def local_engine_config(tmp_path):
         "inference": {"model-path": "Qwen/Qwen3-8B", "backend": "sglang", "num-gpus": 2},
         "training": {
             "backend": "tinker",
-            "options": {"state-dir": str(tmp_path / "state"), "lora-rank": 16, "export-adapter": True},
+            "options": {"state-dir": str(tmp_path / "state"), "lora-rank": 16},
         },
     }
 
@@ -180,9 +200,9 @@ def remote_engine_config(tmp_path):
     return raw
 
 
-def serving_config(config, release_format=EXPORTED_ADAPTERS):
+def serving_config(config):
     """The serving runtime config that the HTTP service builds for the deployment ``config``."""
-    return serving_runtime_config(service_config_from_mapping(config), TinkerDeployment(), release_format)
+    return serving_runtime_config(service_config_from_mapping(config), TinkerDeployment(), None)
 
 
 def build(config, monkeypatch, engines):
@@ -193,7 +213,8 @@ def build(config, monkeypatch, engines):
 
     def serve(factory, config, model_path, recipe_config, environ):
         seen.update(config)
-        return AdapterServingRuntime(engines, Handler(), adapter_capacity=config["adapter_capacity"])
+        weights = ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
+        return AdapterServingRuntime(engines, Handler(), adapter_capacity=config["adapter_capacity"], weights=weights)
 
     monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
     component, inference = connect_training_component(
@@ -206,6 +227,7 @@ def train(component, inference, objective, scenario, sample, start=None):
     """Run one job to its end, then serve its checkpoint for ``scenario``; return the checkpoint and its version."""
     data = JobData("b", (item(sample),))
     parameters = {"method": TrainingMethod(objective.name).to_dict()}
+    start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, data, parameters))
     deadline = time.monotonic() + 10
@@ -245,7 +267,8 @@ def test_local_engines_run_on_an_inference_component_that_reef_serve_starts(tmp_
     assert "test-key" not in yaml.safe_dump(config)
     assert not local_model_required(config)
     serving = serving_config(config)
-    assert serving["type"] == "remote_serving" and serving["release_format"] == EXPORTED_ADAPTERS.to_dict()
+    assert serving["type"] == "remote_serving" and serving["release_format"] == ENGINE_ADAPTERS.to_dict()
+    assert serving["weights"]["module"] == "reef.tinker.weights:TinkerSamplerWeights"
     assert serving["remote"]["url"] == url and serving["engine"] == "sglang"
     assert (serving["num_gpus"], serving["tensor_parallel_size"]) == (2, 1)
 
@@ -263,7 +286,9 @@ def test_remote_engines_keep_the_section_and_start_no_local_component(tmp_path):
     assert serving_config(config)["remote"] == config["reef"]["inference_remote"]
 
 
-def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(tmp_path, monkeypatch, objective):
+def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(
+    tmp_path, monkeypatch, objective, downloads
+):
     raw = local_engine_config(tmp_path)
     raw["inference"]["max-loaded-adapters"] = 3
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
@@ -271,12 +296,15 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(tmp_
     component, inference, seen = build(config, monkeypatch, engines)
     try:
         assert isinstance(component, TinkerTrainingComponent) and isinstance(inference, AdapterServingRuntime)
-        assert component.release_format == EXPORTED_ADAPTERS
-        assert (seen["release_format"], seen["adapter_capacity"]) == (EXPORTED_ADAPTERS.to_dict(), 3)
+        # A release is its manifest; the engines load the adapter downloaded from its sampler path.
+        assert component.release_format is None
+        assert (seen["release_format"], seen["adapter_capacity"]) == (ENGINE_ADAPTERS.to_dict(), 3)
         math, served = train(component, inference, objective, "math", 0)
-        adapter = Path(math.release_path) / ADAPTER_DIR
-        assert (adapter / "adapter_config.json").is_file()
-        assert engines.loads == [(adapter_name("math", served), adapter, served)]
+        assert [path.name for path in Path(math.release_path).iterdir()] == ["tinker-checkpoint.json"]
+        assert downloads == ["tinker://update-1/sampler"]
+        assert engines.loads == [
+            (adapter_name("math", served), cached_adapter(tmp_path, "tinker://update-1/sampler"), served)
+        ]
         assert inference.serving_adapter_runtime_load_id("math") == served
         # Another scenario serves its own adapter beside the first one.
         _, code = train(component, inference, objective, "code", 1)
@@ -293,7 +321,7 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(tmp_
         component.close()
 
 
-def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypatch, objective):
+def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypatch, objective, downloads):
     config, _ = resolve_deployment_config(local_engine_config(tmp_path), None, tmp_path / "serve.yaml")
     component, inference, _ = build(config, monkeypatch, Engines())
     math, _ = train(component, inference, objective, "math", 0)
@@ -304,7 +332,10 @@ def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypat
     component, inference, _ = build(config, monkeypatch, engines)
     try:
         served = inference.activate_checkpoint(Artifact.local(Path(math.release_path)), scenario="math")
-        assert engines.loads == [(adapter_name("math", served), Path(math.release_path) / ADAPTER_DIR, served)]
+        adapter = cached_adapter(tmp_path, "tinker://update-1/sampler")
+        assert engines.loads == [(adapter_name("math", served), adapter, served)]
+        # The adapter downloaded before the restart serves again without a second download.
+        assert downloads == ["tinker://update-1/sampler"]
         _, activated = train(component, inference, objective, "math", 1, start=math.path)
         assert component._client.calls[0].state_path == "tinker://update-1/state"
         # One adapter slot: generation is paused, so the scenario's new adapter replaces its served one.
@@ -344,7 +375,7 @@ def test_engine_topologies_refuse_conflicting_inputs_before_starting(tmp_path, m
         resolve_deployment_config(local_engine_config(tmp_path), None, tmp_path / "serve.yaml")
 
 
-def test_engines_serve_tinker_only_exported_adapters_that_their_engine_loads(tmp_path, monkeypatch):
+def test_engines_serve_tinker_adapters_only_on_an_engine_that_loads_them(tmp_path, monkeypatch):
     for name in TOKENS:
         monkeypatch.setenv(name, f"{name.lower()}-value")
     monkeypatch.setattr("reef.train.tinker_backend.client.TinkerSDKClient", RemoteClient)
@@ -355,11 +386,6 @@ def test_engines_serve_tinker_only_exported_adapters_that_their_engine_loads(tmp
     raw["inference"]["num-gpus"] = 1
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     with pytest.raises(RuntimeConfigError, match="vllm serves full weights only"):
-        connect_training_component(service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", loss_family="tttd")
-    raw = remote_engine_config(tmp_path)
-    raw["training"]["options"]["export-adapter"] = False
-    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    with pytest.raises(DeployConfigError, match="export-adapter"):
         connect_training_component(service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", loss_family="tttd")
 
 

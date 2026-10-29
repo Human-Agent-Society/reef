@@ -1,6 +1,6 @@
 # The harness tree DeepSeek Harness takes. A method writes each part at its
 # path; Reef checks the file as its format and renders it to its renders path,
-# inside the dsh home of an episode or of an install. A tree file that no part
+# inside the dsh home of a rollout or of an install. A tree file that no part
 # takes is refused.
 parts:
   rules:

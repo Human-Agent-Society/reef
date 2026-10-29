@@ -16,14 +16,14 @@ The core loop
        participant G as Training component
        participant E as Artifact evaluation
 
-       opt Harness recipe: pull the served tree
+       opt Harness recipe: pull the active release's tree
          H->>S: GET /reef/harness for scenario
          S-->>H: Harness tree and release
          Note over H: Agent runs on that tree
        end
        Note over H,I: Serve and record each request
        H->>S: Inference request for scenario
-       S->>S: Freeze current release
+       S->>S: Freeze active release
        S->>I: Provider-native request
        I-->>S: Provider response
        S->>S: Validate frozen release and store record
@@ -77,9 +77,9 @@ full elsewhere:
      - `Write a recipe <../developer-guide/write-a-recipe.rst>`__
    * - Record eligibility
      - `Training pipeline <../developer-guide/processors.rst>`__
-   * - Evaluation
-     - `Evaluate a candidate
-       <../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__
+   * - Activation
+     - `Activate an artifact
+       <../developer-guide/write-a-recipe.rst#activate-an-artifact>`__
    * - Release lifecycle
      - `The release chain
        <../advanced_topics/state-model.rst#the-release-chain>`__

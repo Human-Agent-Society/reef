@@ -10,13 +10,12 @@ from reef.artifact import (
     ArtifactRef,
     ArtifactReleaseChain,
     CachedRepositoryBackendFactory,
-    GitVersionSource,
     HuggingFaceSource,
     InMemoryRepositoryBackend,
     Repository,
     RepositoryBackend,
     download_huggingface_snapshot,
-    parse_artifact_source,
+    parse_huggingface_source,
 )
 
 
@@ -202,10 +201,10 @@ def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> No
     (candidate / "SKILL.md").write_text("v1")
 
     first = repository.stage(1, Artifact.local(candidate), parent=checkpoint)
-    repository.advance_current(first.ref, expected=checkpoint)
+    repository.activate(first.ref, expected=checkpoint)
     (candidate / "SKILL.md").write_text("v2")
     second = repository.stage(2, Artifact.local(candidate), parent=checkpoint)
-    repository.advance_current(second.ref, expected=first.ref)
+    repository.activate(second.ref, expected=first.ref)
 
     first_path = repository.resolve(first.ref).local_path
     assert first_path.joinpath("SKILL.md").read_text() == "v1"
@@ -219,11 +218,17 @@ def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> No
         ("org/model", HuggingFaceSource("org/model", None)),
         ("hf://org/model", HuggingFaceSource("org/model", None)),
         ("hf://org/model@version", HuggingFaceSource("org/model", "version")),
-        ("git+lfs://abc123", GitVersionSource("abc123")),
     ],
 )
-def test_parse_artifact_source(value, expected) -> None:
-    assert parse_artifact_source(value) == expected
+def test_parse_huggingface_source(value, expected) -> None:
+    assert parse_huggingface_source(value) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("value", "message"), [("hf://model", "org/model syntax"), ("hf://org/model@", "non-empty")])
+def test_parse_huggingface_source_refuses_another_form(value, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_huggingface_source(value)
 
 
 @pytest.mark.unit

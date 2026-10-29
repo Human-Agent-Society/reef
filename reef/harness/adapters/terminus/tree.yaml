@@ -1,6 +1,6 @@
 # The harness tree Terminus 2 takes. A method writes each part at its path;
 # Reef checks the file as its format and renders it to its renders path,
-# inside the episode root the Reef-owned Harbor runner reads. A tree file that
+# inside the rollout root the Reef-owned Harbor runner reads. A tree file that
 # no part takes is refused.
 parts:
   rules:

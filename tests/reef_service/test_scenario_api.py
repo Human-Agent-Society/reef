@@ -146,7 +146,7 @@ def test_delete_scenario_over_http() -> None:
             assert (await deleted.json())["scenario"] == "delivery"
             assert await (await client.get("/reef/scenarios")).json() == {"scenarios": []}
             assert (await client.delete("/reef/scenarios/delivery")).status == 404
-            assert (await client.get("/reef/scenarios/delivery/releases")).status == 404
+            assert (await client.get("/reef/scenarios/delivery/artifacts")).status == 404
         finally:
             await client.close()
 

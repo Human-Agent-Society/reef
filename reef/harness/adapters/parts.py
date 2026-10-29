@@ -10,7 +10,7 @@ descriptor's config targets, and its file merges into that target. A tree
 path that no part matches is refused.
 
 Model endpoints and credentials are never in a tree: the model binding writes
-them when a tree is rendered for an episode.
+them when a tree is rendered for a rollout.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class Part:
     ``config`` part, whose file merges into the config target its name
     names. ``holds`` says in one line what the file holds, for methods and
     people. ``review`` is True when a change to the part always waits for a
-    person, whatever the deployment's ``evolution.review_parts`` says.
+    person, whatever the ``activation`` section's ``review_kinds`` says.
     Purpose: ``load_tree_layout`` makes one per entry of ``tree.yaml``;
     validation, rendering and the host facts a method reads use it.
     """

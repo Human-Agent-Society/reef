@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree.checks import NAME, NATIVE_END_REASONS, validate_native_graph
 
 #: The built-in loop as a graph: think, act while the model calls tools, end when it answers. The loop runs this
@@ -58,11 +58,11 @@ def bounded_search(pattern: str, text: str, timeout_s: float | None = None) -> b
     """Whether ``pattern`` matches ``text``, decided within ``timeout_s`` in a child process.
 
     Python's matcher cannot be interrupted, so a pattern that backtracks
-    without end would hold the loop until the episode's wall clock; the
+    without end would hold the loop until the rollout's wall clock; the
     child is killed instead. The answer is ``True`` or ``False``, or the
     reason there is none: ``"timeout"`` when the clock ran out, and
     ``"unavailable"`` when the child could not start or answer (a process
-    limit on the episode, say). Either one is a miss to the caller, named
+    limit on the rollout, say). Either one is a miss to the caller, named
     in the stage's detail."""
     try:
         done = subprocess.run(
@@ -108,7 +108,7 @@ SUMMARY_PROMPT = (
 
 
 class GraphError(Exception):
-    """A graph the loop cannot run; the episode ends with LOAD_ERROR like a broken tool."""
+    """A graph the loop cannot run; the rollout ends with LOAD_ERROR like a broken tool."""
 
 
 class Graph:
@@ -582,7 +582,7 @@ class Run:
         try:
             outcome, text = _walk(child, graph)
         finally:
-            # Steps are drawn from the episode total, so the parent's budget shrinks by what the child spent.
+            # Steps are drawn from the rollout total, so the parent's budget shrinks by what the child spent.
             self.step += child.step
             session.close()
         return outcome, text, child.step
@@ -593,7 +593,7 @@ def _walk(run: Run, graph: Graph) -> tuple[str, str]:
 
     A failure (a model call that ended in error, a graph that exceeded its
     transition bound) raises ``_Stop`` with a nonzero exit status, which the
-    root turns into the episode's exit and an agent's turn propagates."""
+    root turns into the rollout's exit and an agent's turn propagates."""
     session = run.session
     name = graph.start
     limit = (graph.max_steps + 1) * TRANSITIONS_PER_STEP
@@ -637,7 +637,7 @@ def _walk(run: Run, graph: Graph) -> tuple[str, str]:
 
 
 def run_graph(run: Run, graph: Graph) -> int:
-    """The root turn: walk the graph and map its end to the episode's exit status."""
+    """The root turn: walk the graph and map its end to the rollout's exit status."""
     try:
         _walk(run, graph)
     except _Stop as stop:
@@ -819,7 +819,7 @@ class LoopContext:
 
 
 def run_loop_module(run: Run, module: TurnLoop) -> int:
-    """The root turn as code: ``run_turn`` over the context, its end mapped to the episode's exit status.
+    """The root turn as code: ``run_turn`` over the context, its end mapped to the rollout's exit status.
 
     Returning ends the turn ``completed``; an exception that is not the
     turn's own end aborts it with ``LOOP_ERROR``, exit status 1. The first

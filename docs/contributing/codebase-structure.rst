@@ -99,7 +99,7 @@ import a concrete integration.
 |                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | making candidates, training loops,         |
-|                         | episodes, the harness history and its score cache, the   | artifact publication                       |
+|                         | rollouts, the harness history and its score cache, the   | artifact publication                       |
 |                         | harness publication policies, and the ``evaluation``     |                                            |
 |                         | plugin configuration                                     |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -120,12 +120,12 @@ import a concrete integration.
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the release chain           |
 |                         | descriptor), the source tree (patches, validation,       |                                            |
-|                         | rendering), episodes, runners, trajectories, and the     |                                            |
+|                         | rendering), rollouts, runners, trajectories, and the     |                                            |
 |                         | loopback gateway an agent process reaches its model      |                                            |
 |                         | and tools through                                        |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
-|                         | and environment lifecycle through Harbor                 | policy                                     |
+| ``reef/execution/``     | job scheduling, process ownership, isolation,            | harness rendering, evaluation, recipe      |
+|                         | file transfer and environment lifecycle                  | policy                                     |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``recipes/``            | one method per package: the recipe, processor and        | shared machinery, or another method        |
 |                         | objective of a weight method, or the ``Method`` of a     |                                            |
@@ -167,24 +167,31 @@ package's own submodules and third-party libraries):
      - ``surface``, ``artifact``, ``core``
    * - ``inference``
      - ``runtime``, ``artifact``, ``core``
-   * - ``sandbox``
+   * - ``execution``
      - ``core``
    * - ``harness``
-     - ``inference``, ``sandbox``, ``runtime``, ``surface``, ``artifact``, ``core``
+     - ``inference``, ``execution``, ``runtime``, ``surface``, ``artifact``, ``core``
    * - ``evaluation``
-     - ``harness``, ``sandbox``, ``runtime``, ``core``
+     - ``harness``, ``execution``, ``runtime``, ``core``
    * - ``train``
-     - ``evaluation``, ``harness``, ``sandbox``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``harness``, ``execution``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``harness``, ``sandbox``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``harness``, ``execution``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``scenario``
      - ``recipe``, ``train``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``record2sample``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``cli``
      - ``service``, ``core``
+
+``execution/lifecycle.py`` defines the shared ``Execution`` interface using
+only the standard library. ``execution/processes.py`` adds local process
+ownership and depends only on that interface and the standard library.
+``execution/jobs.py`` depends only on these two modules and the standard library. Sandbox executors and generator checks also use
+``execution/processes.py`` for local child ownership. The shared worker must not import
+``execution.sandbox`` or its providers and executor adapters.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
@@ -274,8 +281,8 @@ The extension points those packages expose are in `Python API
 
 - Is it a value or error needed by unrelated layers without behavior attached?
   Put it in ``reef/core/``.
-- Does it own scenario state, commit ordering, recovery, or rollback? Put it in
-  ``reef/scenario/``. ``reef/storage/commits.py`` defines the persisted ``CommitRecord`` and
+- Does it own scenario state, commit ordering, recovery, activation, or
+  training starts? Put it in ``reef/scenario/``. ``reef/storage/commits.py`` defines the persisted ``CommitRecord`` and
   ``RecordProgress`` values without storage behavior. Checkpoint recovery uses
   the same ``CommitRecord`` type; initial registration has no commit.
   ``reef/storage/scenario.py`` defines the ``ScenarioStore`` and ``ScenarioStorage``
@@ -318,8 +325,9 @@ The extension points those packages expose are in `Python API
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations, and ``ScopedTable``, one table
   with the namespace of one store. ``sql_tasks.py``,
-  ``sql_trajectories.py`` and ``sql_commits.py`` share the task, trajectory
-  and commit tables and their operations in the same database.
+  ``sql_trajectories.py``, ``sql_evaluations.py`` and ``sql_commits.py``
+  share the task, trajectory, artifact evaluation and commit tables and their
+  operations in the same database.
   ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
   ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
   maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,

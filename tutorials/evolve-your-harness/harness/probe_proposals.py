@@ -4,7 +4,7 @@ Each sample is one call with the prompt ``NativeMethod`` sends, over the
 serve file's seed tree and one failing trace of the task. A sample is parsed
 when its reply yields a patch and admitted when the patch passes
 ``validate_patch`` for the native adapter, the same check the evolve step
-runs before any episode. The table this prints is the one the README's
+runs before any rollout. The table this prints is the one the README's
 results carry.
 """
 
@@ -24,7 +24,7 @@ sys.path.insert(0, str(HERE.parents[3]))  # the reef checkout, for a source run
 from harness import native_evolution
 from harness.plugins import MAX_TOKENS, TIMEOUT_S, failures_text
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree import HarnessTree, validate_patch
 from reef.train.harness_backend import Trace
 

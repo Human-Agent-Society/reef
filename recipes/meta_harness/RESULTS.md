@@ -54,6 +54,6 @@ These measurements used the local experiment runner, before the shared
 Terminus adapter supported Python extensions. They validate the search method;
 they are not benchmark measurements of the updated adapter. A focused contract
 test now loads the checked-in harness as an `extension` file through the
-method, the harness evolution recipe, the episode lifecycle, the Terminus
+method, the harness evolution recipe, the rollout lifecycle, the Terminus
 runner, and the publication path, with process launch and the remote trial
 replaced by test doubles.

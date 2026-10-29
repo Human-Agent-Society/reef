@@ -3,7 +3,7 @@
 ``AgentExecution`` is the agent bound for one scenario: its adapter, the
 executor that isolates it, its binary and its time limit.
 ``launch_agent`` runs one process of an adapter's harness over rendered
-files in directories the caller owns, as ``run_episode`` does in a
+files in directories the caller owns, as ``run_rollout`` does in a
 throwaway root, and ``read_session`` reads back its session log. ``run_agent``
 implements ``Tools.run_agent``: it starts the gateway with the workspace's
 tools (``check`` and ``evaluate``), renders the agent's tree after Reef's
@@ -28,15 +28,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
-from reef.evaluation.harness.history import EPISODES_DIR
+from reef.evaluation.harness.history import ROLLOUTS_DIR
+from reef.execution.sandbox.environment import download_directory, execute
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import headless_argv, headless_env
-from reef.harness.episodes.trajectory import reader_for
 from reef.harness.gateway import AgentGateway, AgentTool
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import headless_argv, headless_env
+from reef.harness.rollouts.trajectory import reader_for
 from reef.harness.tree import HarnessTree, render_tree
-from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
 from reef.train.harness_backend.contract import AgentOutcome, Tools
 from reef.train.harness_backend.workspace import Workspace
 
@@ -62,7 +62,7 @@ class AgentExecution:
     """
 
     descriptor: AdapterDescriptor
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     binary: str
     timeout_s: float
 
@@ -83,7 +83,7 @@ def agent_env(descriptor: AdapterDescriptor, binary: str, home: Path) -> dict[st
 
 def launch_agent(
     descriptor: AdapterDescriptor,
-    executor: EpisodeExecutor,
+    executor: ProgramExecutor,
     argv: Sequence[str],
     files: Mapping[str, str],
     env: Mapping[str, str],
@@ -101,8 +101,8 @@ def launch_agent(
     directory, is writable. ``files`` are written under ``home`` and stay
     read-only; the descriptor's state directories under ``home``
     (``writable_paths``) and ``writable`` stay writable, and ``readonly``
-    names more paths the process only reads. Raises ``EpisodeTimeout`` and
-    ``EpisodeLaunchError`` as the executor does.
+    names more paths the process only reads. Raises ``RolloutTimeout`` and
+    ``RolloutLaunchError`` as the executor does.
     """
     for relative, text in files.items():
         target = home / PurePosixPath(relative)
@@ -151,7 +151,7 @@ class AgentRun:
         self.workspace = workspace
         self.tools = tools
         self.root = Path(os.path.commonpath([workspace.root.resolve(), workspace.history_dir.resolve()]))
-        self.session: EpisodeExecutor | None = None
+        self.session: ProgramExecutor | None = None
         self.lock = threading.Lock()
 
     def read_tree(self, arguments: Mapping[str, Any]) -> HarnessTree:
@@ -205,9 +205,9 @@ class EvaluateTool(AgentTool):
 
     name = "evaluate"
     description = (
-        "Score a tree of the step's workspace on tasks, repeats episodes each. A scored episode in the history is "
-        "reused; new episodes spend the step's episode budget. Answers tree (its checksum) and episodes: one "
-        "record per episode with its task, repeat, score (null when it could not run), failure, reply, and "
+        "Score a tree of the step's workspace on tasks, repeats rollouts each. A scored rollout in the history is "
+        "reused; new rollouts spend the step's rollout budget. Answers tree (its checksum) and rollouts: one "
+        "record per rollout with its task, repeat, score (null when it could not run), failure, reply, and "
         "directory (its files, from the workspace)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
@@ -237,19 +237,19 @@ class EvaluateTool(AgentTool):
         with self.run.lock:
             tree = self.run.read_tree(arguments)
             records = self.run.tools.evaluate(tree, tasks, repeats=repeats)
-        history = self.run.workspace.history_dir / EPISODES_DIR
-        episodes = [
+        history = self.run.workspace.history_dir / ROLLOUTS_DIR
+        rollouts = [
             {
                 "task": record.task,
                 "repeat": record.repeat,
-                "score": record.score,
+                "score": record.score.to_json(),
                 "failure": None if record.failure is None else record.failure.cause,
                 "reply": record.reply,
-                "directory": os.path.relpath(history / record.episode, self.run.workspace.root),
+                "directory": os.path.relpath(history / record.rollout, self.run.workspace.root),
             }
             for record in records
         ]
-        return {"tree": tree.checksum(), "episodes": episodes}
+        return {"tree": tree.checksum(), "rollouts": rollouts}
 
 
 def run_agent(
@@ -301,9 +301,9 @@ def run_agent(
                 # The executor copies the agent's files back, also after a time out.
                 run.session.close()
             outcome = AgentOutcome(process.exit_code, False, None, round(time.monotonic() - started, 1))
-        except EpisodeTimeout:
+        except RolloutTimeout:
             outcome = AgentOutcome(None, True, None, round(time.monotonic() - started, 1))
-        except EpisodeLaunchError as exc:
+        except RolloutLaunchError as exc:
             outcome = AgentOutcome(None, False, str(exc), round(time.monotonic() - started, 1))
     finally:
         gateway.stop()

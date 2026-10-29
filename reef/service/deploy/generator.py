@@ -4,8 +4,9 @@ A deployment with a ``generator`` section gets a ``generator`` service before th
 depends on it, so ``${endpoints.generator}`` is published by the time the HTTP child and its recipe read
 their configuration. The generator reads the same resolved deployment through ``REEF_CONFIG``; it needs
 no arguments. Its executor is the ``generator`` role of ``execution:``, so a deployment can place it on a
-host with Docker and the ``harbor`` command line while the rest stays local. It runs under the
-same interpreter as the other children (``REEF_PYTHON``, otherwise the launcher's).
+host with the ``harbor`` command line and the Harbor environment ``generator.environment`` selects (Docker
+by default, or E2B with no Docker on the host) while the rest stays local. It runs under the same
+interpreter as the other children (``REEF_PYTHON``, otherwise the launcher's).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import Settings, config_metadata, config_option
+from reef.execution.sandbox.task_environment import checked_task_environment
 from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
 
@@ -30,18 +32,29 @@ DEFAULT_READY_TIMEOUT = 60
 
 @dataclass(frozen=True)
 class GeneratorSettings(Settings):
-    """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section."""
+    """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section.
+
+    Values: ``tasks_root`` is a directory path that is not blank. ``port`` is an int in 1..65535. ``concurrency``
+    is an int of at least 1. ``designer_timeout_s`` and ``ready_timeout`` are positive. ``designer_api`` is None,
+    ``openai`` or ``responses``. ``agent`` is None or a Harbor agent config with a ``name`` or an ``import_path``.
+    ``environment`` is a name in ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, the Harbor
+    environment of every check and rollout.
+    ``host`` is a bind address; ``work_dir``, ``agent_host``, ``harbor``, ``designer_url``, ``designer_token`` and
+    ``designer_model`` are strings or None, and ``designer_options`` is a mapping or None.
+    Purpose: ``generator_service`` reads the deployment's ``generator`` section into it to start the process;
+    ``reef.service.deploy.generator_process`` reads it again to build the service.
+    """
 
     tasks_root: str = config_option(help="The directory generated tasks and Harbor job files live under.")
     host: str = config_option("127.0.0.1", help="The generator's bind address.")
     port: int = config_option(DEFAULT_PORT, help="The generator's bind port.")
     work_dir: str | None = config_option(
-        None, help="Where the episode runner keeps trials; <tasks-root>/.episodes by default."
+        None, help="Where the rollout runner keeps trials; <tasks-root>/.rollouts by default."
     )
     agent: Mapping[str, Any] | None = dataclasses.field(
         default=None,
         metadata=config_metadata(
-            "The Harbor agent each episode runs, with {model}, {base_url} and {api_key} placeholders; "
+            "The Harbor agent each rollout runs, with {model}, {base_url} and {api_key} placeholders; "
             "terminus-2 by default."
         ),
     )
@@ -51,7 +64,11 @@ class GeneratorSettings(Settings):
     harbor: str | None = config_option(
         None, help="The harbor command line for the oracle check; found on PATH by default."
     )
-    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight across all episode requests.")
+    environment: str = config_option(
+        "docker",
+        help="The Harbor environment of the checks and rollouts: docker, or e2b on a host without Docker.",
+    )
+    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Rollouts in flight across all rollout requests.")
     designer_url: str | None = config_option(
         None, help="A Reef service the designer calls go to instead of this deployment's."
     )
@@ -91,6 +108,7 @@ class GeneratorSettings(Settings):
             raise ValueError("generator.designer-timeout-s must be positive")
         if self.designer_api not in (None, "openai", "responses"):
             raise ValueError("generator.designer-api must be openai or responses")
+        checked_task_environment(self.environment, "generator.environment")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):

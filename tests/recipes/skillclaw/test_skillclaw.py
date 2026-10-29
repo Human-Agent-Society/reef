@@ -1,5 +1,5 @@
 """Guarantees of the recipes/skillclaw method package, hermetic: the
-night's LLM is stubbed, probe episodes run a fake pi binary, docker tasks are
+night's LLM is stubbed, probe rollouts run a fake pi binary, docker tasks are
 faked, and the driver's dry run replays traffic through the real embedded
 service so the recorded requests carry the served pool's catalog."""
 
@@ -22,7 +22,7 @@ from tests.support.harness_steps import TreeReleases, harness_backend
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import recorded_payload
 from reef.evaluation.harness import EvaluationSettings, NoEvaluationPolicy
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
@@ -36,7 +36,7 @@ from reef.train.types import JobData
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "recipes" / "skillclaw"
 
-# A pi stand-in for the probe episodes: it writes the session file the
+# A pi stand-in for the probe rollouts: it writes the session file the
 # runner reads back as the trajectory and answers nothing, so every probe
 # scores 0.0; the probes never decide the publish.
 PI_FAKE = """\
@@ -61,7 +61,7 @@ FILES = {"skills/answer-style/SKILL.md": STARTER_TEXT}
 SEED = HarnessTree(FILES)
 
 #: The deployment's model binding, as reef passes it to propose and renders
-#: it into probe episodes. Tests stub the evolver's chat loop, so no call
+#: it into probe rollouts. Tests stub the evolver's chat loop, so no call
 #: ever reaches this endpoint.
 MODEL = ModelBindings(served=ModelBinding(base_url="http://127.0.0.1:9", model="demo-model", api_key="dummy"))
 
@@ -380,7 +380,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["skills"]
     # The pool reaches traffic through the proxy; no harness tree is installed, so no adapter is named.
     assert surface.harness is None and built.harness_adapter is None
-    # The backend reads its head from the committed releases, here the seed alone; no episodes run.
+    # The backend reads its head from the committed releases, here the seed alone; no rollouts run.
     trainer = built.build("demo", SQLiteRecordStore(), releases=ComponentReleases(TreeReleases(built.seed), "skills"))
     assert isinstance(trainer, Trainer) and trainer.job_samples == 60
 
@@ -705,7 +705,7 @@ def test_the_recipe_yaml_is_valid_yaml_after_interpolation(monkeypatch) -> None:
 
 
 def test_a_night_whose_pool_fails_the_checks_skips_without_probes(skillclaw, example, tmp_path, monkeypatch) -> None:
-    """A night that writes a credential into a skill: the step skips with the problem, and no probe episode runs."""
+    """A night that writes a credential into a skill: the step skips with the problem, and no probe rollout runs."""
     night_llm(
         example,
         monkeypatch,
@@ -720,13 +720,13 @@ def test_a_night_whose_pool_fails_the_checks_skips_without_probes(skillclaw, exa
     result = backend_step(backend, night, backend.initial_state(), NoEvaluationPolicy())
     assert result.metrics["skipped"].startswith("skills/leaky/SKILL.md")
     assert result.metrics["method_summary"] == "the night wrote skills/leaky/SKILL.md"
-    assert backend.history.episodes == [] and result.artifact is None
+    assert backend.history.rollouts == [] and result.artifact is None
 
 
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:
     """The ported retry loop now drives reef's binding: temperature dropped
     on the provider's 400, stream-only fallback folded, model never named."""
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
 
     evolver = example["evolver"]
     seen: list[dict[str, Any]] = []

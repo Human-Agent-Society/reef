@@ -3,14 +3,14 @@
 Each step gives one proposer model the search so far, read from the
 scenario's history: the seed and every tree the method proposed, each with its
 files, its parent, what the proposer said about it, its outcome and its scores
-on the evaluation tasks; excerpts of the episode records and of the step's
+on the evaluation tasks; excerpts of the rollout records and of the step's
 traces; and the files the adapter takes. The reply names any candidate as its
 parent and returns one complete tree. The step checks that tree and leaves it
 in ``workspace.harness`` as the candidate. A reply that is invalid, or that
 repeats a tree the history holds, leaves the head unchanged, so the step skips.
 
 A deployment selects with the ``compare`` policy and ``statistic: mean``. The
-incumbent's scores come from the score cache, not from new episodes, so a
+incumbent's scores come from the score cache, not from new rollouts, so a
 candidate must beat the mean the incumbent was measured at, as upstream's
 frontier does.
 
@@ -25,13 +25,13 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import fmean
 from typing import Any, Self
 
 from reef.core.config import config_option
+from reef.core.evaluation import mean_score
 from reef.core.plugins import PluginSettings
 from reef.core.prompts import untrusted_text
-from reef.evaluation.harness import CandidateRecord, EpisodeRecord, History
+from reef.evaluation.harness import CandidateRecord, History, RolloutRecord
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
@@ -60,7 +60,7 @@ class MetaHarnessSettings(PluginSettings):
     Values: ``mode`` is one of ``MODES``. ``model`` names an
     ``evolution.models`` binding and is never ``served``. ``components`` are
     distinct parts of the adapter's tree, empty for every part.
-    ``max_candidates`` and ``max_target_episodes`` are budgets ≥ 0, where 0
+    ``max_candidates`` and ``max_target_rollouts`` are budgets ≥ 0, where 0
     sets no limit. ``max_files`` ≥ 1, ``max_traces`` ≥ 0 and
     ``trace_chars`` ≥ 1 bound one proposal and one prompt.
     Purpose: ``MetaHarness.from_config`` parses it, and the method reads it
@@ -75,8 +75,8 @@ class MetaHarnessSettings(PluginSettings):
         (), help="The parts of the tree a proposal may change; none means every part."
     )
     max_candidates: int = config_option(0, help="The most candidates the method proposes. 0 sets no limit.")
-    max_target_episodes: int = config_option(
-        0, help="Propose no candidate once the evaluations ran this many episodes. 0 sets no limit."
+    max_target_rollouts: int = config_option(
+        0, help="Propose no candidate once the evaluations ran this many rollouts. 0 sets no limit."
     )
     max_files: int = config_option(32, help="The most files of one proposed tree.")
     max_traces: int = config_option(16, help="The most traces whose record files one prompt shows.")
@@ -93,7 +93,7 @@ class MetaHarnessSettings(PluginSettings):
             raise ValueError("components must not repeat a part")
         for label, value, least in (
             ("max_candidates", self.max_candidates, 0),
-            ("max_target_episodes", self.max_target_episodes, 0),
+            ("max_target_rollouts", self.max_target_rollouts, 0),
             ("max_files", self.max_files, 1),
             ("max_traces", self.max_traces, 0),
             ("trace_chars", self.trace_chars, 1),
@@ -111,7 +111,7 @@ class Member:
     ``OUTCOMES``: ``served`` when the tree is the head of the step; otherwise
     ``selected`` when a step's decision selected it, ``rejected`` when the
     decisions on it only rejected it, and ``undecided`` when no decision is on
-    it. ``episodes`` are episodes of ``tree``: its latest one for each (task,
+    it. ``rollouts`` are rollouts of ``tree``: its latest one for each (task,
     repeat) of the evaluation tasks, in task order and then repeat order.
     Purpose: ``search_population`` makes them; the method shows them to the
     proposer model and checks the reply's parent against them, and the
@@ -121,15 +121,15 @@ class Member:
     record: CandidateRecord
     tree: HarnessTree
     outcome: str
-    episodes: tuple[EpisodeRecord, ...]
+    rollouts: tuple[RolloutRecord, ...]
 
     def __post_init__(self) -> None:
         if self.tree.checksum() != self.record.tree:
             raise ValueError("Member.tree must be the tree its record names")
         if self.outcome not in OUTCOMES:
             raise ValueError(f"Member.outcome must be one of {', '.join(OUTCOMES)}")
-        if any(episode.tree != self.record.tree for episode in self.episodes):
-            raise ValueError("Member.episodes must be episodes of the member's tree")
+        if any(rollout.tree != self.record.tree for rollout in self.rollouts):
+            raise ValueError("Member.rollouts must be rollouts of the member's tree")
 
     @property
     def parent(self) -> str | None:
@@ -140,11 +140,9 @@ class Member:
 
     @property
     def mean_score(self) -> float | None:
-        """The mean score of ``episodes``, an episode that could not run as 0, as ``compare`` counts it; ``None``
-        before the first episode."""
-        if not self.episodes:
-            return None
-        return fmean(0.0 if episode.score is None else episode.score for episode in self.episodes)
+        """The mean score of the ``rollouts`` that did not fail, as ``compare`` counts it (``mean_score``); ``None``
+        before the first rollout, or when every rollout failed."""
+        return mean_score(rollout.score for rollout in self.rollouts)
 
 
 class MetaHarness(Method):
@@ -247,7 +245,7 @@ class MetaHarness(Method):
         return StepResult(summary, notes)
 
     def spent_budget(self, history: History, step: int) -> str | None:
-        """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_episodes``, ``None``
+        """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_rollouts``, ``None``
         while both last.
 
         The counts read the history's records of the steps before ``step``. An
@@ -260,9 +258,9 @@ class MetaHarness(Method):
         )
         if settings.max_candidates and proposed >= settings.max_candidates:
             return "max_candidates"
-        episodes = sum(1 for episode in history.episodes if episode.step < step)
-        if settings.max_target_episodes and episodes >= settings.max_target_episodes:
-            return "max_target_episodes"
+        rollouts = sum(1 for rollout in history.rollouts if rollout.step < step)
+        if settings.max_target_rollouts and rollouts >= settings.max_target_rollouts:
+            return "max_target_rollouts"
         return None
 
     def checked_tree(
@@ -285,19 +283,19 @@ class MetaHarness(Method):
     ) -> list[dict[str, Any]]:
         """The traces a prompt shows, each with an excerpt of its record files: at most ``max_traces``.
 
-        The step's own traces come first. Then the members' episodes take
+        The step's own traces come first. Then the members' rollouts take
         turns: the served member first and the others newest first, and each
-        member gives its lowest scores first, an episode that could not run
-        before any score.
+        member gives its lowest scores first, a failed rollout before any
+        score.
         """
         max_traces = self.settings.max_traces
         shown: list[dict[str, Any]] = [
             {
                 "source": trace.source,
                 "score": trace.score,
-                # A rollout keeps its trajectory files and its episode.json in the history, not in the trace.
+                # A rollout keeps its trajectory files and its rollout.json in the history, not in the trace.
                 "record": excerpt(
-                    history.episode_dir(trace.record) if trace.source == "rollout" else trace.directory,
+                    history.rollout_dir(trace.record) if trace.source == "rollout" else trace.directory,
                     self.settings.trace_chars,
                 ),
             }
@@ -307,25 +305,28 @@ class MetaHarness(Method):
         others = [member for member in reversed(members) if member.outcome != "served"]
         turns = itertools.zip_longest(
             *(
-                sorted(member.episodes, key=lambda episode: (episode.score is not None, episode.score or 0.0))
+                sorted(
+                    member.rollouts,
+                    key=lambda rollout: (not rollout.score.is_failed, rollout.score.value or 0.0),
+                )
                 for member in (*served, *others)
             )
         )
-        for episode in itertools.chain.from_iterable(turns):
+        for rollout in itertools.chain.from_iterable(turns):
             if len(shown) >= max_traces:
                 break
-            if episode is None:
+            if rollout is None:
                 continue
-            failure = None if episode.failure is None else f"{episode.failure.stage}: {episode.failure.cause}"
+            failure = None if rollout.failure is None else f"{rollout.failure.stage}: {rollout.failure.cause}"
             shown.append(
                 {
                     "source": "evaluation",
-                    "candidate_id": episode.tree,
-                    "task": task_ids[episode.task],
-                    "repeat": episode.repeat,
-                    "score": episode.score,
+                    "candidate_id": rollout.tree,
+                    "task": task_ids[rollout.task],
+                    "repeat": rollout.repeat,
+                    "score": rollout.score.to_json(),
                     "failure": None if failure is None else clipped(failure, self.settings.trace_chars),
-                    "record": excerpt(history.episode_dir(episode.episode), self.settings.trace_chars),
+                    "record": excerpt(history.rollout_dir(rollout.rollout), self.settings.trace_chars),
                 }
             )
         return shown
@@ -342,7 +343,7 @@ def search_population(
     ``step`` are members too. A tree that an earlier attempt of ``step``
     proposed is not: that attempt never committed. Outcomes read the final
     decision of each step before ``step``, the latest one the history holds
-    for it. The episodes are those on ``tasks``.
+    for it. The rollouts are those on ``tasks``.
     """
     decisions = {decision.step: decision for decision in history.decisions if decision.step < step}
     order = {task: index for index, task in enumerate(tasks)}
@@ -360,12 +361,12 @@ def search_population(
             outcome = "rejected"
         else:
             outcome = "undecided"
-        latest = {(episode.task, episode.repeat): episode for episode in history.episodes_of(record.tree)}
-        episodes = sorted(
-            (episode for (task, _), episode in latest.items() if task in order),
-            key=lambda episode: (order[episode.task], episode.repeat),
+        latest = {(rollout.task, rollout.repeat): rollout for rollout in history.rollouts_of(record.tree)}
+        rollouts = sorted(
+            (rollout for (task, _), rollout in latest.items() if task in order),
+            key=lambda rollout: (order[rollout.task], rollout.repeat),
         )
-        members.append(Member(record, history.tree(record.tree), outcome, tuple(episodes)))
+        members.append(Member(record, history.tree(record.tree), outcome, tuple(rollouts)))
     return tuple(members)
 
 
@@ -380,9 +381,9 @@ def uncommitted(record: CandidateRecord, step: int) -> bool:
 
 def member_json(member: Member, task_ids: Mapping[str, str]) -> dict[str, Any]:
     """What a prompt shows of one member; ``task_ids`` names each evaluation task."""
-    scores: dict[str, list[float | None]] = {}
-    for episode in member.episodes:
-        scores.setdefault(task_ids[episode.task], []).append(episode.score)
+    scores: dict[str, list[float | str]] = {}
+    for rollout in member.rollouts:
+        scores.setdefault(task_ids[rollout.task], []).append(rollout.score.to_json())
     return {
         "candidate_id": member.record.tree,
         "parent_id": member.parent,

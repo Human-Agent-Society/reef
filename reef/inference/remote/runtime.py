@@ -25,7 +25,12 @@ from reef.inference.vllm.chat import VLLMInferenceHandler
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime, SavedWeightServingRuntime
+from reef.runtime.serving import (
+    AdapterServingRuntime,
+    FullWeightServingRuntime,
+    ReleaseWeights,
+    SavedWeightServingRuntime,
+)
 
 #: The request dialect of each built-in engine the component can run.
 ENGINE_HANDLERS: dict[str, type[InferenceHandler]] = {
@@ -120,14 +125,16 @@ class RemoteServingRuntimeConfig:
     ``options`` holds the engine's native options and
     ``inference_handler_config`` the request handler's own options.
     ``executor`` and ``executor_options`` select the engines' executor (the
-    ``rollout`` role). Purpose: the serving assembly writes the value from the
-    deployment's ``inference`` settings and the training component's release
-    format; ``RemoteServingRuntimeFactory`` reads it.
+    ``rollout`` role). ``weights`` is ``None``, which reads each release's own
+    files (``ReleaseFiles``), or a ``ReleaseWeights`` plugin reference.
+    Purpose: the serving assembly writes the value from the deployment's
+    ``inference`` settings and the training backend's engine weights;
+    ``RemoteServingRuntimeFactory`` reads it.
     """
 
     remote: Mapping[str, Any] = field(metadata=config_metadata("The inference.remote section."))
     release_format: Mapping[str, Any] = field(
-        metadata=config_metadata("The training component's release format, as ReleaseFormat.to_dict writes it.")
+        metadata=config_metadata("The format of the weights the engines load, as ReleaseFormat.to_dict writes it.")
     )
     engine: str = config_option("sglang", help="Engine backend that the component starts.")
     num_gpus: int = config_option(1, help="GPUs the component's engines use.")
@@ -143,10 +150,15 @@ class RemoteServingRuntimeConfig:
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
+    weights: str | Mapping[str, Any] | None = config_option(
+        None, help="A ReleaseWeights plugin that gives each release's weight files; unset reads the release's own."
+    )
 
     def __post_init__(self) -> None:
         RemoteInferenceSettings.from_mapping(self.remote)
         ReleaseFormat.from_dict(self.release_format)
+        if self.weights is not None:
+            ReleaseWeights.reference(self.weights, setting="runtime.weights")
         if not isinstance(self.engine, str) or not self.engine.strip():
             raise ValueError("runtime.engine must be a non-empty string")
         for name, options in (
@@ -206,6 +218,11 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
         except ValueError as exc:
             raise RuntimeConfigError(str(exc)) from exc
         release_format = ReleaseFormat.from_dict(config["release_format"])
+        weights = (
+            None
+            if config.get("weights") is None
+            else ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
+        )
         try:
             engine_config = serving_engine_config(
                 engine,
@@ -247,6 +264,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
                     service=service,
                     model_path=model_path,
                     inference_timeout_s=config["inference_timeout_s"],
+                    weights=weights,
                 )
             else:
                 serving = FullWeightServingRuntime(
@@ -255,6 +273,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
                     service=service,
                     model_path=model_path,
                     inference_timeout_s=config["inference_timeout_s"],
+                    weights=weights,
                 )
             return serving
         except BaseException:

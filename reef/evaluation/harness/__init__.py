@@ -1,15 +1,15 @@
-"""Harness candidate evaluation: run evaluation tasks as episodes, keep every score, and decide by the scores.
+"""Harness candidate evaluation: run evaluation tasks as rollouts, keep every score, and decide by the scores.
 
 ``scoring``
-    ``EpisodeScorer``, the scorer a deployment names in
+    ``RolloutScorer``, the scorer a deployment names in
     ``evolution.evaluation.scorer``, and what Reef keeps of one scored
-    episode.
+    rollout.
 ``runner``
-    The worker pool that runs and scores episodes.
+    The worker pool that runs and scores rollouts.
 ``history``
-    Every tree, episode and decision of a scenario; the score cache.
+    Every tree, rollout and decision of a scenario; the score cache.
 ``evaluator``
-    ``HarnessEpisodeEvaluator``: scores any tree on any tasks through the
+    ``HarnessRolloutEvaluator``: scores any tree on any tasks through the
     cache, and scores a ``HarnessCandidate`` against the head tree.
 ``policy``
     The publication policies ``compare``, ``floor`` and ``none``.
@@ -24,15 +24,15 @@ from reef.evaluation.harness.evaluator import (
     EvaluationContext,
     HarnessCandidate,
     HarnessCandidateEvaluator,
-    HarnessEpisodeEvaluator,
+    HarnessRolloutEvaluator,
 )
-from reef.evaluation.harness.history import CandidateRecord, DecisionRecord, EpisodeRecord, History
-from reef.evaluation.harness.policy import ComparePolicy, EpisodePolicy, FloorPolicy, NoEvaluationPolicy
-from reef.evaluation.harness.runner import EpisodeEvaluationWorker, EvaluationWorkerPool, evaluation_selection
+from reef.evaluation.harness.history import CandidateRecord, DecisionRecord, History, RolloutRecord
+from reef.evaluation.harness.policy import ComparePolicy, FloorPolicy, NoEvaluationPolicy, RolloutPolicy
+from reef.evaluation.harness.runner import EvaluationWorkerPool, RolloutEvaluationWorker, evaluation_selection
 from reef.evaluation.harness.scoring import (
-    EpisodeScorer,
     FailureObservation,
-    ScoredEpisode,
+    RolloutScorer,
+    ScoredRollout,
     VerifierRewardScorer,
     verifier_reward,
 )
@@ -44,10 +44,6 @@ __all__ = [
     "CandidateRecord",
     "ComparePolicy",
     "DecisionRecord",
-    "EpisodeEvaluationWorker",
-    "EpisodePolicy",
-    "EpisodeRecord",
-    "EpisodeScorer",
     "EvaluationContext",
     "EvaluationSettings",
     "EvaluationTasks",
@@ -56,11 +52,15 @@ __all__ = [
     "FloorPolicy",
     "HarnessCandidate",
     "HarnessCandidateEvaluator",
-    "HarnessEpisodeEvaluator",
+    "HarnessRolloutEvaluator",
     "History",
     "NoEvaluationPolicy",
     "Promoter",
-    "ScoredEpisode",
+    "RolloutEvaluationWorker",
+    "RolloutPolicy",
+    "RolloutRecord",
+    "RolloutScorer",
+    "ScoredRollout",
     "StepTasks",
     "VerifierRewardScorer",
     "evaluation_selection",

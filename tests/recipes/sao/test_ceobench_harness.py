@@ -200,11 +200,11 @@ class Client:
         return {"accepted": True}
 
 
-class Releases:
+class Steps:
     def __init__(self, counts) -> None:
         self.counts = list(counts)
 
-    def training_releases(self):
+    def training_steps(self):
         return self.counts.pop(0) if len(self.counts) > 1 else self.counts[0]
 
 
@@ -320,7 +320,7 @@ def create_harness(monkeypatch, modules, tmp_path, *, env=None):
 
 
 def play(monkeypatch, modules, harness, task, tools, responses):
-    """Run one episode of the harness against ``task`` and ``tools`` with a scripted model; return the context."""
+    """Run one rollout of the harness against ``task`` and ``tools`` with a scripted model; return the context."""
     capture = Capture()
     model = Model(responses, capture)
     server = SimpleNamespace(server_address=("127.0.0.1", 29123), stopped=False)
@@ -830,7 +830,7 @@ def test_week_records_close_weeks_over_the_credit_window(monkeypatch) -> None:
         {"receipt": "r-2", "tokens": 25, "week": 0, "decision": "next_week"},
         {"receipt": "r-3", "tokens": 37, "week": 1, "decision": "next_week"},
     ]
-    # The last weeks close with the episode's final cash, valued as cash alone.
+    # The last weeks close with the rollout's final cash, valued as cash alone.
     closed = {week: (cash_end, value_end) for week, cash_end, value_end, _credit in records.finished_weeks(970_000.0)}
     assert closed[2] == (970_000.0, 970_000.0)
     rows = records.summary(970_000.0)
@@ -872,10 +872,10 @@ def test_turn_decision_tells_company_changing_calls_from_reads(monkeypatch) -> N
 def test_training_pacer_waits_for_the_batches_the_reported_turns_filled(monkeypatch) -> None:
     report = load_modules(monkeypatch).report
     monkeypatch.setattr(report.time, "sleep", lambda _s: None)
-    pacer = report.TrainingPacer(8, 60.0, Releases([3, 3, 4, 4]), SimpleNamespace(warning=lambda *a, **k: None))
+    pacer = report.TrainingPacer(8, 60.0, Steps([3, 3, 4, 4]), SimpleNamespace(warning=lambda *a, **k: None))
     assert pacer.wait(1, 7) < 1.0  # no full batch yet: nothing to wait for
     pacer.wait(2, 8)  # one batch: waits until the release count moves from 3 to 4
-    assert pacer.expected_releases(16) == 2
+    assert pacer.expected_steps(16) == 2
 
 
 @pytest.mark.unit
@@ -886,19 +886,19 @@ def test_training_pacer_forgives_a_batch_the_trainer_never_commits(monkeypatch) 
     monkeypatch.setattr(report.time, "time", lambda: next(clock))
     warnings = []
     pacer = report.TrainingPacer(
-        8, 30.0, Releases([0]), SimpleNamespace(warning=lambda msg, *a: warnings.append(msg % a))
+        8, 30.0, Steps([0]), SimpleNamespace(warning=lambda msg, *a: warnings.append(msg % a))
     )
     pacer.wait(3, 16)
-    assert warnings == ["week 3: trainer committed 0 of 2 expected releases after 30s; going on"]
-    assert pacer.expected_releases(16) == 0  # the forgiven batches are not waited for again
+    assert warnings == ["week 3: trainer committed 0 of 2 expected steps after 30s; going on"]
+    assert pacer.expected_steps(16) == 0  # the forgiven batches are not waited for again
 
 
 # ---------------------------------------------------------------------------
-# One episode through the Harbor agent (harness/harbor_agent.py)
+# One rollout through the Harbor agent (harness/harbor_agent.py)
 
 
 @pytest.mark.unit
-def test_harness_plays_the_episode_and_reports_each_week_to_reef(monkeypatch, tmp_path) -> None:
+def test_harness_plays_the_rollout_and_reports_each_week_to_reef(monkeypatch, tmp_path) -> None:
     modules = load_modules(monkeypatch)
     harness = create_harness(monkeypatch, modules, tmp_path)
     simulation = Simulation()
@@ -1004,7 +1004,7 @@ def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch, tmp
 
 
 @pytest.mark.unit
-def test_harness_ends_the_episode_when_the_engine_times_out(monkeypatch, tmp_path) -> None:
+def test_harness_ends_the_rollout_when_the_engine_times_out(monkeypatch, tmp_path) -> None:
     modules = load_modules(monkeypatch)
     harness = create_harness(monkeypatch, modules, tmp_path)
     simulation = Simulation()
@@ -1024,7 +1024,7 @@ def test_gate_reads_the_engine_books_for_a_new_week_and_holds_for_training(monke
         monkeypatch, modules, tmp_path, env={"CEOBENCH_PACE_BATCH": "1", "CEOBENCH_PACE_TIMEOUT_S": "1"}
     )
     monkeypatch.setattr(modules.report.time, "sleep", lambda _s: None)
-    harness.pacer = modules.report.TrainingPacer(1, 1.0, Releases([0, 0, 1]), harness.logger)
+    harness.pacer = modules.report.TrainingPacer(1, 1.0, Steps([0, 0, 1]), harness.logger)
     simulation = Simulation()
     simulation.subscribers = 3
     task = Task(simulation)
@@ -1037,7 +1037,7 @@ def test_gate_reads_the_engine_books_for_a_new_week_and_holds_for_training(monke
     harness.enter_week(task, 1, 7)  # week 0 is reported; the pacer then waits for its batch
     assert harness.records.weeks[1].start.mrr is None
     assert [payload["references"] for _s, payload in harness.client.calls] == [["r-1"]]
-    assert harness.pacer.expected_releases(1) == 1
+    assert harness.pacer.expected_steps(1) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1066,7 +1066,7 @@ def test_scorer_locates_the_single_run_and_prefers_the_checkpointed_database(tmp
 
 
 @pytest.mark.unit
-def test_entrypoint_runs_one_episode_and_drains_training(monkeypatch, capsys) -> None:
+def test_entrypoint_runs_one_rollout_and_drains_training(monkeypatch, capsys) -> None:
     calls = []
 
     class Lab:
@@ -1091,7 +1091,7 @@ def test_entrypoint_runs_one_episode_and_drains_training(monkeypatch, capsys) ->
 
     runpy.run_path(str(EXAMPLE_DIR / "run.py"))
 
-    # One episode: the policy adapts inside the episode it is scored on.
+    # One rollout: the policy adapts inside the rollout it is scored on.
     (lab, task, agent, tags), *rest = calls
     assert not rest
     assert str(task.relative_to(EXAMPLE_DIR)) == "harbor"
