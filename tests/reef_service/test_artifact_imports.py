@@ -12,8 +12,16 @@ from tests.support.artifact_versions import ImportingComponent, dispatcher, trai
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.runtime_stubs import runtime_bindings
 
-from reef.artifact import REFERENCE_FILE, ArtifactSources, DirectoryFiles, directory_content_id, read_reference
-from reef.core.errors import CommitPending
+from reef.artifact import (
+    REFERENCE_FILE,
+    ArtifactSourceReader,
+    ArtifactSources,
+    DirectorySource,
+    SourceFiles,
+    directory_content_id,
+    read_reference,
+)
+from reef.core.errors import CommitPending, UnknownScenario
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
@@ -35,6 +43,20 @@ def source(directory: Path) -> dict[str, str]:
     return {"uri": directory.as_uri(), "version": ""}
 
 
+def opened(directory: Path) -> SourceFiles:
+    """The files of ``directory`` as the ``file`` reader opens them."""
+    return DirectorySource(directory, source_version="", link=False)
+
+
+def store(tmp_path: Path) -> Path:
+    """A new empty directory for an import to store into."""
+    stores = tmp_path / "stores"
+    stores.mkdir(exist_ok=True)
+    directory = stores / str(len(list(stores.iterdir())))
+    directory.mkdir()
+    return directory
+
+
 @pytest.mark.unit
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
@@ -47,7 +69,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     served_before = len(runtime.activated)
     runtime.restore_order.clear()
     imported = value.import_artifact(
-        "math", weights(tmp_path / "w9"), DirectoryFiles(tmp_path / "w9"), None, source=source(tmp_path / "w9")
+        "math", opened(weights(tmp_path / "w9")), None, source=source(tmp_path / "w9"), directory=store(tmp_path)
     )
 
     # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
@@ -78,11 +100,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
 
     # The same bytes again are another artifact with the same content id.
     again = value.import_artifact(
-        "math",
-        weights(tmp_path / "again"),
-        DirectoryFiles(tmp_path / "again"),
-        None,
-        source=source(tmp_path / "again"),
+        "math", opened(weights(tmp_path / "again")), None, source=source(tmp_path / "again"), directory=store(tmp_path)
     )
     assert again.artifact_id != imported.artifact_id and again.content_id == imported.content_id
 
@@ -129,23 +147,57 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
     try:
         with pytest.raises(ValueError, match=r"config\.json and weight files"):
             value.import_artifact(
-                "math", missing_config, DirectoryFiles(missing_config), None, source=source(missing_config)
+                "math", opened(missing_config), None, source=source(missing_config), directory=store(tmp_path)
             )
         with pytest.raises(ValueError, match="has no component 'other'"):
             value.import_artifact(
                 "math",
-                weights(tmp_path / "good"),
-                DirectoryFiles(tmp_path / "good"),
+                opened(weights(tmp_path / "good")),
                 "other",
                 source=source(tmp_path / "good"),
+                directory=store(tmp_path),
             )
         monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
         with pytest.raises(CommitPending, match="cannot import an artifact"):
             value.import_artifact(
-                "math", tmp_path / "good", DirectoryFiles(tmp_path / "good"), None, source=source(tmp_path / "good")
+                "math", opened(tmp_path / "good"), None, source=source(tmp_path / "good"), directory=store(tmp_path)
             )
         assert len(scenario.store.history()) == steps
         assert value.list_artifacts("math") == rows
+    finally:
+        value.close()
+
+
+class CountingReader(ArtifactSourceReader):
+    """Opens ``mem://`` URIs as the full-weight release in ``directory`` and keeps each URI it opened."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = weights(directory)
+        self.read: list[str] = []
+
+    @property
+    def schemes(self) -> tuple[str, ...]:
+        return ("mem",)
+
+    def open(self, uri: str) -> SourceFiles:
+        self.read.append(uri)
+        return DirectorySource(self.directory, source_version="v1", link=False)
+
+
+@pytest.mark.unit
+def test_an_import_the_scenario_cannot_take_reads_nothing(tmp_path) -> None:
+    value, _, _ = dispatcher(tmp_path)
+    value.get_or_create_scenario("math")
+    reader = CountingReader(tmp_path / "mem")
+    imports = ArtifactImports(ArtifactSources((reader,)), tmp_path / "imports")
+    try:
+        with pytest.raises(ValueError, match="has no component 'wieghts'"):
+            imports.import_source(value, "math", "wieghts", "mem://model")
+        with pytest.raises(UnknownScenario):
+            imports.import_source(value, "other", None, "mem://model")
+        assert reader.read == []
+        assert imports.import_source(value, "math", None, "mem://model")["scenario"] == "math"
+        assert reader.read == ["mem://model"]
     finally:
         value.close()
 
@@ -204,7 +256,7 @@ def test_the_import_http_api_takes_a_uri(tmp_path) -> None:
 @pytest.mark.unit
 def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_path, monkeypatch) -> None:
     hub = MemoryHub(tmp_path / "cache", "org/model", {"config.json": b"{}", "model.safetensors": b"w9-weights"})
-    monkeypatch.setattr("reef.artifact.sources.HfApi", lambda: hub)
+    monkeypatch.setattr("reef.artifact.files.HfApi", lambda: hub)
 
     async def run() -> None:
         value, _, _ = dispatcher(tmp_path)

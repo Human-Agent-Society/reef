@@ -18,7 +18,7 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
-from reef.artifact.files import ArtifactFiles
+from reef.artifact.files import SourceFiles, directory_content_id
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
@@ -38,6 +38,7 @@ from reef.storage.commits import (
     to_json_value,
 )
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
+from reef.surface.base import ArtifactLayout
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainStepResult
 
@@ -291,6 +292,24 @@ class ScenarioCommitter:
             return None
         return self.release_manifest(artifact).artifact_ids(release_id)
 
+    def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
+        """The component an import into ``component`` lands in, and the layout that checks its directory.
+
+        ``component`` may be left out when the scenario has one component. Raise ``ValueError`` for an unknown
+        component or one that takes no import. Purpose: the import service calls it before it downloads anything.
+        """
+        names = self.component_names()
+        if component is None:
+            if len(names) > 1:
+                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
+            component = names[0]
+        if component not in names:
+            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+        component_surface = self._binding.surface.components.get(component)
+        if component_surface is None or component_surface.layout is None:
+            raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
+        return component, component_surface.layout
+
     def component_names(self) -> tuple[str, ...]:
         """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
         return self._binding.surface.names or (self.trainers[0].component,)
@@ -416,42 +435,42 @@ class ScenarioCommitter:
             return selected
 
     def import_artifact(
-        self, directory: Path, files: ArtifactFiles, component: str | None, *, source: Mapping[str, str]
+        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
     ) -> ComponentArtifact:
-        """Publish the files in ``directory`` as a new artifact of ``component`` whose content is ``files``; return it.
+        """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
-        ``directory`` holds what Reef stores: the imported files themselves
-        (RFC #980), or the ``REFERENCE_FILE`` of a revision that stays on the
-        Hub (RFC #995). ``files`` is the content in both cases.
         ``component`` may be left out when the scenario has one component.
         The component's layout (``ComponentSurface.layout``) checks ``files``
-        first, outside the locks, since it can ask a remote service.
-        Then the release's own admission check runs on ``directory``, as at a
-        training publication. The artifact's content id is ``files.content_id()``.
-        The release binds the artifact as ``component`` and every other
+        first, outside the locks, since it can ask a remote service, and
+        before anything is copied. Then Reef stores the artifact in the empty
+        ``directory``: ``files.reference`` when the source keeps the files
+        fixed (RFC #995), else a copy of the files (RFC #980). The release's
+        own admission check runs on what is stored, as at a training
+        publication. The artifact's content id is the content id of
+        ``files``: a copy's is computed from the copy, which has the same
+        bytes. The release binds the artifact as ``component`` and every other
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
-        directory was read from, as its metrics. The active release, the chain tip,
-        every training start and the activation rule are left alone. Raise
-        ``ValueError`` for an unknown component, a component that takes no
-        import, or a directory that the layout or the admission check refuses;
-        ``CommitPending`` while a training result waits for its commit.
-        Nothing changes then.
+        files were read from, as its metrics. The active release, the chain
+        tip, every training start and the activation rule are left alone.
+        Raise ``ValueError`` for an unknown component, a component that takes
+        no import, or files that the layout or the admission check refuses;
+        ``ArtifactSourceError`` when the copy fails; ``CommitPending`` while a
+        training result waits for its commit. Nothing changes then.
         """
-        names = self.component_names()
-        if component is None:
-            if len(names) > 1:
-                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
-            component = names[0]
-        if component not in names:
-            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+        component, layout = self.import_target(component)
         surface = self._binding.surface
-        component_surface = surface.components.get(component)
-        if component_surface is None or component_surface.layout is None:
-            raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
-        component_surface.layout.check(files)
-        imported = Artifact.local(directory, content_id=files.content_id())
+        component_surface = surface.components[component]
+        layout.check(files)
+        if files.reference is None:
+            files.copy_into(directory)
+            content_id = directory_content_id(directory)
+        else:
+            for path, data in files.reference.items():
+                (directory / path).write_bytes(data)
+            content_id = files.content_id()
+        imported = Artifact.local(directory, content_id=content_id)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1

@@ -385,7 +385,7 @@ def resolve_hf_snapshot(repo_id: str) -> str:
             f"  set reef.model_path to a local path or an HF repo ID like 'Qwen/Qwen2.5-1.5B-Instruct'"
         )
     try:
-        from reef.artifact.sources import download_huggingface_snapshot, parse_huggingface_source
+        from reef.artifact.files import download_huggingface_snapshot, parse_huggingface_source
 
         snapshot = download_huggingface_snapshot(parse_huggingface_source(value))
         return str(snapshot.local_path)

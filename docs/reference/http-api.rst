@@ -1241,14 +1241,17 @@ Import an artifact
 
 ``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
 artifact from the directory that a URI names. Leave out ``component`` when
-the scenario has one component. The body is ``{"source": "<uri>"}``. A source
-reader copies the directory from one of these URIs:
+the scenario has one component. The body is ``{"source": "<uri>"}``. Reef
+checks the layout below on the source, and then copies the directory from one
+of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
   full 40-digit commit SHA, Reef keeps a reference to the revision instead of
   a copy (see below).
-- ``s3://bucket/prefix/``: every object under the prefix.
-- ``file:///absolute/path``: a directory on the service's file system.
+- ``s3://bucket/prefix/``: every object under the prefix. Empty folder
+  markers, keys that end in ``/``, are skipped.
+- ``file:///absolute/path``: a directory on the service's file system,
+  percent encoded as ``Path.as_uri()`` writes it. Its files are copied.
 - A scheme that ``storage.artifact-sources`` adds.
 
 To import a directory from your own machine, put it in one of these places
@@ -1320,8 +1323,8 @@ give a large import a long client timeout.
 | 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
 |        | to read; an unknown ``component``, or ``component`` is missing in  |
 |        | a scenario with several components; the component takes no         |
-|        | import; the directory does not have the component's layout, or its |
-|        | admission check refuses it                                         |
+|        | import (Reef reads nothing for these three); the directory does    |
+|        | not have the component's layout, or its admission check refuses it |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario; Reef reads nothing then                          |
 +--------+--------------------------------------------------------------------+

@@ -17,7 +17,7 @@ LFS_SIZE = 8
 
 
 class MemoryHub(HfApi):
-    """``repo`` at ``COMMIT`` holds ``files``; ``downloads`` lists each file that a caller downloaded."""
+    """``repo`` at ``COMMIT``, its ``main`` branch, holds ``files``; ``downloads`` lists each file a caller downloaded."""
 
     def __init__(self, cache: Path, repo: str, files: dict[str, bytes]) -> None:
         super().__init__()
@@ -25,17 +25,19 @@ class MemoryHub(HfApi):
         self.downloads: list[str] = []
 
     def model_info(self, repo_id: str, *, revision: str | None = None, **kwargs: Any) -> Any:
-        if (repo_id, revision) != (self.repo, COMMIT):
+        # The default branch, ``main``, is at ``COMMIT``.
+        if repo_id != self.repo or revision not in (None, "main", COMMIT):
             missing = httpx2.Response(404, request=httpx2.Request("GET", "https://huggingface.co"))
             raise RevisionNotFoundError(f"{repo_id}@{revision} is not on the hub", response=missing)
         return SimpleNamespace(
+            sha=COMMIT,
             siblings=[
                 SimpleNamespace(
                     rfilename=path,
                     lfs=SimpleNamespace(sha256=hashlib.sha256(data).hexdigest()) if len(data) >= LFS_SIZE else None,
                 )
                 for path, data in self.files.items()
-            ]
+            ],
         )
 
     def hf_hub_download(self, repo_id: str, filename: str, *, revision: str | None = None, **kwargs: Any) -> str:

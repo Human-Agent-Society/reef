@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
-from reef.artifact.files import ArtifactFiles
+from reef.artifact.files import SourceFiles
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.core.activation import ActivationRule
@@ -280,11 +280,15 @@ class Scenario:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
 
+    def import_target(self, component: str | None) -> str:
+        """The component an import into ``component`` lands in; see :meth:`ScenarioCommitter.import_target`."""
+        return self._committer.import_target(component)[0]
+
     def import_artifact(
-        self, directory: Path, files: ArtifactFiles, component: str | None, *, source: Mapping[str, str]
+        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
     ) -> ComponentArtifact:
-        """Publish ``directory`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
-        return self._committer.import_artifact(directory, files, component, source=source)
+        """Publish ``files`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
+        return self._committer.import_artifact(files, component, source=source, directory=directory)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""

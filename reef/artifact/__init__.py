@@ -52,7 +52,22 @@ from reef.artifact.artifact import (
     ArtifactValidator,
 )
 from reef.artifact.composite import compose_release
-from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_content_id
+from reef.artifact.files import (
+    REFERENCE_FILE,
+    ArtifactFiles,
+    DirectoryFiles,
+    DirectorySource,
+    DownloadedSnapshot,
+    HuggingFaceRevision,
+    HuggingFaceRevisionFiles,
+    HuggingFaceSource,
+    S3PrefixFiles,
+    SourceFiles,
+    directory_content_id,
+    download_huggingface_snapshot,
+    parse_huggingface_source,
+    read_reference,
+)
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
@@ -69,22 +84,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
-from reef.artifact.sources import (
-    REFERENCE_FILE,
-    ArtifactSourceReader,
-    ArtifactSources,
-    DownloadedSnapshot,
-    FileReader,
-    HuggingFaceReader,
-    HuggingFaceRevision,
-    HuggingFaceRevisionFiles,
-    HuggingFaceSource,
-    ReferencedContent,
-    S3Reader,
-    download_huggingface_snapshot,
-    parse_huggingface_source,
-    read_reference,
-)
+from reef.artifact.sources import ArtifactSourceReader, ArtifactSources, FileReader, HuggingFaceReader, S3Reader
 
 __all__ = [
     "REFERENCE_FILE",
@@ -106,6 +106,7 @@ __all__ = [
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
     "DirectoryFiles",
+    "DirectorySource",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",
     "FileReader",
@@ -117,14 +118,15 @@ __all__ = [
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
     "PEFTValidator",
-    "ReferencedContent",
     "RegistrationAwareRepositoryBackendFactory",
     "ReleaseNotRestorable",
     "Repository",
     "RepositoryBackend",
     "RepositoryBackendContext",
     "RepositoryBackendFactory",
+    "S3PrefixFiles",
     "S3Reader",
+    "SourceFiles",
     "StagedReleaseRepositoryBackend",
     "compose_release",
     "directory_content_id",
