@@ -48,6 +48,7 @@ from reef.core.evaluation import RolloutRequest
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskRollout, TaskRolloutError, TaskRolloutRunner, checked_labels
+from reef.processes import CURRENT_PROCESS_SCOPE
 from reef.record2sample.generator.designer import (
     Designer,
     DesignerError,
@@ -76,7 +77,6 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
-from reef.sandbox.lifecycle import CURRENT_PROCESS_SCOPE
 from reef.sandbox.task_environment import (
     ModuleProbe,
     ReadinessProbe,

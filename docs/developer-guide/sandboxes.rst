@@ -43,7 +43,7 @@ The generator service's checks (``harbor run -e`` children) and rollouts
 (in-process Harbor trials) use Harbor's task environment lifecycle. They select
 an environment by name and read its needs from ``reef.sandbox.task_environment``.
 Checks share local process management with the executors through
-``reef.sandbox.lifecycle.ProcessScope``; their command arguments and scoring
+``reef.processes.ProcessScope``; their command arguments and scoring
 remain in the generator. The Terminus harness layers the two: an executor
 launches its runner, which then drives a Harbor task environment.
 

@@ -390,7 +390,7 @@ def test_core_storage_and_sandbox_only_depend_on_lower_layers() -> None:
     allowed = {
         "core": ("reef.core",),
         "storage": ("reef.core", "reef.storage"),
-        "sandbox": ("reef.core", "reef.sandbox"),
+        "sandbox": ("reef.core", "reef.processes", "reef.sandbox"),
     }
     for owner, prefixes in allowed.items():
         for path in sorted((REPO_ROOT / "reef" / owner).rglob("*.py")):
@@ -530,14 +530,18 @@ def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
             assert _imports_of(imported, dependency) == [], module_name
 
 
-def test_background_jobs_use_only_the_standard_library_and_process_lifecycle() -> None:
-    # Keep the shared worker independent of concrete sandbox providers and execution adapters.
+def test_background_jobs_depend_only_on_the_standard_library_and_processes() -> None:
+    # Keep the shared worker independent of the sandbox subsystem.
     tree = ast.parse((REPO_ROOT / "reef" / "background_jobs.py").read_text(encoding="utf-8"))
     targets = _imported_modules(tree, package="reef")
-    assert all(target.startswith("reef.sandbox.lifecycle.") for target in targets if target.startswith("reef."))
-    assert "reef" not in targets
-    lifecycle = ast.parse((REPO_ROOT / "reef/sandbox/lifecycle.py").read_text(encoding="utf-8"))
-    imports = _imported_modules(lifecycle, package="reef.sandbox")
+    assert all(
+        target.split(".")[0] in sys.stdlib_module_names or target.startswith("reef.processes.") for target in targets
+    )
+
+
+def test_processes_depend_only_on_the_standard_library() -> None:
+    tree = ast.parse((REPO_ROOT / "reef/processes.py").read_text(encoding="utf-8"))
+    imports = _imported_modules(tree, package="reef")
     assert all(target.split(".")[0] in sys.stdlib_module_names for target in imports)
 
 

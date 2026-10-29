@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.sandbox.lifecycle import ProcessRequest, ProcessScope, ProcessScopeClosed
+from reef.processes import ProcessRequest, ProcessScope, ProcessScopeClosed
 
 pytestmark = pytest.mark.unit
 

@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, primary_reward
+from reef.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
 from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
-from reef.sandbox.lifecycle import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
 CATEGORIES = (

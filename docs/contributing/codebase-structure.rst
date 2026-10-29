@@ -158,7 +158,7 @@ package's own submodules and third-party libraries):
    * - ``inference``
      - ``runtime``, ``artifact``, ``core``
    * - ``sandbox``
-     - ``core``
+     - ``processes``, ``core``
    * - ``harness``
      - ``sandbox``, ``runtime``, ``core``
    * - ``evaluation``
@@ -177,8 +177,10 @@ package's own submodules and third-party libraries):
      - ``service``, ``core``
 
 ``background_jobs.py`` depends only on the standard library and
-``sandbox.lifecycle``. That module uses only the standard library; the shared
-worker must not import concrete sandbox providers or executor adapters.
+``processes.py``. Sandbox executors and generator checks also use
+``processes.py`` for local child ownership. That module uses only the standard
+library and imports no Reef modules. The shared worker must not import
+``sandbox`` or its providers and executor adapters.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
