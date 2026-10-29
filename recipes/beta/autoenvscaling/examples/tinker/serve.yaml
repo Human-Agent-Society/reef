@@ -86,10 +86,10 @@ pipeline:
           # A model call on the same Reef reviews each task's tests; a task they grade on what the instruction does
           # not state is refused.
           review: refuse
-  # One task job holds tasks_per_step saved tasks; Tinker rolls them out and trains on their task groups.
+  # One task job holds up to buffer_size saved tasks; Tinker rolls them out and trains on their task groups.
   sample2job:
     config:
-      tasks_per_step: 2
+      buffer_size: 2
 training:
   backend: tinker
   ready-timeout: 1800

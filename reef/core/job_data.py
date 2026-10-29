@@ -255,8 +255,8 @@ class JobOutcome:
     ``finished`` or ``failed``; ``metrics`` is the component's telemetry for the whole job, a mapping that
     encodes as JSON and that Reef records without reading, such as a task job's ``rollout_rewards``;
     ``error`` is a non-empty string exactly when ``event`` is ``failed``. Purpose: the weight trainer's job
-    loop makes it when it commits a job's end and keeps the last one in its state; the sample-to-job stage
-    (``Sample2Job.job_ended``) reads it.
+    loop makes it when it commits a job's end and keeps the last one in its state; the record-to-sample stage
+    (``Record2Sample.job_ended``) reads it.
     """
 
     job_id: str
