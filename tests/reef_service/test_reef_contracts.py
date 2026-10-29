@@ -177,7 +177,9 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
 
     @dataclass(frozen=True)
     class RecordingRecipe(Recipe):
-        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+        def build(
+            self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        ):
             selected.append(self.name)
             return super().build(
                 scenario,

@@ -511,9 +511,10 @@ The session contract is:
        scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
    * - ``samples``
-     - The ``SampleStore`` of the scenario's training samples: the uploaded
-       trajectories in upload order, each with ``train_counts``, the number of
-       committed jobs of each trainer that trained it. It closes with the session and
+     - The ``SampleStore`` of the scenario's training samples, in arrival
+       order: the uploaded trajectories, and the imported Harbor tasks of the
+       ``train`` and ``eval`` splits. Each sample has ``train_counts``, the
+       number of committed jobs of each trainer that trained it. It closes with the session and
        survives restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
@@ -590,9 +591,10 @@ The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
 which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
 give ``task_storage`` to ``Trainer.build`` too. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
-components never share a store, except ``imported-tasks``
-(``reef.storage.tasks.IMPORTED_TASK_STORE``): the scenario's imported tasks,
-which every component opens by that name and only the service writes.
+components never share a store. The scenario's imported tasks are not a task
+store: they are tasks in the scenario's ``SampleStore``, which the factory
+gives to ``Recipe.build_trainers`` as ``samples`` and every component reads
+from ``PipelineContext.samples``.
 
 A store holds generations. A generation holds its source record ids and its
 candidates. ``save_candidates`` saves a copy of each candidate task directory
