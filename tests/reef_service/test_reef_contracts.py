@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from contextlib import closing
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.runtime_stubs import runtime_bindings
 
@@ -47,6 +50,22 @@ class WeightRecipe(Recipe):
         return create_weight_surface(kind="model")
 
 
+class ForkFailingBackend(InMemoryRepositoryBackend):
+    """A repository whose scenario fork always fails."""
+
+    def fork(self, release_id: str | None = None, *, metadata=None):
+        raise ArtifactError("cannot fork math")
+
+
+def base_directory(tmp_path: Path, **files: str) -> Path:
+    """The base artifact directory ``tmp_path/initial`` holding ``files`` (name to text)."""
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    for name, text in files.items():
+        (initial / name).write_text(text)
+    return initial
+
+
 def weight_dispatcher(tmp_path, initial, *, training: bool = False):
     """A dispatcher of weight scenarios; ``training`` gives them a training component, so they record serving versions."""
     return Dispatcher(
@@ -55,6 +74,27 @@ def weight_dispatcher(tmp_path, initial, *, training: bool = False):
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
     )
+
+
+def serving_client(dispatcher, backend=None, **options) -> TestClient:
+    """A test client of ``dispatcher``'s app; ``backend`` is an async inference function, when given."""
+    if backend is not None:
+        options["inference_handler"] = ContractInferenceHandler(backend)
+    return TestClient(TestServer(create_app(dispatcher, **options)))
+
+
+@asynccontextmanager
+async def proxied_client(tmp_path, path: str, upstream) -> AsyncIterator[tuple[TestClient, Dispatcher]]:
+    """A client of a Reef app whose HTTP inference handler forwards to the ``upstream`` route at ``path``."""
+    upstream_app = web.Application()
+    upstream_app.router.add_post(path, upstream)
+    async with TestServer(upstream_app) as upstream_server:
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
+        async with serving_client(dispatcher, inference_handler=backend) as client:
+            yield client, dispatcher
 
 
 @pytest.mark.unit
@@ -72,18 +112,13 @@ def test_service_rejects_missing_scenario_and_inference_accept() -> None:
 
 
 @pytest.mark.unit
-def test_service_has_no_control_route() -> None:
-    with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
-        assert all(route.resource.canonical != "/reef/control" for route in create_app(dispatcher).router.routes())
-
-
-@pytest.mark.unit
-def test_provider_native_generation_stays_behind_inference_backend() -> None:
+def test_service_has_no_control_route_and_provider_native_generation_stays_behind_inference_backend() -> None:
     with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
         routes = {route.resource.canonical for route in create_app(dispatcher).router.routes()}
 
     assert {"/v1/chat/completions", "/v1/responses", "/v1/messages"} <= routes
     assert "/generate" not in routes
+    assert "/reef/control" not in routes
 
 
 @pytest.mark.unit
@@ -122,10 +157,7 @@ def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> Non
 
 @pytest.mark.unit
 def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-    backend = InMemoryRepositoryBackend.factory(initial)
+    backend = InMemoryRepositoryBackend.factory(base_directory(tmp_path, **{"model.txt": "base"}))
     selected = backend("math").resolve_release().release_id
     dispatcher = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
     service = RequestService(dispatcher)
@@ -143,8 +175,6 @@ def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     selected: list[str] = []
 
     @dataclass(frozen=True)
@@ -162,7 +192,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
 
     dispatcher = Dispatcher(
         RecordingRecipe(name="tttd"),
-        InMemoryRepositoryBackend.factory(initial),
+        InMemoryRepositoryBackend.factory(base_directory(tmp_path)),
         scenario_storage=SQLiteScenarioStorage(),
     )
 
@@ -173,9 +203,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_report_first_request_forks_scenario_artifact(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend = InMemoryRepositoryBackend.factory(initial)
+    backend = InMemoryRepositoryBackend.factory(base_directory(tmp_path))
     dispatcher = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
 
     RequestService(dispatcher).accept(
@@ -189,9 +217,7 @@ def test_report_first_request_forks_scenario_artifact(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend = InMemoryRepositoryBackend.factory(initial)
+    backend = InMemoryRepositoryBackend.factory(base_directory(tmp_path))
 
     first = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
     created = first.get_or_create_scenario("math")
@@ -208,59 +234,22 @@ def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> 
 
 
 @pytest.mark.unit
-def test_failed_artifact_fork_does_not_leave_runtime(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-
-    class FailingBackend(InMemoryRepositoryBackend):
-        def fork(self, release_id: str | None = None, *, metadata=None):
-            del release_id
-            del metadata
-            raise ArtifactError("cannot fork math")
-
+def test_failed_artifact_fork_returns_service_unavailable_and_does_not_leave_runtime(tmp_path) -> None:
     dispatcher = build_default_dispatcher(
-        backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
+        backend_factory=ForkFailingBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
     )
 
-    with pytest.raises(ArtifactError, match="cannot fork math"):
-        dispatcher.get_or_create_scenario("math")
-
-    assert dispatcher.registry.get_optional("math") is None
-
-
-@pytest.mark.unit
-def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
     async def run() -> None:
-        initial = tmp_path / "initial"
-        initial.mkdir()
-
-        class FailingBackend(InMemoryRepositoryBackend):
-            def fork(self, release_id: str | None = None, *, metadata=None):
-                del release_id
-                del metadata
-                raise ArtifactError("cannot fork math")
-
-        dispatcher = build_default_dispatcher(
-            backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
-            scenario_storage=SQLiteScenarioStorage(),
-        )
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            response = await client.post(
-                "/reef/report",
-                headers={"x-reef-scenario": "math"},
-                json={"score": 1.0},
-            )
+        async with serving_client(dispatcher) as client:
+            response = await client.post("/reef/report", headers={"x-reef-scenario": "math"}, json={"score": 1.0})
             assert response.status == 503
             assert await response.text() == "cannot fork math"
-        finally:
-            await client.close()
-
-    import asyncio
 
     asyncio.run(run())
+    with pytest.raises(ArtifactError, match="cannot fork math"):
+        dispatcher.get_or_create_scenario("math")
+    assert dispatcher.registry.get_optional("math") is None
 
 
 @pytest.mark.unit
@@ -273,50 +262,45 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
 
 @pytest.mark.unit
 def test_inference_payload_is_recorded_without_reef_body_fields() -> None:
-    async def run() -> None:
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        service = RequestService(dispatcher)
-        payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    service = RequestService(dispatcher)
+    payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
-        async def backend(artifact: Artifact, path: str, request_payload: dict) -> dict:
-            del artifact, path
-            assert request_payload == payload
-            return {"provider": "ok"}
+    async def backend(artifact: Artifact, path: str, request_payload: dict) -> dict:
+        assert request_payload == payload
+        return {"provider": "ok"}
 
-        await service.infer_with_data(
+    asyncio.run(
+        service.infer_with_data(
             {"x-reef-scenario": "chat"},
             payload,
             "/v1/chat/completions",
             ContractInferenceHandler(backend),
         )
+    )
 
-        record = dispatcher.get_or_create_scenario("chat").records.replay("chat")[0]
-        assert record.payload == {**payload, "response": {"provider": "ok"}}
-        assert record.artifact_ref is not None
-        assert "scenario" not in record.payload
-        assert "type" not in record.payload
-
-    import asyncio
-
-    asyncio.run(run())
+    record = dispatcher.get_or_create_scenario("chat").records.replay("chat")[0]
+    assert record.payload == {**payload, "response": {"provider": "ok"}}
+    assert record.artifact_ref is not None
+    assert "scenario" not in record.payload
+    assert "type" not in record.payload
 
 
 @pytest.mark.unit
 def test_http_app_records_inference_and_returns_backend_response() -> None:
+    used_artifact = None
+
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        nonlocal used_artifact
+        used_artifact = artifact
+        assert not hasattr(artifact.ref, "scenario")
+        assert path == "/v1/chat/completions"
+        return {"choices": [{"message": {"content": payload["messages"][0]["content"]}}]}
+
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+
     async def run() -> None:
-        used_artifact = None
-
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            nonlocal used_artifact
-            used_artifact = artifact
-            assert not hasattr(artifact.ref, "scenario")
-            assert path == "/v1/chat/completions"
-            return {"choices": [{"message": {"content": payload["messages"][0]["content"]}}]}
-
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
+        async with serving_client(dispatcher, backend) as client:
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"x-reef-scenario": "chat"},
@@ -325,32 +309,27 @@ def test_http_app_records_inference_and_returns_backend_response() -> None:
             assert response.status == 200
             assert response.headers["x-reef-agent-record-id"]
             assert (await response.json())["choices"][0]["message"]["content"] == "hi"
-            records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            assert [record.request_type for record in records] == [RequestType.INFERENCE]
-            assert records[0].payload["response"]["choices"][0]["message"]["content"] == "hi"
-            assert records[0].artifact_ref == used_artifact.ref
-            assert "artifact" not in records[0].payload
-        finally:
-            await client.close()
-
-    import asyncio
 
     asyncio.run(run())
+    records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+    assert [record.request_type for record in records] == [RequestType.INFERENCE]
+    assert records[0].payload["response"]["choices"][0]["message"]["content"] == "hi"
+    assert records[0].artifact_ref == used_artifact.ref
+    assert "artifact" not in records[0].payload
 
 
 @pytest.mark.unit
 def test_a_rollout_call_keeps_no_record_and_returns_its_training_block() -> None:
+    training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
+
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        return {"choices": [{"message": {"content": "hi"}}], "training": training}
+
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    assert dispatcher.get_or_create_scenario("chat") is not None
+
     async def run() -> None:
-        training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
-
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            return {"choices": [{"message": {"content": "hi"}}], "training": training}
-
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        assert dispatcher.get_or_create_scenario("chat") is not None
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
+        async with serving_client(dispatcher, backend) as client:
             rollout = {"x-reef-scenario": "chat", ROLLOUT_HEADER: "1"}
             body = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers=rollout, json=body)
@@ -360,72 +339,51 @@ def test_a_rollout_call_keeps_no_record_and_returns_its_training_block() -> None
             assert streamed.status == 400
             served = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
             assert "training" not in await served.json(), "a served call never shows its training block"
-            records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            assert len(records) == 1, "only the served call is a record"
-        finally:
-            await client.close()
-
-    import asyncio
 
     asyncio.run(run())
+    records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+    assert len(records) == 1, "only the served call is a record"
 
 
 @pytest.mark.unit
-def test_artifact_proxy_backend_forwards_native_payload_unchanged() -> None:
+def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> None:
+    received = {}
+
+    async def upstream(request):
+        received["path"] = request.path
+        received["payload"] = await request.json()
+        received["release_id"] = request.headers["x-reef-release-id"]
+        received["artifact_path"] = request.headers["x-reef-artifact-path"]
+        return web.json_response({"provider": "ok"})
+
+    repository_backend = InMemoryRepositoryBackend("chat", base_directory(tmp_path), root=tmp_path / "repository")
+    artifact = repository_backend.materialize(repository_backend.fork())
+    payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
+
     async def run() -> None:
-        received = {}
-
-        async def upstream(request):
-            received["path"] = request.path
-            received["payload"] = await request.json()
-            received["release_id"] = request.headers["x-reef-release-id"]
-            received["artifact_path"] = request.headers["x-reef-artifact-path"]
-            return __import__("aiohttp").web.json_response({"provider": "ok"})
-
-        from aiohttp import web
-
         upstream_app = web.Application()
         upstream_app.router.add_post("/v1/chat/completions", upstream)
-        server = TestServer(upstream_app)
-        await server.start_server()
-        try:
+        async with TestServer(upstream_app) as server:
             inference_handler = HttpInferenceHandler(str(server.make_url("")).rstrip("/"))
-            payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
-            initial = tmp_path / "initial"
-            initial.mkdir()
-            repository_backend = InMemoryRepositoryBackend("chat", initial, root=tmp_path / "repository")
-            materialized = repository_backend.materialize(repository_backend.fork())
-            artifact = materialized
             assert await inference_handler.inference(artifact, "/v1/chat/completions", payload) == {"provider": "ok"}
-            assert received == {
-                "path": "/v1/chat/completions",
-                "payload": payload,
-                "release_id": artifact.ref.release_id,
-                "artifact_path": str(artifact.local_path),
-            }
-        finally:
-            await server.close()
 
-    import asyncio
-    import tempfile
-    from pathlib import Path
-
-    with tempfile.TemporaryDirectory() as directory:
-        tmp_path = Path(directory)
-        asyncio.run(run())
+    asyncio.run(run())
+    assert received == {
+        "path": "/v1/chat/completions",
+        "payload": payload,
+        "release_id": artifact.ref.release_id,
+        "artifact_path": str(artifact.local_path),
+    }
 
 
 @pytest.mark.unit
 def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -> None:
+    first_chunk = b'data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\n'
+    final_chunk = b"data: [DONE]\n\r"
+    received = {}
+
     async def run() -> None:
-        import asyncio
-
-        from aiohttp import web
-
-        first_chunk = b'data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\n'
-        final_chunk = b"data: [DONE]\n\r"
         finish_upstream = asyncio.Event()
-        received = {}
 
         async def upstream(request):
             received["path"] = request.path
@@ -444,84 +402,67 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
             await response.write(final_chunk)
             return response
 
-        upstream_app = web.Application()
-        upstream_app.router.add_post("/v1/chat/completions", upstream)
-        upstream_server = TestServer(upstream_app)
-        await upstream_server.start_server()
+        async with proxied_client(tmp_path, "/v1/chat/completions", upstream) as (client, dispatcher):
+            try:
+                payload = {
+                    "model": "reef",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                }
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={"x-reef-scenario": "chat"},
+                    json=payload,
+                )
 
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
-        await client.start_server()
-        try:
-            payload = {
-                "model": "reef",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            }
-            response = await client.post(
-                "/v1/chat/completions",
-                headers={"x-reef-scenario": "chat"},
-                json=payload,
-            )
+                assert response.status == 200
+                assert response.headers["Content-Type"].startswith("text/event-stream")
+                assert response.headers["Cache-Control"] == "no-cache"
+                assert response.headers["X-Upstream-Response"] == "preserved"
+                assert "x-reef-agent-record-id" not in response.headers
 
-            assert response.status == 200
-            assert response.headers["Content-Type"].startswith("text/event-stream")
-            assert response.headers["Cache-Control"] == "no-cache"
-            assert response.headers["X-Upstream-Response"] == "preserved"
-            assert "x-reef-agent-record-id" not in response.headers
+                first = await asyncio.wait_for(response.content.readexactly(len(first_chunk)), timeout=1)
+                assert first == first_chunk
+                assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
 
-            first = await asyncio.wait_for(response.content.readexactly(len(first_chunk)), timeout=1)
-            assert first == first_chunk
-            assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
+                metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+                assert metrics["serve/request/active"] == 1
+                assert metrics["serve/request/completed_total"] == 0
+                finish_upstream.set()
+                metadata_frame = await asyncio.wait_for(response.content.readuntil(b"\n\n"), timeout=1)
+                metadata = json.loads(metadata_frame.removeprefix(b"data: "))
+                agent_record_id = metadata["reef"]["agent_record_id"]
 
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/request/active"] == 1
-            assert metrics["serve/request/completed_total"] == 0
-            finish_upstream.set()
-            metadata_frame = await asyncio.wait_for(response.content.readuntil(b"\n\n"), timeout=1)
-            metadata = json.loads(metadata_frame.removeprefix(b"data: "))
-            agent_record_id = metadata["reef"]["agent_record_id"]
-
-            records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            assert len(records) == 1
-            assert records[0].agent_record_id == agent_record_id
-            assert await asyncio.wait_for(response.read(), timeout=1) == final_chunk
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/request/active"] == 0
-            assert metrics["serve/request/completed_total"] == 1
-            assert metrics["ingest/accepted_total"] == 1
-            assert records[0].payload["response"]["stream"] is True
-            assert records[0].payload["response"]["complete"] is True
-            assert records[0].payload["response"]["status"] == 200
-            assert records[0].payload["response"]["body"] == (first_chunk + final_chunk).decode()
-            assert records[0].artifact_ref is not None
-            assert received == {
-                "path": "/v1/chat/completions",
-                "payload": payload,
-                "release_id": records[0].artifact_ref.release_id,
-            }
-        finally:
-            finish_upstream.set()
-            await client.close()
-            await upstream_server.close()
-
-    import asyncio
+                records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+                assert len(records) == 1
+                assert records[0].agent_record_id == agent_record_id
+                assert await asyncio.wait_for(response.read(), timeout=1) == final_chunk
+                metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+                assert metrics["serve/request/active"] == 0
+                assert metrics["serve/request/completed_total"] == 1
+                assert metrics["ingest/accepted_total"] == 1
+                assert records[0].payload["response"]["stream"] is True
+                assert records[0].payload["response"]["complete"] is True
+                assert records[0].payload["response"]["status"] == 200
+                assert records[0].payload["response"]["body"] == (first_chunk + final_chunk).decode()
+                assert records[0].artifact_ref is not None
+                assert received == {
+                    "path": "/v1/chat/completions",
+                    "payload": payload,
+                    "release_id": records[0].artifact_ref.release_id,
+                }
+            finally:
+                finish_upstream.set()
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path) -> None:
+    content = b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
+    stop = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
     async def run() -> None:
-        import asyncio
-
-        from aiohttp import web
-
-        content = b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
-        stop = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
         release_stop = asyncio.Event()
 
         async def upstream(request):
@@ -532,73 +473,46 @@ def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path)
             await response.write(stop)
             return response
 
-        upstream_app = web.Application()
-        upstream_app.router.add_post("/v1/messages", upstream)
-        upstream_server = TestServer(upstream_app)
-        await upstream_server.start_server()
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
-        await client.start_server()
-        try:
-            response = await client.post(
-                "/v1/messages",
-                headers={"x-reef-scenario": "chat"},
-                json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
-            )
-            assert "x-reef-agent-record-id" not in response.headers
-            assert await response.content.readexactly(len(content)) == content
-            assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
+        async with proxied_client(tmp_path, "/v1/messages", upstream) as (client, dispatcher):
+            try:
+                response = await client.post(
+                    "/v1/messages",
+                    headers={"x-reef-scenario": "chat"},
+                    json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+                assert "x-reef-agent-record-id" not in response.headers
+                assert await response.content.readexactly(len(content)) == content
+                assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
 
-            release_stop.set()
-            terminal = await response.read()
-            data = terminal.decode().split("data: ", 1)[1]
-            metadata = json.loads(data)
-            receipt = metadata["reef"]["agent_record_id"]
-            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            assert record.agent_record_id == receipt
-            assert record.payload["response"]["body"] == (content + stop).decode()
-            assert record.payload["response"]["complete"] is True
-        finally:
-            release_stop.set()
-            await client.close()
-            await upstream_server.close()
-
-    import asyncio
+                release_stop.set()
+                terminal = await response.read()
+                metadata = json.loads(terminal.decode().split("data: ", 1)[1])
+                [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+                assert record.agent_record_id == metadata["reef"]["agent_record_id"]
+                assert record.payload["response"]["body"] == (content + stop).decode()
+                assert record.payload["response"]["complete"] is True
+            finally:
+                release_stop.set()
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_responses_stream_is_forwarded_and_attaches_its_receipt_to_response_completed(tmp_path) -> None:
+    delta = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    completed = b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+    received = {}
+
+    async def upstream(request):
+        received["payload"] = await request.json()
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(delta)
+        await response.write(completed)
+        return response
+
     async def run() -> None:
-        from aiohttp import web
-
-        delta = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
-        completed = b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
-        received = {}
-
-        async def upstream(request):
-            received["payload"] = await request.json()
-            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
-            await response.prepare(request)
-            await response.write(delta)
-            await response.write(completed)
-            return response
-
-        upstream_app = web.Application()
-        upstream_app.router.add_post("/v1/responses", upstream)
-        upstream_server = TestServer(upstream_app)
-        await upstream_server.start_server()
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
-        await client.start_server()
-        try:
+        async with proxied_client(tmp_path, "/v1/responses", upstream) as (client, dispatcher):
             payload = {"model": "gpt-4o", "input": [{"role": "user", "content": "hi"}], "stream": True}
             response = await client.post("/v1/responses", headers={"x-reef-scenario": "chat"}, json=payload)
             assert response.status == 200
@@ -613,39 +527,22 @@ def test_responses_stream_is_forwarded_and_attaches_its_receipt_to_response_comp
             assert record.payload["response"]["complete"] is True
             assert record.payload["response"]["message"] == {"role": "assistant", "content": "hi"}
             assert received["payload"] == payload
-        finally:
-            await client.close()
-            await upstream_server.close()
-
-    import asyncio
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tmp_path) -> None:
+    content = b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+
+    async def upstream(request):
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(content)
+        return response
+
     async def run() -> None:
-        from aiohttp import web
-
-        content = b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
-
-        async def upstream(request):
-            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
-            await response.prepare(request)
-            await response.write(content)
-            return response
-
-        upstream_app = web.Application()
-        upstream_app.router.add_post("/v1/chat/completions", upstream)
-        upstream_server = TestServer(upstream_app)
-        await upstream_server.start_server()
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
-        await client.start_server()
-        try:
+        async with proxied_client(tmp_path, "/v1/chat/completions", upstream) as (client, dispatcher):
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"x-reef-scenario": "chat"},
@@ -661,58 +558,42 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
             assert metrics["serve/request/completed_total"] == 0
             assert metrics["serve/request/active"] == 0
             assert metrics["ingest/accepted_total"] == 1
-        finally:
-            await client.close()
-            await upstream_server.close()
-
-    import asyncio
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
+    used_versions = []
+
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        used_versions.append(artifact.ref.release_id)
+        return {"version": artifact.ref.release_id}
+
+    repository_backend = InMemoryRepositoryBackend.factory(
+        base_directory(tmp_path, **{"model.txt": "base"}), root=tmp_path / "repository"
+    )
+    dispatcher = build_default_dispatcher(backend_factory=repository_backend, scenario_storage=SQLiteScenarioStorage())
+    old_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
+
+    candidate_path = tmp_path / "candidate"
+    candidate_path.mkdir()
+    (candidate_path / "model.txt").write_text("trained")
+    dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
+    new_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
+
     async def run() -> None:
-        used_versions = []
-
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            del path, payload
-            used_versions.append(artifact.ref.release_id)
-            return {"version": artifact.ref.release_id}
-
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "model.txt").write_text("base")
-        repository_backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-        dispatcher = build_default_dispatcher(
-            backend_factory=repository_backend, scenario_storage=SQLiteScenarioStorage()
-        )
-        old_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
-
-        candidate_path = tmp_path / "candidate"
-        candidate_path.mkdir()
-        (candidate_path / "model.txt").write_text("trained")
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
-        new_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
-
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
+        async with serving_client(dispatcher, backend) as client:
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"x-reef-scenario": "chat"},
                 json={"model": "reef", "messages": []},
             )
             assert response.status == 200
-        finally:
-            await client.close()
-
-        assert old_ref.release_id != new_ref.release_id
-        assert used_versions == [new_ref.release_id]
-
-    import asyncio
 
     asyncio.run(run())
+    assert old_ref.release_id != new_ref.release_id
+    assert used_versions == [new_ref.release_id]
 
 
 def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) -> None:
@@ -723,56 +604,48 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
     dispatcher.registry.get(scenario).commit(TrainStepResult(state=None, artifact=Artifact.local(checkpoint)))
 
 
+def serving_weight_dispatcher(tmp_path, *, training: bool = False) -> Dispatcher:
+    """A weight dispatcher whose scenario "chat" serves the saved version ``sglang-v1``."""
+    dispatcher = weight_dispatcher(tmp_path, base_directory(tmp_path, **{"model.txt": "base"}), training=training)
+    dispatcher.get_or_create_scenario("chat")
+    commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
+    return dispatcher
+
+
 @pytest.mark.unit
 def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
     """A backend ``abort`` finish reason retries; only the completed response is recorded."""
+    calls = []
+
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        calls.append(artifact.ref)
+        if len(calls) == 1:
+            return {"choices": [{"finish_reason": "abort"}]}
+        return {"choices": [{"message": {"content": "hi"}, "meta_info": {"runtime_load_id": "sglang-v1"}}]}
+
+    dispatcher = serving_weight_dispatcher(tmp_path)
+    head = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
     async def run() -> None:
-        calls = []
-
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            del path, payload
-            calls.append(artifact.ref)
-            if len(calls) == 1:
-                return {"choices": [{"finish_reason": "abort"}]}
-            return {"choices": [{"message": {"content": "hi"}, "meta_info": {"runtime_load_id": "sglang-v1"}}]}
-
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "model.txt").write_text("base")
-        dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat")
-        commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
-        head = dispatcher.get_or_create_scenario("chat").repository.current_artifact
-
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
+        async with serving_client(dispatcher, backend) as client:
             response = await client.post(
-                "/v1/chat/completions",
-                headers={"x-reef-scenario": "chat"},
-                json={"messages": []},
+                "/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json={"messages": []}
             )
             assert response.status == 200
             assert await response.json() == {
                 "choices": [{"message": {"content": "hi"}, "meta_info": {"runtime_load_id": "sglang-v1"}}]
             }
-        finally:
-            await client.close()
-
-        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-        assert metrics["serve/request/started_total"] == 1
-        assert metrics["serve/request/completed_total"] == 1
-        assert metrics["serve/retries_total"] == 1
-        assert metrics["serve/version_mismatch_total"] == 0
-        assert calls == [head, head]
-        recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-        assert len(recorded) == 1
-        assert recorded[0].artifact_ref == calls[-1]
-
-    import asyncio
 
     asyncio.run(run())
+    metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+    assert metrics["serve/request/started_total"] == 1
+    assert metrics["serve/request/completed_total"] == 1
+    assert metrics["serve/retries_total"] == 1
+    assert metrics["serve/version_mismatch_total"] == 0
+    assert calls == [head, head]
+    recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+    assert len(recorded) == 1
+    assert recorded[0].artifact_ref == calls[-1]
 
 
 class StreamRecordHandler(InferenceHandler):
@@ -849,18 +722,23 @@ ABORTED_MESSAGES_RECORD = {
 }
 
 
-async def post_stream(dispatcher, handler, path: str):
-    client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))
-    await client.start_server()
-    try:
-        response = await client.post(
-            path,
-            headers={"x-reef-scenario": "chat"},
-            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
-        )
-        return response.status, dict(response.headers), await response.read()
-    finally:
-        await client.close()
+def post_stream(dispatcher, handler, path: str):
+    """Post one streamed turn to ``path``; the response's status, headers and body."""
+
+    async def run():
+        async with serving_client(dispatcher, inference_handler=handler) as client:
+            response = await client.post(
+                path,
+                headers={"x-reef-scenario": "chat"},
+                json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+            )
+            return response.status, dict(response.headers), await response.read()
+
+    return asyncio.run(run())
+
+
+def default_dispatcher(tmp_path) -> Dispatcher:
+    return build_default_dispatcher(local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage())
 
 
 @pytest.mark.unit
@@ -873,37 +751,32 @@ async def post_stream(dispatcher, handler, path: str):
     ],
     ids=["chat", "messages"],
 )
+@pytest.mark.parametrize("serves_weights", [False, True], ids=["default", "weights"])
 def test_aborted_stream_has_no_receipt_and_is_recorded_incomplete(
-    tmp_path, path, record_response, frames, record_before_terminal
+    tmp_path, path, record_response, frames, record_before_terminal, serves_weights
 ) -> None:
-    """A stream cannot restart after it sent frames, so an aborted stream ends like an incomplete one."""
-
-    async def run() -> None:
-        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        try:
-            status, _, body = await post_stream(dispatcher, handler, path)
-            assert status == 200
-            assert body == b"".join(frames)
-            assert handler.calls == 1
-            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            recorded = record.payload["response"]
-            assert recorded["training"] == record_response["training"]
-            assert recorded["stream_delivery"]["complete"] is False
-            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/request/failed_total"] == 1
-            assert metrics["serve/request/completed_total"] == 0
-            assert metrics["serve/request/active"] == 0
-            assert metrics["ingest/accepted_total"] == 1
-        finally:
-            dispatcher.close()
-
-    import asyncio
-
-    asyncio.run(run())
+    """A stream cannot restart after it sent frames, so an aborted stream ends like an incomplete one. On a
+    scenario that serves weights, an engine abort before the first sampled token reports no runtime-load ID; it
+    is not a 409."""
+    handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
+    with closing(
+        serving_weight_dispatcher(tmp_path) if serves_weights else default_dispatcher(tmp_path)
+    ) as dispatcher:
+        status, _, body = post_stream(dispatcher, handler, path)
+        assert status == 200
+        assert body == b"".join(frames)
+        assert handler.calls == 1
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        recorded = record.payload["response"]
+        assert recorded["training"] == record_response["training"]
+        assert recorded["stream_delivery"]["complete"] is False
+        assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+        assert metrics["serve/version_mismatch_total"] == 0
+        assert metrics["serve/request/failed_total"] == 1
+        assert metrics["serve/request/completed_total"] == 0
+        assert metrics["serve/request/active"] == 0
+        assert metrics["ingest/accepted_total"] == 1
 
 
 @pytest.mark.unit
@@ -913,192 +786,95 @@ def test_stream_record_handler_needs_a_frame() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
-@pytest.mark.parametrize(
-    ("path", "record_response", "frames"),
-    [
-        ("/v1/chat/completions", chat_stream_record("abort"), CHAT_STREAM_FRAMES),
-        ("/v1/messages", ABORTED_MESSAGES_RECORD, MESSAGES_STREAM_FRAMES),
-    ],
-    ids=["chat", "messages"],
-)
-def test_aborted_training_stream_without_a_runtime_load_id_is_not_a_mismatch(
-    tmp_path, path, record_response, frames, record_before_terminal
-) -> None:
-    """An engine abort before the first sampled token reports no runtime-load ID; it is not a 409."""
-
-    async def run() -> None:
-        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "model.txt").write_text("base")
-        dispatcher = weight_dispatcher(tmp_path, initial)
-        try:
-            dispatcher.get_or_create_scenario("chat")
-            commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
-            status, _, body = await post_stream(dispatcher, handler, path)
-            assert status == 200
-            assert body == b"".join(frames)
-            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            recorded = record.payload["response"]
-            assert recorded["training"] == record_response["training"]
-            assert recorded["stream_delivery"]["complete"] is False
-            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/version_mismatch_total"] == 0
-            assert metrics["serve/request/failed_total"] == 1
-            assert metrics["serve/request/active"] == 0
-        finally:
-            dispatcher.close()
-
-    import asyncio
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
 def test_aborted_non_sse_stream_has_no_receipt_header(tmp_path) -> None:
-    async def run() -> None:
-        body = json.dumps(chat_stream_record("abort")).encode()
-        handler = StreamRecordHandler(
-            chat_stream_record("abort"), (body,), record_before_terminal=False, content_type="application/json"
-        )
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        try:
-            status, headers, received = await post_stream(dispatcher, handler, "/v1/chat/completions")
-            assert status == 200
-            assert received == body
-            assert "x-reef-agent-record-id" not in headers
-            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            recorded = record.payload["response"]
-            assert recorded["training"] == STREAM_TRAINING
-            assert recorded["stream_delivery"]["complete"] is False
-            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/request/failed_total"] == 1
-            assert metrics["serve/request/active"] == 0
-        finally:
-            dispatcher.close()
-
-    import asyncio
-
-    asyncio.run(run())
+    body = json.dumps(chat_stream_record("abort")).encode()
+    handler = StreamRecordHandler(
+        chat_stream_record("abort"), (body,), record_before_terminal=False, content_type="application/json"
+    )
+    with closing(default_dispatcher(tmp_path)) as dispatcher:
+        status, headers, received = post_stream(dispatcher, handler, "/v1/chat/completions")
+        assert status == 200
+        assert received == body
+        assert "x-reef-agent-record-id" not in headers
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        recorded = record.payload["response"]
+        assert recorded["training"] == STREAM_TRAINING
+        assert recorded["stream_delivery"]["complete"] is False
+        assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+        assert metrics["serve/request/failed_total"] == 1
+        assert metrics["serve/request/active"] == 0
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
 def test_finished_stream_keeps_its_receipt_and_training_block(tmp_path, record_before_terminal) -> None:
-    async def run() -> None:
-        handler = StreamRecordHandler(
-            chat_stream_record("stop"), CHAT_STREAM_FRAMES, record_before_terminal=record_before_terminal
-        )
-        dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
-        )
-        try:
-            status, _, body = await post_stream(dispatcher, handler, "/v1/chat/completions")
-            assert status == 200
-            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-            assert record.agent_record_id.encode() in body
-            recorded = record.payload["response"]
-            assert recorded["training"] == STREAM_TRAINING
-            assert recorded["stream_delivery"]["complete"] is True
-            assert "error" not in recorded["stream_delivery"]
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/request/completed_total"] == 1
-            assert metrics["serve/request/failed_total"] == 0
-        finally:
-            dispatcher.close()
-
-    import asyncio
-
-    asyncio.run(run())
+    handler = StreamRecordHandler(
+        chat_stream_record("stop"), CHAT_STREAM_FRAMES, record_before_terminal=record_before_terminal
+    )
+    with closing(default_dispatcher(tmp_path)) as dispatcher:
+        status, _, body = post_stream(dispatcher, handler, "/v1/chat/completions")
+        assert status == 200
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        assert record.agent_record_id.encode() in body
+        recorded = record.payload["response"]
+        assert recorded["training"] == STREAM_TRAINING
+        assert recorded["stream_delivery"]["complete"] is True
+        assert "error" not in recorded["stream_delivery"]
+        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+        assert metrics["serve/request/completed_total"] == 1
+        assert metrics["serve/request/failed_total"] == 0
 
 
 @pytest.mark.unit
 def test_interrupted_inference_stops_at_the_configured_retry_deadline() -> None:
-    async def run() -> None:
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            del artifact, path, payload
-            return {"choices": [{"finish_reason": "abort"}]}
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        return {"choices": [{"finish_reason": "abort"}]}
 
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        client = TestClient(
-            TestServer(
-                create_app(
-                    dispatcher,
-                    inference_handler=ContractInferenceHandler(backend),
-                    inference_retry_policy=InferenceRetryPolicy(initial_s=0.001, max_s=0.002, timeout_s=0.01),
-                )
-            )
-        )
-        await client.start_server()
-        try:
+    retry_policy = InferenceRetryPolicy(initial_s=0.001, max_s=0.002, timeout_s=0.01)
+
+    async def run() -> None:
+        async with serving_client(dispatcher, backend, inference_retry_policy=retry_policy) as client:
             response = await client.post(
-                "/v1/chat/completions",
-                headers={"x-reef-scenario": "chat"},
-                json={"messages": []},
+                "/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json={"messages": []}
             )
             assert response.status == 503
             assert "retry deadline exceeded" in await response.text()
-            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-            assert metrics["serve/request/failed_total"] == 1
-            assert metrics["serve/timeouts_total"] == 1
-            assert not dispatcher.get_or_create_scenario("chat").records.replay("chat")
-        finally:
-            await client.close()
-            dispatcher.close()
 
-    import asyncio
-
-    asyncio.run(run())
+    with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
+        asyncio.run(run())
+        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+        assert metrics["serve/request/failed_total"] == 1
+        assert metrics["serve/timeouts_total"] == 1
+        assert not dispatcher.get_or_create_scenario("chat").records.replay("chat")
 
 
 @pytest.mark.unit
 def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> None:
     """A training scenario records which weights answered; a response without a runtime_load_id is a 409 and no record."""
 
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        return {"choices": [{"message": {"content": "hi"}}]}
+
+    dispatcher = serving_weight_dispatcher(tmp_path, training=True)
+
     async def run() -> None:
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            del artifact, path, payload
-            return {"choices": [{"message": {"content": "hi"}}]}
-
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "model.txt").write_text("base")
-        dispatcher = weight_dispatcher(tmp_path, initial, training=True)
-        dispatcher.get_or_create_scenario("chat")
-        commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
-
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
+        async with serving_client(dispatcher, backend) as client:
             response = await client.post(
-                "/v1/chat/completions",
-                headers={"x-reef-scenario": "chat"},
-                json={"messages": []},
+                "/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json={"messages": []}
             )
             assert response.status == 409
             assert "reports no runtime_load_id" in await response.text()
-        finally:
-            await client.close()
-
-        assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
-
-    import asyncio
 
     asyncio.run(run())
+    assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
 
 
 @pytest.mark.unit
 def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> None:
     import gc
 
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend = InMemoryRepositoryBackend("chat", initial, root=tmp_path / "repository")
+    backend = InMemoryRepositoryBackend("chat", base_directory(tmp_path), root=tmp_path / "repository")
     repository = Repository(
         backend,
         backend.resolve_release(),
@@ -1114,11 +890,9 @@ def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> 
 
 @pytest.mark.unit
 def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
     )
@@ -1146,16 +920,13 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
 
 @pytest.mark.unit
 def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-
     class FailingBackend(InMemoryRepositoryBackend):
         def publish(self, candidate, *, expected_parent, advance_head=True):
             raise ArtifactPublicationError("repository failed")
 
     dispatcher = Dispatcher(
         Recipe(),
-        FailingBackend.factory(initial, root=tmp_path / "repository"),
+        FailingBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
     )
@@ -1178,16 +949,13 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
 
 
 def test_healthz_answers_without_token_while_other_routes_require_it(tmp_path) -> None:
+    dispatcher = build_default_dispatcher(
+        backend_factory=InMemoryRepositoryBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+    )
+
     async def run() -> None:
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        dispatcher = build_default_dispatcher(
-            backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-            scenario_storage=SQLiteScenarioStorage(),
-        )
-        client = TestClient(TestServer(create_app(dispatcher, tokens="secret")))
-        await client.start_server()
-        try:
+        async with serving_client(dispatcher, tokens="secret") as client:
             health = await client.get("/healthz")
             assert health.status == 200
 
@@ -1204,10 +972,6 @@ def test_healthz_answers_without_token_while_other_routes_require_it(tmp_path) -
                 json={"score": 1.0},
             )
             assert authenticated.status != 401
-        finally:
-            await client.close()
-
-    import asyncio
 
     asyncio.run(run())
 
@@ -1216,20 +980,16 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
     """The token is the service boundary, not a per-user identity: every
     accepted token is equivalent, so a caller can rotate from one to another
     without losing access to the scenarios it created."""
+    dispatcher = build_default_dispatcher(
+        backend_factory=InMemoryRepositoryBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+    )
+    current = {"Authorization": "Bearer current"}
+    rotated = {"Authorization": "Bearer next"}
+    retired = {"Authorization": "Bearer retired"}
 
     async def run() -> None:
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        dispatcher = build_default_dispatcher(
-            backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-            scenario_storage=SQLiteScenarioStorage(),
-        )
-        client = TestClient(TestServer(create_app(dispatcher, tokens=["current", "next"])))
-        await client.start_server()
-        current = {"Authorization": "Bearer current"}
-        rotated = {"Authorization": "Bearer next"}
-        retired = {"Authorization": "Bearer retired"}
-        try:
+        async with serving_client(dispatcher, tokens=["current", "next"]) as client:
             created = await client.post(
                 "/reef/scenarios",
                 headers=current,
@@ -1265,17 +1025,17 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
                 json={"score": 1.0},
             )
             assert anonymous.status == 401
-        finally:
-            await client.close()
-
-    import asyncio
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
-    """``x-reef-tag-*`` reaches a processor; the service reads no value but ``release`` (see the record test)."""
+    """``x-reef-tag-*`` reaches a processor; the service reads no value but ``release`` (see the record test).
+
+    The streaming path builds its own record and carries the tags as well: a streaming agent-loop call is exactly
+    the one a correlating processor needs.
+    """
     from reef.service.request_service import _with_tags
     from reef.service.wire import parse_request_headers
 
@@ -1287,26 +1047,11 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
     parsed = parse_request_headers(headers, RequestType.INFERENCE)
     assert dict(parsed.tags) == {"session": "hw-3"}  # blank values are not tags
     assert _with_tags({"messages": []}, parsed) == {"messages": [], "metadata": {"tags": {"session": "hw-3"}}}
+    assert _with_tags({"messages": [], "stream": True}, parsed)["metadata"]["tags"] == {"session": "hw-3"}
 
     # A report is a judgment about turns, not a served exchange: no tags.
     reported = parse_request_headers(headers, RequestType.REPORT)
     assert _with_tags({"score": 1.0}, reported) == {"score": 1.0}
-
-
-@pytest.mark.unit
-def test_tags_ride_the_streaming_record_too() -> None:
-    """The streaming path builds its own record; it must carry tags as well.
-
-    A streaming agent-loop call is exactly the one a correlating processor
-    needs, so a tag that only survives the buffered path tags nothing that
-    matters.
-    """
-    from reef.service.request_service import _with_tags
-    from reef.service.wire import parse_request_headers
-
-    parsed = parse_request_headers({"x-reef-scenario": "math", "x-reef-tag-session": "hw-3"}, RequestType.INFERENCE)
-    streamed = _with_tags({"messages": [], "stream": True}, parsed)
-    assert streamed["metadata"]["tags"] == {"session": "hw-3"}
 
 
 class HarnessRecipe(Recipe):
@@ -1322,58 +1067,47 @@ def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_
     """A session still on an older release records against it, from its x-reef-tag-release; a tag the catalog does not
     have, and every call on a scenario that serves weights, records against the served release."""
 
-    async def run() -> tuple[list[str], list[str]]:
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            # A training scenario records the version the engine reports.
-            return (
-                {"meta_info": {"runtime_load_id": "sglang-v2"}} if isinstance(recipe, WeightRecipe) else {"ok": True}
-            )
+    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+        # A training scenario records the version the engine reports.
+        return {"meta_info": {"runtime_load_id": "sglang-v2"}} if isinstance(recipe, WeightRecipe) else {"ok": True}
 
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "rules.md").write_text("first")
-        dispatcher = Dispatcher(
-            recipe,
-            InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-            local_artifact_dir=tmp_path / "local",
-            scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-        )
-        releases = [dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id]
-        for version in (1, 2):
-            if isinstance(recipe, WeightRecipe):
-                commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
-            else:
-                candidate = tmp_path / f"candidate-{version}"
-                candidate.mkdir()
-                (candidate / "rules.md").write_text(f"v{version}")
-                dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
-            releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
-        assert len(set(releases)) == 3
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(
+            base_directory(tmp_path, **{"rules.md": "first"}), root=tmp_path / "repository"
+        ),
+        local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+    )
+    releases = [dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id]
+    for version in (1, 2):
+        if isinstance(recipe, WeightRecipe):
+            commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
+        else:
+            candidate = tmp_path / f"candidate-{version}"
+            candidate.mkdir()
+            (candidate / "rules.md").write_text(f"v{version}")
+            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+        releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
+    assert len(set(releases)) == 3
+
+    async def run() -> list[str]:
+        async with serving_client(dispatcher, backend) as client:
             for tag in (releases[1], releases[0], "no-such-release", None):
                 headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
                 response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
                 assert response.status == 200
             rows = (await (await client.get("/reef/scenarios/chat/records")).json())["records"]
-        finally:
-            await client.close()
-        return releases, [row["artifact_ref"]["release_id"] for row in rows]
+        return [row["artifact_ref"]["release_id"] for row in rows]
 
-    import asyncio
-
-    (first, middle, served), recorded = asyncio.run(run())
+    recorded = asyncio.run(run())
+    first, middle, served = releases
     pulled = isinstance(recipe, HarnessRecipe)
     assert recorded == [middle if pulled else served, first if pulled else served, served, served]
 
 
 @pytest.mark.parametrize("close_dispatcher", [False, True])
 def test_http_app_closes_dispatcher_only_when_requested(monkeypatch, close_dispatcher) -> None:
-    import asyncio
-
-    from aiohttp import web
-
     with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
         close = dispatcher.close
         calls = []

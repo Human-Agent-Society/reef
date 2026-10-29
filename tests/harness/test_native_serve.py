@@ -183,11 +183,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def reef() -> Iterator[_FakeReef]:
-    server = _FakeReef()
-    try:
+    with contextlib.closing(_FakeReef()) as server:
         yield server
-    finally:
-        server.close()
 
 
 def _tree(tmp_path: Path, reef: _FakeReef, release_id: str) -> Path:
@@ -398,7 +395,7 @@ def test_a_failed_mount_keeps_the_previous_tree_serving(tmp_path: Path, reef: _F
         result, streamed = _turn(server, "go")
         assert result["exit"] == 0 and _typed(streamed, "tool/result")[0]["content"] == "ok"
         # Announced once: the head that failed is not retried every poll while it stands.
-        time.sleep(0.35)
+        time.sleep(0.25)
         assert len(_typed(_events(log), "harness/mount-failed")) == 1
 
     assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["release_id"] == "r1"
@@ -589,7 +586,7 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
     env = {**os.environ, "REEF_HARNESS_SCENARIO": SCENARIO}
     env.pop("REEF_NATIVE_ENFORCE", None)
     process = subprocess.Popen(
-        [str(binary), "serve", "--tree", str(dest), "--poll-interval", "0.2"],
+        [str(binary), "serve", "--tree", str(dest), "--poll-interval", "0.1"],
         env=env,
         stderr=subprocess.PIPE,
         text=True,
@@ -625,11 +622,12 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
         assert len(reef.requests) == 3 and reef.requests[2]["body"]["messages"][1]["content"] == "say hello"
 
         reef.release("r2", {**RULES, **_tool("shout", "    return 'LOUD'"), **_tool("hum")}, parent="r1")
-        _wait(lambda: json.loads(run("status").stdout)["release_id"] == "r2", timeout_s=10.0)
+        # The wait reads the status over the socket, so it starts no process per poll.
+        _wait(lambda: serve.request(socket_path, {"control": "status"})["data"]["release_id"] == "r2", timeout_s=10.0)
         mounted = run("mount", "r1")
         assert mounted.returncode == 0 and json.loads(mounted.stdout)["mounted"] is True
         # A manual move off the head sticks: the head was announced once and is not redone every poll.
-        time.sleep(0.5)
+        time.sleep(0.3)
         assert json.loads(run("status").stdout)["release_id"] == "r1"
         assert run("mount", "r9").returncode == 1
     finally:

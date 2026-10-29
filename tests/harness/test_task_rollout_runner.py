@@ -84,7 +84,7 @@ class StandInReef:
                 return None
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     @property
     def url(self) -> str:
@@ -132,9 +132,8 @@ class StandInLab(TaskLab):
 
 @pytest.fixture
 def reef():
-    service = StandInReef()
-    yield service
-    service.close()
+    with contextlib.closing(StandInReef()) as service:
+        yield service
 
 
 def written_task(root: Path, name: str, record_id: str = "rec-source") -> Path:
@@ -146,6 +145,16 @@ def written_task(root: Path, name: str, record_id: str = "rec-source") -> Path:
         source_agent_record_ids=(record_id,),
     )
     return write_harbor_task(task, root)
+
+
+def rollout(reward: float | None, error: str = "") -> TaskRollout:
+    """A finished rollout of task ``t`` with ``reward`` and ``error`` and nothing else."""
+    return TaskRollout(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
+
+
+def command_options(reef: StandInReef, work_dir: Path) -> list[str]:
+    """The command's options that name the service, the scenario, the model and the work directory."""
+    return ["--reef-url", reef.url, "--scenario", "guess", "--model", "m", "--work-dir", str(work_dir)]
 
 
 def runner(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object) -> TaskRolloutRunner:
@@ -266,18 +275,6 @@ def test_an_unrecorded_rollout_keeps_its_calls_and_reports_nothing(reef: StandIn
         runner(reef, tmp_path, StandInLab({}), is_unrecorded=True)
 
 
-def test_an_unrecorded_rollout_whose_calls_all_fail_names_the_first_answer(tmp_path: Path) -> None:
-    refusing = StandInReef(refuse_inference=True)
-    try:
-        task_path = written_task(tmp_path / "tasks", "t1")
-        lab = StandInLab({"reward": 0.0})
-        ran = runner(refusing, tmp_path, lab, is_reporting=False, is_unrecorded=True).run(task_path)
-        assert ran.turns == () and ran.failed_calls == 2
-        assert ran.error.startswith("2 model calls failed; the first answered 401")
-    finally:
-        refusing.close()
-
-
 def test_an_unscored_rollout_is_kept_but_not_reported(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({}, error="the container died")).run(task_path)
@@ -324,12 +321,9 @@ def test_per_receipt_sends_one_report_per_model_call(reef: StandInReef, tmp_path
 
 
 def test_a_refused_report_is_the_rollouts_error_and_the_rollout_comes_back_unreported(tmp_path: Path) -> None:
-    reef = StandInReef(refuse_reports=True)
-    try:
-        task_path = written_task(tmp_path / "tasks", "t1")
+    task_path = written_task(tmp_path / "tasks", "t1")
+    with contextlib.closing(StandInReef(refuse_reports=True)) as reef:
         ran = runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(task_path)
-    finally:
-        reef.close()
     assert ran.reward == 1.0 and not ran.is_reported
     assert "the report for t1 was refused (400)" in ran.error
 
@@ -420,17 +414,18 @@ def test_labels_are_stored_the_way_the_service_stores_tags(reef: StandInReef, tm
     assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == {"arm": "Hint"} and ran.is_reported
 
 
-def test_refused_model_calls_are_named_in_the_error(tmp_path: Path) -> None:
-    reef = StandInReef(refuse_inference=True)
-    try:
-        task_path = written_task(tmp_path / "tasks", "t1")
+def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_is_recorded(tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    with contextlib.closing(StandInReef(refuse_inference=True)) as reef:
         ran = runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(task_path)
-    finally:
-        reef.close()
+        unrecorded = runner(reef, tmp_path, StandInLab({"reward": 0.0}), is_reporting=False, is_unrecorded=True)
+        unrecorded_ran = unrecorded.run(task_path)
     assert ran.reward == 1.0 and ran.receipts == () and not ran.is_reported
     assert ran.failed_calls == 2
     assert ran.error == "2 model calls failed; the first answered 401: invalid service token"
     assert ran.as_line()["failed_calls"] == 2
+    assert unrecorded_ran.turns == () and unrecorded_ran.failed_calls == 2
+    assert unrecorded_ran.error.startswith("2 model calls failed; the first answered 401")
 
 
 def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:
@@ -470,27 +465,8 @@ def test_main_runs_one_side_of_a_manifest_and_prints_a_line_per_task(
     train_names = list(read_split_manifest(manifest).train)
     monkeypatch.setenv("REEF_TOKEN", "env-token")
     lab = StandInLab({"reward": 1.0})
-    status = main(
-        [
-            "--manifest",
-            str(manifest),
-            "--tasks-root",
-            str(root),
-            "--side",
-            "train",
-            "--reef-url",
-            reef.url,
-            "--scenario",
-            "guess",
-            "--model",
-            "m",
-            "--work-dir",
-            str(tmp_path / "work"),
-            "--label",
-            "arm=plain",
-        ],
-        lab=lab,
-    )
+    arguments = ["--manifest", str(manifest), "--tasks-root", str(root), "--side", "train", "--label", "arm=plain"]
+    status = main([*arguments, *command_options(reef, tmp_path / "work")], lab=lab)
     assert status == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [line["task"] for line in lines] == train_names and len(train_names) == 2
@@ -502,20 +478,7 @@ def test_main_runs_one_side_of_a_manifest_and_prints_a_line_per_task(
 
 def test_main_returns_one_when_a_task_was_not_reported(reef: StandInReef, tmp_path: Path, capsys) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    status = main(
-        [
-            str(task_path),
-            "--reef-url",
-            reef.url,
-            "--scenario",
-            "guess",
-            "--model",
-            "m",
-            "--work-dir",
-            str(tmp_path / "w"),
-        ],
-        lab=StandInLab({}, error="no verifier"),
-    )
+    status = main([str(task_path), *command_options(reef, tmp_path / "w")], lab=StandInLab({}, error="no verifier"))
     assert status == 1
     line = json.loads(capsys.readouterr().out.strip())
     assert line == {
@@ -529,28 +492,10 @@ def test_main_returns_one_when_a_task_was_not_reported(reef: StandInReef, tmp_pa
 
 
 def test_main_prints_each_line_as_it_finishes_and_keeps_going_after_a_refused_report(tmp_path: Path, capsys) -> None:
-    reef = StandInReef(refuse_reports=True)
-    try:
-        first = written_task(tmp_path / "tasks", "t1")
-        second = written_task(tmp_path / "tasks", "t2")
-        lab = StandInLab({"reward": 1.0})
-        status = main(
-            [
-                str(first),
-                str(second),
-                "--reef-url",
-                reef.url,
-                "--scenario",
-                "guess",
-                "--model",
-                "m",
-                "--work-dir",
-                str(tmp_path / "w"),
-            ],
-            lab=lab,
-        )
-    finally:
-        reef.close()
+    tasks = [str(written_task(tmp_path / "tasks", name)) for name in ("t1", "t2")]
+    lab = StandInLab({"reward": 1.0})
+    with contextlib.closing(StandInReef(refuse_reports=True)) as reef:
+        status = main([*tasks, *command_options(reef, tmp_path / "w")], lab=lab)
     assert status == 1
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [line["task"] for line in lines] == ["t1", "t2"] and len(lab.calls) == 2
@@ -568,21 +513,10 @@ def test_main_checks_every_task_directory_before_the_first_rollout(reef: StandIn
     assert lab.calls == [] and "not a Harbor task directory" in capsys.readouterr().err
 
 
-def test_main_refuses_a_manifest_beside_task_directories(tmp_path: Path) -> None:
+def test_main_refuses_a_manifest_beside_task_directories(reef: StandInReef, tmp_path: Path, capsys) -> None:
     with pytest.raises(SystemExit):
-        main(
-            [
-                str(tmp_path),
-                "--manifest",
-                str(tmp_path / "m.json"),
-                "--reef-url",
-                "http://x",
-                "--scenario",
-                "s",
-                "--model",
-                "m",
-            ]
-        )
+        main([str(tmp_path), "--manifest", str(tmp_path / "m.json"), *command_options(reef, tmp_path / "w")])
+    assert "--manifest goes with --tasks-root and no task directories" in capsys.readouterr().err
 
 
 def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef: StandInReef, tmp_path: Path) -> None:
@@ -595,9 +529,6 @@ def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef:
 
 
 def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_a_rollout_that_never_ran() -> None:
-    def rollout(reward: float | None, error: str = "") -> TaskRollout:
-        return TaskRollout(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
-
     assert rewards_of((rollout(1.0), rollout(None), rollout(None, "the trial raised"))) == (1.0, 0.0)
     assert rewards_of((rollout(0.5, "a late error"),)) == (0.5,)
     assert (
@@ -608,9 +539,6 @@ def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_a_rollout_that_ne
 def test_a_rollout_that_could_not_run_fails_and_one_without_a_reward_scores_zero(
     reef: StandInReef, tmp_path: Path
 ) -> None:
-    def rollout(reward: float | None, error: str = "") -> TaskRollout:
-        return TaskRollout(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
-
     scorer = runner(reef, tmp_path, StandInLab({}))
     assert scorer.rollout_score(rollout(None, "the sandbox is gone")) == RolloutScore.failed()
     assert scorer.rollout_score(rollout(None)) == RolloutScore.scored(0.0)

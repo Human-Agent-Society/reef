@@ -509,27 +509,15 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
         ({**parameters(TrainingMethod(REWARD_OBJECTIVE)), "scheduling": {"epochs": 2}}, "does not support 2 epochs"),
         ({**parameters(TrainingMethod("sft")), "save_interval": 0}, "save_interval must be a positive int"),
         ({**parameters(TrainingMethod("sft")), "save_interval": True}, "save_interval must be a positive int"),
+        # A job of tasks: Slime rolls no task out.
+        (parameters(TrainingMethod("sft")), "does not roll tasks out"),
     ],
 )
-def test_a_job_with_parameters_slime_does_not_take_is_refused_and_records_nothing(
-    tmp_path, stacks, job_parameters, message
-) -> None:
+def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks, job_parameters, message) -> None:
     stack = stacks(tmp_path)
+    data = JobData("tasks", (TaskSample(tmp_path / "task"),)) if "tasks" in message else batch_for(0)
     with pytest.raises(ValueError, match=message):
-        stack.component.submit(TrainingJob("job-0", "slime", stack.component.base_start, batch_for(0), job_parameters))
-    with pytest.raises(KeyError):
-        stack.component.status("job-0")
-    assert stack.group.train_calls == []
-
-
-@pytest.mark.unit
-def test_a_job_of_tasks_is_refused_because_slime_rolls_no_task_out(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path)
-    tasks = JobData("tasks", (TaskSample(tmp_path / "task"),))
-    with pytest.raises(ValueError, match="does not roll tasks out"):
-        stack.component.submit(
-            TrainingJob("job-0", "slime", stack.component.base_start, tasks, parameters(TrainingMethod("sft")))
-        )
+        stack.component.submit(TrainingJob("job-0", "slime", stack.component.base_start, data, job_parameters))
     with pytest.raises(KeyError):
         stack.component.status("job-0")
     assert stack.group.train_calls == []
@@ -653,20 +641,13 @@ def test_a_skipped_job_saves_no_checkpoint_and_the_next_job_continues_the_start(
 
 
 @pytest.mark.unit
-def test_a_single_method_job_leaves_the_workers_as_they_started(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path)
-    stack.run(TrainingMethod("sft"), step=0)
-    stack.run(TrainingMethod("sft"), step=1)
-    assert [stack.worker_switch(job) for job in (0, 1)] == [None, None]
-    assert len(stack.group.train_calls) == 2
-
-
-@pytest.mark.unit
 def test_a_job_of_another_family_switches_the_actor_workers_and_back(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     for step, method in enumerate(("sft", REWARD_OBJECTIVE, REWARD_OBJECTIVE, "sft")):
         assert stack.run(TrainingMethod(method), step=step).state == "finished"
 
+    # A job of the family the workers started with leaves them as they are.
+    assert stack.worker_switch(0) is None
     policy = stack.worker_switch(1)
     assert policy is not None
     assert policy["learning_rate_schedule_state"] is None
@@ -1240,34 +1221,30 @@ def test_the_component_stamps_a_dotted_family_reference_for_the_workers() -> Non
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("ref_load", "expected"), [("/checkpoints/initial", "/checkpoints/initial"), (None, "/models/hf")]
+    ("resumable", "ref_load", "expected_load", "expected_rollout_id"),
+    [
+        (False, "/checkpoints/initial", "/checkpoints/initial", 0),
+        (False, None, "/models/hf", 0),
+        # A restart keeps the checkpoint it can resume.
+        (True, "/checkpoints/initial", "resume", 4),
+    ],
 )
-def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(tmp_path: Path, ref_load, expected) -> None:
-    args = SimpleNamespace(
-        megatron_to_hf_mode="bridge",
-        load=str(tmp_path / "empty-resume-directory"),
-        ref_load=ref_load,
-        hf_checkpoint="/models/hf",
-        start_rollout_id=9,
-    )
-    startup.use_megatron_bridge_first_start_load(args)
-    assert (args.load, args.start_rollout_id) == (expected, 0)
-
-
-@pytest.mark.unit
-def test_bridge_mode_restart_keeps_resumable_checkpoint(tmp_path: Path) -> None:
+def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
+    tmp_path: Path, resumable, ref_load, expected_load, expected_rollout_id
+) -> None:
     resume = tmp_path / "resume"
-    resume.mkdir()
-    (resume / "latest_checkpointed_iteration.txt").write_text("3")
+    if resumable:
+        resume.mkdir()
+        (resume / "latest_checkpointed_iteration.txt").write_text("3")
     args = SimpleNamespace(
         megatron_to_hf_mode="bridge",
         load=str(resume),
-        ref_load="/checkpoints/initial",
+        ref_load=ref_load,
         hf_checkpoint="/models/hf",
         start_rollout_id=4,
     )
     startup.use_megatron_bridge_first_start_load(args)
-    assert (args.load, args.start_rollout_id) == (str(resume), 4)
+    assert (args.load, args.start_rollout_id) == (str(resume) if resumable else expected_load, expected_rollout_id)
 
 
 @pytest.mark.unit
@@ -1300,29 +1277,22 @@ def test_a_restart_without_a_saved_optimizer_does_not_load_one(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("loss_family", "loss_type", "use_rollout_logprobs"), [("sft", "sft_loss", False), ("pg", "policy_loss", True)]
-)
-def test_matching_reef_and_slime_objectives_are_accepted(loss_family, loss_type, use_rollout_logprobs) -> None:
-    resolve_loss_family(loss_family).validate_backend_args(
-        SimpleNamespace(loss_type=loss_type, use_rollout_logprobs=use_rollout_logprobs)
-    )
-
-
-@pytest.mark.parametrize(
     ("loss_family", "loss_type", "use_rollout_logprobs", "message"),
     [
+        ("sft", "sft_loss", False, None),
+        ("pg", "policy_loss", True, None),
         ("sft", "policy_loss", False, "sft_loss"),
         ("pg", "sft_loss", True, "policy_loss"),
         ("pg", "policy_loss", False, "use-rollout-logprobs"),
     ],
 )
-def test_mismatched_reef_and_slime_objectives_are_refused(
-    loss_family, loss_type, use_rollout_logprobs, message
-) -> None:
+def test_reef_and_slime_objectives_must_match(loss_family, loss_type, use_rollout_logprobs, message) -> None:
+    args = SimpleNamespace(loss_type=loss_type, use_rollout_logprobs=use_rollout_logprobs)
+    if message is None:
+        resolve_loss_family(loss_family).validate_backend_args(args)
+        return
     with pytest.raises(RuntimeError, match=message):
-        resolve_loss_family(loss_family).validate_backend_args(
-            SimpleNamespace(loss_type=loss_type, use_rollout_logprobs=use_rollout_logprobs)
-        )
+        resolve_loss_family(loss_family).validate_backend_args(args)
 
 
 @pytest.mark.unit

@@ -21,7 +21,8 @@ from aiohttp import web
 from reef_client import ReefClient
 from reef_client.harness import SYNC_LOG, HarnessInstall, HarnessSyncError, commands_root, connect
 
-from tests.reef_service.test_harness_channel import HEADERS, PATCHES, app_client, channel_dispatcher, evaluated_step
+from tests.reef_service.test_harness_channel import HEADERS, PATCHES, channel_dispatcher, evaluated_step
+from tests.reef_service.test_harness_channel import served as served_client
 from tests.support.harness_service import EchoInference
 from tests.support.harness_steps import PI_SEED
 
@@ -34,9 +35,7 @@ MINE = {"plugin/rules.md": "Mine.\n", "plugin/skills/fix/SKILL.md": SKILL, "pi-a
 
 def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tmp_path) -> None:
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, PATCHES[:1], seed=PI_SEED))
-        await client.start_server()
-        try:
+        async with served_client(channel_dispatcher(tmp_path, PATCHES[:1], seed=PI_SEED)) as client:
             base = (await (await client.get("/reef/harness", headers=HEADERS)).json())["release_id"]
             body = {"files": MINE, "base_release_id": base}
             response = await client.post("/reef/harness/import", headers=HEADERS, json=body)
@@ -87,17 +86,13 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
             assert (
                 source["files"]["skills/other/SKILL.md"] == other and source["files"]["rules.md"] == "marker rules\n"
             )
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
 
 def test_a_client_install_calls_the_scenario_route_and_the_call_is_recorded(tmp_path) -> None:
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, (), seed=PI_SEED))
-        await client.start_server()
-        try:
+        async with served_client(channel_dispatcher(tmp_path, (), seed=PI_SEED)) as client:
             params = {"form": "client", "service_url": "http://reef.example:8900/", "root": "/home/a/install"}
             manifest = await (await client.get("/reef/harness", params=params, headers=HEADERS)).json()
             provider = json.loads(manifest["files"]["pi-agent/models.json"])["providers"]["reef"]
@@ -122,8 +117,6 @@ def test_a_client_install_calls_the_scenario_route_and_the_call_is_recorded(tmp_
             assert record.status == 200
             unknown = await client.post("/reef/scenarios/delivery/v1/models", json={})
             assert unknown.status == 404
-        finally:
-            await client.close()
 
     asyncio.run(run())
 

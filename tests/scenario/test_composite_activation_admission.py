@@ -15,9 +15,11 @@ from tests.support.component_trainers import _TwoTrainerRecipe, component_files,
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
-from reef.core.errors import CommitPending, TrainingStartRefused
+from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
+from reef.core.evaluation import PolicyModel
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -372,5 +374,40 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
             WEIGHTS: "weights step 1",
             HARNESS: "harness imported",
         }
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_release(tmp_path: Path) -> None:
+    """A serve publishes the combination beside the chain, as an activation does, and moves no head."""
+    runtime = StubInferenceRuntime()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, runtime)
+        first = _step(scenario, HARNESS, 1)
+        _step(scenario, HARNESS, 2)
+        active = scenario.current_artifact_ref()
+        tip = scenario.repository.checkpoint_artifact
+        artifact_id = f"{first}:{HARNESS}"
+        with pytest.raises(ReefError, match="answers only from the release it has loaded"):
+            scenario.serve(artifact_id, HARNESS)
+
+        runtime.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+        served = scenario.serve(artifact_id, HARNESS)
+        assert served.artifact_id == artifact_id and served.release_id != first
+        release = scenario.served_release(artifact_id)
+        assert release.release_id == served.release_id
+        assert component_files(scenario, release) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
+        assert scenario.current_artifact_ref() == active
+        assert scenario.repository.checkpoint_artifact == tip
+        record = scenario.store.history()[-1]
+        assert (record.operation, record.component, record.components[HARNESS]) == ("serve", HARNESS, artifact_id)
+
+        stopped = scenario.stop_serving(artifact_id)
+        assert stopped.release == release
+        assert scenario.store.history()[-1].components == record.components
+        with pytest.raises(ArtifactNotFound):
+            scenario.served_release(artifact_id)
     finally:
         dispatcher.close()

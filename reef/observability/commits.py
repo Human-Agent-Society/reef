@@ -168,9 +168,8 @@ class CommitExperimentObserver(RecordObserver):
                 self.run_segment, self.run_step = commit.step, 0
             elif commit.operation == "training":
                 self.run_step += 1
-        if commit.operation in ("activate", "import", "sync"):
-            # An activation, an import or a sync changes what serves or what exists, not the training run: no tracker
-            # event.
+        if commit.operation in ("activate", "import", "sync", "serve", "stop_serving"):
+            # These change what serves or what exists, not the training run: no tracker event.
             return
         if commit.operation == "train_from":
             self.reports.put(

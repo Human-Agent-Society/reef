@@ -169,7 +169,7 @@ The usual local checks are:
 
 ```bash
 pre-commit run --all-files
-pytest tests/ -n 8 --dist loadfile
+pytest tests/ -n 8
 ```
 
 Run the suite in parallel, as CI does; `pytest-xdist` ships in the `dev`
@@ -391,7 +391,7 @@ Before requesting review for Python changes, run:
 ```bash
 pre-commit run --all-files
 python -m mypy
-pytest tests/ -n 8 --dist loadfile
+pytest tests/ -n 8
 ```
 
 ## Make a pull request

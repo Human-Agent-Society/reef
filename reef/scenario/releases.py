@@ -7,6 +7,7 @@ its operation lock, so long-running training preparation cannot block serving.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
@@ -15,6 +16,28 @@ from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core.components import made_artifact_id
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
+
+
+@dataclass(frozen=True)
+class ServedArtifact:
+    """An artifact that a scenario serves beside its active release, and the release that serves it.
+
+    Values: ``component`` is a non-empty component name and ``artifact_id`` a non-empty artifact ID. ``release`` is
+    the release of the ``"serve"`` record that started to serve the artifact; that record checked that ``release``
+    binds ``artifact_id`` as ``component``. Purpose: ``ScenarioReleases.served_beside`` makes it from the commit
+    history. The request service answers a call to the artifact's URL from ``release``, and
+    ``ScenarioCommitter.stop_serving`` returns the one that it ended.
+    """
+
+    component: str
+    artifact_id: str
+    release: ArtifactRef
+
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) and value for value in (self.component, self.artifact_id)):
+            raise ValueError("a served artifact's component and artifact_id are non-empty strings")
+        if not isinstance(self.release, ArtifactRef):
+            raise ValueError("a served artifact's release is an ArtifactRef")
 
 
 class ScenarioReleases:
@@ -37,6 +60,8 @@ class ScenarioReleases:
         self.recorded_creation_components: Mapping[str, str] | None = None
         self.creation_components_read = False
         self.creation_read_failed_at: int | None = None
+        #: The scenario step that ``served_beside`` last read, and what it returned then.
+        self.served_read: tuple[int, Mapping[str, ServedArtifact]] | None = None
 
     @property
     def creation_artifact(self) -> ArtifactRef:
@@ -172,29 +197,35 @@ class ScenarioReleases:
         - When the manifest of a release is unknown, the row lists the
           artifact of the component that the release's trainer named.
 
-        ``activated`` marks an artifact that has been active at some time. An
+        ``activated`` marks an artifact that has been active at some time, and
+        ``served`` one that the scenario serves beside its active release. An
         import's row has ``source``: where its content was read from.
         """
         with self.publication_lock:
             made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
             creation = self.creation_components(scenario_step) or {}
+            beside = self.served_beside(scenario_step, components)
             if len(components) == 1:
                 (component,) = components
-                return tuple(
-                    self.artifact_row(
-                        row,
-                        component,
-                        (
-                            creation.get(component, row["release_id"])
-                            if row["operation"] == "creation"
-                            else row["release_id"]
-                        ),
-                        row["content_id"],
-                        row["active"],
-                        row["activated"],
+                rows = []
+                for row in made:
+                    artifact_id = (
+                        creation.get(component, row["release_id"])
+                        if row["operation"] == "creation"
+                        else row["release_id"]
                     )
-                    for row in made
-                )
+                    rows.append(
+                        self.artifact_row(
+                            row,
+                            component,
+                            artifact_id,
+                            row["content_id"],
+                            row["active"],
+                            row["activated"],
+                            artifact_id in beside,
+                        )
+                    )
+                return tuple(rows)
             manifests = self.manifests(scenario_step)
             active = self.active_components(scenario_step) or {}
             activated = {name: self.activated_artifacts(name, scenario_step) for name in components}
@@ -219,9 +250,51 @@ class ScenarioReleases:
                             None,
                             active.get(component) == artifact_id,
                             artifact_id in activated[component],
+                            artifact_id in beside,
                         )
                     )
             return tuple(reversed(listed))
+
+    def bound_artifact_ids(self, release_id: str, components: tuple[str, ...], scenario_step: int) -> dict[str, str]:
+        """The ``artifact_id`` of each of ``components`` that the release ``release_id`` binds, as the records name it.
+
+        With one component, the artifact of a release is the one that it made: its ``release_id``. For the creation,
+        it is the artifact that the scenario started from. With several components, it is the release's manifest
+        entry. A component that no known manifest names is left out.
+        """
+        if len(components) == 1:
+            (component,) = components
+            creation = self.creation_components(scenario_step) or {}
+            if release_id == self._creation_artifact.release_id:
+                return {component: creation.get(component, release_id)}
+            return {component: release_id}
+        manifest = self.manifests(scenario_step).get(release_id) or {}
+        return {name: manifest[name] for name in components if name in manifest}
+
+    def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedArtifact]:
+        """The artifacts that the scenario serves beside its active release, by ``artifact_id``.
+
+        The result is the fold of the commit history. A ``"serve"`` record adds its artifact, and a
+        ``"stop_serving"`` record removes it. An activation changes nothing here, so the result can hold an
+        artifact of the active release. A store without a durable history serves none. Each ``scenario_step``
+        is read once.
+        """
+        if self.served_read is not None and self.served_read[0] == scenario_step:
+            return self.served_read[1]
+        served: dict[str, ServedArtifact] = {}
+        for record in self.records():
+            if record.operation in ("serve", "stop_serving"):
+                component = components[0] if record.component is None else record.component
+                bound = record.components or self.bound_artifact_ids(
+                    record.artifact_ref.release_id, components, scenario_step
+                )
+                artifact_id = bound[component]
+                if record.operation == "serve":
+                    served[artifact_id] = ServedArtifact(component, artifact_id, record.artifact_ref)
+                else:
+                    served.pop(artifact_id, None)
+        self.served_read = (scenario_step, served)
+        return served
 
     def activated_artifacts(self, component: str, scenario_step: int) -> set[str]:
         """The ``artifact_id`` values that ``component`` has served: the creation's, and each activating record's."""
@@ -237,8 +310,12 @@ class ScenarioReleases:
         content_id: str | None,
         active: bool,
         activated: bool,
+        served: bool,
     ) -> dict[str, Any]:
-        """One artifact row: the release row's fields that describe the step that made it, under its own identity."""
+        """One artifact row: the release row's fields that describe the step that made it, under its own identity.
+
+        ``served`` is true when the scenario serves the artifact beside its active release (``served_beside``).
+        """
         listed: dict[str, Any] = {
             "artifact_id": artifact_id,
             "component": component,
@@ -249,6 +326,7 @@ class ScenarioReleases:
             "recorded_at": row["recorded_at"],
             "active": active,
             "activated": activated,
+            "served": served,
         }
         if row["operation"] == "training":
             listed["record_progress"] = dict(row["record_progress"])
