@@ -81,14 +81,30 @@ class TinkerConfig(TinkerServiceConfig):
 class SpindleFullConfig(TinkerServiceConfig):
     """The ``training.options`` of the Spindle full-parameter training component (RFC #996).
 
-    Values: those of ``TinkerServiceConfig``, with ``base_url`` set to the Spindle deployment; ``base`` is
+    Values: those of ``TinkerServiceConfig``, with ``base_url`` set to the Spindle deployment. ``base`` is
     ``hf://<repo>@<commit>`` with a full 40-digit commit SHA (``HuggingFaceRevision``), the weights that the
-    deployment's full-parameter engine for ``<repo>`` trains. Purpose: ``spindle_full_settings`` parses it; the
-    component, its SDK client and its sampler read it, and ``SpindleFullDeployment`` derives serving from it.
+    deployment's full-parameter engine for ``<repo>`` trains. ``release_repo`` is the ``org/name`` Hugging Face
+    repo that each saved checkpoint's weights are exported to, one commit each. ``checkpoint_volume`` and
+    ``modal_environment`` name the Modal Volume where the Spindle deployment keeps its checkpoints (``None``: the
+    profile's default environment), and ``hf_secret`` the Modal Secret there whose ``HF_TOKEN`` may write
+    ``release_repo`` and read the base. Purpose: ``spindle_full_settings`` parses it; the component, its SDK
+    client, its sampler and its exporter read it, and ``SpindleFullDeployment`` derives serving from it.
     """
 
     base: str = config_option(
         help="hf://<repo>@<commit>: the Hugging Face revision that the Spindle full-parameter engine trains."
+    )
+    release_repo: str = config_option(
+        help="org/name: the Hugging Face repo that each saved checkpoint's weights are exported to, one commit each."
+    )
+    checkpoint_volume: str = config_option(
+        "spindle-checkpoints", help="The Modal Volume where the Spindle deployment saves its checkpoints."
+    )
+    modal_environment: str | None = config_option(
+        None, help="The Modal environment of the Spindle deployment; unset is the profile's default."
+    )
+    hf_secret: str = config_option(
+        "huggingface-secret", help="The Modal Secret whose HF_TOKEN may write release_repo and read the base."
     )
 
     def __post_init__(self) -> None:
@@ -96,6 +112,11 @@ class SpindleFullConfig(TinkerServiceConfig):
         if self.base_url is None:
             raise ValueError("Spindle full-parameter training requires base_url, the Spindle deployment")
         HuggingFaceRevision.parse(self.base)
+        owner, separator, name = self.release_repo.partition("/")
+        if not separator or not owner or not name or "/" in name:
+            raise ValueError(f"Spindle full-parameter release_repo is org/name, got {self.release_repo!r}")
+        if not self.checkpoint_volume or not self.hf_secret:
+            raise ValueError("Spindle full-parameter training requires checkpoint_volume and hf_secret")
 
     @property
     def base_revision(self) -> HuggingFaceRevision:

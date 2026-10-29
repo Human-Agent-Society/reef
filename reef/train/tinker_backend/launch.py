@@ -9,9 +9,9 @@ serve the checkpoints instead: they load each release's adapter, which
 sampler path.
 
 ``spindle_full`` trains all the parameters on a Spindle deployment the same way
-(``SpindleFullTrainingComponent``, RFC #996). Spindle's sampler serves its
-releases; Reef's engines cannot, since Spindle serves no full weights to
-download.
+(``SpindleFullTrainingComponent``, RFC #996). Each release refers to its
+weights, which a Modal function exports to a Hugging Face repo, so Spindle's
+sampler serves it by default and Reef's engines can load it too.
 """
 
 from __future__ import annotations
@@ -174,6 +174,7 @@ class SpindleFullComponentFactory(TrainingComponentFactory):
         from reef.tinker.sampling import TinkerSDKSampler
         from reef.train.tinker_backend.client import TinkerSDKClient
         from reef.train.tinker_backend.full import SpindleFullTrainingComponent
+        from reef.train.tinker_backend.spindle_export import ModalCheckpointExporter
 
         settings = SpindleFullConfig(**{key: value for key, value in config.items() if key != "type"})
         key = environ.get(settings.api_key_env)
@@ -190,7 +191,9 @@ class SpindleFullComponentFactory(TrainingComponentFactory):
                 base_url=settings.base_url,
                 timeout_s=settings.inference_timeout_s,
             )
-            return SpindleFullTrainingComponent(model_path, settings, client, sampler=sampler)
+            return SpindleFullTrainingComponent(
+                model_path, settings, client, ModalCheckpointExporter(settings), sampler=sampler
+            )
         except BaseException:
             client.close()
             if sampler is not None:

@@ -24,7 +24,7 @@ from urllib.parse import unquote
 from huggingface_hub import HfApi
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError, RevisionNotFoundError
 
-from reef.artifact.artifact import REPOSITORY_FILES, ArtifactSourceError
+from reef.artifact.artifact import ArtifactSourceError
 from reef.artifact.composite import link_or_copy
 from reef.artifact.files import ArtifactFiles, DirectoryFiles, path_order
 from reef.core.config import config_option
@@ -267,13 +267,13 @@ class HuggingFaceRevision:
 
 
 def read_reference(directory: Path) -> HuggingFaceRevision | None:
-    """The revision that the artifact in ``directory`` refers to; ``None`` for an artifact that holds its files.
+    """The revision whose files are the weights of the artifact in ``directory``; ``None`` for one that holds its own.
 
-    An artifact is a reference when ``REFERENCE_FILE`` is its only entry besides the files that a repository adds to
-    a materialized release (``REPOSITORY_FILES``). Raise ``ValueError`` when that file is not a
-    ``HuggingFaceRevision.to_dict`` value.
+    An artifact refers to a revision when ``REFERENCE_FILE`` is at its root. Its other files, such as a training
+    service's checkpoint manifest beside it, describe the artifact and hold no weights. Raise ``ValueError`` when the
+    file is not a ``HuggingFaceRevision.to_dict`` value.
     """
-    if not directory.is_dir() or {entry.name for entry in directory.iterdir()} - REPOSITORY_FILES != {REFERENCE_FILE}:
+    if not (directory / REFERENCE_FILE).is_file():
         return None
     try:
         value = json.loads((directory / REFERENCE_FILE).read_text(encoding="utf-8"))

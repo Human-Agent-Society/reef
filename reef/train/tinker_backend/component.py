@@ -33,7 +33,7 @@ from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
 from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
@@ -165,6 +165,14 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"the start {directory} holds no Tinker checkpoint manifest")
         return self.validated(TinkerCheckpoint.read(directory))
 
+    def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its release holds; by default nothing.
+
+        The job loop calls it for each saved checkpoint before the checkpoint is recorded, so a job that a restart
+        interrupts here saves the checkpoint again.
+        """
+        return
+
     def check_manifest(self, files: ArtifactFiles) -> None:
         """Raise ``ValueError`` unless ``files`` hold a manifest that ``validated`` takes and whose state resolves."""
         if MANIFEST not in files.paths():
@@ -189,8 +197,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return str(imported)
 
     @property
-    def release_format(self) -> None:
-        """``None``: a release holds only its manifest, and the weights stay on the service."""
+    def release_format(self) -> ReleaseFormat | None:
+        """``None`` by default: a release holds only its manifest, and the weights stay on the service."""
         return None
 
     @property
@@ -346,6 +354,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             )
             target = directory / str(last)
             current.write(target)
+            self.complete_release(current, target)
             self.save_checkpoint(
                 directory,
                 SavedCheckpoint(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import math
 import time
 import uuid
@@ -14,6 +15,8 @@ from reef.tinker.checkpoint import FreshStart, TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerServiceConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
+
+logger = logging.getLogger(__name__)
 
 
 class TinkerClient(ABC):
@@ -59,40 +62,53 @@ class TinkerClient(ABC):
     def close(self) -> None: ...
 
 
+def post_request(sdk: Any, holder: Any, path: str, body: Mapping[str, Any], response_type: Any) -> Any:
+    """Post ``body`` to the service at ``path`` through the SDK's session ``holder``; return the request's result.
+
+    The Tinker SDK has no call for Spindle's full-parameter requests, so they go through the SDK's own connection
+    pool and request future, as ``spindle.client.create_full_training_client`` sends them. ``response_type`` is
+    the SDK type of the future's result.
+    """
+    futures = importlib.import_module("tinker.lib.api_future_impl")
+    pools = importlib.import_module("tinker.lib.client_connection_pool_type")
+
+    async def send() -> Any:
+        started = time.time()
+        with holder.aclient(pools.ClientConnectionPoolType.TRAIN) as client:
+            future = await client.post(path, body=dict(body), cast_to=sdk.types.UntypedAPIFuture)
+        return await futures._APIFuture(
+            response_type, holder, future, request_start_time=started, request_type=path.rsplit("/", 1)[-1]
+        ).result_async()
+
+    return holder.run_coroutine_threadsafe(send()).result()
+
+
 def create_full_training_client(sdk: Any, service: Any, base_model: str) -> Any:
     """A new training client of all the parameters of ``base_model`` on the Spindle service of ``service``.
 
     Spindle extends Tinker's ``create_model`` with ``parameterization: {"type": "full"}``, which the Tinker SDK
-    cannot send, so this posts the request as ``spindle.client.create_full_training_client`` does, through the
-    SDK's own session and request future.
+    cannot send.
     """
-    futures = importlib.import_module("tinker.lib.api_future_impl")
-    pools = importlib.import_module("tinker.lib.client_connection_pool_type")
-    queue_logs = importlib.import_module("tinker.lib.queue_state_logger")
     holder = service.holder
-    session_id = holder.get_session_id()
     model_seq_id = holder.get_training_client_id()
+    request = sdk.types.CreateModelRequest(
+        session_id=holder.get_session_id(), model_seq_id=model_seq_id, base_model=base_model
+    )
+    body = {**request.model_dump(exclude_none=True, mode="json"), "parameterization": {"type": "full"}}
+    response = post_request(sdk, holder, "/api/v1/create_model", body, sdk.types.CreateModelResponse)
+    return sdk.TrainingClient(holder, model_seq_id=model_seq_id, model_id=response.model_id)
 
-    async def create() -> Any:
-        started = time.time()
-        request = sdk.types.CreateModelRequest(session_id=session_id, model_seq_id=model_seq_id, base_model=base_model)
-        with holder.aclient(pools.ClientConnectionPoolType.TRAIN) as client:
-            future = await client.post(
-                "/api/v1/create_model",
-                body={**request.model_dump(exclude_none=True, mode="json"), "parameterization": {"type": "full"}},
-                cast_to=sdk.types.UntypedAPIFuture,
-            )
-        response = await futures._APIFuture(
-            sdk.types.CreateModelResponse,
-            holder,
-            future,
-            request_start_time=started,
-            request_type="CreateModel",
-            queue_state_observer=queue_logs.QueueStateLogger(base_model, "Model creation"),
-        ).result_async()
-        return sdk.TrainingClient(holder, model_seq_id=model_seq_id, model_id=response.model_id)
 
-    return holder.run_coroutine_threadsafe(create()).result()
+def unload_model(sdk: Any, trainer: Any) -> None:
+    """Unload ``trainer``'s model from the service, which frees the engine that a full-parameter model holds alone.
+
+    Spindle keeps a model until it is unloaded or, on a deployment, until its session is idle for a while; a
+    scoped run never reclaims it, so its next model would wait for the engine.
+    """
+    request = sdk.types.UnloadModelRequest(model_id=trainer.model_id)
+    post_request(
+        sdk, trainer.holder, "/api/v1/unload_model", request.model_dump(mode="json"), sdk.types.UnloadModelResponse
+    )
 
 
 class TinkerSDKClient(TinkerClient):
@@ -186,6 +202,7 @@ class TinkerSDKClient(TinkerClient):
         loss.check_kl_coef(kl_coef)
         service = self._new_service()
         status = "errored"
+        trainer = None
         try:
             # Every attempt owns a new model, restored WITH optimizer state.
             # An uncertain remote result can never mutate the incumbent model.
@@ -227,6 +244,12 @@ class TinkerSDKClient(TinkerClient):
             status = "success"
             return result_checkpoint, metrics
         finally:
+            if trainer is not None and self._lora_rank is None:
+                try:
+                    unload_model(self._sdk, trainer)
+                except (self._sdk.APIError, TimeoutError) as exc:
+                    # The checkpoint is saved; a deployment reclaims the idle model later, so the job stands.
+                    logger.warning("could not unload full-parameter model %s: %s", trainer.model_id, exc)
             close_service(self._sdk, service, status, timeout_s=self._config.train_timeout_s)
 
     def _base_logprobs(self, rows: Sequence[TokenRow]) -> list[list[float]]:
