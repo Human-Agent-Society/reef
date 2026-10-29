@@ -1,13 +1,13 @@
 Sandbox environments
 ====================
 
-Use ``reef.sandbox.environment.ExecutorEnvironment`` to run commands and move
+Use ``reef.execution.sandbox.environment.ExecutorEnvironment`` to run commands and move
 files through Harbor's ``BaseEnvironment`` interface. It supports Reef's local
 and bubblewrap executors, and the cloud sandboxes of E2B and Modal. Harness rendering and candidate
 evaluation remain outside this package.
 
 Callers do not need to know which sandbox runs their commands. These
-interfaces of ``reef.sandbox`` name the sandbox kinds and cloud providers for
+interfaces of ``reef.execution.sandbox`` name the sandbox kinds and cloud providers for
 them:
 
 - ``build_executor`` reads the deployment's ``executor`` setting and returns an
@@ -17,10 +17,10 @@ them:
   that provider's options in ``section``. A caller with its own settings, such
   as ``evolution.proposer_agent``, passes its section; the factory reads only
   the provider's options, ``forward_ports`` and ``env_from``.
-- ``reef.sandbox.remote.REMOTE_TASK_ENVIRONMENTS`` lists the Harbor environment
+- ``reef.execution.sandbox.remote.REMOTE_TASK_ENVIRONMENTS`` lists the Harbor environment
   types that run a task's containers on a provider, each with the variables
   its credentials come from.
-- ``reef.sandbox.task_environment`` names every Harbor task environment type
+- ``reef.execution.sandbox.task_environment`` names every Harbor task environment type
   (``HARBOR_TASK_ENVIRONMENTS``) and checks what a host needs to run tasks in
   the ones it has probes for (``PROBED_TASK_ENVIRONMENTS``: ``docker`` and
   ``e2b``). ``task_environment_probes(environment)`` returns a readiness probe
@@ -41,9 +41,9 @@ the task's agent and verifier in it and stops it.
 
 The generator service's checks (``harbor run -e`` children) and rollouts
 (in-process Harbor trials) use Harbor's task environment lifecycle. They select
-an environment by name and read its needs from ``reef.sandbox.task_environment``.
+an environment by name and read its needs from ``reef.execution.sandbox.task_environment``.
 Checks share local process management with the executors through
-``reef.processes.ProcessScope``; their command arguments and scoring
+``reef.execution.processes.ProcessScope``; their command arguments and scoring
 remain in the generator. The Terminus harness layers the two: an executor
 launches its runner, which then drives a Harbor task environment.
 
@@ -111,8 +111,8 @@ environment. This local example returns ``hello`` and exit code zero::
     from tempfile import TemporaryDirectory
 
     from harbor.environments.base import BaseEnvironment
-    from reef.sandbox.environment import ExecutorEnvironment
-    from reef.sandbox.process import LocalExecutor
+    from reef.execution.sandbox.environment import ExecutorEnvironment
+    from reef.execution.sandbox.process import LocalExecutor
 
     async def example():
         with TemporaryDirectory() as directory:
@@ -143,7 +143,7 @@ Bind an executor to a program
 -----------------------------
 
 An executor runs one program, such as a harness binary. Describe the program
-with a ``reef.sandbox.process.SandboxProgram`` subclass, then bind it::
+with a ``reef.execution.sandbox.process.SandboxProgram`` subclass, then bind it::
 
     executor, binary = build_executor(config).for_program(program)
 

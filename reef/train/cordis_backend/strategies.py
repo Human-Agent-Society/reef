@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.plugins import ConfiguredPlugin
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree.mutations import Mutation
-from reef.sandbox.process import ProgramExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TrajectorySample
 

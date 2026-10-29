@@ -32,6 +32,9 @@ from types import ModuleType
 from typing import Any
 
 from reef.core.tasks import primary_reward
+from reef.execution.sandbox.process import ISOLATION_ENV
+from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.task_environment import HARBOR_TASK_ENVIRONMENTS
 from reef.harness.runners.terminus.tree import (
     ENVIRONMENT_ENV,
     TerminusTreeError,
@@ -41,9 +44,6 @@ from reef.harness.runners.terminus.tree import (
     skill_roots,
     terminus_kwargs,
 )
-from reef.sandbox.process import ISOLATION_ENV
-from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-from reef.sandbox.task_environment import HARBOR_TASK_ENVIRONMENTS
 
 #: Harbor's default when the tree has no code extension.
 AGENT_NAME = "terminus-2"

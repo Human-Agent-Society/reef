@@ -3,7 +3,7 @@
 Pipeline stages use the worker for slow work that must not block the trainer,
 such as judge calls or task-generation rounds. The generator service runs its
 proposals, checks and rollouts on one worker. Its process ownership uses the
-standard-library-only reef.processes module.
+standard-library-only reef.execution.processes module.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 
-from reef.processes import CURRENT_PROCESS_SCOPE, ProcessScope
+from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessScope
 
 logger = logging.getLogger(__name__)
 

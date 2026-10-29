@@ -16,7 +16,7 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   their model calls; each rollout comes back with its reward and its answered calls (``turns``).
 - ``GET /jobs/{id}``: a job's state and result.
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and the host has what the Harbor
-  environment needs (``reef.sandbox.task_environment``); until then 503 naming what is missing, so ``reef serve``
+  environment needs (``reef.execution.sandbox.task_environment``); until then 503 naming what is missing, so ``reef serve``
   waits on a generator that cannot check tasks or run rollouts.
 
 Jobs run at the same time on one job worker; a rollout job waits only for the service's rollout slots, so a
@@ -43,12 +43,18 @@ from pathlib import Path
 from aiohttp import web
 from reef_client.client import ReefClientError
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.evaluation import RolloutRequest
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.execution.processes import CURRENT_PROCESS_SCOPE
+from reef.execution.sandbox.task_environment import (
+    ModuleProbe,
+    ReadinessProbe,
+    checked_task_environment,
+    task_environment_probes,
+)
 from reef.harness.client.tasks import TaskRollout, TaskRolloutError, TaskRolloutRunner, checked_labels
-from reef.processes import CURRENT_PROCESS_SCOPE
 from reef.record2sample.generator.designer import (
     Designer,
     DesignerError,
@@ -77,12 +83,6 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
-from reef.sandbox.task_environment import (
-    ModuleProbe,
-    ReadinessProbe,
-    checked_task_environment,
-    task_environment_probes,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class HarborProbe(ReadinessProbe):
 def readiness_probes(*, harbor: str | None = None, environment: str = "docker") -> tuple[ReadinessProbe, ...]:
     """What checking a task and running its rollouts takes: reef-eval, the harbor command line, and ``environment``.
 
-    The needs of the Harbor task environment come from ``reef.sandbox.task_environment.task_environment_probes``;
+    The needs of the Harbor task environment come from ``reef.execution.sandbox.task_environment.task_environment_probes``;
     the generator adds only its own. Raise ``ValueError`` for an environment that module cannot check.
     """
     return (
@@ -138,7 +138,7 @@ class HarborChecks(TaskChecks):
     """The checks through the harbor command line, in one Harbor environment.
 
     Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is one of
-    ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is an explicit caller-owned HarborRuns,
+    ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is an explicit caller-owned HarborRuns,
     or None to use the worker's job scope (a fresh scope outside a worker).
     Purpose: ``CheckJob`` calls ``oracle``, which runs both checks in ``environment``. The default generator
     delegates process ownership and shutdown to its worker.
@@ -178,7 +178,7 @@ class ReefGeneratorRollouts(GeneratorRollouts):
     Values: ``reef_url`` is the Reef service the agent's calls go to, with ``token`` as its bearer or None.
     ``work_dir`` is where the runners keep trials. ``agent`` is a Harbor agent config mapping or None for
     Terminus 2, and ``agent_host`` an address of this host the task's sandbox reaches, or None. ``environment`` is
-    one of ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, for every rollout. ``rollout_slots`` is a
+    one of ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, for every rollout. ``rollout_slots`` is a
     semaphore with ``concurrency`` slots, a positive int.
     Purpose: the generator process makes it; ``RolloutJob`` calls ``run_rollouts``. The service's job worker runs
     every rollout on its one event loop, so all calls share the rollout slots.

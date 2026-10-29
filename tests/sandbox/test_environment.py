@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import BaseEnvironment, ExecResult
 
-from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.environment import ExecutorEnvironment, run_sync
-from reef.sandbox.process import LocalExecutor, ProcessOutcome, RolloutLaunchError, RolloutTimeout
+from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
+from reef.execution.sandbox.environment import ExecutorEnvironment, run_sync
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, RolloutLaunchError, RolloutTimeout
 
 
 def test_harbor_lifecycle_commands_and_file_transfers(tmp_path: Path) -> None:

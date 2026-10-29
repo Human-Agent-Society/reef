@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import Settings, config_metadata, config_option
+from reef.execution.sandbox.task_environment import checked_task_environment
 from reef.runtime.deployment import http_readiness_command
-from reef.sandbox.task_environment import checked_task_environment
 from reef.service.deploy.config_utils import DeployConfigError
 
 GENERATOR_SERVICE = "generator"
@@ -37,7 +37,7 @@ class GeneratorSettings(Settings):
     Values: ``tasks_root`` is a directory path that is not blank. ``port`` is an int in 1..65535. ``concurrency``
     is an int of at least 1. ``designer_timeout_s`` and ``ready_timeout`` are positive. ``designer_api`` is None,
     ``openai`` or ``responses``. ``agent`` is None or a Harbor agent config with a ``name`` or an ``import_path``.
-    ``environment`` is a name in ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, the Harbor
+    ``environment`` is a name in ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, the Harbor
     environment of every check and rollout.
     ``host`` is a bind address; ``work_dir``, ``agent_host``, ``harbor``, ``designer_url``, ``designer_token`` and
     ``designer_model`` are strings or None, and ``designer_options`` is a mapping or None.

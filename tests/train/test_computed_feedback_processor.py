@@ -21,14 +21,14 @@ from typing import Any
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, RecordJudging
 from reef.record2sample import JudgedSamples
 from reef.sample2job import Sample2Job
-from reef.sandbox.process import LocalExecutor, RolloutLaunchError
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TrajectorySample
 
@@ -283,7 +283,7 @@ class BlockingJobRunner(BackgroundJobRunner):
 
 
 def test_worker_cancels_queued_jobs_without_running_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("reef.background_jobs.CLOSE_GRACE_S", 0.01)
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
     runner = BlockingJobRunner()
     worker = BackgroundJobWorker(runner, thread_name="queue-close", concurrency=1)
     assert worker.submit(SupportsReceipt("running"))
@@ -299,7 +299,7 @@ def test_worker_cancels_queued_jobs_without_running_them(monkeypatch: pytest.Mon
 
 
 def test_worker_reports_incomplete_close_until_runner_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("reef.background_jobs.CLOSE_GRACE_S", 0.01)
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
     runner = BlockingJobRunner(defer_cancellation=True)
     worker = BackgroundJobWorker(runner, thread_name="deferred-close")
     worker.submit(SupportsReceipt("job"))
@@ -350,7 +350,7 @@ class ProcessJobRunner(BackgroundJobRunner):
 def test_worker_reaps_executor_process_before_publishing_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("reef.background_jobs.CLOSE_GRACE_S", 0.01)
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
     worker = BackgroundJobWorker(ProcessJobRunner(tmp_path), thread_name="process-close")
     worker.submit(SupportsReceipt("job"))
     deadline = time.monotonic() + 5
@@ -387,7 +387,7 @@ class SaturatedJobRunner(BackgroundJobRunner):
 
 
 def test_worker_shutdown_does_not_need_an_available_executor_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("reef.background_jobs.CLOSE_GRACE_S", 0.01)
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
     runner = SaturatedJobRunner()
     worker = BackgroundJobWorker(runner, thread_name="saturated-worker", concurrency=1)
     worker.submit(SupportsReceipt("job"))

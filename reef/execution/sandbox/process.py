@@ -34,7 +34,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from reef.core.errors import ReefError
-from reef.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed, ProcessSetup
+from reef.execution.processes import (
+    CURRENT_PROCESS_SCOPE,
+    ProcessRequest,
+    ProcessScope,
+    ProcessScopeClosed,
+    ProcessSetup,
+)
 
 ISOLATION_ENV = "REEF_SANDBOX_ISOLATION"
 

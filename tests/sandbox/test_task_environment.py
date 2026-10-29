@@ -1,4 +1,4 @@
-"""The Harbor task environments and the readiness probes that ``reef.sandbox.task_environment`` owns."""
+"""The Harbor task environments and the readiness probes that ``reef.execution.sandbox.task_environment`` owns."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-from reef.sandbox.task_environment import (
+from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.task_environment import (
     HARBOR_TASK_ENVIRONMENTS,
     PROBED_TASK_ENVIRONMENTS,
     TASK_ENVIRONMENT_PROBES,

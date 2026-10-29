@@ -9,7 +9,7 @@ process runs in a bubblewrap jail (:func:`protected_command`) that keeps the san
 the directories the rollout declares.
 
 A port in ``forward_ports`` is reachable inside the sandbox at the same loopback address it has on the Reef host,
-so no URL handed to a process changes. The sandbox runs :mod:`reef.sandbox.relay` on that port; a
+so no URL handed to a process changes. The sandbox runs :mod:`reef.execution.sandbox.relay` on that port; a
 :class:`TunnelPump` on the Reef host polls the relay over the provider's public address for each request a
 process made, sends it to the local port, and streams the answer back. Only the forwarded ports are reachable
 this way, and every credential stays on the Reef side of them.
@@ -18,9 +18,9 @@ A sandbox carries its deployment as ``owner``; a Reef that stopped mid run never
 process starts its first sandbox it stops the ones its deployment left (:meth:`RemoteExecutor.reap_once`), and
 never another deployment's.
 
-A provider module (:mod:`reef.sandbox.e2b`, :mod:`reef.sandbox.modal`) implements the sandbox's start, its file and
-command primitives, and the launch of one process. :mod:`reef.sandbox.config` selects a provider for an
-executor, and :mod:`reef.sandbox.task_environment` names the Harbor task environments.
+A provider module (:mod:`reef.execution.sandbox.e2b`, :mod:`reef.execution.sandbox.modal`) implements the sandbox's start, its file and
+command primitives, and the launch of one process. :mod:`reef.execution.sandbox.config` selects a provider for an
+executor, and :mod:`reef.execution.sandbox.task_environment` names the Harbor task environments.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from typing import Any, ClassVar, Self
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, ClientSession, ClientTimeout
 
-from reef.sandbox.process import (
+from reef.execution.sandbox.process import (
     ISOLATION_ENV,
     ProcessOutcome,
     ProgramExecutor,
@@ -243,7 +243,7 @@ class RemoteExecutor(ProgramExecutor):
     subclass adds its provider's credentials and image, and implements :meth:`open`, :meth:`reap`,
     :meth:`preflight`, :meth:`has_image` and :meth:`with_program`.
 
-    Purpose: :mod:`reef.sandbox.config` builds one from a deployment's sandbox section; a caller binds it to a
+    Purpose: :mod:`reef.execution.sandbox.config` builds one from a deployment's sandbox section; a caller binds it to a
     program with :meth:`for_program` and runs processes through :meth:`launch` or :meth:`open_session`.
     """
 

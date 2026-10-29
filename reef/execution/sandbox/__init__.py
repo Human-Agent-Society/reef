@@ -1,7 +1,7 @@
 """Shared process execution and isolation through Harbor's environment contract.
 
 ``process`` owns the ``ProgramExecutor`` interface, local execution, resource
-limits and execution adapters. The shared ``reef.processes`` module owns local
+limits and execution adapters. The shared ``reef.execution.processes`` module owns local
 child processes, termination grace and reaping. Callers bind an executor to a ``SandboxProgram``
 and open sessions through that interface, without knowing the sandbox kind.
 ``config`` builds the executor a deployment's ``executor`` setting selects, and

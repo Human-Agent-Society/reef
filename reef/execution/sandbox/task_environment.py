@@ -4,8 +4,8 @@ A Harbor task environment is the ``-e`` type of ``harbor run``, or the ``environ
 it, builds the task's image in it, runs the agent and the verifier there, and stops it. This module names the
 environment types and checks what the host needs for each; it starts nothing.
 
-An executor is a different thing: a ``ProgramExecutor`` (:mod:`reef.sandbox.process`) launches one program, such as
-a harness's pinned binary, and ``ExecutorEnvironment`` (:mod:`reef.sandbox.environment`) adapts one to Harbor's
+An executor is a different thing: a ``ProgramExecutor`` (:mod:`reef.execution.sandbox.process`) launches one program, such as
+a harness's pinned binary, and ``ExecutorEnvironment`` (:mod:`reef.execution.sandbox.environment`) adapts one to Harbor's
 ``BaseEnvironment`` without building a task image, so neither builds or runs a Harbor task. A caller that runs
 Harbor tasks selects an environment by name and reads its needs here, instead of naming a provider's package or
 credentials.
@@ -23,7 +23,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 
-from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 #: Every Harbor task environment type Reef passes to Harbor: local Docker, and each cloud type in
 #: ``REMOTE_TASK_ENVIRONMENTS``.

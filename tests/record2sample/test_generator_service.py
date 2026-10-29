@@ -25,6 +25,12 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
+from reef.execution.sandbox.task_environment import (
+    HARBOR_E2B_NAMES,
+    DockerProbe,
+    EnvironmentVariableProbe,
+    ModuleProbe,
+)
 from reef.harness.client.tasks import RolloutTurn, TaskRollout, TaskRolloutRunner, rewards_of
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import (
@@ -59,7 +65,6 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
-from reef.sandbox.task_environment import HARBOR_E2B_NAMES, DockerProbe, EnvironmentVariableProbe, ModuleProbe
 from reef.service.deploy.generator import GeneratorSettings
 
 pytestmark = pytest.mark.unit
@@ -1085,7 +1090,7 @@ def test_generator_accepts_the_shared_request_without_a_processor(tmp_path: Path
 
 
 def test_worker_scope_stops_harbor_without_a_shared_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("reef.background_jobs.CLOSE_GRACE_S", 0.01)
+    monkeypatch.setattr("reef.execution.jobs.CLOSE_GRACE_S", 0.01)
     pid_path = tmp_path / "harbor.pid"
     cleanup_path = tmp_path / "cleaned"
     harbor = tmp_path / "harbor"

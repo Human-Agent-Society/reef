@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, primary_reward
-from reef.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
+from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
 from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
@@ -384,7 +384,7 @@ def run_harbor_agent(
     """Run ``agent`` on the task through the harbor command line in Harbor's ``environment``, and read the trial.
 
     The child runs in its own process group and inherits this process's environment, so the credentials of the
-    environment (``reef.sandbox.task_environment``) reach Harbor.
+    environment (``reef.execution.sandbox.task_environment``) reach Harbor.
     """
     command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
     scope = runs.scope if runs is not None else CURRENT_PROCESS_SCOPE.get()

@@ -15,7 +15,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
-from reef.sandbox.process import (
+from reef.execution.sandbox.process import (
     PROCESS_OWNER,
     ProcessOutcome,
     ProcessOwner,
