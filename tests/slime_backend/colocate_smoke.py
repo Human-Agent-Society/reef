@@ -142,6 +142,7 @@ def main() -> None:
                         [pair[0] for pair in pairs],
                         1.0 if index == 0 else 0.0,
                         version,
+                        action_mask=[1] * len(pairs),
                     )
                 )
             job = TrainingJob(

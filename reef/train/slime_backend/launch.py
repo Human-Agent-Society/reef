@@ -221,11 +221,19 @@ class SlimeDeployment(TrainingDeployment):
             if settings["inference_prefix_sharing"]:
                 raise DeployConfigError("training.colocate requires inference.prefix-sharing: false")
             shared_options = expand_option_references(config, options)
-            nodes = int(shared_options.get("actor-num-nodes", 1))
-            width = int(shared_options.get("actor-num-gpus-per-node", 1))
+            dimensions: dict[str, int] = {}
+            for name, default in (("actor-num-nodes", 1), ("actor-num-gpus-per-node", 1), ("megatron-lora-rank", 0)):
+                value = shared_options.get(name, default)
+                if isinstance(value, str) and value.strip().isdigit():
+                    value = int(value)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise DeployConfigError(f"training.options.{name} must be a non-negative integer")
+                dimensions[name] = value
+            nodes = dimensions["actor-num-nodes"]
+            width = dimensions["actor-num-gpus-per-node"]
             if nodes != 1 or settings["inference_num_gpus"] != width or settings["tensor_parallel_size"] != width:
                 raise DeployConfigError("training.colocate requires one node and one engine on all actor GPUs")
-            if int(shared_options.get("megatron-lora-rank", 0)) or shared_options.get("release-train"):
+            if dimensions["megatron-lora-rank"] or shared_options.get("release-train"):
                 raise DeployConfigError("training.colocate supports full-weight training with persistent workers only")
             if shared_options.get("offload-train") is False or shared_options.get("no-offload-train"):
                 raise DeployConfigError("training.colocate requires offload-train")

@@ -19,7 +19,7 @@ from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.service import SGLangInferenceService
 from reef.runtime.deployment import InferenceResources, RuntimeConfigError, RuntimeFactory
-from reef.runtime.interfaces import InferenceRuntime, SharedGpuInferenceRuntime
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, SharedGpuInferenceRuntime
 from reef.runtime.jobs import ReleaseFormat
 from reef.runtime.serving import FullWeightServingRuntime
 
@@ -39,7 +39,7 @@ class ColocatedServingRuntime(FullWeightServingRuntime, SharedGpuInferenceRuntim
     def __init__(
         self,
         backend: SGLangInferenceBackend,
-        handler: SGLangInferenceHandler,
+        handler: InferenceHandler,
         *,
         service: SGLangInferenceService,
         model_path: str,
