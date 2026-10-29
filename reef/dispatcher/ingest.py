@@ -169,4 +169,4 @@ def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, Trajec
                 trainer.uploaded_sample(trajectory)
             except ValueError as exc:
                 raise ValueError(f"trajectory {trajectory_id!r} cannot train: {exc}") from exc
-    return current.store.trajectories.add(trajectories)
+    return current.store.samples.add(trajectories)
