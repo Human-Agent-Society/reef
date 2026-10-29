@@ -487,9 +487,8 @@ one line when it is done:
   most 2 seconds for each answer from Reef; without an answer, the agent
   starts on the installed files. When the agent exits, a background process
   sends what the session changed in the layer, so your terminal is back at
-  once. The next ``run`` prints the result of that send. Each session starts
-  on the newest release, and what a session changed reaches Reef before its
-  next step. Arguments after ``--`` go to the agent. With one scenario
+  once. The next ``run`` prints the result of that send. Arguments after
+  ``--`` go to the agent. With one scenario
   installed, ``run``, ``sync``, ``status`` and ``disconnect`` need no
   scenario name.
 - ``sync`` sends the layer's files that you or the agent changed since the
@@ -510,15 +509,22 @@ one line when it is done:
   ``disconnect`` removes the install, and the agent command and the ``PATH``
   line that ``connect`` added.
 
-How the layer goes over your own configuration depends on the agent:
+Your own configuration is the agent's own directory, and each repository's
+own files, such as its ``AGENTS.md`` or ``.claude/``. How the layer goes over
+it depends on the agent:
 
 .. list-table::
    :header-rows: 1
-   :widths: 14 86
+   :widths: 12 38 50
 
    * - Adapter
-     - The release over your configuration
+     - Your own configuration
+     - The release over it
    * - ``claude``
+     - ``~/.claude``: ``CLAUDE.md``, ``settings.json``, ``skills/``,
+       ``commands/``, ``agents/``, ``plugins/``, and ``projects/`` with your
+       sessions and automatic memory. Your MCP servers are in
+       ``~/.claude.json``.
      - The release's skills and commands load as a plugin, named
        ``reef:<name>`` beside your own. Its rules follow your ``CLAUDE.md``.
        Its settings bind the model and win over yours. Claude Code's
@@ -526,20 +532,38 @@ How the layer goes over your own configuration depends on the agent:
        working directory, so it syncs; memory written before ``connect``
        stays under ``~/.claude/projects``.
    * - ``pi``
+     - ``~/.pi/agent``: ``AGENTS.md``, ``settings.json``, ``models.json``,
+       ``skills/``, ``prompts/``, ``extensions/`` and ``sessions/``.
      - The release's skills, prompts and extensions load beside yours; on a
        name both define, the release's wins. Its rules follow your
        ``AGENTS.md``; pi then skips your ``APPEND_SYSTEM.md``. pi's
        settings take no layer, and changing the model in a session still
        writes your ``settings.json``.
    * - ``opencode``
+     - ``~/.config/opencode``: ``opencode.json`` or ``.jsonc``, ``AGENTS.md``,
+       ``agent/``, ``command/``, ``plugin/`` and ``skill/``. Your sessions are in
+       ``~/.local/share/opencode``.
      - The release's config, skills, commands and plugins merge over yours;
        on a key or name both define, the release's wins. Your
        ``AGENTS.md`` is read from ``~/.config/opencode``.
    * - ``codex``
+     - ``~/.codex``: ``config.toml`` with your models, providers and MCP
+       servers, ``AGENTS.md``, ``auth.json``, ``skills/`` and ``sessions/``.
      - Arguments bind the model and add the release's rules after your
        ``AGENTS.md``, replacing your own ``developer_instructions``. Codex
        loads skills from no directory an argument names, so the release's
        skills and config stay out of your sessions.
+
+Reef evolves only the layer. It never reads your own configuration, and it
+never syncs or evolves it. Two things follow:
+
+- The agent puts parts of your configuration into its model calls, such as
+  your rules and the names and descriptions of your skills. Reef records each
+  call as the agent sent it, so the recorded calls hold that text. The calls
+  use your Reef token, not your own provider key.
+- A step learns from sessions that ran with your configuration, but the
+  evaluation runs each release without it. A release that scores better in
+  the evaluation was measured without your own rules, skills and settings.
 
 Reef learns from your sessions through reports: a client that grades a run
 sends ``POST /reef/report`` with a score over the receipts of its model calls.
