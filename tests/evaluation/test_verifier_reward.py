@@ -1,15 +1,13 @@
-"""The shipped scorer for task directory episodes: the Harbor verifier's reward from the terminus row."""
+"""The shipped scorer for task directory episodes: the Harbor verifier's reward from the verifier row."""
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
 from reef.core.tasks import primary_reward
 from reef.evaluation.harness import EpisodeScorer, VerifierRewardScorer, verifier_reward
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.runners.terminus.runner import trial_record
 
 TASK = "/tasks/openenv-00012-003-deduction"
 
@@ -79,12 +77,3 @@ def test_the_scorer_resolves_from_its_class_reference() -> None:
     )
     assert isinstance(scorer, VerifierRewardScorer)
     assert scorer.score(TASK, episode(verifier({"reward": 0.5}))) == 0.5
-
-
-def test_the_terminus_row_carries_harbor_primary_reward(tmp_path: Path) -> None:
-    record = trial_record(TASK, {"tests_total": 10, "tests_passed": 7, "reward": 0.7}, tmp_path)
-    assert record["reward"] == 0.7 and not record["failed"]
-    assert trial_record(TASK, {"accuracy": 1.0}, tmp_path)["reward"] == 1.0
-    assert trial_record(TASK, {"a": 1, "b": 2}, tmp_path)["reward"] is None
-    failed = trial_record(TASK, {}, tmp_path, "docker compose build failed")
-    assert failed["failed"] and failed["reward"] is None and failed["error"] == "docker compose build failed"

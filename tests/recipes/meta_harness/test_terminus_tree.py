@@ -13,19 +13,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from reef_terminus import TerminusTreeError, instruction_paths, load_tree, runner, skill_roots, terminus_kwargs
+from reef_terminus.trajectory import read_trials
+from reef_terminus.tree import ENVIRONMENT_ENV
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.trajectory import TerminusAtifReader
-from reef.harness.runners.terminus import (
-    TerminusTreeError,
-    instruction_paths,
-    load_tree,
-    runner,
-    skill_roots,
-    terminus_kwargs,
-)
-from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV
 from reef.harness.tree import HarnessTree, render_tree
 
 #: The model comes from Reef's binding: a tree cannot set model_name.
@@ -283,7 +276,7 @@ def test_the_written_trial_is_what_the_reader_parses(tmp_path: Path) -> None:
     (trials / "trajectory.json").write_text(_trajectory([{"n": 1}]))
     runner.write_trial(runner.trial_record("hello-world", {"accuracy": 1.0}, trials), sessions)
 
-    events = TerminusAtifReader()(sessions)
+    events = read_trials(sessions)
     assert [event["type"] for event in events] == ["verifier", "step"]
     assert events[0]["reward"] == 1.0 and events[0]["task"] == "hello-world"
     assert events[1]["n"] == 1

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from reef.harness.adapters import BUILTIN_ADAPTERS
+from reef.harness.adapters import available_adapters
 from reef.harness.adapters.descriptor import DescriptorError
 
 
@@ -96,9 +96,10 @@ def load_harness_facts(path: Path) -> HarnessFacts:
 
 @cache
 def harness_facts(adapter: str) -> HarnessFacts | None:
-    """The facts for a bundled ``adapter`` from ``<adapter>.yaml`` beside this module; ``None`` where it has none."""
+    """The facts for an ``adapter`` Reef can load (bundled or registered) from ``<adapter>.yaml`` beside this module;
+    ``None`` where it has none."""
     path = Path(__file__).with_name(f"{adapter}.yaml")
-    if adapter not in BUILTIN_ADAPTERS or not path.is_file():
+    if adapter not in available_adapters() or not path.is_file():
         return None
     return load_harness_facts(path)
 

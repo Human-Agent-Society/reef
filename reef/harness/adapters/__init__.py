@@ -20,7 +20,7 @@ from reef.harness.adapters.descriptor import (
     load_descriptor,
 )
 
-BUILTIN_ADAPTERS = ("claude", "codex", "dsh", "hermes", "native", "opencode", "pi", "terminus")
+BUILTIN_ADAPTERS = ("claude", "codex", "dsh", "hermes", "native", "opencode", "pi")
 
 _cache: dict[str, AdapterDescriptor] = {}
 

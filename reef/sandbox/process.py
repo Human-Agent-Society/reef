@@ -279,7 +279,7 @@ def inherited_environment() -> dict[str, str]:
     """The minimal parent environment an episode keeps: how to find binaries.
 
     The running interpreter's scripts directory comes last on PATH, so a
-    runner that ships with reef (reef-terminus, reef-native) is found when
+    runner that ships with reef (reef-native) is found when
     ``reef serve`` runs from a venv that is not on PATH; every name PATH
     already finds resolves as before."""
     env = {

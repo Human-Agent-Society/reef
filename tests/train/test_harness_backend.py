@@ -428,10 +428,11 @@ def test_a_rollout_of_a_task_directory_gives_the_method_the_task_instruction(tmp
         history_dir=tmp_path / "history",
         step=1,
         tree=PI_SEED,
-        descriptor=get_adapter("terminus"),
+        descriptor=get_adapter("pi"),
         tasks=(),
         repeats=1,
         rollouts=(record,),
+        task_directories=True,
     )
     assert [(trace.source, trace.task, trace.record) for trace in workspace.traces()] == [
         ("rollout", "Fix the build, then run the tests.\n", "e1")
@@ -487,7 +488,9 @@ def test_the_method_summary_and_notes_are_recorded_bounded(tmp_path: Path) -> No
 
 def test_a_skip_keeps_the_method_summary_and_notes(tmp_path: Path) -> None:
     notes = {"failure": "the reply holds no usable file"}
-    backend, _ = harness_backend(tmp_path, lambda workspace, services: workspace.write_output("nothing to change", notes))
+    backend, _ = harness_backend(
+        tmp_path, lambda workspace, services: workspace.write_output("nothing to change", notes)
+    )
     result = backend_step(backend, data(1), backend.initial_state())
     # The summary and notes ride the skip, so the pages can show why the method changed nothing.
     assert result.metrics["skipped"] == UNCHANGED and result.artifact is None

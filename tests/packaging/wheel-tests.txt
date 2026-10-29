@@ -39,9 +39,6 @@ tests/harness/test_native_harness.py
 tests/harness/test_native_loop.py
 tests/harness/test_native_serve.py
 tests/harness/test_task_episode_runner.py
-tests/harness/test_terminus_agent.py
-tests/harness/test_terminus_episode.py
-tests/harness/test_terminus_tree.py
 tests/harness/test_tree_checks.py
 tests/inference/test_inference_control.py
 tests/inference/test_sglang_chat_capture.py

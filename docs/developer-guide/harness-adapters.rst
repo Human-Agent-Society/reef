@@ -52,8 +52,9 @@ exits, Harbor runs the task's tests;
 ``reef.evaluation.harness:VerifierRewardScorer`` takes their reward as the
 episode's score. The session log comes back, and the ``sessions`` reader
 turns it into the trajectory. An adapter needs no extra section for this: an
-npm ``install`` is enough. ``terminus`` is the exception: its runner takes the
-task directory itself (``is_prompt_task_directory``).
+npm ``install`` is enough. An adapter whose own runner takes the task
+directory sets ``is_prompt_task_directory`` instead, as the Terminal-Bench
+campaign's ``terminus`` does.
 
 **A person's machine.** With ``run.layer``, ``reef-client harness`` installs
 the rendered tree as a layer over the person's own configuration, starts the
@@ -166,7 +167,9 @@ mistake:
    loads, that the agent's model calls appear in ``GET
    /reef/scenarios/<scenario-name>/records``, and that a skill you change in
    the install comes back to Reef after the session (``reef-client harness
-   status``).
+   status``). Add the agent to the real-binary tests in ``tests/smoke/``:
+   a tree with a marker in each part must reach the model as an episode and
+   as the layer over an empty configuration of the person.
 #. **Nothing else broke.** ``pytest tests/harness -n 8 --dist loadfile``
    and ``pre-commit run --files`` on your files.
 
@@ -174,8 +177,11 @@ Bundled adapters
 ~~~~~~~~~~~~~~~~
 
 Reef bundles six adapters for third-party coding-agent CLIs. It also bundles
-``native``, Reef's own agent, and ``terminus``, which runs the Harbor
-Terminus 2 agent through a Reef runner. For each adapter, the list gives the
+``native``, Reef's own agent. Another package adds an adapter through the
+``reef.harness_adapters`` entry point group: the Meta-Harness Terminal-Bench
+campaign adds ``terminus``, for Harbor's Terminus 2 (`its README
+<../../recipes/meta_harness/examples/terminal_bench/README.md#the-terminus-adapter>`__).
+For each adapter, the list gives the
 install pin, the headless command, and the config targets. `Render paths`_
 gives where the other parts land.
 
@@ -188,7 +194,7 @@ gives where the other parts land.
 - ``claude`` (npm ``@anthropic-ai/claude-code`` 2.1.257):
   ``claude -p --output-format json --permission-mode auto``.
   ``claude/settings.json`` (``primary``).
-- ``codex`` (npm ``@openai/codex`` 0.153.4): ``codex exec --json``.
+- ``codex`` (npm ``@openai/codex`` 0.158.0): ``codex exec --json``.
   ``codex/config.toml`` (``primary``), ``codex/models.json`` (``models``).
 - ``dsh`` (npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5):
   ``dsh --profile headless``. Under ``dsh/``:
@@ -198,8 +204,6 @@ gives where the other parts land.
 - ``hermes`` (git ``NousResearch/hermes-agent`` at ``v2026.8.31``, 0.21.0):
   ``hermes chat -Q --oneshot -q``. ``hermes/config.yaml`` (``primary``),
   ``hermes/.env`` (``env``).
-- ``terminus`` (ships with reef): ``reef-terminus --task``.
-  ``terminus/config.json`` (``primary``).
 - ``native`` (ships with reef): ``reef-native -p``. ``native/config.json``
   (``primary``), ``native/models.json`` (``models``).
 
@@ -375,7 +379,7 @@ render path:
      - ``claude/CLAUDE.md``
      - ``claude/skills/<name>/SKILL.md``
      - ``claude/commands/<name>.md``
-     - ``.js``: ``claude/plugins/<name>/index.js``
+     - ``.mjs``: ``claude/extensions/<name>.mjs``
    * - ``codex``
      - ``codex/AGENTS.md``
      - ``codex/skills/<name>/SKILL.md``
@@ -391,11 +395,6 @@ render path:
      - ``hermes/skills/<name>/SKILL.md``
      - ``hermes-commands/<name>/SKILL.md``
      - ``.py``: ``hermes/plugins/<name>/__init__.py``
-   * - ``terminus``
-     - ``terminus/AGENTS.md``
-     - ``terminus/skills/<name>/SKILL.md``
-     - ``terminus-commands/<name>/SKILL.md``
-     - ``.py``: ``terminus/context/<name>.py``
    * - ``native``
      - ``native/RULES.md``
      - ``native/skills/<name>/SKILL.md``
@@ -404,8 +403,8 @@ render path:
 
 The five ``native_*`` parts of ``native`` render to their own tree paths,
 such as ``native/tools/<name>.py`` (see `Native runner`_). On ``claude``, an
-extension is the entry file of a Claude Code plugin; the plugin still needs a
-marketplace or settings reference before Claude Code activates it.
+extension is a script that a ``hooks`` entry of the tree's settings runs at
+a Claude Code event, as ``node "{root}/claude/extensions/<name>.mjs"``.
 
 ``claude`` has one more part, ``memory``: ``memory/<name>.md`` renders to
 ``claude/memory/<name>.md``. Its renderer sets Claude Code's
@@ -445,16 +444,29 @@ and refuses a key it does not know.
   ``{prompt}``, and ``env``, the variables beside those of ``dirs``, such as
   switches that turn off the binary's own updater.
 - ``run.layer`` (optional) says how a person's machine runs the agent with a
-  release over the person's own configuration, which stays as it is. It
-  has two fields: ``args``, groups of arguments added to the binary's own,
-  such as ``["--plugin-dir", "{root}/claude"]``, and ``env``, variables such
-  as ``OPENCODE_CONFIG_DIR``. Templates hold ``{root}`` (the install),
-  ``{model}`` and ``{base_url}`` (the model binding's), ``{token}`` (in
-  ``env`` only, so no command line shows it), and ``{file:<render path>}``,
-  that file's text as a JSON string; a group whose file is empty is left
-  out. Use the agent's own way to add configuration, such as a plugin
-  directory or an extra config directory. Without ``layer``, the adapter does
-  not run on a person's machine (see `Use a published tree
+  release over the person's own configuration, which stays as it is. Its
+  fields:
+
+  - ``args``: groups of arguments added to the binary's own, such as
+    ``["--plugin-dir", "{root}/claude"]``.
+  - ``env``: variables, such as ``OPENCODE_CONFIG_DIR``.
+  - ``register`` and ``unregister``: the binary's own commands, each its
+    arguments. The client runs ``register`` once for each installed
+    release, and ``unregister`` when it disconnects. Use them for a part
+    that the agent loads from no path a flag can name: Codex loads skills
+    only from an installed plugin, so its ``register`` runs ``codex plugin
+    add``. Each command must succeed when it runs again.
+
+  Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}``
+  (the model binding's), ``{token}`` (in ``env`` only, so no command line
+  shows it), and ``{file:<render path>}`` (in ``args`` only), that file's
+  text as a JSON string; a group whose file is empty is left out. Use the
+  agent's own way to add configuration, such as a plugin directory or an
+  extra config directory. Every part in ``evolve``, and every config key
+  that the checks admit, must take effect in an episode and in the layer.
+  When the layer cannot carry one, refuse it in the checks or leave the
+  part out of ``evolve``. Without ``layer``, the adapter does not run on a
+  person's machine (see `Use a published tree
   <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
 - ``config`` maps each config target's name to the file's root-relative
   ``path``, and optionally its ``defaults`` and its ``checks`` (see `Config
@@ -466,8 +478,8 @@ and refuses a key it does not know.
   steps, ``package.module:ClassName``, the form a deployment names a method
   in (see `Adapter steps`_). Each bundled adapter keeps it in ``render.py``.
 
-An agent that runs its episodes in a container of its own, as ``terminus``
-does, may also set:
+An agent that runs its episodes in a container of its own, such as the
+Terminal-Bench campaign's ``terminus``, may also set:
 
 - ``self_isolating``: ``true`` makes Reef refuse to nest the agent in its
   jail, unless its ``execution_validator`` accepts the configuration.
@@ -655,11 +667,17 @@ calls its steps in this order:
 #. ``finalize_render`` gets every file as text, each config file already
    written in its format. It is for work that spans several files, or for a
    layout that the suffix's format cannot produce.
-#. ``layer_files`` runs only for a layer (``render_tree`` with ``layer``),
-   which starts each config target from nothing instead of the episode
-   defaults and skips the targets' checks. It adds what the layer's
-   ``args`` name and the tree may lack: Claude's plugin manifest, an empty
-   rules file, or pi's extension that registers the release's models.
+#. ``layer_args`` and ``layer_files`` run only for a layer
+   (``reef.harness.sync.layer_install``), on a render that starts each
+   config target from nothing instead of the episode defaults and skips
+   the targets' checks. ``layer_args`` returns argument groups for what the
+   agent reads from no file the layer can name, such as Codex's config keys
+   as ``-c`` arguments or pi's settings as flags such as ``--thinking``. The layer
+   adds them after its ``args``. ``layer_files`` then adds what the layer's
+   ``args`` and ``register`` commands name and the tree may lack, such as
+   Claude's plugin manifest, an empty rules file, pi's extension that
+   registers the release's models, or Codex's plugin manifest. It also
+   drops the files that the agent cannot read from the install.
 
 Each step defaults to returning its input unchanged, and refuses a tree by
 raising ``RenderError``. Every step must be a static method; an ordinary
@@ -681,8 +699,8 @@ Run a rendered tree
 with a ``layer``. To do it yourself, write the files of
 ``GET /reef/harness?form=client&service_url=<reef>&root=<directory>`` under
 ``<directory>``, and replace ``REEF_TOKEN_PLACEHOLDER`` with your token in
-the files and in ``run.env``. Then run ``run.binary`` with ``run.args`` and
-``run.env``. Those files bind the model to
+the files and in ``run.env``. Run ``run.binary`` with each command of
+``run.register``, then with ``run.args`` and ``run.env``. Those files bind the model to
 ``<reef>/reef/scenarios/<scenario>``, which names the scenario in the path,
 so the agent needs no custom header.
 
@@ -720,8 +738,12 @@ pi
 - A skill without ``name`` and ``description`` frontmatter gets both: the
   directory name and the first line of the text. pi does not list a skill
   without them.
-- pi rewrites some old ``settings.json`` keys when it loads them. The render
-  writes the new form, so the installed file is the one pi keeps.
+- ``settings.json`` admits only ``defaultThinkingLevel`` and an empty
+  ``defaultTools``, besides the binding's ``defaultProvider`` and
+  ``defaultModel``. On a person's machine pi reads only the person's own
+  ``settings.json``, so the layer passes them as ``--thinking`` and
+  ``--no-builtin-tools``. pi applies a thinking level only to a model that
+  its provider declares as reasoning.
 - Routes refused: a provider in ``models.json`` other than ``reef``, fields
   on ``reef`` that the binding does not write, ``enabledModels``, and
   ``httpProxy``.
@@ -793,6 +815,15 @@ them, and ``config.toml`` admits only a fixed set of top-level keys.
   them.
 - Codex takes no ``extension`` part, because Codex hooks run outside its
   command sandbox. Validation refuses a file under ``extensions/``.
+- On a person's machine, Codex reads skills only from an installed plugin.
+  The layer makes the install's ``codex/`` the plugin ``reef`` of a local
+  marketplace at the install root, and ``register`` installs it with
+  ``codex plugin``. Codex copies the plugin into its plugin cache, so
+  ``register`` runs again after each install, and the layer keeps no config
+  file in ``codex/``. The plugin loads in every Codex session of the
+  person, also one not started through Reef. Each key of the tree's
+  ``config.toml`` comes as a ``-c`` argument, except the keys that the
+  checks pin to the episode defaults.
 - The tree may set ``web_search`` (``disabled``, ``cached``, ``indexed``,
   or ``live``) but not ``approval_policy``. The episode ``argv`` pins
   ``approval_policy="never"`` and ``web_search="disabled"``. A person's
@@ -887,99 +918,6 @@ reads).
 The binding supports only the ``openai`` dialect. Hermes runs tools without
 prompting and returns a tool error for commands it considers dangerous; the
 adapter uses no bypass flag.
-
-Terminus 2
-~~~~~~~~~~
-
-Terminus 2 is a Harbor agent class, not a CLI. ``reef-terminus`` reads the
-tree from ``REEF_TERMINUS_DIR``, configures Harbor's ``terminus-2`` agent
-through ``reef-eval``, and runs the one Harbor task (a directory or a
-registry id) that ``--task`` names. It writes the verifier reward and the
-ATIF trajectory under ``REEF_TERMINUS_SESSION_DIR``.
-
-- ``config`` supplies constructor arguments; unknown keys are refused.
-  ``rules`` supplies an ``extra_instruction_paths`` entry. ``skill`` and
-  ``command`` are two ``AgentConfig.skills`` roots, and Harbor does not mark
-  commands as commands.
-- One extension file, ``extensions/<name>.py``, may define
-  ``Agent(Terminus2)``. Rendering checks its syntax without running it.
-- The binding keeps the served name in ``model_name`` and sets
-  ``llm_kwargs.custom_llm_provider`` to ``litellm_proxy``, so litellm sends
-  the name unchanged, whatever its vendor prefix, and passes
-  ``reasoning_effort``, the thinking budget, and ``llm_call_kwargs`` in the
-  body. Harbor looks up the context limit under ``model_name``; a name that
-  litellm does not list gets 1,000,000 tokens.
-- Routes refused: ``llm_kwargs`` fields that the binding does not write;
-  ``llm_call_kwargs`` arguments that select an endpoint, provider,
-  credential, model, fallback, or logging callback (such as ``base_url``,
-  ``model``, and ``fallbacks``); and ``model`` or ``models`` in
-  ``llm_call_kwargs.extra_body``.
-
-To run a published tree yourself, save the ``files`` of ``GET /reef/harness``
-under a tree root. Evaluation episodes call the upstream directly, but your
-own run through Reef needs the scenario header, or Reef answers HTTP 400.
-Write ``terminus/config.json`` with the service's ``REEF_TOKEN`` (any text
-when the service has no token), then run one task:
-
-.. code:: json
-
-   {
-     "model_name": "<served model>",
-     "api_base": "http://127.0.0.1:8901/v1",
-     "llm_kwargs": {
-       "api_key": "<REEF_TOKEN>",
-       "custom_llm_provider": "litellm_proxy",
-       "extra_headers": {"x-reef-scenario": "<scenario>"}
-     }
-   }
-
-.. code:: bash
-
-   TREE_ROOT="$HOME/reef-harness/terminus"
-   REEF_TERMINUS_DIR="$TREE_ROOT" \
-     REEF_TERMINUS_SESSION_DIR="$TREE_ROOT/terminus/sessions" \
-     REEF_TERMINUS_TRIALS_DIR="$HOME/reef-trials" \
-     reef-terminus --task /path/to/harbor/task
-
-The trial record under ``$TREE_ROOT/terminus/sessions`` holds the rewards
-and the trajectory. Docker must share the trials directory with the host;
-with colima on macOS, use a path under your home directory. A trial with
-neither reward nor verifier output is reported as a possible mount problem.
-
-Docker or a remote environment
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Episodes run the Harbor task in local Docker by default. The episode keeps
-the service's ``DOCKER_HOST``, ``DOCKER_CONTEXT``, and ``DOCKER_CONFIG``
-(default ``~/.docker``), because ``HOME`` points into the episode. On macOS
-the episode root is under ``~/.reef/episodes``. Elsewhere it is in the temp
-directory; if Docker's VM does not share it, set ``TMPDIR`` for the service.
-
-To run tasks in a remote Harbor environment, use the sandbox executor and
-pass the switch and the credentials into it. For E2B:
-
-.. code:: yaml
-
-   evolution:
-     executor: sandbox
-     sandbox:
-       egress_hosts: [api.e2b.dev]
-       env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
-
-Start the service with ``REEF_TERMINUS_ENVIRONMENT=e2b`` and
-``E2B_API_KEY``. For Modal, allow ``api.modal.com``, pass
-``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``, and set
-``REEF_TERMINUS_ENVIRONMENT=modal``. The runtime needs Linux, bubblewrap,
-Python 3.12+, and Harbor with the environment's extra (``harbor[e2b]``, or
-the ``modal`` package). The interpreter and local task directories must be
-visible inside the sandbox, for example under ``/opt``. ``egress_hosts``
-does not yet enforce a hostname firewall.
-
-Reef refuses before launch: local Docker under the sandbox executor, a
-remote environment without ``egress_hosts`` or its credentials in
-``env_from``, and an ``extension`` file under any executor other than
-``sandbox``. Such a tree still renders; the refusal depends on how the
-episode runs, not on what the tree holds.
 
 Native runner
 ~~~~~~~~~~~~~

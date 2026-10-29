@@ -53,7 +53,6 @@ from reef.evaluation.harness import (
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import TerminusAtifReader
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -324,19 +323,19 @@ def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
 
 
 def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_path: Path) -> None:
-    """Every adapter plays task directories: terminus by its own command, a prompt adapter with an npm install in
-    each task's container. Collection, which adds prompts, does not apply."""
+    """An adapter with an npm install plays task directories, each in the task's own container. Collection, which
+    adds prompts, does not apply."""
     root = tmp_path / "tasks"
     for name in ("held-1", "held-2", "train-1"):
         write_task(root, name)
     write_split_manifest(tmp_path / "split.json", TaskSplit(("train-1",), ("held-1", "held-2"), 0, 0.5))
     manifest = {"tasks": [], "task_manifest": str(tmp_path / "split.json"), "tasks_root": str(root)}
 
-    def boot(adapter: str = "terminus", **evaluation: Any) -> HarnessEvolutionRecipe:
+    def boot(adapter: str = "pi", **evaluation: Any) -> HarnessEvolutionRecipe:
         return from_config(evolution_config(evaluation={**manifest, **evaluation}, adapter=adapter), runtime=runtime())
 
     assert boot().configured_tasks() == (str(root / "held-1"), str(root / "held-2"))
-    assert boot(adapter="pi").task_directories(get_adapter("pi"))
+    assert boot().task_directories(get_adapter("pi"))
     with pytest.raises(RecipeConfigError, match="'hermes' cannot play Harbor task directories"):
         boot(adapter="hermes")
     with pytest.raises(RecipeConfigError, match="collect_failures adds prompts"):
@@ -358,7 +357,7 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
 ) -> None:
     store_settings = {"tasks": [], "task_store": IMPORTED_TASK_STORE}
     built = from_config(
-        evolution_config(evaluation=store_settings, adapter="terminus", state_dir=str(tmp_path / "state")),
+        evolution_config(evaluation=store_settings, state_dir=str(tmp_path / "state")),
         runtime=runtime(),
     )
     assert built.configured_tasks() == ()
@@ -381,21 +380,17 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
         assert backend.tasks.seed() == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
         with pytest.raises(RecipeConfigError, match="needs the task storage"):
             built.build_backend("s", releases_for(built), None)
-    assert from_config(evolution_config(evaluation=store_settings), runtime=runtime()).task_directories(
-        get_adapter("pi")
-    )
 
 
 def test_offline_rollouts_need_task_directories_to_evaluate_on_and_a_scorer() -> None:
     """A prompt adapter's offline steps play train task directories, so its evaluation tasks are directories too."""
     offline = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskRollouts"}}}
-    built = from_config({**evolution_config(adapter="terminus"), **offline}, runtime=runtime())
-    assert built.stages().sample2job.plugin_class is TrainTaskRollouts
     store = {"tasks": [], "task_store": IMPORTED_TASK_STORE}
-    assert from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime()).runs_offline()
+    built = from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime())
+    assert built.stages().sample2job.plugin_class is TrainTaskRollouts and built.runs_offline()
     with pytest.raises(RecipeConfigError, match="the evaluation tasks must be task directories too"):
         from_config({**evolution_config(), **offline}, runtime=runtime())
-    unscored = evolution_config(adapter="terminus", evaluation={"scorer": None, "policy": "none"})
+    unscored = evolution_config(evaluation={"scorer": None, "policy": "none", "tasks": []})
     with pytest.raises(RecipeConfigError, match=r"they need evaluation\.scorer"):
         from_config({**unscored, **offline}, runtime=runtime())
 
@@ -916,10 +911,10 @@ def test_an_episode_whose_log_the_reader_found_empty_says_no_transcript_was_read
     assert scored.failure is None and scored.reply == "reef-ok"
 
 
-def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run() -> None:
-    """The runner records a trial whose image did not build or whose agent could not start as a failed verifier
-    row with the error; it ranks below every real score and the error reaches the manifest."""
-    worker = episode_worker_for("terminus", verifier_reward)
+def test_a_task_trial_that_never_ran_ranks_as_an_episode_that_could_not_run() -> None:
+    """A task episode records a trial whose image did not build or whose agent could not start as a failed
+    verifier row with the error; it ranks below every real score and the error reaches the manifest."""
+    worker = episode_worker_for("pi", verifier_reward)
 
     def row(error: str) -> dict:
         return {"type": "verifier", "task": "task one", "rewards": {}, "reward": None, "failed": True, "error": error}
@@ -934,17 +929,16 @@ def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run(
     assert scored.score == 0.0 and scored.failure is not None and scored.failure.stage == "exit"
 
 
-def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Path) -> None:
-    """A terminus trial's ATIF steps carry their text as a plain string ``message``: scoring reads the verifier's
-    reward and finds no assistant reply, instead of taking the step's text for a wrapped message."""
-    worker = episode_worker_for("terminus", verifier_reward)
+def test_a_task_episode_with_atif_steps_scores_by_its_verifier() -> None:
+    """An ATIF step carries its text as a plain string ``message``: scoring reads the verifier's reward and finds no
+    assistant reply, instead of taking the step's text for a wrapped message."""
+    worker = episode_worker_for("pi", verifier_reward)
     steps = [
         {"step_id": 1, "source": "user", "message": "Write the output of `echo reef-ok` to health.txt."},
         {"step_id": 2, "source": "agent", "model_name": "m", "message": "Analysis: fresh terminal.\nPlan: run it."},
     ]
-    trial = {"task": "health", "rewards": {"reward": 1.0}, "reward": 1.0, "failed": False, "error": "", "steps": steps}
-    (tmp_path / "health.json").write_text(json.dumps(trial), encoding="utf-8")
-    trajectory = TerminusAtifReader()(tmp_path)
+    verifier = {"type": "verifier", "task": "health", "rewards": {"reward": 1.0}, "reward": 1.0, "failed": False}
+    trajectory = (verifier, *({"type": "step", **step} for step in steps))
     scored = worker.score_result(
         EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health", MODELS
     )

@@ -9,7 +9,7 @@ task's verifier then scores the container. The agent's session files come
 back, and the adapter's trajectory reader reads them.
 
 The episode's trajectory starts with one ``verifier`` event that holds the
-task and its rewards, in the form the terminus runner writes, so
+task and its rewards, so
 ``reef.evaluation.harness.VerifierRewardScorer`` reads the reward of every
 task episode the same way. The adapter needs no section for this: it uses
 the adapter's ``install``, ``dirs``, ``run.episode`` and ``sessions``.
@@ -55,7 +55,7 @@ def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
 
     The agent needs an install that works in any glibc container (npm), and
     its command must take the task as text: an adapter whose ``{prompt}`` is
-    the task directory (terminus) runs the task through its own runner.
+    the task directory runs the task through its own runner.
     """
     return (
         not descriptor.is_prompt_task_directory

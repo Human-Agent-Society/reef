@@ -91,15 +91,20 @@ class LayerInstall:
     Values: ``files`` maps render paths under the install to text, with
     ``TOKEN_PLACEHOLDER`` where the client's token goes. ``args`` are added to
     the adapter's binary, and ``env`` is set for it; ``env`` may hold the
-    placeholder, ``args`` never do. ``synced`` holds the render templates of
-    the parts a client sends back, ``{name}`` standing for one path segment.
+    placeholder, ``args`` never do. ``register`` and ``unregister`` are the
+    binary's commands, each its arguments, that the client runs after it
+    installs ``files`` and when it removes the install (``AdapterLayer``).
+    ``synced`` holds the render templates of the parts a client sends back,
+    ``{name}`` standing for one path segment.
     Purpose: ``layer_install`` makes it; the client-form manifest serves it,
-    and the client installs ``files`` and runs the command.
+    and the client installs ``files`` and runs the commands.
     """
 
     files: Mapping[str, str]
     args: tuple[str, ...]
     env: Mapping[str, str]
+    register: tuple[tuple[str, ...], ...]
+    unregister: tuple[tuple[str, ...], ...]
     synced: tuple[str, ...]
 
 
@@ -117,7 +122,9 @@ def layer_install(
         raise ValueError(f"adapter {descriptor.name!r} does not run on a person's machine: it declares no layer")
     binding = replace(served, base_url=scenario_url, api_key=TOKEN_PLACEHOLDER)
     rendered = render_tree(tree, descriptor, binding.config_overlays(descriptor), layer=True)
-    files = descriptor.place_root(rendered, root)
+    # The renderer's arguments read the rendered files before layer_files drops the ones no flag can name.
+    renderer_args = descriptor.renderer.layer_args(rendered)
+    files = descriptor.place_root(descriptor.renderer.layer_files(rendered), root)
     values = {"{root}": root, "{model}": binding.model, "{base_url}": scenario_url, "{token}": TOKEN_PLACEHOLDER}
 
     def filled(template: str) -> str:
@@ -131,8 +138,16 @@ def layer_install(
         if any(not files.get(path, "").strip() for path in named):
             continue
         args.extend(FILE_TEMPLATE.sub(lambda match: json.dumps(files[match.group(1)]), filled(arg)) for arg in group)
+    args.extend(arg for group in renderer_args for arg in group)
     synced = tuple(part.renders for part in descriptor.layout.parts.values() if part.renders is not None)
-    return LayerInstall(files, tuple(args), {name: filled(value) for name, value in layer.env.items()}, synced)
+    return LayerInstall(
+        files,
+        tuple(args),
+        {name: filled(value) for name, value in layer.env.items()},
+        tuple(tuple(filled(arg) for arg in command) for command in layer.register),
+        tuple(tuple(filled(arg) for arg in command) for command in layer.unregister),
+        synced,
+    )
 
 
 @dataclass(frozen=True)

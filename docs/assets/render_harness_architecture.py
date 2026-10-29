@@ -303,7 +303,7 @@ def render(theme: str, fonts) -> str:
             "Offline: learn from uploaded tasks",
             [
                 "Train tasks run on the head; eval tasks score each candidate.",
-                "Agents: any with an npm install, in each task's container; terminus.",
+                "Agents: any with an npm install, each in its task's own container.",
                 "Recipes: GEPA with TrainTaskRollouts; Meta-Harness (compare).",
             ],
         )

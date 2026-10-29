@@ -214,7 +214,7 @@ def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
 def test_an_adapter_without_host_env_keeps_no_service_variable_and_roots_in_the_temp_directory(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Only terminus declares host_env and is_root_bind_mounted; every other episode stays hermetic, on macOS too."""
+    """An adapter that declares no host_env and no bind-mounted root stays hermetic, on macOS too."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
     result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))

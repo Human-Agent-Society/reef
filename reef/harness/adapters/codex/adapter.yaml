@@ -2,8 +2,8 @@
 #
 # CODEX_HOME relocates user configuration, rules, hooks, skills, and session
 # rollouts into the episode root. Codex lists the skills below
-# $CODEX_HOME/skills in exec and in its TUI, so a person's session on the
-# rendered tree finds the same skills an episode does. The CLI
+# $CODEX_HOME/skills in exec and in its TUI. On a person's machine the same
+# skills load from a plugin (run.layer). The CLI
 # keeps model-generated commands in a workspace-write sandbox and never waits
 # for an approval during a benchmark episode.
 name: codex
@@ -11,7 +11,7 @@ binary: codex
 install:
   kind: npm
   package: "@openai/codex"
-  version: "0.153.4"
+  version: "0.158.0"
   binary_path: "node_modules/.bin/codex"
 renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
 # What Reef may evolve: each kind of file, at the path where codex reads it. A config/<target>.json
@@ -19,7 +19,7 @@ renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
 evolve:
   rules: codex/AGENTS.md
   skill: codex/skills/{name}/SKILL.md
-  # Codex 0.153.4 loads no custom prompts (its TUI refuses /name), so a
+  # Codex loads no custom prompts (the TUI of 0.153.4 refused /name), so a
   # command is a skill that a person runs as $name. A skill and a command of
   # one name render to one path and are refused.
   command:
@@ -66,9 +66,13 @@ run:
       - "{prompt}"
   # How a person's machine runs Codex on a release: the person's own ~/.codex stays, and -c
   # arguments win over its config.toml key by key. They bind the model, with the key in an
-  # environment variable rather than on the command line, and add the rules as
-  # developer_instructions after the person's AGENTS.md. Codex reads skills from no directory a
-  # flag names, so the release's skills and config stay out of a person's session.
+  # environment variable rather than on the command line, add the rules as
+  # developer_instructions after the person's AGENTS.md, and set each key of the release's
+  # config.toml (the renderer's layer_args). Codex reads skills from no directory a flag names,
+  # only from an installed plugin: register installs the install's codex/ as the plugin reef from
+  # the local marketplace reef at the install root, and again after each install, because Codex
+  # reads a copy in its plugin cache. The plugin then loads in each of the person's Codex sessions,
+  # and features.plugins turns plugins on for this one.
   layer:
     env:
       REEF_LAYER_TOKEN: "{token}"
@@ -76,7 +80,14 @@ run:
       - ["-c", 'model_provider="reef"']
       - ["-c", 'model="{model}"']
       - ["-c", 'model_providers.reef={name="Reef", base_url="{base_url}/v1", wire_api="responses", env_key="REEF_LAYER_TOKEN", supports_websockets=false}']
+      - ["-c", "features.plugins=true"]
       - ["-c", "developer_instructions={file:codex/AGENTS.md}"]
+    register:
+      - ["plugin", "marketplace", "add", "{root}"]
+      - ["plugin", "add", "reef@reef"]
+    unregister:
+      - ["plugin", "remove", "reef@reef"]
+      - ["plugin", "marketplace", "remove", "reef"]
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.

@@ -33,10 +33,15 @@ evolve:
   # Claude Code writes for itself across sessions are files of the tree: a
   # client syncs them, and a method may read and edit them.
   memory: claude/memory/{name}.md
-  # Claude Code's code surface is a plugin: a directory with an entry file.
-  # The part renders that entry file; activating it still needs a marketplace
-  # or settings reference, so skills, commands and rules carry the harness.
-  extension: claude/plugins/{name}/index.js
+  # Claude Code runs code at its events through hooks. A hooks entry of the
+  # tree's config/primary.json (settings.json) runs the script by its path,
+  # such as node "{root}/claude/extensions/<name>.mjs": an episode and a
+  # person's machine both read that settings.json, with {root} filled in.
+  extension:
+    renders: claude/extensions/{name}.mjs
+    holds: >-
+      a script that a hooks entry of settings.json runs at a Claude Code event, as
+      node "{root}/claude/extensions/<name>.mjs"
 # The agent's directories under the root, each with the variable that moves it there. What the agent writes
 # in them is its state, never residue, and a sandbox keeps them writable.
 dirs:
@@ -68,8 +73,8 @@ run:
   # How a person's machine runs Claude Code on a release: the person's own ~/.claude stays, and
   # the release loads over it. The install's claude/ is a plugin, so its skills and commands
   # load as reef:<name> beside the person's own; its rules follow the person's CLAUDE.md; its
-  # settings, which bind the model and point automatic memory at the memory part, win over the
-  # person's.
+  # settings, which bind the model, point automatic memory at the memory part and run the
+  # extension scripts as hooks, win over the person's.
   layer:
     args:
       - ["--plugin-dir", "{root}/claude"]

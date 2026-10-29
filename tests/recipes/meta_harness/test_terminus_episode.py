@@ -22,11 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from reef_terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV, trial_record
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeError, run_episode
-from reef.harness.runners.terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV
 from reef.harness.tree import HarnessTree, render_tree
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, ProcessOutcome, SandboxExecutor
 
@@ -303,3 +303,15 @@ def test_remote_terminus_requires_explicit_network_and_credentials(egress, crede
     executor = SandboxExecutor(egress_hosts=egress, env=credentials)
     with pytest.raises(EpisodeError, match=message):
         run_episode(descriptor, render(TREE), "task", executor=executor)
+
+
+TASK = "/tasks/openenv-00012-003-deduction"
+
+
+def test_the_terminus_row_carries_harbor_primary_reward(tmp_path: Path) -> None:
+    record = trial_record(TASK, {"tests_total": 10, "tests_passed": 7, "reward": 0.7}, tmp_path)
+    assert record["reward"] == 0.7 and not record["failed"]
+    assert trial_record(TASK, {"accuracy": 1.0}, tmp_path)["reward"] == 1.0
+    assert trial_record(TASK, {"a": 1, "b": 2}, tmp_path)["reward"] is None
+    failed = trial_record(TASK, {}, tmp_path, "docker compose build failed")
+    assert failed["failed"] and failed["reward"] is None and failed["error"] == "docker compose build failed"

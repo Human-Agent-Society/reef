@@ -9,7 +9,7 @@ operator to install the agent by hand before ``reef serve``.
 
 Reef still never hosts or proxies binary bytes: the install runs the vendor's
 own command. An adapter that declares no ``install`` section (reef's native
-loop, terminus) resolves to its bare binary name and is found on ``PATH`` as
+loop) resolves to its bare binary name and is found on ``PATH`` as
 before, and an explicit ``evolution.binary`` skips this module entirely.
 """
 

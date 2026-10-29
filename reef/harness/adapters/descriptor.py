@@ -84,9 +84,10 @@ class AdapterRenderer(Plugin):
 
     The shared render runs them in a fixed order: ``process_config`` for each config file, ``process_skill`` and
     ``process_command`` for each file of a part whose format is ``skill`` or ``command``, ``check_model_route``,
-    then ``finalize_render`` after the render has written each config file as text in the format its suffix names. Before any of them, the render
-    refuses a tree that sets a key Reef's model binding writes without the binding's credential, and a tree whose
-    config fails a check its target declares. A rule on config values belongs in those checks; a step is for
+    then ``finalize_render`` after the render has written each config file as text in the format its suffix names.
+    For a layer, ``reef.harness.sync.layer_install`` then runs ``layer_args`` and ``layer_files``. Before any of
+    them, the render refuses a tree that sets a key Reef's model binding writes without the binding's credential,
+    and a tree whose config fails a check its target declares. A rule on config values belongs in those checks; a step is for
     changing files and for what a check cannot state, such as a model in a skill's frontmatter or a value that
     must name an agent the config defines.
 
@@ -109,6 +110,8 @@ class AdapterRenderer(Plugin):
         "process_command",
         "check_model_route",
         "finalize_render",
+        "layer_files",
+        "layer_args",
     )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -170,9 +173,16 @@ class AdapterRenderer(Plugin):
 
     @staticmethod
     def layer_files(files: dict[str, str]) -> dict[str, str]:
-        """The files of a layer over a person's own configuration (``AdapterLayer``): ``files``, the rendered tree,
-        with what the layer's ``args`` name and the tree may lack, such as an empty rules file."""
+        """The files of a layer over a person's own configuration (``AdapterLayer``): ``files``, the tree rendered
+        for the layer, with what the layer's ``args`` and ``register`` commands name and the tree may lack, such as
+        an empty rules file, and without the files the agent reads from no path the layer can name."""
         return files
+
+    @staticmethod
+    def layer_args(files: Mapping[str, str]) -> tuple[tuple[str, ...], ...]:
+        """The argument groups that carry what ``files``, the tree rendered for the layer, holds and the agent reads
+        from no file the layer can name, such as a config key; the layer adds them after its ``args``."""
+        return ()
 
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
@@ -275,25 +285,35 @@ class InstallSpec:
 class AdapterLayer:
     """How a person's machine runs the agent with a release over the person's own configuration.
 
-    The client writes the release's layer files (``render_tree`` with ``layer``) under a directory of its own, the
-    install, and runs the binary with ``args`` added and ``env`` set. The agent still loads the person's own
-    configuration, which the client never writes.
+    The client writes the release's layer files (``reef.harness.sync.layer_install``) under a directory of its
+    own, the install, and runs the binary with ``args`` added and ``env`` set. The agent still loads the person's
+    own configuration, which the client never writes. An agent that loads a part from no path a flag can name
+    loads it once the agent's own commands in ``register`` record the install, as ``codex plugin add`` does.
 
     Values: ``args`` are non-empty groups of arguments, such as a flag and its value; ``env`` maps variables to
-    values. Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}`` (the binding's), ``{token}``
-    (only in ``env``: a command line is visible to other processes) and ``{file:<render path>}`` (that file's text
-    as a JSON string; a group whose file is empty is left out).
+    values. ``register`` are the agent's commands, each its arguments, that the client runs after it installs a
+    release's files; each must succeed when it runs again. ``unregister`` are the commands that undo them, which
+    ``disconnect`` runs. Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}`` (the binding's),
+    ``{token}`` (only in ``env``: a command line is visible to other processes) and ``{file:<render path>}`` (in
+    ``args`` only: that file's text as a JSON string; a group whose file is empty is left out).
     Purpose: ``load_descriptor`` parses ``run.layer``; ``reef.harness.sync.layer_install`` fills it in.
     """
 
     args: tuple[tuple[str, ...], ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
+    register: tuple[tuple[str, ...], ...] = ()
+    unregister: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
-        if any(not group or not all(isinstance(arg, str) for arg in group) for group in self.args):
-            raise DescriptorError("layer args must be non-empty groups of strings")
-        if any("{token}" in arg for group in self.args for arg in group):
-            raise DescriptorError("layer args must not hold {token}: a command line is visible to other processes")
+        for name, groups in (("args", self.args), ("register", self.register), ("unregister", self.unregister)):
+            if any(not group or not all(isinstance(arg, str) for arg in group) for group in groups):
+                raise DescriptorError(f"layer {name} must be non-empty groups of strings")
+            if any("{token}" in arg for group in groups for arg in group):
+                raise DescriptorError(
+                    f"layer {name} must not hold {{token}}: a command line is visible to other processes"
+                )
+        if any("{file:" in arg for group in (*self.register, *self.unregister) for arg in group):
+            raise DescriptorError("layer register and unregister commands must not hold {file:...}")
 
 
 @dataclass(frozen=True)
@@ -327,7 +347,7 @@ class AdapterDescriptor:
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
     #: Service environment variables an episode under the local executor keeps: the service's own value, else
     #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
-    #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as terminus's docker CLI.
+    #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as a docker CLI.
     host_env: Mapping[str, str] = field(default_factory=dict)
     #: True when the binary bind-mounts paths below the episode root into a container. On macOS Docker runs in a VM
     #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
@@ -475,15 +495,21 @@ def _parse_layer(raw: Any, where: str) -> AdapterLayer | None:
     """``run.layer``, or ``None`` without one; DescriptorError names the first malformed field."""
     if raw is None:
         return None
-    if not isinstance(raw, Mapping) or not set(raw) <= {"args", "env"}:
-        raise DescriptorError(f"{where} run 'layer' must be an object of args and env")
-    args, env = raw.get("args", []), raw.get("env", {})
-    if not isinstance(args, list) or not all(isinstance(group, list) for group in args):
-        raise DescriptorError(f"{where} run layer 'args' must be a list of argument groups")
+    if not isinstance(raw, Mapping) or not set(raw) <= {"args", "env", "register", "unregister"}:
+        raise DescriptorError(f"{where} run 'layer' must be an object of args, env, register and unregister")
+    groups: dict[str, tuple[tuple[str, ...], ...]] = {}
+    for name in ("args", "register", "unregister"):
+        value = raw.get(name, [])
+        if not isinstance(value, list) or not all(isinstance(group, list) for group in value):
+            raise DescriptorError(f"{where} run layer {name!r} must be a list of argument groups")
+        groups[name] = tuple(tuple(group) for group in value)
+    env = raw.get("env", {})
     if not isinstance(env, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         raise DescriptorError(f"{where} run layer 'env' must map strings to strings")
     try:
-        return AdapterLayer(args=tuple(tuple(group) for group in args), env=dict(env))
+        return AdapterLayer(
+            args=groups["args"], env=dict(env), register=groups["register"], unregister=groups["unregister"]
+        )
     except DescriptorError as exc:
         raise DescriptorError(f"{where}: {exc}") from exc
 

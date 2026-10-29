@@ -8,7 +8,8 @@ one-entry mapping a test merges into a tree's files. ``NATIVE_SEED`` is the
 starter tree of the evolve-your-harness tutorial: its tools, its
 ``loop_guard`` hook, its ``main`` graph and a skill. ``write_rendered``
 renders a tree for one adapter and writes the files under a root, for a test
-that runs a loader or a binary on them. ``descriptor_data`` and
+that runs a loader or a binary on them, and ``write_layer`` writes a layer
+under its install root, as the client does. ``descriptor_data`` and
 ``write_descriptor`` give a test a bundled adapter's ``adapter.yaml`` to change
 and load from a directory of its own.
 """
@@ -25,6 +26,7 @@ import yaml
 import reef.harness.adapters
 from reef.harness.adapters.descriptor import ADAPTER_FILE, AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.sync import TOKEN_PLACEHOLDER, LayerInstall
 from reef.harness.tree import HarnessTree, render_tree
 from reef.harness.tree.checks import NATIVE_LOOP_DEFAULT_MAX_STEPS
 
@@ -90,6 +92,16 @@ def write_rendered(
     return files
 
 
+def write_layer(root: Path, layer: LayerInstall, token: str = "dummy") -> dict[str, str]:
+    """``layer``'s files written under ``root``, its install, with ``token`` in place of the placeholder, as the
+    client writes them; the layer's variables with the token."""
+    for relative, text in layer.files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text.replace(TOKEN_PLACEHOLDER, token), encoding="utf-8")
+    return {name: value.replace(TOKEN_PLACEHOLDER, token) for name, value in layer.env.items()}
+
+
 __all__ = [
     "NATIVE_SEED",
     "NATIVE_SEED_FILES",
@@ -100,6 +112,7 @@ __all__ = [
     "native_json",
     "native_loop",
     "native_tool",
+    "write_layer",
     "write_rendered",
 ]
 

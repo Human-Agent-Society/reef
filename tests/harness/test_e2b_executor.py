@@ -2,6 +2,7 @@
 
 import json
 import shlex
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -57,8 +58,10 @@ def test_non_npm_agents_need_a_template_and_container_agents_keep_their_own_exec
         E2BExecutor(api_key="test-key").for_program(AdapterProgram(get_adapter("native")))
     _, binary = E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(get_adapter("native")))
     assert binary == "reef-native"
+    # An adapter whose runner starts its own containers, as the Terminal-Bench campaign's terminus does.
+    container_agent = replace(get_adapter("native"), self_isolating=True)
     with pytest.raises(SandboxUnavailable, match="own containers"):
-        E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(get_adapter("terminus")))
+        E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(container_agent))
 
 
 def test_preflight_checks_remote_readiness_once_and_always_closes(monkeypatch):

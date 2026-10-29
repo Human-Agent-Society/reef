@@ -1086,7 +1086,7 @@ store instead of on traffic, set
 ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskRollouts``. Each
 step then rolls out the next train tasks on the head tree as the method's
 traces. Startup refuses it without an adapter that plays task directories
-(``terminus``) and ``evolution.evaluation.scorer``:
+(an npm ``install``) and ``evolution.evaluation.scorer``:
 
 .. config::
 
@@ -1097,7 +1097,7 @@ traces. Startup refuses it without an adapter that plays task directories
 .. config::
 
    evolution.method | required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(context)`` makes each step's candidate
-   evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
+   evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
    evolution.seed | the directory of the first tree: every regular file under it, at its relative path as its tree path; it becomes the base release of a new scenario, and an existing scenario keeps its head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.models | {} | the method's own models by name, which it calls as ``services.models[name]``: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name; the name ``served`` is refused, since it is the model under test
@@ -1137,8 +1137,8 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
 
 .. config::
 
-   evolution.evaluation.tasks | the evaluation tasks: episode prompts, or task directories for an adapter whose prompt is a task directory (``terminus``)
-   evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. With an adapter other than ``terminus``, each task runs in its own container, and the adapter needs an npm ``install`` (`Task directories <../user-guide/evolve-your-harness.rst#task-directories>`__); startup refuses a manifest that names no eval task
+   evolution.evaluation.tasks | the evaluation tasks: episode prompts, or task directories for an adapter whose prompt is a task directory (``is_prompt_task_directory``)
+   evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Each task runs in its own container, and the adapter needs an npm ``install`` (`Task directories <../user-guide/evolve-your-harness.rst#task-directories>`__); startup refuses a manifest that names no eval task
    evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
    evolution.evaluation.task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. With ``imported-tasks``, the scenario takes task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter rule as ``task_manifest``
    evolution.evaluation.scorer | an ``EpisodeScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward
@@ -1148,7 +1148,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
    evolution.evaluation.floor_score | 1.0 | the score every episode must reach under ``floor``; positive
    evolution.evaluation.repeats | 1 | the episodes per task and tree; each repeat is scored, and compared, on its own
    evolution.evaluation.episode_timeout_s | 600 | seconds one evaluation episode may run
-   evolution.evaluation.agent_host | host.docker.internal | the address at which an agent in a task's container reaches Reef, for task directories with an adapter other than ``terminus``; Reef puts it in place of a loopback host (``127.0.0.1``, ``localhost``, ``::1`` or ``0.0.0.0``) of the served model's base URL, and keeps the port and the path; another host stays. Docker Desktop and colima resolve the default. On Linux, name an address of the host that the container reaches, such as the Docker bridge gateway, and make Reef listen there
+   evolution.evaluation.agent_host | host.docker.internal | the address at which an agent in a task's container reaches Reef; Reef puts it in place of a loopback host (``127.0.0.1``, ``localhost``, ``::1`` or ``0.0.0.0``) of the served model's base URL, and keeps the port and the path; another host stays. Docker Desktop and colima resolve the default. On Linux, name an address of the host that the container reaches, such as the Docker bridge gateway, and make Reef listen there
    evolution.evaluation.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
    evolution.evaluation.collect_failures | false | when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
    evolution.evaluation.collector | | optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is collected, and the caps and the credential and directive screens still apply

@@ -164,7 +164,7 @@ class EpisodeEvaluationWorker:
             )
         trial_error = failed_trial_error(result.trajectory)
         if trial_error:
-            # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
+            # The trial never ran (the image did not build, the agent could not
             # start): no answer was given, so it ranks below every real score instead of tying a zero.
             return ScoredEpisode(
                 None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path

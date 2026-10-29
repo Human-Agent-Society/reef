@@ -467,13 +467,16 @@ evaluator reads the task verifier's reward.
 ## Terminus
 
 `--recipe.config.evolution.adapter terminus` runs the recipe on
-Terminal-Bench's Terminus 2. Prepare a model endpoint with its API key, and
+Terminal-Bench's Terminus 2. Reef does not bundle that adapter: install the
+Meta-Harness Terminal-Bench campaign first (`pip install -e
+recipes/meta_harness/examples/terminal_bench`), which registers it and its
+`reef-terminus` runner. Prepare a model endpoint with its API key, and
 Docker or a remote Harbor environment (E2B or Modal) for the task container.
 With Docker, the default, prepare a working Docker installation on the service
 host. On macOS, Docker must share `~/.reef/episodes` with the host. Other
 platforms use the temp directory; set `TMPDIR` for the service if Docker's VM
 does not share it. To run the task containers remotely instead, see
-[Docker or a remote environment](../../../docs/developer-guide/harness-adapters.rst#docker-or-a-remote-environment).
+[Docker or a remote environment](../../meta_harness/examples/terminal_bench/README.md#docker-or-a-remote-environment).
 
 Terminus runs one Harbor task at a time through `reef-terminus --task`, so
 there is no session to type in. Submit requests over HTTP and read their

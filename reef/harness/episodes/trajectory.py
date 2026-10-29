@@ -240,33 +240,6 @@ class HermesSessionReader(TrajectoryReader):
 
 
 @register_trajectory_reader
-class TerminusAtifReader(TrajectoryReader):
-    """Read the terminus runner's ATIF trajectories: every ``*.json`` under ``path``.
-
-    The runner writes one file per trial: an ATIF trajectory whose ``steps``
-    carry the agent's turns, alongside the verifier's outcome. Each file
-    becomes a ``verifier`` event holding the reward and the task it scored,
-    then one ``step`` event per ATIF step, so a scorer reads the reward and a
-    method reads the turns from the same trajectory.
-    """
-
-    format = "terminus-atif-json"
-
-    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        events: list[dict[str, Any]] = []
-        for file in sorted(Path(path).rglob("*.json")):
-            try:
-                trial = json.loads(file.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise TrajectoryError(f"terminus trial {file} is not valid JSON") from exc
-            if not isinstance(trial, dict) or not isinstance(trial.get("steps"), list):
-                raise TrajectoryError(f"terminus trial {file} is not an ATIF trajectory with a steps list")
-            events.append({"type": "verifier", **{key: value for key, value in trial.items() if key != "steps"}})
-            events.extend({"type": "step", **step} for step in trial["steps"] if isinstance(step, dict))
-        return tuple(events)
-
-
-@register_trajectory_reader
 class OpencodeSessionReader(TrajectoryReader):
     """Read opencode's session database: ``opencode.db`` under ``path``, one event per message.
 
@@ -345,8 +318,8 @@ def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
 
     Codex wraps Responses messages in ``response_item.payload`` with
     ``output_text`` parts; pi wraps messages in ``message`` with ``text``
-    parts. A non-mapping ``message`` (a terminus ATIF step's text) is not a
-    wrapped message.
+    parts. A non-mapping ``message`` (an ATIF step's text) is not a wrapped
+    message.
     """
     for event in reversed(trajectory):
         nested = event.get("payload") if event.get("type") == "response_item" else event.get("message")
@@ -364,7 +337,7 @@ def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
 
 
 def failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
-    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
+    """The error of a Harbor trial that never ran (a failed ``verifier`` row with an error), else empty."""
     for event in trajectory:
         if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
             return str(event["error"])

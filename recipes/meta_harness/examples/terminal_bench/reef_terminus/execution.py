@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from reef_terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
+
 from reef.harness.adapters.descriptor import ExecutionValidator
-from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 

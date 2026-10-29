@@ -245,8 +245,7 @@ def adapter_modes(theme: str, fonts) -> str:
         write(
             40,
             MODES_H - 20,
-            "The middle column needs an npm install. terminus runs Harbor tasks with its own runner, which takes "
-            "the task directory.",
+            "The middle column needs an npm install: Reef installs the agent in each task's container.",
             BODY,
             p["muted"],
         )

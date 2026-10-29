@@ -16,7 +16,7 @@ import yaml
 from tests.support.harness_render import descriptor_data, write_descriptor
 
 from reef.core.model_metadata import ModelMetadata
-from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.adapters import BUILTIN_ADAPTERS, available_adapters, get_adapter
 from reef.harness.adapters.codex.render import bundled_model_catalog
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
@@ -31,7 +31,6 @@ PI = get_adapter("pi")
 OPENCODE = get_adapter("opencode")
 CLAUDE = get_adapter("claude")
 CODEX = get_adapter("codex")
-TERMINUS = get_adapter("terminus")
 DSH = get_adapter("dsh")
 HERMES = get_adapter("hermes")
 NATIVE = get_adapter("native")
@@ -95,13 +94,11 @@ SOURCES = {
     "claude": {
         **COMMON,
         **config(SETTINGS),
-        "extensions/tracer.js": TRACER,
+        "extensions/tracer.mjs": TRACER,
         "memory/MEMORY.md": "- Run the tests before you report a fix.\n",
     },
     # codex refuses code extensions.
     "codex": COMMON,
-    # terminus refuses code extensions, and its config holds Terminus 2 constructor arguments.
-    "terminus": {**COMMON, **config({"max_turns": 40})},
     # dsh's config is keyed by plugin id.
     "dsh": {**COMMON, **config({"agent-loop": {"config": {"maxSteps": 40}}}), "extensions/tracer.mjs": TRACER},
     # hermes's config is its config.yaml, and its extensions are Python plugins.
@@ -139,12 +136,16 @@ def test_render_refuses_a_tree_it_cannot_lay_out() -> None:
 
 
 def test_config_merges_the_tree_over_the_defaults_and_each_overlay_over_the_tree() -> None:
-    tree = HarnessTree(config({"compaction": {"enabled": True, "keep": 4}, "defaultThinkingLevel": "off"}))
-    files = render_tree(tree, PI, [("primary", {"compaction": {"keep": 8}})])
+    tree = HarnessTree(config({"compaction": {"auto": True, "prune": False}, "theme": "light"}))
+    files = render_tree(tree, OPENCODE, [("primary", {"compaction": {"prune": True}})])
     # Sibling keys survive the merge, and the overlay wins the key it writes.
-    assert json.loads(files["pi-agent/settings.json"]) == {
-        "compaction": {"enabled": True, "keep": 8},
-        "defaultThinkingLevel": "off",
+    assert json.loads(files["opencode/opencode.json"]) == {
+        "autoupdate": False,
+        "compaction": {"auto": True, "prune": True},
+        "enabled_providers": ["reef"],
+        "permission": {"*": "allow"},
+        "share": "disabled",
+        "theme": "light",
     }
     # claude's descriptor defaults sit below the tree's own keys.
     settings = json.loads(render(config({"cleanupPeriodDays": 7}), CLAUDE)["claude/settings.json"])
@@ -228,7 +229,7 @@ def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_config() 
 
 
 def test_codex_renders_a_command_as_a_skill_and_refuses_one_that_shares_a_skills_name() -> None:
-    """Codex 0.153.4 loads no custom prompts, so a command is a skill typed as $name, in the one skill root."""
+    """Codex loads no custom prompts, so a command is a skill typed as $name, in the one skill root."""
     command = {"commands/reefine.md": "File the text after $reefine as a request."}
     files = render(command, CODEX)
     assert files["codex/skills/reefine/SKILL.md"] == (
@@ -296,10 +297,10 @@ def test_codex_rejects_model_metadata_from_a_tree(metadata: dict[str, object]) -
 @pytest.mark.parametrize(
     ("model", "native_model"),
     [
-        ("gpt-5.4", "gpt-5.4"),
-        ("openai/gpt-5.4", "gpt-5.4"),
-        ("gpt-5.4-2026-03-05", "gpt-5.4"),
-        ("gpt-5.4-mini", "gpt-5.4-mini"),
+        ("gpt-5.5", "gpt-5.5"),
+        ("openai/gpt-5.5", "gpt-5.5"),
+        ("gpt-5.5-2026-03-05", "gpt-5.5"),
+        ("gpt-5.6-luna", "gpt-5.6-luna"),
         ("gpt-6-astra", "gpt-6-astra"),
         ("openai/gpt-6-astra", "gpt-6-astra"),
     ],
@@ -324,49 +325,6 @@ def test_codex_overrides_native_capabilities_and_keeps_instructions(
         "default_reasoning_level": native["default_reasoning_level"] if reasoning else None,
     }
     assert catalog == {**bundled, model: expected}
-
-
-def test_terminus_folds_commands_into_a_second_skill_root() -> None:
-    files = render(SOURCES["terminus"], TERMINUS)
-    # Both roots carry a SKILL.md, and the renderer synthesized frontmatter on each.
-    assert files["terminus/skills/notes/SKILL.md"].startswith("---\nname: notes\n")
-    assert files["terminus-commands/summarize/SKILL.md"].startswith("---\nname: summarize\n")
-
-
-def test_terminus_rejects_config_keys_that_are_not_constructor_arguments() -> None:
-    with pytest.raises(
-        RenderError, match=r"key 'tmux_pane_width' in terminus/config\.json: each key must be a Terminus 2 argument"
-    ):
-        render(config({"tmux_pane_width": 200}), TERMINUS)
-
-
-@pytest.mark.parametrize("turns", [0, -1, True, "many"])
-def test_terminus_rejects_a_max_turns_that_is_not_a_positive_integer(turns) -> None:
-    with pytest.raises(RenderError, match="max_turns must be a positive integer"):
-        render(config({"max_turns": turns}), TERMINUS)
-
-
-def test_terminus_extension_requires_an_agent_class() -> None:
-    with pytest.raises(RenderError, match="must define class Agent"):
-        render({"extensions/assemble.py": "def assemble(s, r, f): return None\n"}, TERMINUS)
-
-
-def test_terminus_renders_one_extension_without_executing_it() -> None:
-    code = "raise RuntimeError('must not run')\nclass Agent: pass\n"
-    assert render({"extensions/agent.py": code}, TERMINUS)["terminus/context/agent.py"] == code
-    with pytest.raises(RenderError, match="exactly one extension"):
-        render({"extensions/agent.py": code, "extensions/second.py": code}, TERMINUS)
-
-
-@pytest.mark.parametrize("model", ["m1", "qwen/qwen3-coder"])
-def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
-    binding = ModelBinding(base_url="http://127.0.0.1:9", model=model, api_key="k-1")
-    config_json = json.loads(render({}, TERMINUS, binding)["terminus/config.json"])
-    # The served name stays the model name Harbor looks the context limit up under; litellm_proxy routes litellm
-    # to api_base whatever vendor prefix that name carries, with the tree's call arguments in the request body.
-    assert config_json["model_name"] == model
-    assert config_json["api_base"] == "http://127.0.0.1:9/v1"
-    assert config_json["llm_kwargs"] == {"api_key": "k-1", "custom_llm_provider": "litellm_proxy"}
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
@@ -1035,20 +993,14 @@ def test_claude_render_keeps_deep_link_registration_off(value: object) -> None:
         render(config({"disableDeepLinkRegistration": value}), CLAUDE)
 
 
-def test_pi_settings_keys_pi_rewrites_on_load_are_rendered_in_their_new_form() -> None:
-    """pi 0.84.2 rewrites queueMode, a boolean websockets and a skills object when it loads settings.json and writes
-    the new form back on its next save; the render writes that form, so the file is the one pi keeps."""
-    data = {
-        "queueMode": "all",
-        "websockets": False,
-        "skills": {"customDirectories": ["extra"], "enableSkillCommands": True},
+def test_pi_settings_admit_only_what_a_persons_machine_applies() -> None:
+    """pi reads settings.json from no directory a flag names, so a tree sets only what pi's flags carry."""
+    assert json.loads(render(config({"defaultThinkingLevel": "high"}), PI)["pi-agent/settings.json"]) == {
+        "defaultThinkingLevel": "high"
     }
-    assert json.loads(render(config(data), PI)["pi-agent/settings.json"]) == {
-        "steeringMode": "all",
-        "transport": "sse",
-        "skills": ["extra"],
-        "enableSkillCommands": True,
-    }
+    for data in ({"compaction": {"enabled": False}}, {"defaultThinkingLevel": "most"}, {"defaultTools": ["bash"]}):
+        with pytest.raises(RenderError, match=re.escape("pi-agent/settings.json")):
+            render(config(data), PI)
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
@@ -1148,7 +1100,7 @@ def test_an_adapter_renderer_step_must_be_a_static_method() -> None:
     [
         ("reef.harness.adapters.pi.render", "must be 'package.module:ClassName'"),
         ("reef.harness.adapters.pi.render:Missing", "cannot import"),
-        ("reef.harness.adapters.terminus.execution:TerminusExecutionValidator", "must name a class that inherits"),
+        ("reef.harness.adapters.descriptor:ExecutionValidator", "must name a class that inherits"),
     ],
 )
 def test_a_renderer_must_name_an_adapter_renderer_class(tmp_path, reference: str, message: str) -> None:
@@ -1172,10 +1124,8 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
         load_descriptor(target)
 
 
-def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
-    """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
-    assert TERMINUS.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
-    assert TERMINUS.is_root_bind_mounted
-    for name in sorted(set(available_adapters()) - {"terminus"}):
+def test_no_bundled_adapter_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
+    """Every bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
+    for name in BUILTIN_ADAPTERS:
         descriptor = get_adapter(name)
         assert descriptor.host_env == {} and not descriptor.is_root_bind_mounted, name

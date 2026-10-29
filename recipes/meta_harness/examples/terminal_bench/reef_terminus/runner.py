@@ -13,7 +13,7 @@ rules, and skills retain Harbor's native interfaces in either case.
 
 It writes one trial file under ``REEF_TERMINUS_SESSION_DIR`` holding the
 verifier's rewards and the ATIF steps, which the adapter's
-``terminus-atif-json`` reader turns into the episode's trajectory. Harbor's
+``reef_terminus.trajectory.read_trials`` reader turns into the episode's trajectory. Harbor's
 own trial tree lands in ``REEF_TERMINUS_TRIALS_DIR``, keeping the session
 directory the reader walks to files Reef wrote.
 """
@@ -31,8 +31,7 @@ from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
-from reef.core.tasks import primary_reward
-from reef.harness.runners.terminus.tree import (
+from reef_terminus.tree import (
     ENVIRONMENT_ENV,
     TerminusTreeError,
     extension_source,
@@ -41,6 +40,8 @@ from reef.harness.runners.terminus.tree import (
     skill_roots,
     terminus_kwargs,
 )
+
+from reef.core.tasks import primary_reward
 from reef.sandbox.process import ISOLATION_ENV
 from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
@@ -152,7 +153,7 @@ def own_trial(trials_dir: Path, names_before_run: Collection[str], uri: str | No
 
 
 def trial_record(task: str, rewards: Any, trial_dir: Path | None, error: str = "") -> dict[str, Any]:
-    """One trial as the ``terminus-atif-json`` reader expects it, its steps read from ``trial_dir`` alone.
+    """One trial as the ``reef_terminus.trajectory.read_trials`` reader expects it, its steps read from ``trial_dir`` alone.
 
     ``error`` is recorded rather than dropped: an episode whose container never
     built scores nothing, and a bare zero would read as a candidate the agent

@@ -11,8 +11,9 @@ The map, one subpackage per job:
     ``descriptor``) that says what Reef may evolve and where the agent reads
     each file (kinds in ``parts``), where the agent keeps its directories,
     how it binds a model, and how it runs; and a ``render.py`` with its own
-    render steps. pi, opencode, claude, codex, dsh, hermes, and the two
-    programs Reef ships, native and terminus.
+    render steps. pi, opencode, claude, codex, dsh, hermes, and native, the
+    program Reef ships. Another distribution adds an adapter through the
+    ``reef.harness_adapters`` entry point group.
 ``episodes/``
     one headless run and its reading: launch on a rendered root through any
     ``reef.sandbox`` executor (``run``), the adapter as the program that
@@ -21,9 +22,8 @@ The map, one subpackage per job:
     (``tasks``), and one adapter's agent playing a Harbor task in the task's
     container (``harbor_task``).
 ``runners/``
-    the programs an adapter's ``binary`` points at when Reef ships them:
-    ``native`` (the loop, its graph and the resident ``serve`` form) and
-    ``terminus`` (the Harbor runner).
+    the program an adapter's ``binary`` points at when Reef ships it:
+    ``native`` (the loop, its graph and the resident ``serve`` form).
 ``capture``
     the capture proxy between a harness and Reef: tags and receipts.
 ``gateway``

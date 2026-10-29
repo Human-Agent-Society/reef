@@ -6,6 +6,7 @@ import copy
 from pathlib import Path
 
 import pytest
+from reef_terminus.runner import trial_record
 from tests.support.harness_steps import COMPONENT, TreeReleases
 
 from recipes.beta.reefine import ReefineMethod, ReefineRecipe
@@ -13,7 +14,6 @@ from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.core.config import config_arguments
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.runners.terminus.runner import trial_record
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError

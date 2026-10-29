@@ -19,11 +19,11 @@ import os
 from pathlib import Path
 
 import pytest
+from reef_terminus.trajectory import read_trials
 from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.trajectory import TerminusAtifReader
 from reef.harness.tree import HarnessTree
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
@@ -56,13 +56,13 @@ def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path,
     monkeypatch.setenv("REEF_TERMINUS_SESSION_DIR", str(sessions))
     monkeypatch.setenv("REEF_TERMINUS_TRIALS_DIR", str(root / "terminus" / "trials"))
 
-    from reef.harness.runners.terminus.runner import run, trial_slug
+    from reef_terminus.runner import run, trial_slug
 
     exit_code = run(TASK)
 
     slug = trial_slug(TASK)
     assert sorted(sessions.glob("*.json")) == [sessions / f"{slug}.json"]
-    events = TerminusAtifReader()(sessions)
+    events = read_trials(sessions)
     assert events and events[0]["type"] == "verifier"
     # The verifier has to have run. Accepting an empty reward here would let
     # this pass on an episode whose container never built.

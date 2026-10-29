@@ -499,8 +499,10 @@ def test_descriptor_dirs_stay_in_managed_state(tmp_path, path: str) -> None:
     ("layer", "message"),
     [
         ({"args": [["--key", "{token}"]]}, "must not hold {token}"),
+        ({"register": [["login", "{token}"]]}, "must not hold {token}"),
+        ({"register": [["add", "{file:x}"]]}, "must not hold {file:...}"),
         ({"args": ["-e"]}, "a list of argument groups"),
-        ({"files": {}}, "an object of args and env"),
+        ({"files": {}}, "an object of args, env, register and unregister"),
     ],
 )
 def test_a_descriptor_layer_keeps_the_token_off_the_command_line(tmp_path, layer, message: str) -> None:

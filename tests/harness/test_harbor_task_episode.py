@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -85,8 +86,8 @@ def test_a_trial_that_never_ran_the_agent_is_a_failed_trial_with_its_error(tmp_p
 
 def test_only_an_adapter_with_an_npm_install_and_a_text_prompt_plays_a_task_in_a_container(tmp_path: Path) -> None:
     assert all(can_run_in_task_container(get_adapter(name)) for name in ("claude", "pi", "opencode", "codex"))
-    # terminus's own command takes the task directory; hermes installs from git.
-    assert not can_run_in_task_container(get_adapter("terminus"))
+    # An adapter whose own command takes the task directory runs it itself; hermes installs from git.
+    assert not can_run_in_task_container(replace(get_adapter("pi"), is_prompt_task_directory=True))
     assert not can_run_in_task_container(get_adapter("hermes"))
     with pytest.raises(EpisodeError, match="'hermes' cannot play a Harbor task directory"):
         run_task_episode(get_adapter("hermes"), {}, str(harbor_task(tmp_path)))

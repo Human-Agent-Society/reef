@@ -871,6 +871,9 @@ does a scenario whose recipe serves no harness tree.
   ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own token.
   This form adds ``run``, the command that runs the agent on the files
   (``binary``, ``args`` and ``env``; ``env`` may hold the placeholder too),
+  the agent's own commands that record the install and remove it
+  (``register`` and ``unregister``, each a list of argument lists, empty for
+  most agents), the agent's pinned ``install``,
   and ``synced``, the render templates of the files the client sends back,
   ``{name}`` standing for one path segment. An adapter without a ``layer``
   is HTTP 400.

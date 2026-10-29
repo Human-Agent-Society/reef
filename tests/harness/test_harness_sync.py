@@ -116,10 +116,38 @@ def test_a_layer_runs_the_agent_over_the_persons_own_config_with_the_token_off_t
         assert layer.args[-1] == f"developer_instructions={json.dumps('Run the tests first.' + chr(10))}"
         empty = layer_install(HarnessTree({}), descriptor, served, "http://reef.invalid/reef/scenarios/s", "/r")
         assert not any(arg.startswith("developer_instructions") for arg in empty.args)
+        # The skills load as a plugin whose root keeps no config file, so Codex's cache copies no credential.
+        assert "codex/config.toml" not in layer.files and "codex/skills/fix/SKILL.md" in layer.files
+        assert json.loads(layer.files["codex/.codex-plugin/plugin.json"])["name"] == "reef"
+        assert json.loads(layer.files[".agents/plugins/marketplace.json"])["plugins"][0]["source"]["path"] == "./codex"
+        assert layer.register == (("plugin", "marketplace", "add", "/home/a/install"), ("plugin", "add", "reef@reef"))
+        assert layer.unregister[0] == ("plugin", "remove", "reef@reef")
     if adapter == "opencode":
         assert layer.env["OPENCODE_CONFIG_DIR"] == "/home/a/install/opencode"
     # The episode defaults stay in episodes: a layer never opens every permission of the person's agent.
     assert "permission" not in "".join(layer.files.values())
+
+
+@pytest.mark.parametrize(
+    ("adapter", "config", "expected"),
+    [
+        # Each key of codex's config.toml as a -c argument; the binding's own keys stay out.
+        (
+            "codex",
+            {"model_reasoning_effort": "low", "features": {"enable_request_compression": True}},
+            ["-c", 'model_reasoning_effort="low"', "-c", "features.enable_request_compression=true"],
+        ),
+        # pi reads no settings.json of a layer: its settings come as flags.
+        ("pi", {"defaultThinkingLevel": "high"}, ["--thinking", "high"]),
+        ("pi", {"defaultThinkingLevel": "off", "defaultTools": []}, ["--thinking", "off", "--no-builtin-tools"]),
+    ],
+)
+def test_a_layer_passes_the_config_the_agent_reads_from_no_file_of_the_layer(adapter, config, expected) -> None:
+    served = ModelBinding(base_url="http://upstream.invalid", model="m1", api=BINDINGS[adapter])
+    tree = HarnessTree({"config/primary.json": json.dumps(config)})
+    layer = layer_install(tree, get_adapter(adapter), served, "http://reef.invalid/reef/scenarios/s", "/r")
+    assert list(layer.args[-len(expected) :]) == expected
+    assert not any(arg.startswith(("model_providers", "model=")) for arg in layer.args[-len(expected) :])
 
 
 def test_claude_keeps_its_memory_in_the_tree_under_the_root_that_writes_it() -> None:

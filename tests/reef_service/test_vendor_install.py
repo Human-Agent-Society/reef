@@ -69,7 +69,7 @@ def on_path(monkeypatch):
 
 @pytest.mark.unit
 def test_an_adapter_without_an_install_section_resolves_to_its_bare_binary_name() -> None:
-    """Reef's native loop and terminus declare no vendor channel: PATH answers, as before."""
+    """Reef's native loop declares no vendor channel: PATH answers, as before."""
     descriptor = get_adapter("native")
     assert descriptor.install is None
     assert resolve_binary(descriptor) == descriptor.binary

@@ -61,12 +61,12 @@ def render_tree(
     config target the adapter does not declare, two files that land on one
     path, and whatever the adapter's renderer refuses.
 
-    With ``layer``, the files are a layer over a person's own configuration
-    (``AdapterDescriptor.layer``): no config target starts from its episode
-    defaults, the targets' checks do not run, and the renderer's
-    ``layer_files`` adds what the layer's arguments name. The defaults and
+    With ``layer``, the files are for a layer over a person's own
+    configuration (``AdapterDescriptor.layer``): no config target starts from
+    its episode defaults, and the targets' checks do not run. The defaults and
     checks keep episodes deterministic, and the tree passed the checks when it
-    was published. RenderError when the adapter has no layer.
+    was published. ``reef.harness.sync.layer_install`` makes the layer from
+    these files. RenderError when the adapter has no layer.
     """
     if layer and descriptor.layer is None:
         raise RenderError(f"adapter {descriptor.name!r} does not run on a person's machine: it declares no layer")
@@ -103,8 +103,7 @@ def render_tree(
         configs[target_name] = deep_merge(configs[target_name], data)
     for name, target in descriptor.config_targets.items():
         files[target.path] = json.dumps(configs[name], indent=2, sort_keys=True) + "\n"
-    rendered = apply_adapter_renderer(descriptor, files, formats, checks=not layer)
-    return descriptor.renderer.layer_files(rendered) if layer else rendered
+    return apply_adapter_renderer(descriptor, files, formats, checks=not layer)
 
 
 def apply_adapter_renderer(

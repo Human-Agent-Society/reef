@@ -586,12 +586,12 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
     """Under review a release waits for a promote, and the promote row carries no request of its own: the manifest
     follows the promote to its target, so the served head lists what the pending release named and serves its
     tree."""
-    themed = json.dumps({"defaultThinkingLevel": "off", "theme": "light"}) + "\n"
+    tuned = json.dumps({"defaultThinkingLevel": "high"}) + "\n"
 
     def method(workspace, services):
         if workspace.request() is None:
             return None
-        return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": themed})
+        return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": tuned})
 
     dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, method, publish="review"))
     scenario = dispatcher.get_or_create_scenario("agents")
@@ -626,7 +626,7 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             assert "metrics" not in row
             # The promote serves the pending release's source tree, the evolved setting included.
             source = await client.get("/reef/harness", params={"form": "source"}, headers=headers)
-            assert (await source.json())["files"]["config/primary.json"] == themed
+            assert (await source.json())["files"]["config/primary.json"] == tuned
         finally:
             await client.close()
 

@@ -157,7 +157,7 @@ def test_a_harness_scenario_takes_an_upload_when_its_evaluation_reads_imported_t
     tmp_path: Path, evaluation: dict, published: list[str]
 ) -> None:
     """Harness evolution's default job data reads no imported task: only an evaluation on them takes the upload."""
-    config = evolution_config(evaluation=evaluation, adapter="terminus", state_dir=str(tmp_path / "state"))
+    config = evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state"))
     dispatcher = dispatcher_for(
         tmp_path, HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
     )

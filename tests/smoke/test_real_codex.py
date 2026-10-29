@@ -20,12 +20,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.harness_render import write_layer
 
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
 from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.sync import layer_install
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
@@ -355,7 +357,16 @@ def test_codex_bundled_model_catalog_matches_the_pin() -> None:
     assert bundled_model_catalog() == {model["slug"]: model for model in json.loads(result.stdout)["models"]}
 
 
-@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-6-astra"])
+#: Codex 0.158.0 leaves the sentence on checklists out of gpt-5.5's own prompt, but keeps it from a model catalog,
+#: so an episode with model metadata on gpt-5.5 sends one sentence more than Codex does.
+GPT_5_5_KEEPS_A_SENTENCE = pytest.mark.xfail(
+    strict=True, reason="Codex drops gpt-5.5's checklist sentence only for its own catalog"
+)
+
+
+@pytest.mark.parametrize(
+    "model", [pytest.param("gpt-5.5", marks=GPT_5_5_KEEPS_A_SENTENCE), "gpt-5.6-sol", "gpt-6-astra"]
+)
 def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> None:
     server, base_url = _server()
     try:
@@ -374,7 +385,17 @@ def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> 
         server.server_close()
 
 
-@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4", "gpt-6-astra", "openai/gpt-6-astra"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("gpt-5.5", marks=GPT_5_5_KEEPS_A_SENTENCE),
+        pytest.param("openai/gpt-5.5", marks=GPT_5_5_KEEPS_A_SENTENCE),
+        "gpt-5.6-sol",
+        "openai/gpt-5.6-sol",
+        "gpt-6-astra",
+        "openai/gpt-6-astra",
+    ],
+)
 @pytest.mark.parametrize("reasoning", [True, False])
 def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: str, reasoning: bool) -> None:
     server, base_url = _server()
@@ -400,8 +421,55 @@ def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: s
             assert after_body["reasoning"] == before_body["reasoning"]
         else:
             # Responses Lite keeps its context policy while omitting effort and summary.
-            expected_reasoning = {"context": "all_turns"} if model.endswith("gpt-6-astra") else {}
+            expected_reasoning = {key: value for key, value in before_body["reasoning"].items() if key == "context"}
             assert after_body["reasoning"] == expected_reasoning
     finally:
         server.shutdown()
         server.server_close()
+
+
+#: A tree with a marker in each part codex's adapter evolves, and a config key the request shows.
+CODEX_PARTS = {
+    "rules.md": RULES_MARKER,
+    "skills/probe/SKILL.md": f"---\nname: probe\ndescription: {SKILL_MARKER}\n---\nProbe.\n",
+    "commands/ship.md": "---\ndescription: The Reef Codex command marker is TIDEPOOL-COMMAND-33.\n---\nShip.\n",
+    "config/primary.json": json.dumps({"model_verbosity": "high"}),
+}
+
+
+@pytest.mark.parametrize("form", ["episode", "layer"])
+def test_real_codex_takes_every_part_of_a_tree_in_an_episode_and_over_a_persons_own_config(
+    tmp_path: Path, form: str
+) -> None:
+    """Every part an evolved tree may hold reaches the model, in an episode and on a person's machine, where Codex
+    keeps the person's own home, empty here, takes the skills from the plugin the layer registers, and takes the
+    rules and the config as arguments. Unregistering leaves the person's config without the plugin."""
+    server, base_url = _server()
+    descriptor = get_adapter("codex")
+    # A native model, so the request carries the verbosity the config sets.
+    binding = ModelBinding(base_url=base_url, model="gpt-6-astra", api_key="reef-smoke-key", api="responses")
+    try:
+        if form == "episode":
+            files = _bound_files(CODEX_PARTS, binding=binding)
+            result = run_episode(descriptor, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+            assert result.exit_code == 0, result.stderr
+        else:
+            own = tmp_path / "own"
+            own.mkdir()
+            layer = layer_install(HarnessTree(CODEX_PARTS), descriptor, binding, base_url, str(tmp_path / "install"))
+            env = {**os.environ, **write_layer(tmp_path / "install", layer), "CODEX_HOME": str(own)}
+            for command in layer.register:
+                subprocess.run([REAL_CODEX, *command], env=env, check=True, capture_output=True)
+            argv = [REAL_CODEX, *layer.args, "exec", "--json", "--skip-git-repo-check", "Reply READY"]
+            done = subprocess.run(argv, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+            assert done.returncode == 0, done.stderr
+            for command in layer.unregister:
+                subprocess.run([REAL_CODEX, *command], env=env, check=True, capture_output=True)
+            assert "reef" not in (own / "config.toml").read_text()
+    finally:
+        server.shutdown()
+        server.server_close()
+    request = server.requests[-1][2]
+    markers = ("TIDEPOOL-CODEX-41", "TIDEPOOL-SKILL-27", "TIDEPOOL-COMMAND-33")
+    assert [marker for marker in markers if marker not in request] == []
+    assert json.loads(request)["text"]["verbosity"] == "high"

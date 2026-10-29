@@ -75,7 +75,7 @@ def test_local_executor_does_not_forward_parent_stdin(tmp_path: Path) -> None:
 
 
 def test_local_executor_finds_a_runner_beside_the_interpreter_after_path(tmp_path: Path, monkeypatch) -> None:
-    """reef serve started from a venv off PATH still launches reef-terminus; a name PATH finds keeps its binary."""
+    """reef serve started from a venv off PATH still launches a runner Reef ships; a name PATH finds keeps its binary."""
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
     scripts = tmp_path / "venv" / "bin"

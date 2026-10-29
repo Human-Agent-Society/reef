@@ -154,7 +154,7 @@ training step (4 to 8 above).
    * - Agents
      - The adapters with a layer: ``claude``, ``pi``, ``opencode``,
        ``codex``.
-     - Every adapter with an npm ``install``, and ``terminus``.
+     - Every adapter with an npm ``install``.
    * - Data comes from
      - ``reef-client harness`` and ``POST /reef/report``.
      - ``POST /reef/scenarios/<scenario-name>/tasks``, with Harbor task
@@ -379,9 +379,6 @@ render. The bundled adapters take these parts:
 +--------------+-----------------------------+---------------------------------------------+
 | ``hermes``   | Hermes Agent                | config, rules, command, skill, extension    |
 +--------------+-----------------------------+---------------------------------------------+
-| ``terminus`` | Terminus 2 (Terminal-Bench) | config, rules, command, skill, extension    |
-|              |                             | (sandbox and remote tasks)                  |
-+--------------+-----------------------------+---------------------------------------------+
 | ``native``   | Reef's own loop             | config, rules, skill, native_tool,          |
 |              |                             | native_hook, native_graph, native_agent,    |
 |              |                             | native_loop                                 |
@@ -505,9 +502,8 @@ task starts the run. Recorded traffic still starts steps, and it goes first.
 After a restart, the run continues after the last committed step. A task
 uploaded during an epoch joins the next epoch.
 
-The stage needs a scorer. With an adapter other than ``terminus``, the
-evaluation tasks must be directories too: a ``task_store`` or a
-``task_manifest``. Each task runs in its own container (see `Task
+The stage needs a scorer, and the evaluation tasks must be directories too:
+a ``task_store`` or a ``task_manifest``. Each task runs in its own container (see `Task
 directories`_).
 
 The method
@@ -602,8 +598,8 @@ Running episodes
        # Only for a model that listens on the evaluation worker's localhost:
        forward_ports: [8000]
 
-A task directory with an adapter other than ``terminus`` runs in its own
-container instead, under the ``local`` executor (see `Task directories`_).
+A task directory runs in its own container instead, under the ``local``
+executor (see `Task directories`_).
 
 ``evolution.sandbox.env_from`` lists the environment variables to pass into
 an episode; a missing variable fails configuration. No other variable
@@ -623,9 +619,8 @@ Task directories
 
 A Harbor task directory holds an instruction, an environment and the tests
 that score the work. Tasks from a ``task_store``, from a ``task_manifest``,
-and the train tasks of an offline run are directories. ``terminus``'s runner
-takes the directory itself. For any other adapter, Reef runs each task in its
-own container:
+and the train tasks of an offline run are directories. Reef runs each task
+in its own container:
 
 #. Harbor starts the task's container with Docker.
 #. Reef installs the adapter's pinned agent there with npm, copies in the
@@ -637,7 +632,9 @@ own container:
 
 The adapter needs nothing more than an npm ``install`` for this (see `How
 Reef runs an agent
-<../developer-guide/harness-adapters.rst#how-reef-runs-an-agent>`__). The
+<../developer-guide/harness-adapters.rst#how-reef-runs-an-agent>`__). An
+adapter whose own runner takes the task directory, such as the Meta-Harness
+Terminal-Bench campaign's ``terminus``, plays it that way instead. The
 task's image needs glibc, because Node comes from nvm. When the image has no
 ``curl``, Reef installs it with ``apt-get``.
 
@@ -653,12 +650,14 @@ Reef listen on it with ``reef.host``.
 
 Startup refuses task directories when:
 
-- the adapter has no npm ``install`` and is not ``terminus``;
-- ``evolution.executor`` is not ``local`` and the adapter is not
-  ``terminus``: the task's container is the boundary;
+- the adapter has no npm ``install``;
+- ``evolution.executor`` is not ``local``: the task's container is the
+  boundary;
 - ``collect_failures`` is on, because it adds prompts;
-- an offline run's evaluation tasks are prompts in ``tasks``, with an
-  adapter other than ``terminus``.
+- an offline run's evaluation tasks are prompts in ``tasks``.
+
+An adapter whose own runner takes the task directory skips the first, second
+and last of these.
 
 Collection: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -728,7 +727,9 @@ connects to one harness shares it. The Reef URL comes from ``--reef`` or
 
 - It installs the harness's head in
   ``~/.local/share/reef-client/harness/<scenario>``. It never reads or writes
-  your own configuration.
+  your own configuration. For Codex, which loads skills only from a plugin,
+  it runs Codex's own ``codex plugin`` commands, which add the install as the
+  plugin ``reef`` to your ``~/.codex``; ``disconnect`` removes it.
 - When the agent is not installed, it installs the version that Reef's
   evaluation episodes run, with npm, under ``~/.local/share/reef-client/agents``.
 - It makes the agent's own command run through Reef: a command with the
@@ -790,18 +791,19 @@ it depends on the agent:
        ``~/.claude.json``.
      - The release's skills and commands load as a plugin, named
        ``reef:<name>`` beside your own. Its rules follow your ``CLAUDE.md``.
-       Its settings bind the model and win over yours. Claude Code's
-       automatic memory goes to the release's ``memory`` part, for every
-       working directory, so it syncs; memory written before ``connect``
-       stays under ``~/.claude/projects``.
+       Its settings bind the model, run the release's extensions as hooks,
+       and win over yours. Claude Code's automatic memory goes to the
+       release's ``memory`` part, for every working directory, so it syncs;
+       memory written before ``connect`` stays under ``~/.claude/projects``.
    * - ``pi``
      - ``~/.pi/agent``: ``AGENTS.md``, ``settings.json``, ``models.json``,
        ``skills/``, ``prompts/``, ``extensions/`` and ``sessions/``.
      - The release's skills, prompts and extensions load beside yours; on a
        name both define, the release's wins. Its rules follow your
-       ``AGENTS.md``; pi then skips your ``APPEND_SYSTEM.md``. pi's
-       settings take no layer, and changing the model in a session still
-       writes your ``settings.json``.
+       ``AGENTS.md``; pi then skips your ``APPEND_SYSTEM.md``. The two
+       settings a release can hold come as flags: its thinking level as
+       ``--thinking``, and no built-in tools as ``--no-builtin-tools``.
+       Changing the model in a session still writes your ``settings.json``.
    * - ``opencode``
      - ``~/.config/opencode``: ``opencode.json`` or ``.jsonc``, ``AGENTS.md``,
        ``agent/``, ``command/``, ``plugin/`` and ``skill/``. Your sessions are in
@@ -812,13 +814,16 @@ it depends on the agent:
    * - ``codex``
      - ``~/.codex``: ``config.toml`` with your models, providers and MCP
        servers, ``AGENTS.md``, ``auth.json``, ``skills/`` and ``sessions/``.
-     - Arguments bind the model and add the release's rules after your
-       ``AGENTS.md``, replacing your own ``developer_instructions``. Codex
-       loads skills from no directory an argument names, so the release's
-       skills and config stay out of your sessions.
+     - Arguments bind the model, add the release's rules after your
+       ``AGENTS.md``, replacing your own ``developer_instructions``, and set
+       the release's config keys over yours. The release's skills and
+       commands load as the plugin ``reef``, which ``connect`` adds to your
+       ``~/.codex`` with ``codex plugin`` and each ``run`` refreshes, so your
+       other Codex sessions load them too. ``disconnect`` removes it.
 
 Reef evolves only the layer. It never reads your own configuration, and it
-never syncs or evolves it. Two things follow:
+never syncs or evolves it; only Codex's own ``plugin`` commands add an entry
+to your ``~/.codex``. Two things follow:
 
 - The agent puts parts of your configuration into its model calls, such as
   your rules and the names and descriptions of your skills. Reef records each

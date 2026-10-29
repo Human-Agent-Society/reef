@@ -1,45 +1,26 @@
-"""pi adapter render steps: skill frontmatter, the settings pi migrates, and the layer's files.
+"""pi adapter render steps: skill frontmatter, and the layer's files and arguments.
 
 pi follows the Agent Skills spec: a ``SKILL.md`` needs ``name`` and
 ``description`` frontmatter or the skill is reported as a conflict at startup
 and never offered. ``process_skill`` gives a skill node whose
 text carries none both, the description being the text's first line.
 
-pi 0.84.2 rewrites a few old settings keys when it loads ``settings.json`` and
-writes the new form back on its next save: ``queueMode`` becomes
-``steeringMode``, a boolean ``websockets`` becomes ``transport``, and a
-``skills`` object becomes the array of its ``customDirectories`` (its
-``enableSkillCommands`` moves to the top level). The render writes the new
-form itself, so the file an install writes is the one pi keeps, and the check
-of the keys pi may not change never refuses pi's own rewrite.
+On a person's machine, pi reads ``settings.json`` and ``models.json`` only
+from the person's own directory. ``layer_files`` adds an extension that
+registers the release's providers, and ``layer_args`` passes the settings the
+adapter's checks admit as pi's flags: the thinking level as ``--thinking``,
+and an empty ``defaultTools`` as ``--no-builtin-tools``.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from collections.abc import Mapping
 
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 
 SETTINGS_PATH = "pi-agent/settings.json"
-
-
-def migrated_settings(settings: dict[str, object]) -> dict[str, object]:
-    """``settings`` with the old keys pi 0.84.2 rewrites on load in their new form, as its migrateSettings does."""
-    if "queueMode" in settings and "steeringMode" not in settings:
-        settings["steeringMode"] = settings.pop("queueMode")
-    if "transport" not in settings and isinstance(settings.get("websockets"), bool):
-        settings["transport"] = "websocket" if settings.pop("websockets") else "sse"
-    skills = settings.get("skills")
-    if isinstance(skills, dict):
-        if "enableSkillCommands" in skills and "enableSkillCommands" not in settings:
-            settings["enableSkillCommands"] = skills["enableSkillCommands"]
-        directories = skills.get("customDirectories")
-        if isinstance(directories, list) and directories:
-            settings["skills"] = directories
-        else:
-            settings.pop("skills")
-    return settings
 
 
 #: The extension a pi layer loads: pi reads models.json only from its own directory, so this registers the
@@ -77,9 +58,11 @@ class PiAdapterRenderer(AdapterRenderer):
         return {"pi-agent/AGENTS.md": "", **files, "pi-agent/extensions/reef/index.ts": PROVIDER_EXTENSION}
 
     @staticmethod
-    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        # Write pi's settings in the form pi keeps.
-        return migrated_settings(config) if path == SETTINGS_PATH else config
+    def layer_args(files: Mapping[str, str]) -> tuple[tuple[str, ...], ...]:
+        settings = json.loads(files[SETTINGS_PATH])
+        level = settings.get("defaultThinkingLevel")
+        thinking = () if level is None else (("--thinking", str(level)),)
+        return (*thinking, ("--no-builtin-tools",)) if settings.get("defaultTools") == [] else thinking
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:

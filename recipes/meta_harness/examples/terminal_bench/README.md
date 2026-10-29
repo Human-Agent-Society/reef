@@ -9,7 +9,7 @@ the search retains every valid candidate, and Reef selects only strict
 improvements over the best recorded mean score.
 
 The example uses the Meta-Harness method, Reef's harness evolution recipe, and
-Reef's Terminus adapter.
+the campaign's own [terminus adapter](#the-terminus-adapter).
 [Deviations](#deviations) documents the differences between the runnable setup
 and the comparison.
 
@@ -135,6 +135,105 @@ rollouts. Smaller runs scale the evaluation budget. A failed commit keeps its
 episodes in the history, and its retry reuses them; a candidate that a retry
 proposes in place of the failed one costs extra. These are search limits, not
 billing caps.
+
+## The terminus adapter
+
+`reef_terminus/` is this campaign's adapter for Harbor's Terminus 2. Reef does
+not bundle it. `pip install -e .` in this directory registers it as
+`terminus` on the `reef.harness_adapters` entry point group, and installs the
+`reef-terminus` runner that its episodes launch. A deployment then names it
+with `evolution.adapter: terminus`, as `terminal_bench.yaml` does. The runner
+writes one trial file per episode, and `reef_terminus.trajectory.read_trials`,
+the adapter's `sessions` reader, reads it back.
+
+Terminus 2 is a Harbor agent class, not a CLI. `reef-terminus` reads the
+tree from `REEF_TERMINUS_DIR`, configures Harbor's `terminus-2` agent
+through `reef-eval`, and runs the one Harbor task (a directory or a
+registry id) that `--task` names. It writes the verifier reward and the
+ATIF trajectory under `REEF_TERMINUS_SESSION_DIR`.
+
+- `config` supplies constructor arguments; unknown keys are refused.
+  `rules` supplies an `extra_instruction_paths` entry. `skill` and
+  `command` are two `AgentConfig.skills` roots, and Harbor does not mark
+  commands as commands.
+- One extension file, `extensions/<name>.py`, may define
+  `Agent(Terminus2)`. Rendering checks its syntax without running it.
+- The binding keeps the served name in `model_name` and sets
+  `llm_kwargs.custom_llm_provider` to `litellm_proxy`, so litellm sends
+  the name unchanged, whatever its vendor prefix, and passes
+  `reasoning_effort`, the thinking budget, and `llm_call_kwargs` in the
+  body. Harbor looks up the context limit under `model_name`; a name that
+  litellm does not list gets 1,000,000 tokens.
+- Routes refused: `llm_kwargs` fields that the binding does not write;
+  `llm_call_kwargs` arguments that select an endpoint, provider,
+  credential, model, fallback, or logging callback (such as `base_url`,
+  `model`, and `fallbacks`); and `model` or `models` in
+  `llm_call_kwargs.extra_body`.
+
+To run a published tree yourself, save the `files` of `GET /reef/harness`
+under a tree root. Evaluation episodes call the upstream directly, but your
+own run through Reef needs the scenario header, or Reef answers HTTP 400.
+Write `terminus/config.json` with the service's `REEF_TOKEN` (any text
+when the service has no token), then run one task:
+
+``json
+{
+  "model_name": "<served model>",
+  "api_base": "http://127.0.0.1:8901/v1",
+  "llm_kwargs": {
+    "api_key": "<REEF_TOKEN>",
+    "custom_llm_provider": "litellm_proxy",
+    "extra_headers": {"x-reef-scenario": "<scenario>"}
+  }
+}
+``
+
+``bash
+TREE_ROOT="$HOME/reef-harness/terminus"
+REEF_TERMINUS_DIR="$TREE_ROOT" \
+  REEF_TERMINUS_SESSION_DIR="$TREE_ROOT/terminus/sessions" \
+  REEF_TERMINUS_TRIALS_DIR="$HOME/reef-trials" \
+  reef-terminus --task /path/to/harbor/task
+``
+
+The trial record under `$TREE_ROOT/terminus/sessions` holds the rewards
+and the trajectory. Docker must share the trials directory with the host;
+with colima on macOS, use a path under your home directory. A trial with
+neither reward nor verifier output is reported as a possible mount problem.
+
+### Docker or a remote environment
+
+Episodes run the Harbor task in local Docker by default. The episode keeps
+the service's `DOCKER_HOST`, `DOCKER_CONTEXT`, and `DOCKER_CONFIG`
+(default `~/.docker`), because `HOME` points into the episode. On macOS
+the episode root is under `~/.reef/episodes`. Elsewhere it is in the temp
+directory; if Docker's VM does not share it, set `TMPDIR` for the service.
+
+To run tasks in a remote Harbor environment, use the sandbox executor and
+pass the switch and the credentials into it. For E2B:
+
+``yaml
+evolution:
+  executor: sandbox
+  sandbox:
+    egress_hosts: [api.e2b.dev]
+    env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
+``
+
+Start the service with `REEF_TERMINUS_ENVIRONMENT=e2b` and
+`E2B_API_KEY`. For Modal, allow `api.modal.com`, pass
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and set
+`REEF_TERMINUS_ENVIRONMENT=modal`. The runtime needs Linux, bubblewrap,
+Python 3.12+, and Harbor with the environment's extra (`harbor[e2b]`, or
+the `modal` package). The interpreter and local task directories must be
+visible inside the sandbox, for example under `/opt`. `egress_hosts`
+does not yet enforce a hostname firewall.
+
+Reef refuses before launch: local Docker under the sandbox executor, a
+remote environment without `egress_hosts` or its credentials in
+`env_from`, and an `extension` file under any executor other than
+`sandbox`. Such a tree still renders; the refusal depends on how the
+episode runs, not on what the tree holds.
 
 ## Resume and output
 

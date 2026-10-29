@@ -17,8 +17,8 @@
 # tasks. Declarative trees can use the default local runner with Docker.
 name: terminus
 binary: reef-terminus
-renderer: reef.harness.adapters.terminus.render:TerminusAdapterRenderer
-execution_validator: reef.harness.adapters.terminus.execution:TerminusExecutionValidator
+renderer: reef_terminus.render:TerminusAdapterRenderer
+execution_validator: reef_terminus.execution:TerminusExecutionValidator
 # What Reef may evolve: each kind of file, at the path where terminus reads it. A config/<target>.json
 # of the tree merges into that config file (config, below).
 evolve:
@@ -39,7 +39,7 @@ evolve:
 dirs:
   terminus/sessions: REEF_TERMINUS_SESSION_DIR
   terminus/trials: REEF_TERMINUS_TRIALS_DIR
-sessions: {format: terminus-atif-json, path: terminus/sessions}
+sessions: {format: "reef_terminus.trajectory:read_trials", path: terminus/sessions}
 # Terminus 2 reaches the model through litellm, so the binding is the provider
 # base URL, key, and model name. The served tree never carries a provider.
 # litellm_proxy sends the model to api_base as it is named whatever vendor

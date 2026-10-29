@@ -7,15 +7,16 @@ renders under the second root, and Harbor lists those skills beside the
 others, with nothing that marks them as commands.
 
 One extension can define an Agent subclass of Harbor's Terminus2. Rendering
-only checks its syntax; ``reef.harness.adapters.terminus.execution`` checks
+only checks its syntax; ``reef_terminus.execution`` checks
 where it may run.
 """
 
 from __future__ import annotations
 
+from reef_terminus.tree import TerminusTreeError, extension_source
+
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
-from reef.harness.runners.terminus.tree import TerminusTreeError, extension_source
 from reef.harness.tree.render import RenderError
 
 

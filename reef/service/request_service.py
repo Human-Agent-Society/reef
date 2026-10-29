@@ -629,7 +629,8 @@ class RequestService:
         to ``service_url``'s route of the scenario
         (``reef.harness.sync.layer_install``). The client form adds ``run``,
         the command that runs the agent on the files (``binary``, ``args``,
-        ``env``) and the agent's pinned ``install``, and ``synced``, the render templates of the files a client
+        ``env``), the agent's commands that record and remove the install
+        (``register``, ``unregister``) and the agent's pinned ``install``, and ``synced``, the render templates of the files a client
         sends back. The ``evaluation`` field carries the metrics of the
         training step that published the release, so a consumer can audit
         what a pulled tree changed and why it was admitted before running
@@ -658,6 +659,8 @@ class RequestService:
                 "binary": backend.descriptor.binary,
                 "args": list(layer.args),
                 "env": dict(layer.env),
+                "register": [list(command) for command in layer.register],
+                "unregister": [list(command) for command in layer.unregister],
                 # The pinned vendor install, so a client can install the agent the episodes run when it has none.
                 "install": None if install is None else asdict(install),
             }

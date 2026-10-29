@@ -156,8 +156,10 @@ could not run are run again.
 
 ## Terminus 2 code evolution
 
-Use Reef's `terminus` adapter and its `extension` part to evolve Python
-behavior. It accepts one self-contained module defining `Agent(Terminus2)`,
+Use the Terminal-Bench campaign's `terminus` adapter and its `extension`
+part to evolve Python behavior. Reef does not bundle the adapter:
+`pip install -e examples/terminal_bench` registers it (see [the terminus
+adapter](examples/terminal_bench/README.md#the-terminus-adapter)). It accepts one self-contained module defining `Agent(Terminus2)`,
 at `extensions/<name>.py` in the tree. Start from a no-op subclass so the
 proposer sees the adapter contract: a seed directory holding
 `extensions/agent.py` with

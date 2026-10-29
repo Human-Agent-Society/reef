@@ -1,6 +1,6 @@
 """A tree never chooses where a model call goes: Reef's model binding is its only route.
 
-For claude, hermes, dsh, pi and terminus, render refuses every config key the
+For claude, hermes, dsh and pi, render refuses every config key the
 pinned harness reads to choose the endpoint, the provider, the credential or
 the model, in the tree alone (as validation renders it) and with the binding's
 overlays (as an episode renders it). A request body a tree passes to the
@@ -346,54 +346,11 @@ def test_pi_refuses_a_key_the_descriptor_locks(files: dict[str, str], bound: boo
 
 @pytest.mark.parametrize("api", ["openai", "responses", "anthropic"])
 def test_pi_keeps_the_settings_a_tree_tunes(api: str) -> None:
-    tuned = config({"defaultThinkingLevel": "high", "compaction": {"enabled": False}, "defaultTools": ["bash"]})
+    tuned = config({"defaultThinkingLevel": "high"})
     files = render("pi", tuned, bound=True, api=api)
     assert json.loads(files["pi-agent/settings.json"])["defaultProvider"] == "reef"
     assert set(json.loads(files["pi-agent/models.json"])["providers"]) == {"reef"}
     render("pi", {**tuned, **config({"providers": {}}, "models")}, bound=False)
-
-
-TERMINUS_REFUSED = [
-    pytest.param({"model_name": "openai/m"}, False, id="model-name-in-tree"),
-    pytest.param({"api_base": OTHER_URL}, False, id="endpoint-in-tree"),
-    pytest.param({"llm_kwargs": {"base_url": OTHER_URL}}, True, id="constructor-endpoint"),
-    pytest.param({"llm_call_kwargs": {"base_url": OTHER_URL}}, True, id="call-base-url"),
-    pytest.param({"llm_call_kwargs": {"api_base": OTHER_URL}}, True, id="call-api-base"),
-    pytest.param({"llm_call_kwargs": {"custom_llm_provider": "openai"}}, True, id="call-provider"),
-    pytest.param({"llm_call_kwargs": {"model": "openai/m"}}, True, id="call-model"),
-    pytest.param(
-        {"llm_call_kwargs": {"fallbacks": [{"model": "m", "api_base": OTHER_URL}]}}, True, id="call-fallback"
-    ),
-    pytest.param({"llm_call_kwargs": {"aws_bedrock_runtime_endpoint": OTHER_URL}}, True, id="call-cloud-endpoint"),
-    pytest.param(
-        {"llm_call_kwargs": {"success_callback": ["langfuse"], "langfuse_host": OTHER_URL}}, True, id="logging"
-    ),
-    pytest.param({"llm_call_kwargs": {"models": ["m"]}}, True, id="call-fallback-models"),
-    pytest.param({"llm_call_kwargs": {"extra_body": {"model": "m"}}}, True, id="body-model"),
-    pytest.param({"llm_call_kwargs": {"extra_body": {"models": ["m"]}}}, True, id="body-fallback-models"),
-]
-
-
-@pytest.mark.parametrize(("data", "bound"), TERMINUS_REFUSED)
-def test_terminus_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
-    with pytest.raises(RenderError, match="Reef's model binding"):
-        render("terminus", config(data), bound=bound)
-
-
-def test_terminus_refuses_a_request_body_that_is_not_an_object() -> None:
-    with pytest.raises(
-        RenderError, match=r"on llm_call_kwargs\.extra_body in terminus/config\.json: litellm reads it as an object"
-    ):
-        render("terminus", config({"llm_call_kwargs": {"extra_body": '{"model": "m"}'}}), bound=True)
-
-
-def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
-    tuned = {"max_turns": 12, "llm_call_kwargs": {"top_k": 20, "extra_body": {"provider": {"sort": "price"}}}}
-    rendered = json.loads(render("terminus", config(tuned), bound=True)["terminus/config.json"])
-    assert rendered["llm_call_kwargs"] == tuned["llm_call_kwargs"]
-    assert rendered["llm_kwargs"] == {"api_key": "k-bound", "custom_llm_provider": "litellm_proxy"}
-    assert rendered["model_name"] == "served"
-    render("terminus", config(tuned), bound=False)
 
 
 @pytest.mark.parametrize(
@@ -420,8 +377,6 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
         ("hermes", {"model": {"api_mode": "bedrock_converse"}}, "Reef's model binding"),
         ("dsh", {"llm-pi-ai": {"config": {"providers": {"evil": DSH_ROUTE}}}}, "Reef's model binding"),
         ("pi", {"enabledModels": ["evil/m"]}, "Reef's model binding"),
-        ("terminus", {"llm_call_kwargs": {"base_url": OTHER_URL}}, "Reef's model binding"),
-        ("terminus", {"llm_call_kwargs": {"extra_body": {"model": "m"}}}, "Reef's model binding"),
     ],
 )
 def test_validation_refuses_the_tree_and_says_why(adapter: str, data: dict[str, Any], refusal: str) -> None:

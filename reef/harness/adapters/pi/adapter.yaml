@@ -90,8 +90,9 @@ run:
   # How a person's machine runs pi on a release: the person's own ~/.pi/agent stays, and the
   # release loads over it. -e loads the install's skills, prompts and extensions, and on a name
   # both define the release's wins. The rules follow the person's AGENTS.md. pi reads models.json
-  # only from its own directory, so an extension the render adds registers the release's
-  # providers. pi still writes the person's settings.json when the person changes the model.
+  # and settings.json only from its own directory, so an extension the render adds registers the
+  # release's providers, and the release's settings come as flags (the renderer's layer_args).
+  # pi still writes the person's settings.json when the person changes the model.
   layer:
     args:
       - ["-e", "{root}/pi-agent"]
@@ -110,6 +111,20 @@ config:
       - key: [enabledModels, httpProxy]
         match: IsAbsent()
         reason: Reef's model binding chooses the endpoint and the model
+      # pi reads settings.json only from its own directory, and on a person's machine that is
+      # the person's own, so a person's machine takes a setting of a release only as a flag
+      # (the renderer's layer_args): the thinking level as --thinking, and no built-in tools
+      # as --no-builtin-tools. The binding writes defaultProvider and defaultModel.
+      - key: "."
+        match: Each(Key(IsIn(["defaultThinkingLevel", "defaultTools", "defaultProvider", "defaultModel"])))
+        reason: a person's machine applies no other pi setting of a release
+      - key: defaultThinkingLevel
+        match: AnyOf(IsAbsent(), IsIn(["off", "minimal", "low", "medium", "high", "xhigh", "max"]))
+        reason: pi's --thinking takes only these levels
+      # A list of some built-in tools has no flag: --tools allows extension tools only by name.
+      - key: defaultTools
+        match: AnyOf(IsAbsent(), Eq([]))
+        reason: a person's machine takes only no built-in tools, as --no-builtin-tools
   models:
     path: "pi-agent/models.json"
     defaults: {}
