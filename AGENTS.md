@@ -339,11 +339,14 @@ pre-commit run --files path/to/changed_file.py
 
 # Full checks before requesting review for Python changes.
 pre-commit run --all-files
-.venv/bin/python -m pytest tests/ -n 8 --dist loadfile
+.venv/bin/python -m pytest tests/ -n 8
 ```
 
-Run the full suite in parallel, as CI does: `-n 8 --dist loadfile` keeps each
-file in one worker. `pytest-xdist` ships in the `dev` extra. Use `-n 0` for a
+Run the full suite in parallel, as CI does. `pyproject.toml` selects
+`--dist worksteal`, so `-n 8` spreads single tests, not files, over the
+workers. Each test must pass alone and in any order: keep state in `tmp_path`,
+allocate ports dynamically, and share a module-scoped fixture only for
+read-only setup. `pytest-xdist` ships in the `dev` extra. Use `-n 0` for a
 serial run when you diagnose a failure.
 
 The full suite needs training dependencies even for collection. Some tests
@@ -354,7 +357,7 @@ CI uses `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` for
 Git LFS test isolation. Record skipped or unavailable checks honestly.
 
 For full-suite coverage on Python 3.12, use
-`.venv/bin/python -m pytest tests -n 8 --dist loadfile --cov=reef --cov-report=term`.
+`.venv/bin/python -m pytest tests -n 8 --cov=reef --cov-report=term`.
 The configured coverage floor applies to the whole package, not a focused run.
 
 Pre-commit includes repository-wide Python design, statement, and README

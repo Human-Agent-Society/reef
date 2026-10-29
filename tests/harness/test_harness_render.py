@@ -53,6 +53,14 @@ def problems(files: Mapping[str, str], descriptor: AdapterDescriptor) -> tuple[s
     return validate_tree(HarnessTree(dict(files)), descriptor).problems
 
 
+def edited_descriptor(tmp_path: Path, adapter: str, **fields: object) -> Path:
+    """A copy of ``adapter``'s bundled descriptor.yaml under ``tmp_path`` with ``fields`` set."""
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / adapter / "descriptor.yaml").read_text())
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump({**data, **fields}), encoding="utf-8")
+    return target
+
+
 def golden_tree(adapter: str) -> dict[str, str]:
     root = GOLDENS / adapter
     return {path.relative_to(root).as_posix(): path.read_text() for path in sorted(root.rglob("*")) if path.is_file()}
@@ -1137,12 +1145,8 @@ def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch)
         "class SecondRenderer(AdapterRenderer):\n    pass\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
-    data["quirks"] = module_name
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match="more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer"):
-        load_descriptor(target)
+        load_descriptor(edited_descriptor(tmp_path, "native", quirks=module_name))
 
 
 @pytest.mark.parametrize(
@@ -1155,12 +1159,8 @@ def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch)
     ],
 )
 def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
-    data[field] = value
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
-        load_descriptor(target)
+        load_descriptor(edited_descriptor(tmp_path, "pi", **{field: value}))
 
 
 def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:

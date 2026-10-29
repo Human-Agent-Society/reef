@@ -100,10 +100,14 @@ def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> 
     )
     settings = service_config_from_mapping(normalize_service_config(config))
     assert (settings.task_import_manifest, settings.task_import_tasks_root) == (str(path), str(root))
+    # An in-memory artifact backend: this test checks the task import, not the Git LFS repository.
     settings = replace(
         settings,
         recipe="recipe",
-        artifact_repository=str(tmp_path / "artifacts.git"),
+        artifact_backend={
+            "module": "tests.support.artifact_backend_plugin:MemoryArtifactBackend",
+            "config": {"label": "tasks"},
+        },
         artifact_work_dir=str(tmp_path / "work"),
         artifact_cache_dir=str(tmp_path / "cache"),
         task_file_dir=str(tmp_path / "files"),

@@ -152,6 +152,7 @@ class _RecordingRequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        artifact_id: str | None = None,
     ) -> tuple[InferenceStream, Any]:
         pending = SimpleNamespace(
             item=AgentRecord.create(scenario="reef-codex", request_type=RequestType.INFERENCE, payload=dict(payload)),
