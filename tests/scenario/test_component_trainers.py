@@ -1394,7 +1394,7 @@ def test_commit_record_carries_its_component() -> None:
         component=HARNESS,
     )
     assert CommitRecord.from_dict(start.to_dict()) == start
-    with pytest.raises(CommitHistoryError, match="an activate commit names"):
+    with pytest.raises(CommitHistoryError, match="operation 'activate' names a component"):
         replace(start, operation="activate")
 
 
