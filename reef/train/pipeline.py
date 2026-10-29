@@ -56,7 +56,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, SampleStatus
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.samples import MemorySampleStore, StoredSample, TrainerSamples, consumed_sample_id
+from reef.storage.samples import SAMPLE_KINDS, MemorySampleStore, StoredSample, TrainerSamples, consumed_sample_id
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
@@ -252,7 +252,7 @@ class TrainingPipeline:
 
     @property
     def accepts_imported_tasks(self) -> bool:
-        """Whether the recipe reads the scenario's imported tasks."""
+        """Whether the recipe trains the scenario's imported ``train`` tasks (``Sample2Job.accepts_imported_tasks``)."""
         return self.sample2job.accepts_imported_tasks
 
     @property
@@ -448,15 +448,19 @@ class TrainingPipeline:
     def trainable(self, stored: StoredSample) -> Sample | None:
         """The sample that job data trains for ``stored``, or None when this trainer cannot train it.
 
-        A sample that this trainer made from records trains as it is, and another trainer's does not. A trajectory of no component is an upload,
-        which trains only when the sample-to-job stage accepts uploads, rendered by the record-to-sample stage; one
-        that it cannot render now, for example after ``max_tokens`` was lowered, is skipped with a warning. A task
-        of no component is an imported task, which no trainer trains: an evaluation runs it.
+        A sample that this trainer's stages made trains as it is, and another trainer's does not. A task of no
+        component is an imported task: a ``train`` task trains as it is when the sample-to-job stage accepts
+        imported tasks, and an ``eval`` task never trains, since an evaluation runs it. A trajectory of no component
+        is an upload, which trains only when the sample-to-job stage accepts uploads, rendered by the
+        record-to-sample stage; one that it cannot render now, for example after ``max_tokens`` was lowered, is
+        skipped with a warning.
         """
         if stored.component is not None:
             # Another trainer's sample is that trainer's to train.
             return stored.sample if stored.component == self.store.trainer else None
-        if not isinstance(stored.sample, TrajectorySample) or not self.accepts_trajectories:
+        if not isinstance(stored.sample, TrajectorySample):
+            return stored.sample if stored.split == "train" and self.accepts_imported_tasks else None
+        if not self.accepts_trajectories:
             return None
         try:
             return self.record2sample.uploaded_sample(stored.sample)
@@ -484,8 +488,9 @@ class TrainingPipeline:
         client changes (``insert_into_buffer``, ``remove_from_buffer``), less the reserved samples and those that
         this process trained, of the kind of the first of them. Staleness does not apply: the client decides.
 
-        In ``auto``, the candidates are the held samples that no job data reserved, of the kind of the first of
-        them, and that are not stale: a sample that the record stages made is stale when the record stage's
+        In ``auto``, the candidates are the held samples that no job data reserved, of a kind that the recipe gives
+        job parameters (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the
+        kind of the first of them, and that are not stale: a sample that the record stages made is stale when the record stage's
         staleness check finds its data too many versions behind (``Record2Record.is_stale``), and so is every
         sample of its group. The buffer is the first ``buffer_size`` candidates, or all of them without a
         ``buffer_size``, and the other candidates of every group that those touch, so a group trains whole.
@@ -497,10 +502,12 @@ class TrainingPipeline:
                 (stored, sample) for stored in self.store.get(held) if (sample := self.trainable(stored)) is not None
             ]
             return tuple(entry for entry in entries if entry[0].kind == entries[0][0].kind)
+        # A kind that the recipe gives no parameters trains only with an instruction that gives them.
+        kinds = set(self.context.job_parameters) or set(SAMPLE_KINDS)
         unreserved = [
             (stored, sample)
             for sample_id, (stored, sample) in self.held.items()
-            if sample_id not in self.reserved_sample_ids
+            if sample_id not in self.reserved_sample_ids and stored.kind in kinds
         ]
         candidates = [(stored, sample) for stored, sample in unreserved if stored.kind == unreserved[0][0].kind]
         stale_groups = {

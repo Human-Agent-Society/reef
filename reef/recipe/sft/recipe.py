@@ -10,6 +10,7 @@ from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.sft.processor import SFTJobData, SFTRecord2Record, SFTSamples
+from reef.storage.samples import SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -37,6 +38,10 @@ class SFTRecipe(WeightTrainingRecipe):
     * ``recipe.config.job_parameters``: the parameters of every job, for
       example ``scheduling.packing_length`` to count steps in packs of tokens.
 
+    The recipe gives parameters to trajectory jobs only. An imported train task
+    trains in ``manual`` mode, for an instruction whose ``parameters`` give its
+    job's method and rollout, such as an RL step after SFT.
+
     Configure the optimizer in ``training.options``.
     """
 
@@ -56,6 +61,10 @@ class SFTRecipe(WeightTrainingRecipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2record=SFTRecord2Record, record2sample=SFTSamples, sample2job=SFTJobData)
+
+    def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """SFT trains trajectories: a task job takes its parameters from its instruction."""
+        return {"trajectory": super().parameters_by_kind()["trajectory"]}
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:
