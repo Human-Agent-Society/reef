@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Self
+from urllib.parse import urlsplit
 
 from reef.artifact.artifact import (
     Artifact,
@@ -66,6 +67,68 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
 FETCHED_RELEASE_REF = "refs/remotes/origin/reef-fetched"
 
 
+@dataclass(frozen=True)
+class RefLayout:
+    """Where the backend keeps its refs in the repository (RFC #1002).
+
+    Values: ``moving`` is the prefix of the refs that move (each scenario's registration and head, the base and the
+    repository head), and ``fixed`` the prefix of the refs that never move once written (each release, and each
+    archived scenario head); both are full ref prefixes that end in ``/``. ``REEF_REFS`` keeps both under
+    ``refs/reef/``. ``HUB_REFS`` puts the moving refs on branches and the fixed refs on tags, the only refs that the
+    Hugging Face Hub accepts. A release's ID is its commit under both, so on the Hub it is a revision.
+    Purpose: ``GitLFSSettings.refs`` selects one; the backend and its factory name every ref through it.
+    """
+
+    moving: str
+    fixed: str
+
+    def __post_init__(self) -> None:
+        if not self.moving.startswith("refs/") or not self.moving.endswith("/") or not self.fixed.endswith("/"):
+            raise ValueError("a ref layout's prefixes are full ref prefixes that end in /")
+
+    def scenario(self, encoded: str) -> str:
+        """The ref of the scenario whose base64url name is ``encoded``: its registration and its head."""
+        return f"{self.moving}scenarios/{encoded}"
+
+    @property
+    def base(self) -> str:
+        return f"{self.moving}base"
+
+    @property
+    def head(self) -> str:
+        return f"{self.moving}head"
+
+    def release(self, commit: str) -> str:
+        return f"{self.fixed}releases/{commit}"
+
+    def archived(self, encoded: str, stamp: str) -> str:
+        return f"{self.fixed}archived/{encoded}/{stamp}"
+
+    @property
+    def patterns(self) -> tuple[str, ...]:
+        """The ``ls-remote`` patterns of every ref of the layout."""
+        return tuple(dict.fromkeys((f"{self.moving}*", f"{self.fixed}*")))
+
+
+REEF_REFS = RefLayout("refs/reef/", "refs/reef/")
+HUB_REFS = RefLayout("refs/heads/reef/", "refs/tags/reef/")
+#: ``GitLFSSettings.refs`` values.
+REF_LAYOUTS = {"reef": REEF_REFS, "branches-and-tags": HUB_REFS}
+
+
+def token_config(repository: str, token: str) -> dict[str, str]:
+    """Git config that sends ``token`` as Basic authorization to the host of the ``https://`` ``repository`` only.
+
+    The Hugging Face Hub takes a token as the password of Basic authorization for Git, and refuses a Bearer token.
+    ``ValueError`` for a repository that is not an ``https://`` URL.
+    """
+    parts = urlsplit(repository)
+    if parts.scheme != "https" or not parts.netloc:
+        raise ValueError(f"a token authorizes an https:// repository, not {repository!r}")
+    credential = base64.b64encode(f"reef:{token}".encode()).decode()
+    return {f"http.https://{parts.netloc}/.extraHeader": f"Authorization: Basic {credential}"}
+
+
 class _GitWorkspace:
     """Manage one git working tree used by a single scenario backend.
 
@@ -80,8 +143,10 @@ class _GitWorkspace:
         repository: str,
         work_dir: Path,
         git_client: GitClient,
+        refs: RefLayout,
     ) -> None:
         self.repository = repository
+        self.refs = refs
         # Git resolves GIT_INDEX_FILE against the subprocess's working directory.
         self.work_dir = Path(work_dir).resolve()
         self.clone_dir = self.work_dir / "repository"
@@ -282,7 +347,8 @@ class _GitWorkspace:
         return output.split()[0]
 
     def has_refs(self) -> bool:
-        return bool(self.git("ls-remote", "origin"))
+        """Whether the remote holds a ref of the workspace's layout; other refs, such as a Hub repo's ``main``, do not count."""
+        return bool(self.git("ls-remote", "origin", *self.refs.patterns))
 
     def clone_for_materialize(self, destination: Path, version: str) -> None:
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
@@ -404,7 +470,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
     """The releases of one scenario in a Git LFS repository.
 
     Every scenario of the repository forks from the repository's base
-    artifact (``refs/reef/base``). When the repository has no base, the
+    artifact (``refs.base``). When the repository has no base, the
     constructor imports ``base`` as the base. ``None`` is an empty base. The
     constructor raises ``ArtifactSourceError`` when the base was not imported,
     as the base of an older Reef was not. It also raises
@@ -420,17 +486,20 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         work_dir: Path,
         cache_dir: Path,
         base: BaseArtifactSource | None = None,
+        refs: RefLayout = REEF_REFS,
+        git_config: Mapping[str, str] | None = None,
     ) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
         _check_tools()
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
-        self.ref_name = f"refs/reef/scenarios/{encoded}"
+        self.refs = refs
+        self.ref_name = refs.scenario(encoded)
         self.work_dir = Path(work_dir)
         self.cache_dir = Path(cache_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._git_client = GitClient(self.work_dir / "repository")
+        self._git_client = GitClient(self.work_dir / "repository", git_config)
         local_repository = repository if isinstance(repository, Path) else None
         if local_repository is not None and not local_repository.exists():
             _initialize_local_repository(local_repository, self._git_client)
@@ -439,9 +508,16 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             repository=self.repository,
             work_dir=self.work_dir,
             git_client=self._git_client,
+            refs=refs,
         )
         self._manifest = _ArtifactManifest(self._workspace)
         self._open_repository()
+        other = HUB_REFS if refs == REEF_REFS else REEF_REFS
+        if self._workspace.git("ls-remote", "origin", *other.patterns):
+            raise ArtifactSourceError(
+                f"artifact repository {self.repository} keeps its refs under {other.moving} and {other.fixed}; "
+                "configure the storage.artifact_backend refs that match it"
+            )
         self._import_base(BaseArtifactSource() if base is None else base)
 
     @classmethod
@@ -452,6 +528,8 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         work_dir: Path,
         cache_dir: Path,
         base: BaseArtifactSource | None = None,
+        refs: RefLayout = REEF_REFS,
+        git_config: Mapping[str, str] | None = None,
     ) -> GitLFSRepositoryBackendFactory:
         """A factory of scenario backends over one repository, whose base artifact is ``base`` (None: empty)."""
         _check_tools()
@@ -461,23 +539,23 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             work_dir=work_dir,
             cache_dir=cache_dir,
             base=BaseArtifactSource() if base is None else base,
+            refs=refs,
+            git_config=git_config,
         )
 
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
         if release_id == "base":
-            base = self._workspace.ls_remote("refs/reef/base")
+            base = self._workspace.ls_remote(self.refs.base)
             if base is None:
                 raise ArtifactNotFound("artifact repository has no base artifact")
             return self._manifest.artifact_ref(base)
         if release_id is None or release_id == "head":
-            resolved_release = self._workspace.ls_remote("refs/reef/head") or self._workspace.ls_remote(
-                "refs/reef/base"
-            )
+            resolved_release = self._workspace.ls_remote(self.refs.head) or self._workspace.ls_remote(self.refs.base)
             if resolved_release is None:
                 raise ArtifactNotFound("artifact repository has no head release")
             return self._manifest.artifact_ref(resolved_release)
         selector = release_id.removeprefix("git+lfs://")
-        resolved_release = self._workspace.ls_remote(f"refs/reef/releases/{selector}")
+        resolved_release = self._workspace.ls_remote(self.refs.release(selector))
         if resolved_release is None:
             try:
                 resolved_release = self._workspace.fetch_version(selector)
@@ -608,8 +686,8 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                     message="publish artifact",
                 )
             if not advance_head:
-                # A pending release lives under the releases namespace; the branch and refs/reef/head stay put.
-                self._workspace.push(f"+{commit}:refs/reef/releases/{commit}")
+                # A pending release lives under the releases namespace; the scenario's ref and the head stay put.
+                self._workspace.push(f"+{commit}:{self.refs.release(commit)}")
                 if not linked:
                     self._cache_release(commit, artifact.local_path, paths, files)
                 return self._manifest.artifact_ref(commit)
@@ -617,7 +695,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
                     f"{commit}:{self.ref_name}",
-                    f"+{commit}:refs/reef/head",
+                    f"+{commit}:{self.refs.head}",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
@@ -667,7 +745,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
                     f"{ref.release_id}:{self.ref_name}",
-                    f"+{ref.release_id}:refs/reef/head",
+                    f"+{ref.release_id}:{self.refs.head}",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
@@ -683,11 +761,11 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         When two processes import at the same time, both push to one ref.
         The second process then reads the base of the first.
         """
-        base = self._workspace.ls_remote("refs/reef/base")
+        base = self._workspace.ls_remote(self.refs.base)
         if base is None and self._workspace.has_refs():
             # Another constructor can import the base after the first read.
             # Refuse only when the base is still missing.
-            base = self._workspace.ls_remote("refs/reef/base")
+            base = self._workspace.ls_remote(self.refs.base)
             if base is None:
                 raise ArtifactSourceError(
                     f"artifact repository {self.repository} has releases but no base artifact; "
@@ -710,7 +788,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         self._restore_head(base)
 
     def _push_base(self, source: BaseArtifactSource) -> str:
-        """Commit the content of ``source`` with no parent, push it to ``refs/reef/base``, and return the base.
+        """Commit the content of ``source`` with no parent, push it to the base ref, and return the base.
 
         The import also fills the base's cache entry. Thus the first materialize links the files and pulls nothing.
         """
@@ -732,9 +810,9 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             commit = self._workspace.commit("import base artifact")
             try:
                 # A ref that exists already refuses this unrelated commit, so the first importer wins.
-                self._workspace.push(f"{commit}:refs/reef/base")
+                self._workspace.push(f"{commit}:{self.refs.base}")
             except ArtifactPublicationError:
-                winner = self._workspace.ls_remote("refs/reef/base")
+                winner = self._workspace.ls_remote(self.refs.base)
                 if winner is None:
                     raise
                 return winner
@@ -752,15 +830,15 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             return commit
 
     def _restore_head(self, base: str) -> str:
-        head = self._workspace.ls_remote("refs/reef/head")
+        head = self._workspace.ls_remote(self.refs.head)
         if head is not None:
             return head
         self._workspace.fetch_version(base)
         try:
-            self._workspace.push(f"{base}:refs/reef/head")
+            self._workspace.push(f"{base}:{self.refs.head}")
             return base
         except ArtifactPublicationError:
-            head = self._workspace.ls_remote("refs/reef/head")
+            head = self._workspace.ls_remote(self.refs.head)
             if head is None:
                 raise
             return head
@@ -774,10 +852,22 @@ class GitLFSSettings(PluginSettings):
     """The config of ``GitLFSRepositoryBackendFactory``."""
 
     repository: str = config_option(help="The Git repository: a local path, created on first use, or a remote URL.")
+    refs: str = config_option(
+        "reef",
+        help=(
+            "Where the refs live: reef keeps them under refs/reef/; branches-and-tags keeps them on branches and "
+            "tags under reef/, which a Hugging Face repo needs."
+        ),
+    )
+    token_env: str | None = config_option(
+        None, help="The environment variable of a token that authorizes an https:// repository, such as HF_TOKEN."
+    )
 
     def __post_init__(self) -> None:
         if not self.repository.strip():
             raise ValueError("repository must be non-empty")
+        if self.refs not in REF_LAYOUTS:
+            raise ValueError(f"refs must be one of {sorted(REF_LAYOUTS)}, got {self.refs!r}")
 
 
 class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):
@@ -791,6 +881,8 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         work_dir: Path,
         cache_dir: Path,
         base: BaseArtifactSource,
+        refs: RefLayout = REEF_REFS,
+        git_config: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._backend_type = backend_type
@@ -798,10 +890,19 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         self._work_dir = Path(work_dir)
         self._cache_dir = Path(cache_dir)
         self._base = base
+        self._refs = refs
+        self._git_config = dict(git_config or {})
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
-        repository = GitLFSSettings.parse(config, plugin_class=cls).repository
+        settings = GitLFSSettings.parse(config, plugin_class=cls)
+        repository = settings.repository
+        git_config: dict[str, str] = {}
+        if settings.token_env is not None:
+            token = os.environ.get(settings.token_env, "").strip()
+            if not token:
+                raise ArtifactSourceError(f"the artifact repository's token needs the variable {settings.token_env}")
+            git_config = token_config(repository, token)
         _check_tools()
         return cls(
             GitLFSRepositoryBackend,
@@ -809,6 +910,8 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             work_dir=context.work_dir,
             cache_dir=context.cache_dir,
             base=context.base,
+            refs=REF_LAYOUTS[settings.refs],
+            git_config=git_config,
         )
 
     def _build_backend(self, scenario: str) -> GitLFSRepositoryBackend:
@@ -819,39 +922,41 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             work_dir=self._work_dir / encoded,
             cache_dir=self._cache_dir,
             base=self._base,
+            refs=self._refs,
+            git_config=self._git_config,
         )
 
     def _has_persisted_registration(self, scenario: str) -> bool:
         if isinstance(self._repository, Path) and not self._repository.exists():
             return False
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
-        ref_name = f"refs/reef/scenarios/{encoded}"
-        output = GitClient(self._work_dir / ".registration-check").run(
+        ref_name = self._refs.scenario(encoded)
+        output = GitClient(self._work_dir / ".registration-check", self._git_config).run(
             ("git", "ls-remote", str(self._repository), ref_name),
             source_error=True,
         )
         return bool(output)
 
     def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
-        """Rename the scenario's ref into ``refs/reef/archived/<scenario>/<time>`` and drop its work clone.
+        """Rename the scenario's ref into the layout's ``archived/<scenario>/<time>`` and drop its work clone.
 
         The commits stay reachable under the archived ref, so nothing the
-        scenario published is lost; ``refs/reef/base``, ``refs/reef/head`` and
-        the pending releases are shared with other scenarios and stay. Only a
-        local bare repository can be renamed in place.
+        scenario published is lost; the base, the head and the pending
+        releases are shared with other scenarios and stay. Only a local bare
+        repository can be renamed in place.
         """
         if not isinstance(self._repository, Path):
             raise NotImplementedError("archiving a scenario needs a local artifact repository")
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         archived: list[str] = []
-        ref_name = f"refs/reef/scenarios/{encoded}"
+        ref_name = self._refs.scenario(encoded)
         if self._repository.exists():
             client = GitClient(self._work_dir / ".registration-check")
             git_dir = ("git", "--git-dir", str(self._repository))
             sha = client.run((*git_dir, "rev-parse", "--verify", "--quiet", ref_name), source_error=True)
             if sha:
                 stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-                archived_ref = f"refs/reef/archived/{encoded}/{stamp}"
+                archived_ref = self._refs.archived(encoded, stamp)
                 client.run((*git_dir, "update-ref", archived_ref, sha), source_error=True)
                 client.run((*git_dir, "update-ref", "-d", ref_name, sha), source_error=True)
                 archived.append(archived_ref)
@@ -864,13 +969,13 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         if isinstance(self._repository, Path) and not self._repository.exists():
             return ()
-        output = GitClient(self._work_dir / ".registration-check").run(
-            ("git", "ls-remote", str(self._repository), "refs/reef/scenarios/*"),
+        output = GitClient(self._work_dir / ".registration-check", self._git_config).run(
+            ("git", "ls-remote", str(self._repository), self._refs.scenario("*")),
             source_error=True,
         )
         names = []
         for line in output.splitlines():
-            encoded = line.split("refs/reef/scenarios/")[-1].strip()
+            encoded = line.split(self._refs.scenario(""))[-1].strip()
             if not encoded:
                 continue
             padded = encoded + "=" * (-len(encoded) % 4)
