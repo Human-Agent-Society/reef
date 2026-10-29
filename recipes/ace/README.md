@@ -76,7 +76,7 @@ whole run, so the step skips the middle one. For each run, in order, and at most
 
 Then the step removes each bullet whose `harmful` count exceeds its `helpful` count by `prune_margin` or more.
 When more than `max_bullets` bullets remain, it removes the bullets with the lowest `helpful` minus `harmful`
-count; of equal counts, the oldest bullet goes first. The step checks the new tree with `tools.check`, and then
+count; of equal counts, the oldest bullet goes first. The step checks the new tree with `services.check`, and then
 writes `state/playbook.json` and `rules.md`. When the new tree fails the check, the step changes neither.
 
 A Reflector reply that does not hold the asked JSON skips its trace. A Curator reply that does not hold it adds

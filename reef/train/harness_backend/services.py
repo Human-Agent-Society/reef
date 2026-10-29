@@ -1,6 +1,6 @@
-"""The tools of one harness step, as the backend implements them.
+"""The services of one harness step, as the backend implements them.
 
-``StepTools`` checks trees against the adapter, scores trees through the
+``StepServices`` checks trees against the adapter, scores trees through the
 step's evaluator and the history's score cache, runs the deployment's coding
 agent in the step's workspace, and hands out the step's budgeted model
 bindings and call meter.
@@ -17,12 +17,12 @@ from reef.harness.gateway import ModelCalls
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend.agent.run import AgentExecution, run_agent
 from reef.train.harness_backend.calls import StepCalls, budgeted_bindings
-from reef.train.harness_backend.contract import AgentOutcome, Tools
+from reef.train.harness_backend.contract import AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
 
-class StepTools(Tools):
-    """The tools of one step.
+class StepServices(Services):
+    """The services of one step.
 
     Values: ``workspace`` is the step's workspace. ``descriptor`` is the
     adapter the trees render for. ``evaluator`` scores trees, ``None`` when
@@ -101,4 +101,4 @@ class StepTools(Tools):
         return run_agent(self.agent, self.workspace, self, prompt, tree=tree, model=model)
 
 
-__all__ = ["StepTools"]
+__all__ = ["StepServices"]

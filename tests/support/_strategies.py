@@ -2,7 +2,7 @@
 
 Reef takes harness evolution plugins as classes only. Tests keep their short
 functions through these adapters. A method function takes the step's
-``Workspace`` and ``Tools`` and returns a ``TreePatch`` (which the adapter
+``Workspace`` and ``Services`` and returns a ``TreePatch`` (which the adapter
 applies to the workspace's tree) or ``None`` (the tree stays as the function
 left it). It says what the step did with ``workspace.write_output``. A scorer function takes ``(task, result)``, and
 ``models`` too when its signature names it.
@@ -20,7 +20,7 @@ def _accepts(fn, name):
 
 
 class FunctionMethod(Method):
-    """A method made of ``fn(workspace, tools)``, the two parts of the step's context; a returned ``TreePatch``
+    """A method made of ``fn(workspace, services)``, the two parts of the step's context; a returned ``TreePatch``
     applies to the head tree."""
 
     def __init__(self, fn):
@@ -28,7 +28,7 @@ class FunctionMethod(Method):
 
     def step(self, context):
         workspace = context.workspace
-        patch = self.fn(workspace, context.tools)
+        patch = self.fn(workspace, context.services)
         if patch is not None:
             workspace.write_tree(workspace.tree().apply(patch))
 

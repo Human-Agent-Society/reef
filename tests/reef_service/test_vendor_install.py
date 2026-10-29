@@ -223,7 +223,7 @@ def _backend(
     if worker_executor is not None:
         fields["worker_executor"] = worker_executor
 
-    def method(workspace, tools):
+    def method(workspace, services):
         return TreePatch(changed_rules("marker rules\n"))
 
     recipe = replace(harness_recipe(tmp_path, method, binary=binary), **fields)

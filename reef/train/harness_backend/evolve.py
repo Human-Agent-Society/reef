@@ -2,7 +2,7 @@
 
 ``Evolution.propose`` runs the method:
 
-1. Run the method in the step's workspace with the step's tools, and keep its
+1. Run the method in the step's workspace with the step's services, and keep its
    model calls with the step record, even when it raises.
 2. Read what the method says about its step from ``output/``, clipped and
    redacted as the record keeps it.
@@ -34,7 +34,7 @@ from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.contract import Method, StepContext
 from reef.train.harness_backend.records import CALLS_FILE, StepRecord, bounded
 from reef.train.harness_backend.state import HarnessState
-from reef.train.harness_backend.tools import StepTools
+from reef.train.harness_backend.services import StepServices
 from reef.train.harness_backend.workspace import StepOutput, Workspace
 from reef.train.types import JobData
 
@@ -47,7 +47,7 @@ class Evolution:
     adapter whose tree it edits; ``history`` and ``records`` are the
     scenario's history and step records; ``agent`` is the deployment's
     coding agent, ``None`` when it configured none; ``max_episodes`` ≥ 0
-    caps the episodes the method's ``tools.evaluate`` runs in one step, 0 for
+    caps the episodes the method's ``services.evaluate`` runs in one step, 0 for
     no cap.
     Purpose: ``HarnessBackend`` makes one and calls ``propose`` in each step.
     """
@@ -82,7 +82,7 @@ class Evolution:
         The candidate is evaluated on ``evaluation_tasks``. ``state`` is the step's state, and the returned step's state carries the method's files from ``state/``.
         ``metrics`` gains the method's calls, episodes and words.
         """
-        tools = StepTools(
+        services = StepServices(
             workspace=workspace,
             descriptor=self.descriptor,
             evaluator=evaluator,
@@ -94,7 +94,7 @@ class Evolution:
             agent=self.agent,
         )
         try:
-            self.method.step(StepContext(workspace, tools))
+            self.method.step(StepContext(workspace, services))
         finally:
             # Written even when the step raised: the calls before the failure are the step's record.
             self.records.write(workspace.root, CALLS_FILE, calls.entries)
@@ -102,7 +102,7 @@ class Evolution:
             metrics["model_calls"] = len(calls.entries)
             metrics["model_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in calls.entries), 3)
             metrics["model_input_tokens"], metrics["model_output_tokens"] = call_tokens(calls.entries)
-            metrics["method_episodes"] = tools.episodes_run
+            metrics["method_episodes"] = services.episodes_run
         output = self.read_output(workspace, metrics)
         try:
             state = replace(state, method_files=workspace.state_files())

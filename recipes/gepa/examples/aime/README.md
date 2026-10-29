@@ -20,9 +20,9 @@ minibatch order) say so in `harness/aime.py`.
 | --- | --- |
 | Candidate prompt | a harness tree; the evolvable file here is `rules.md`, rendered as Pi's `AGENTS.md` |
 | Pareto-sample a parent from the archive | `Archive.select_parent` over per-problem fronts, dominated candidates pruned |
-| Evaluate the parent on a train minibatch, with traces | the served tree's own recorded traffic: the driver runs the minibatch through the service, so the method gets the transcripts free; any other parent runs as episodes through `tools.evaluate` |
+| Evaluate the parent on a train minibatch, with traces | the served tree's own recorded traffic: the driver runs the minibatch through the service, so the method gets the transcripts free; any other parent runs as episodes through `services.evaluate` |
 | Reflect on one component and propose a rewrite | `models["reflection"]` (gpt-5) with GEPA's own prompt, over `Inputs` / `Generated Outputs` / `Feedback` records |
-| Accept the child iff it beats the parent on the minibatch | the method runs the child through `tools.evaluate` and leaves `harness/` unchanged on a reject, so the step publishes nothing and commits the archive |
+| Accept the child iff it beats the parent on the minibatch | the method runs the child through `services.evaluate` and leaves `harness/` unchanged on a reject, so the step publishes nothing and commits the archive |
 | Full validation pass, then Pareto update | `evolution.evaluation.tasks` is the validation set: the step's evaluation scores the child on it, and the next step reads the per-task scores from the history into the archive |
 | Serve the argmax-mean candidate | the `compare` policy with `statistic: mean` publishes a strict mean improvement over the served tree's validation scores, which the score cache keeps, so the served tree stays the archive's best; it publishes the tree for `GET /reef/harness` |
 

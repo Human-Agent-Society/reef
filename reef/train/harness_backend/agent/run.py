@@ -5,7 +5,7 @@ executor that isolates it, its binary and its time limit.
 ``launch_agent`` runs one process of an adapter's harness over rendered
 files in directories the caller owns, as ``run_episode`` does in a
 throwaway root, and ``read_session`` reads back its session log. ``run_agent``
-implements ``Tools.run_agent``: it starts the gateway with the workspace's
+implements ``Services.run_agent``: it starts the gateway with the workspace's
 tools (``check`` and ``evaluate``), renders the agent's tree after Reef's
 protocol rules (``protocol.md``), runs the agent in the workspace, and keeps
 its session log in ``output/``.
@@ -37,7 +37,7 @@ from reef.harness.gateway import AgentGateway, AgentTool
 from reef.harness.tree import HarnessTree, render_tree
 from reef.sandbox.environment import download_directory, execute
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
-from reef.train.harness_backend.contract import AgentOutcome, Tools
+from reef.train.harness_backend.contract import AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
 #: Reef's rules for every agent run, before the agent's own: the workspace, the outputs and the tools.
@@ -138,8 +138,8 @@ def fill(text: str, workspace: Workspace) -> str:
 class AgentRun:
     """One agent run in a step's workspace: what its tools read, and the session that runs it.
 
-    Values: ``workspace`` is the step's workspace and ``tools`` the step's
-    tools. ``root`` is the run's root: the directory that holds the
+    Values: ``workspace`` is the step's workspace and ``services`` the step's
+    services. ``root`` is the run's root: the directory that holds the
     workspace and the history. ``session`` is the executor of the running
     agent, ``None`` before it starts. ``lock`` makes the run's tool calls
     take turns: a call reads the agent's files and may write the history.
@@ -147,9 +147,9 @@ class AgentRun:
     ``read_tree``.
     """
 
-    def __init__(self, workspace: Workspace, tools: Tools) -> None:
+    def __init__(self, workspace: Workspace, services: Services) -> None:
         self.workspace = workspace
-        self.tools = tools
+        self.services = services
         self.root = Path(os.path.commonpath([workspace.root.resolve(), workspace.history_dir.resolve()]))
         self.session: EpisodeExecutor | None = None
         self.lock = threading.Lock()
@@ -194,9 +194,9 @@ class CheckTool(AgentTool):
         if unknown:
             raise ValueError(f"check takes tree, not {', '.join(sorted(unknown))}")
         with self.run.lock:
-            result = self.run.tools.check(self.run.read_tree(arguments))
+            result = self.run.services.check(self.run.read_tree(arguments))
         verdict = "passed" if result.passed else f"refused: {result.message()}"
-        self.run.tools.calls.note("check", f"the agent's tree {verdict}", failed=not result.passed)
+        self.run.services.calls.note("check", f"the agent's tree {verdict}", failed=not result.passed)
         return {"passed": result.passed, "problems": list(result.problems)}
 
 
@@ -236,7 +236,7 @@ class EvaluateTool(AgentTool):
             raise ValueError("repeats must be an integer of at least 1")
         with self.run.lock:
             tree = self.run.read_tree(arguments)
-            records = self.run.tools.evaluate(tree, tasks, repeats=repeats)
+            records = self.run.services.evaluate(tree, tasks, repeats=repeats)
         history = self.run.workspace.history_dir / EPISODES_DIR
         episodes = [
             {
@@ -253,13 +253,13 @@ class EvaluateTool(AgentTool):
 
 
 def run_agent(
-    execution: AgentExecution, workspace: Workspace, tools: Tools, prompt: str, *, tree: HarnessTree, model: str
+    execution: AgentExecution, workspace: Workspace, services: Services, prompt: str, *, tree: HarnessTree, model: str
 ) -> AgentOutcome:
-    """``Tools.run_agent``: run the agent of ``execution`` once in ``workspace``, and keep its session log."""
-    binding = tools.models[model]
+    """``Services.run_agent``: run the agent of ``execution`` once in ``workspace``, and keep its session log."""
+    binding = services.models[model]
     descriptor = execution.descriptor
-    run = AgentRun(workspace, tools)
-    gateway = AgentGateway(binding, tools.calls, (CheckTool(run), EvaluateTool(run)))
+    run = AgentRun(workspace, services)
+    gateway = AgentGateway(binding, services.calls, (CheckTool(run), EvaluateTool(run)))
     home = workspace.scratch / AGENT_HOME
     gateway.start()
     started = time.monotonic()
@@ -280,7 +280,7 @@ def run_agent(
         except ReefError as exc:
             raise ValueError(f"the agent's tree does not render for adapter {descriptor.name!r}: {exc}") from exc
         env = {**agent_env(descriptor, execution.binary, home), "REEF_AGENT_URL": gateway.base_url}
-        tools.calls.note("agent", f"the coding agent started (at most {execution.timeout_s:g} s)")
+        services.calls.note("agent", f"the coding agent started (at most {execution.timeout_s:g} s)")
         try:
             run.session = execution.executor.open_session(forward_ports=(gateway.port,), timeout_s=execution.timeout_s)
             try:
@@ -308,7 +308,7 @@ def run_agent(
     finally:
         gateway.stop()
     keep_session(descriptor, home, workspace.output / SESSION_FILE)
-    tools.calls.note("agent", f"the coding agent {outcome.describe()}", failed=not outcome.succeeded)
+    services.calls.note("agent", f"the coding agent {outcome.describe()}", failed=not outcome.succeeded)
     return outcome
 
 

@@ -66,7 +66,7 @@ def state_of(result: TrainStepResult) -> HarnessState:
 
 
 def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) -> None:
-    def step(workspace, tools):
+    def step(workspace, services):
         workspace.write_tree(workspace.tree().apply(MARKER))
         workspace.write_output("added the marker", {"why": "it scores"})
 
@@ -99,7 +99,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
 
 def test_the_cache_reuses_the_head_scores_in_the_next_step(tmp_path: Path) -> None:
     patches = iter((MARKER, PLAIN))
-    backend, releases = harness_backend(tmp_path, lambda workspace, tools: next(patches))
+    backend, releases = harness_backend(tmp_path, lambda workspace, services: next(patches))
     first = backend_step(backend, data(1), backend.initial_state())
     assert (first.metrics["episodes_run"], first.metrics["episodes_cached"]) == (2, 0)
     published(releases, "r1", first)
@@ -112,7 +112,7 @@ def test_the_cache_reuses_the_head_scores_in_the_next_step(tmp_path: Path) -> No
 def test_an_unchanged_tree_skips_the_step_and_commits_the_method_state(tmp_path: Path) -> None:
     seen: list[str] = []
 
-    def step(workspace, tools):
+    def step(workspace, services):
         seen.append((workspace.state / "round.txt").read_text() if (workspace.state / "round.txt").exists() else "")
         (workspace.state / "round.txt").write_text(str(workspace.step))
         workspace.write_output("waiting")
@@ -126,7 +126,7 @@ def test_an_unchanged_tree_skips_the_step_and_commits_the_method_state(tmp_path:
 
 
 def test_an_invalid_candidate_skips_with_its_problems(tmp_path: Path) -> None:
-    def step(workspace, tools):
+    def step(workspace, services):
         (workspace.harness / "notes.txt").write_text("x")
         return
 
@@ -146,7 +146,7 @@ def test_an_invalid_candidate_skips_with_its_problems(tmp_path: Path) -> None:
 def test_a_harness_file_that_cannot_be_read_skips_the_step_and_the_state_still_commits(
     tmp_path: Path, leave, problem: str
 ) -> None:
-    def step(workspace, tools):
+    def step(workspace, services):
         (workspace.state / "round.txt").write_text("1")
         (workspace.harness / "rules.md").unlink()
         leave(workspace.harness / "rules.md")
@@ -174,7 +174,7 @@ def test_a_state_that_cannot_be_committed_skips_the_step_and_keeps_the_previous_
 ) -> None:
     monkeypatch.setattr("reef.train.harness_backend.workspace.MAX_STATE_BYTES", 16)
 
-    def step(workspace, tools):
+    def step(workspace, services):
         write(workspace.state)
         return MARKER
 
@@ -188,7 +188,7 @@ def test_a_state_that_cannot_be_committed_skips_the_step_and_keeps_the_previous_
 def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path: Path) -> None:
     seen = {}
 
-    def step(workspace, tools):
+    def step(workspace, services):
         seen["tree"] = workspace.tree()
         seen["traces"] = workspace.traces()
         seen["tasks"] = workspace.tasks()
@@ -197,7 +197,7 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
         (workspace.scratch / "tmp.txt").write_text("gone after the step")
         (workspace.output / "report.md").write_text("kept")
         (workspace.output / "leak.json").write_text('{"key": "sk-abcdefghijklmnopqrstuvwxyz0123"}')
-        seen["model"] = tools.models.served.model
+        seen["model"] = services.models.served.model
         return MARKER
 
     sample = recorded_trajectory(
@@ -247,7 +247,7 @@ def test_a_trace_that_ends_on_a_tool_call_has_no_reply(tmp_path: Path) -> None:
         "messages": [{"role": "user", "content": "q"}],
         "response": {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}}]},
     }
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: seen.update(traces=workspace.traces()))
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: seen.update(traces=workspace.traces()))
     backend_step(backend, data(1, recorded_trajectory("i1", payload, None)), backend.initial_state())
     (trace,) = seen["traces"]
     assert trace.task == "q" and trace.reply is None and trace.score is None
@@ -256,12 +256,12 @@ def test_a_trace_that_ends_on_a_tool_call_has_no_reply(tmp_path: Path) -> None:
 def test_a_method_scores_trees_through_the_cache_within_its_episode_budget(tmp_path: Path) -> None:
     runs: list[list[float | None]] = []
 
-    def step(workspace, tools):
+    def step(workspace, services):
         tree = workspace.tree().apply(MARKER)
-        runs.append([record.score for record in tools.evaluate(tree, ("one", "two"))])
-        runs.append([record.score for record in tools.evaluate(tree, ("one", "two"))])
+        runs.append([record.score for record in services.evaluate(tree, ("one", "two"))])
+        runs.append([record.score for record in services.evaluate(tree, ("one", "two"))])
         with pytest.raises(RuntimeError, match="budget has 1 left"):
-            tools.evaluate(tree, ("one", "two"), repeats=2)
+            services.evaluate(tree, ("one", "two"), repeats=2)
         return
 
     backend, _ = harness_backend(tmp_path, step, max_episodes_per_step=3)
@@ -269,7 +269,7 @@ def test_a_method_scores_trees_through_the_cache_within_its_episode_budget(tmp_p
     assert runs == [[1.0, 1.0], [1.0, 1.0]] and result.metrics["method_episodes"] == 2
 
 
-#: Calls ``tools.evaluate`` refuses whole, by why: whether the deployment has a scorer, the tree, the tasks, and the
+#: Calls ``services.evaluate`` refuses whole, by why: whether the deployment has a scorer, the tree, the tasks, and the
 #: start of the refusal.
 REFUSED_CALLS = {
     "no-scorer": (False, PI_SEED.apply(MARKER), ("one",), "RuntimeError: the deployment configured no"),
@@ -285,9 +285,9 @@ def test_a_refused_evaluate_call_adds_no_candidate(
 ) -> None:
     refusals: list[str] = []
 
-    def step(workspace, tools):
+    def step(workspace, services):
         try:
-            tools.evaluate(tree, tasks)
+            services.evaluate(tree, tasks)
         except (RuntimeError, TypeError, ValueError) as exc:
             refusals.append(f"{type(exc).__name__}: {exc}")
         return
@@ -309,10 +309,10 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_episode_bud
         scored.append(task)
         raise ValueError("the scorer broke")
 
-    def step(workspace, tools):
+    def step(workspace, services):
         for _ in range(3):
             try:
-                tools.evaluate(workspace.tree().apply(MARKER), ["one"])
+                services.evaluate(workspace.tree().apply(MARKER), ["one"])
             except (RuntimeError, ValueError) as exc:
                 errors.append(str(exc))
         return
@@ -325,7 +325,7 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_episode_bud
 
 
 def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
     prepared = backend.prepare_step(data(1), backend.initial_state(), 0)
     backend.abort_step(prepared)
     failed = backend.failed_step_metrics()
@@ -348,7 +348,7 @@ def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -
 def test_a_win_waits_for_review_under_publish_review_or_when_it_changes_a_reviewed_part(
     tmp_path: Path, fields: dict, patch: TreePatch, pending: bool
 ) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: patch, **fields)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: patch, **fields)
     result = backend_step(backend, data(1), backend.initial_state())
     assert result.metrics["selected"] is True and result.artifact is not None and result.pending is pending
 
@@ -357,7 +357,7 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
     seen: list[tuple[str, str | None, int | None]] = []
     holder: dict = {}
 
-    def step(workspace, tools):
+    def step(workspace, services):
         progress = holder["backend"].step_progress
         seen.append((progress.phase, progress.request_id, progress.episodes_total))
         return MARKER
@@ -381,7 +381,7 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
         progress = backend.step_progress
         return progress.phase, progress.episodes_total
 
-    def step(workspace, tools):
+    def step(workspace, services):
         seen["phases"].append(phase())
         seen["traces"] = workspace.traces()
         return MARKER
@@ -439,7 +439,7 @@ def test_a_rollout_of_a_task_directory_gives_the_method_the_task_instruction(tmp
 
 
 def test_the_step_and_failure_streak_limits_skip_automatic_steps_only(tmp_path: Path) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER, max_steps=1)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER, max_steps=1)
     first = backend_step(backend, data(1), backend.initial_state())
     second = backend_step(backend, data(2), first.state)
     assert second.metrics["skipped"] == "step budget of 1 exhausted"
@@ -447,7 +447,7 @@ def test_the_step_and_failure_streak_limits_skip_automatic_steps_only(tmp_path: 
     assert "skipped" not in answered.metrics
 
     (tmp_path / "streak").mkdir()
-    streak, _ = harness_backend(tmp_path / "streak", lambda workspace, tools: PLAIN, max_failure_streak=1)
+    streak, _ = harness_backend(tmp_path / "streak", lambda workspace, services: PLAIN, max_failure_streak=1)
     first = backend_step(streak, data(1), streak.initial_state())
     second = backend_step(streak, data(2), first.state)
     assert second.metrics["skipped"] == "failure streak of 1 rejections"
@@ -459,7 +459,7 @@ def test_the_step_and_failure_streak_limits_skip_automatic_steps_only(tmp_path: 
 def marking(**output):
     """A method that adds the marker to the rules and writes ``output`` (``Workspace.write_output``)."""
 
-    def step(workspace, tools):
+    def step(workspace, services):
         workspace.write_tree(workspace.tree().apply(MARKER))
         workspace.write_output(**output)
 
@@ -487,7 +487,7 @@ def test_the_method_summary_and_notes_are_recorded_bounded(tmp_path: Path) -> No
 
 def test_a_skip_keeps_the_method_summary_and_notes(tmp_path: Path) -> None:
     notes = {"failure": "the reply holds no usable file"}
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: workspace.write_output("nothing to change", notes))
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: workspace.write_output("nothing to change", notes))
     result = backend_step(backend, data(1), backend.initial_state())
     # The summary and notes ride the skip, so the pages can show why the method changed nothing.
     assert result.metrics["skipped"] == UNCHANGED and result.artifact is None
@@ -545,7 +545,7 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
         return original(descriptor, files, prompt, **kwargs)
 
     monkeypatch.setattr(harness_runner, "run_episode", spy)
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
     prepared = backend.prepare_step(data(1), backend.initial_state(), 0)
     candidate = prepared.candidate
     assert candidate is not None
@@ -596,7 +596,7 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
 
 def test_a_candidate_that_misses_the_floor_is_rejected_and_joins_the_history(tmp_path: Path) -> None:
     """A rejection counts toward the failure streak, publishes nothing, and still joins the history."""
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: PLAIN)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: PLAIN)
     prepared = backend.prepare_step(data(2), backend.initial_state(), 1)
     candidate = prepared.candidate
     assert candidate is not None
@@ -626,8 +626,8 @@ def test_step_progress_carries_the_methods_model_calls_as_they_happen(tmp_path: 
 
     monkeypatch.setattr(ModelBinding, "chat", answer)
 
-    def method(workspace, tools):
-        tools.models.served.chat([{"role": "user", "content": "design"}])
+    def method(workspace, services):
+        services.models.served.chat([{"role": "user", "content": "design"}])
         seen.append(held["backend"].step_progress.activity)
         return MARKER
 
@@ -645,11 +645,11 @@ def test_step_progress_carries_the_methods_model_calls_as_they_happen(tmp_path: 
 
 
 def test_step_progress_is_cleared_by_a_skip_or_a_failed_method(tmp_path: Path) -> None:
-    skipping, _ = harness_backend(tmp_path, lambda workspace, tools: None, scenario="skipping")
+    skipping, _ = harness_backend(tmp_path, lambda workspace, services: None, scenario="skipping")
     prepared = skipping.prepare_step(data(1, request=REQUEST), skipping.initial_state(), 0)
     assert prepared.outcome == "skip" and skipping.step_progress is None
 
-    def raising(workspace, tools):
+    def raising(workspace, services):
         raise RuntimeError("poison method")
 
     failing, _ = harness_backend(tmp_path, raising, scenario="failing")

@@ -45,7 +45,7 @@ def release_files(scenario: Scenario) -> ScenarioReleaseFiles:
 
 def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_it(tmp_path: Path) -> None:
     answers = iter((MARKER, None))
-    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, tools: next(answers))
+    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: next(answers))
     releases = release_files(scenario)
     base = scenario.repository.base_artifact.release_id
     created = scenario.current_artifact_ref().release_id
@@ -72,7 +72,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
 def test_a_pending_publish_is_the_head_the_next_step_builds_on(tmp_path: Path) -> None:
     trees = []
     dispatcher, scenario = harness_scenario(
-        tmp_path, lambda workspace, tools: trees.append(workspace.tree()) or MARKER, publish="review"
+        tmp_path, lambda workspace, services: trees.append(workspace.tree()) or MARKER, publish="review"
     )
     created = scenario.current_artifact_ref().release_id
     try:
@@ -89,7 +89,7 @@ def test_a_pending_publish_is_the_head_the_next_step_builds_on(tmp_path: Path) -
 
 
 def test_a_promote_and_a_rollback_move_the_head(tmp_path: Path) -> None:
-    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, tools: MARKER, publish="review")
+    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: MARKER, publish="review")
     releases = release_files(scenario)
     created = scenario.current_artifact_ref().release_id
     try:
@@ -105,7 +105,7 @@ def test_a_promote_and_a_rollback_move_the_head(tmp_path: Path) -> None:
 
 
 def test_without_a_durable_history_the_head_is_the_served_release(tmp_path: Path) -> None:
-    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, tools: MARKER, durable=False)
+    dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: MARKER, durable=False)
     releases = release_files(scenario)
     try:
         assert not scenario.store.durable

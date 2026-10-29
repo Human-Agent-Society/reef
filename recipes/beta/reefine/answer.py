@@ -37,7 +37,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import Format, TreeLayout
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.train.harness_backend import ModelCalls, Tools, Trace
+from reef.train.harness_backend import ModelCalls, Services, Trace
 
 #: The one adapter whose extension API Reefine knows; the others take rules, skills and commands from it.
 EXTENSION_ADAPTER = "pi"
@@ -418,7 +418,7 @@ def answer_request(
     tree: HarnessTree,
     request: TrainingRequest,
     traces: Sequence[Trace],
-    tools: Tools,
+    services: Services,
     adapter: str = EXTENSION_ADAPTER,
 ) -> Answer:
     """The served model's answer to one request: the files of the kept answer, with the notes the step records.
@@ -430,19 +430,19 @@ def answer_request(
     points, and ``attempts`` in the notes counts the answers written when
     there was more than one. When no answer delivers the behavior, the
     answer has the empty patch and its notes say why under ``failure``.
-    ``tools`` are the step's: its models answer, its check validates each
+    ``services`` are the step's: its models answer, its check validates each
     answer's files, and its activity names each answer written again.
     """
-    prompt_text = request_prompt(tree, request, traces, tools.models, adapter)
+    prompt_text = request_prompt(tree, request, traces, services.models, adapter)
     answers = RequestAnswers()
     retry = ""
     attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
         asked = prompt_text if not retry else prompt_text.rstrip("\n") + "\n\n" + retry
-        answer = answer_once(asked, tree, request, tools, adapter)
+        answer = answer_once(asked, tree, request, services, adapter)
         if isinstance(answer, UnusableAnswer):
-            retry = answers.take_unusable(answer, attempt, tools.calls)
+            retry = answers.take_unusable(answer, attempt, services.calls)
         elif isinstance(answer, DeclinedAnswer):
             retry = answers.take_declined(answer, attempt)
         elif isinstance(answer, FailedCall):
@@ -468,14 +468,14 @@ def answer_request(
 
 
 def answer_once(
-    asked: str, tree: HarnessTree, request: TrainingRequest, tools: Tools, adapter: str
+    asked: str, tree: HarnessTree, request: TrainingRequest, services: Services, adapter: str
 ) -> WrittenAnswer | UnusableAnswer | DeclinedAnswer | FailedCall:
     """One answer and its review: the patch, the requires items the reply added and the notes; an
     ``UnusableAnswer`` the loop asks again (JSON that does not parse, every file dropped, files that change
-    nothing, files ``tools.check`` refuses); a ``DeclinedAnswer`` design that says no file can deliver the
+    nothing, files ``services.check`` refuses); a ``DeclinedAnswer`` design that says no file can deliver the
     request; or a ``FailedCall`` whose notes say why there is nothing to apply (a failed call, a provider
     refusal)."""
-    models = tools.models
+    models = services.models
     # An extension is longer than a skill, and a thinking model reasons for tens of thousands of tokens before
     # it writes one, answering with no text when the budget ends inside that reasoning; the request path pays
     # for the room and the minutes, the failure path and the review keep their shorter budgets.
@@ -508,7 +508,7 @@ def answer_once(
     if candidate == tree:
         # The step skips a tree it left unchanged, so such an answer is written again instead.
         return UnusableAnswer("the files change nothing in the tree", design, written)
-    validation = tools.check(candidate)
+    validation = services.check(candidate)
     if not validation.passed:
         # The validation the step meets next, run here so a refused file is written again instead of losing the step.
         return UnusableAnswer(f"the harness refused the files: {validation.message()}", design, written)

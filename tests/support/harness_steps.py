@@ -6,8 +6,8 @@ one component, and a recipe and a backend built over them. Episodes run the
 fake binary through the real adapter path, so render, launch and the
 trajectory read are the production code. ``evolution_config`` is a
 deployment config for the tests that build a recipe from its config, over
-the plugins below; ``traced`` makes trace samples of prompts; ``step_tools``
-gives a method that runs on a workspace of its own the backend's tools.
+the plugins below; ``traced`` makes trace samples of prompts; ``step_services``
+gives a method that runs on a workspace of its own the backend's services.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from reef.train.harness_backend import Method, StepContext, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.calls import StepCalls
-from reef.train.harness_backend.tools import StepTools
+from reef.train.harness_backend.services import StepServices
 
 #: The fake pi scores itself: its session event carries the rendered rules text, so a scorer can prefer a tree whose
 #: rules hold the marker.
@@ -229,10 +229,12 @@ def evolution_config(*, evaluation: Mapping[str, Any] | None = None, **evolution
     }
 
 
-def step_tools(workspace: Workspace, models: ModelBindings, record: list[dict[str, Any]] | None = None) -> StepTools:
-    """The backend's tools of ``workspace``'s step, made before the method runs: ``models`` with no budget, every
+def step_services(
+    workspace: Workspace, models: ModelBindings, record: list[dict[str, Any]] | None = None
+) -> StepServices:
+    """The backend's services of ``workspace``'s step, made before the method runs: ``models`` with no budget, every
     call in ``record``, and no scorer. The head is the tree in ``harness/``."""
-    return StepTools(
+    return StepServices(
         workspace=workspace,
         descriptor=get_adapter(str(workspace.host()["adapter"])),
         evaluator=None,
@@ -260,6 +262,6 @@ __all__ = [
     "make_pi_binary",
     "marker_score",
     "runtime",
-    "step_tools",
+    "step_services",
     "traced",
 ]

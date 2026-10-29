@@ -50,7 +50,7 @@ def test_evolution_explicit_ray_places_scorer_on_declared_ray_gpu(tmp_path):
     try:
         backend, _ = harness_backend(
             tmp_path,
-            lambda workspace, tools: None,
+            lambda workspace, services: None,
             score=GPUScorer(),
             tasks=("one",),
             worker_executor=executor_settings(

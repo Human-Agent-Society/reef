@@ -1,7 +1,7 @@
 """The model-call budget, record and live activity of one harness step.
 
 Every model call a method makes in a step goes through ``StepCalls``: the
-bindings it receives in ``Tools.models`` are ``BudgetedBinding`` wrappers,
+bindings it receives in ``Services.models`` are ``BudgetedBinding`` wrappers,
 and a gateway that serves an agent process spends from the same object. The
 calls land in the step's ``calls.json``, and the activity lines feed the
 request page while the step runs.
@@ -34,7 +34,7 @@ class StepCalls(ModelCalls):
     the latest ``MAX_ACTIVITY`` activity lines, each ``{at, kind, text}``
     with ``failed`` on a line that went wrong, its text redacted.
     Purpose: the backend makes one per step and hands it out as
-    ``Tools.calls``; the budgeted bindings and an agent's gateway spend and
+    ``Services.calls``; the budgeted bindings and an agent's gateway spend and
     record through it, and the request page reads :meth:`activity` from
     another thread.
     """

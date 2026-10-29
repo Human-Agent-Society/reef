@@ -390,22 +390,22 @@ def batch() -> JobData:
 def test_a_win_that_touches_a_loop_is_pending_whatever_review_parts_lists(tmp_path: Path) -> None:
     loop = TreePatch(LOOP_FILE)
     skill = TreePatch({"skills/marker/SKILL.md": "# marker"})
-    held = loop_backend(tmp_path, "held", lambda workspace, tools: loop)
+    held = loop_backend(tmp_path, "held", lambda workspace, services: loop)
     result = backend_step(held, batch(), held.initial_state())
     assert result.metrics["selected"] is True and result.pending is True
-    free = loop_backend(tmp_path, "free", lambda workspace, tools: skill)
+    free = loop_backend(tmp_path, "free", lambda workspace, services: skill)
     result = backend_step(free, batch(), free.initial_state())
     assert result.metrics["selected"] is True and result.pending is False
-    listed = loop_backend(tmp_path, "listed", lambda workspace, tools: skill, review_parts=("skill",))
+    listed = loop_backend(tmp_path, "listed", lambda workspace, services: skill, review_parts=("skill",))
     assert backend_step(listed, batch(), listed.initial_state()).pending is True
     # A list that names another part holds the loop just the same, and so does the step that takes the loop out.
-    unlisted = loop_backend(tmp_path, "unlisted", lambda workspace, tools: loop, review_parts=("skill",))
+    unlisted = loop_backend(tmp_path, "unlisted", lambda workspace, services: loop, review_parts=("skill",))
     with_loop = backend_step(unlisted, batch(), unlisted.initial_state())
     assert with_loop.metrics["selected"] is True and with_loop.pending is True
     without = loop_backend(
         tmp_path,
         "without",
-        lambda workspace, tools: TreePatch({"native/loops/main.py": None}),
+        lambda workspace, services: TreePatch({"native/loops/main.py": None}),
         score=lambda task, result: 0.0 if result.trajectory[0]["data"].get("loop") else 1.0,
         seed={**NATIVE_SEED_FILES, **LOOP_FILE},
     )

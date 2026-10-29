@@ -162,12 +162,12 @@ class ReasoningBank(Method):
 
         A reply that is not the asked JSON skips its run, and an item that carries a credential or an
         instruction override stays out of the bank; the notes say why. The bank and the tree change together:
-        when the new tree fails ``tools.check``, neither changes, so no later step starts from a bank that
+        when the new tree fails ``services.check``, neither changes, so no later step starts from a bank that
         cannot render.
         """
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         settings = self.settings
-        judge, extractor = tools.models[settings.judge_model], tools.models[settings.extract_model]
+        judge, extractor = services.models[settings.judge_model], services.models[settings.extract_model]
         bank_path = workspace.state / MEMORY_FILE
         bank = (
             [MemoryItem(**row) for row in json.loads(bank_path.read_text(encoding="utf-8"))]
@@ -239,7 +239,7 @@ class ReasoningBank(Method):
         }
         others = {path: text for path, text in workspace.tree().files.items() if not path.startswith(SKILL_ROOT)}
         candidate = HarnessTree({**others, **{item.path: item.skill() for item in bank}})
-        validation = tools.check(candidate)
+        validation = services.check(candidate)
         if not validation.passed:
             summary = f"the memory skills fail validation, so the bank stays as it was: {validation.message()}"
             workspace.write_output(summary, {**notes, "problems": list(validation.problems)})

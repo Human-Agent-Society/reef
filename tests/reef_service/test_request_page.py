@@ -377,7 +377,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_method
 def holding_method(entered: Event, release: Event, failure: bool = False):
     """A method that holds its step open until ``release``, then writes ``PATCH``, or raises with ``failure``."""
 
-    def method(workspace, tools):
+    def method(workspace, services):
         entered.set()
         release.wait(30)
         if failure:

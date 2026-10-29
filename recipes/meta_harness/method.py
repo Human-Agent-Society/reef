@@ -36,7 +36,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend import Method, StepContext, Tools, Workspace
+from reef.train.harness_backend import Method, StepContext, Services, Workspace
 
 #: ``full_history`` branches from any candidate; ``incumbent_only``, the greedy control, from the served one.
 MODES = ("full_history", "incumbent_only")
@@ -163,7 +163,7 @@ class MetaHarness(Method):
         return cls(MetaHarnessSettings.parse(config, plugin_class=cls))
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         settings = self.settings
         host = workspace.host()
         layout = get_adapter(str(host["adapter"])).layout
@@ -172,7 +172,7 @@ class MetaHarness(Method):
         if unsupported:
             raise ValueError(f"the {host['adapter']} harness tree has no parts {unsupported}")
         try:
-            proposer = tools.models[settings.model]
+            proposer = services.models[settings.model]
         except KeyError as exc:
             raise ValueError(
                 f"the Meta-Harness proposer model {settings.model!r} is not declared under evolution.models; "
@@ -217,7 +217,7 @@ class MetaHarness(Method):
             parent = next((member for member in members if member.record.tree == proposal["parent_id"]), None)
             if parent is None:
                 raise ValueError(f"parent_id must name a candidate of the population ({settings.mode} mode)")
-            tree = self.checked_tree(proposal["files"], parent.tree, layout, parts, tools)
+            tree = self.checked_tree(proposal["files"], parent.tree, layout, parts, services)
         except ValueError as exc:
             append_attempt(workspace, {"step": workspace.step, "status": "invalid", "error": str(exc)})
             workspace.write_output(
@@ -271,7 +271,7 @@ class MetaHarness(Method):
         return None
 
     def checked_tree(
-        self, files: Mapping[str, Any], parent: HarnessTree, layout: TreeLayout, parts: Sequence[str], tools: Tools
+        self, files: Mapping[str, Any], parent: HarnessTree, layout: TreeLayout, parts: Sequence[str], services: Services
     ) -> HarnessTree:
         """The proposed tree when it passes the adapter's validation and changes only files of ``parts`` of
         ``parent``; ``ValueError`` otherwise."""
@@ -280,7 +280,7 @@ class MetaHarness(Method):
             raise ValueError(f"the tree holds {len(tree.files)} files; max_files is {self.settings.max_files}")
         if fixed_files(tree, layout, parts) != fixed_files(parent, layout, parts):
             raise ValueError(f"a proposal may change only the files of the parts {list(parts)}")
-        validation = tools.check(tree)
+        validation = services.check(tree)
         if not validation.passed:
             raise ValueError(f"the tree fails validation: {validation.message()}")
         return tree

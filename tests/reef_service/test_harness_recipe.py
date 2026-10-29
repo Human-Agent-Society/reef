@@ -242,7 +242,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
 
 def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     """One win and no losses clears the plain comparison but not a margin of 1."""
-    recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, evaluation={"min_margin": 1})
+    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, evaluation={"min_margin": 1})
     backend = backend_of(recipe)
     result = backend_step(backend, JobData("demo:1"), backend.initial_state(), recipe.build_policy(backend))
     assert (result.metrics["wins"], result.metrics["losses"], result.metrics["selected"]) == (1, 0, False)
@@ -250,7 +250,7 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 
 def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
-    built = harness_recipe(tmp_path, lambda workspace, tools: None)
+    built = harness_recipe(tmp_path, lambda workspace, services: None)
     trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
     assert isinstance(trainer, Trainer) and isinstance(trainer.candidate_backend, HarnessBackend)
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
@@ -317,7 +317,7 @@ def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
     """A tree persists into every release, so a seed the checks refuse never boots; a credential's refusal
     names the channels a key goes through instead."""
     with pytest.raises(RecipeConfigError, match=rf"evolution\.seed fails validation: .*{problem}"):
-        harness_recipe(tmp_path, lambda workspace, tools: None, seed=HarnessTree(files))
+        harness_recipe(tmp_path, lambda workspace, services: None, seed=HarnessTree(files))
 
 
 # -- the task sources ------------------------------------------------------------------------------
@@ -490,7 +490,7 @@ def test_recipe_forwards_the_episode_executor_to_every_episode(tmp_path: Path, m
     from reef.evaluation.harness.runner import run_episode
 
     monkeypatch.setattr(RUN_EPISODE, spy)
-    recipe = dataclasses.replace(harness_recipe(tmp_path, lambda workspace, tools: MARKER), executor=executor)
+    recipe = dataclasses.replace(harness_recipe(tmp_path, lambda workspace, services: MARKER), executor=executor)
     step(backend_of(recipe))
     assert seen and all(received is executor for received in seen)
 
@@ -520,13 +520,13 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch) -> None
 
 
 def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
-    built = dataclasses.replace(harness_recipe(tmp_path, lambda workspace, tools: None), runtime=None)
+    built = dataclasses.replace(harness_recipe(tmp_path, lambda workspace, services: None), runtime=None)
     with pytest.raises(RecipeConfigError, match=r"reef\.upstream_url"):
         backend_of(built)
 
 
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path, monkeypatch) -> None:
-    built = harness_recipe(tmp_path, lambda workspace, tools: None)
+    built = harness_recipe(tmp_path, lambda workspace, services: None)
     unbound = dataclasses.replace(get_adapter("pi"), model_binding={})
     monkeypatch.setattr("reef.recipe.harness.get_adapter", lambda name: unbound)
     with pytest.raises(ModelBindingError, match="declares no model_binding"):
@@ -545,7 +545,7 @@ def test_model_binding_reaches_episodes_but_never_the_published_tree(tmp_path: P
         return run_episode(descriptor, files, prompt, **kwargs)
 
     monkeypatch.setattr(RUN_EPISODE, spy)
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
     result = step(backend)
 
     assert seen, "evaluation ran episodes"
@@ -578,7 +578,7 @@ def test_episodes_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, 
 
     monkeypatch.setattr(RUN_EPISODE, spy)
     config_value = ModelConfig.from_value(endpoint("first-model"))
-    recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, score=score).with_model_config(config_value)
+    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, score=score).with_model_config(config_value)
     backend = backend_of(recipe)
     first = step(backend)
     config_value.runtime = ModelConfig.from_value(endpoint("second-model")).runtime
@@ -590,7 +590,7 @@ def test_episodes_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, 
 
 def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
     received = []
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: received.append(tools.models))
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: received.append(services.models))
     step(backend)
     # The method sees the served binding through the recording seam: the same endpoint, model and key.
     served = received[0].served
@@ -641,7 +641,7 @@ def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
 
 
 def test_settle_records_the_context_the_evaluation_ran_in(tmp_path: Path) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: MARKER)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
     context = backend.evaluator.context()
     assert (context.model, context.adapter, context.adapter_version) == (
         MODEL.model,
@@ -703,7 +703,7 @@ def test_episode_settings_reach_the_episodes_and_interleave_the_sides(tmp_path: 
 
     monkeypatch.setattr(RUN_EPISODE, spy)
     backend, _ = harness_backend(
-        tmp_path, lambda workspace, tools: MARKER, evaluation={"episode_timeout_s": 5.0, "repeats": 2}
+        tmp_path, lambda workspace, services: MARKER, evaluation={"episode_timeout_s": 5.0, "repeats": 2}
     )
     result = step(backend)
     assert timeouts == [5.0] * 4
@@ -726,14 +726,14 @@ def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: 
         )
     )
     litterer.chmod(0o755)
-    counted = step(backend_of(harness_recipe(tmp_path, lambda workspace, tools: MARKER, binary=str(litterer))))
+    counted = step(backend_of(harness_recipe(tmp_path, lambda workspace, services: MARKER, binary=str(litterer))))
     assert counted.metrics["candidate_residue"] == 1 and counted.metrics["current_residue"] == 1
     assert counted.metrics["episode_failures"] == 0
     (tmp_path / "forbidden").mkdir()
     strict = backend_of(
         harness_recipe(
             tmp_path / "forbidden",
-            lambda workspace, tools: MARKER,
+            lambda workspace, services: MARKER,
             binary=str(litterer),
             evaluation={"forbid_residue": True},
         )
@@ -748,7 +748,7 @@ def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: 
 def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     """An unlaunchable episode loses its pairing but puts no -inf into the metrics, which the commit history
     writes as JSON."""
-    recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, binary=str(tmp_path / "no-such-binary"))
+    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, binary=str(tmp_path / "no-such-binary"))
     result = step(backend_of(recipe))
     assert result.metrics["episode_failures"] == 2  # both sides, one task
     assert result.metrics["selected"] is False  # both failed: a tie
@@ -760,14 +760,14 @@ def test_a_scorer_that_fails_or_returns_no_number_aborts_the_step_and_the_next_o
         raise RuntimeError("episode scorer bug")
 
     patches = iter((MARKER,))
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: next(patches, None), score=broken)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: next(patches, None), score=broken)
     with pytest.raises(RuntimeError, match="episode scorer bug"):
         step(backend)
     assert step(backend).metrics["skipped"] == UNCHANGED
 
     (tmp_path / "nan").mkdir()
     backend, _ = harness_backend(
-        tmp_path / "nan", lambda workspace, tools: MARKER, score=lambda task, result: float("nan")
+        tmp_path / "nan", lambda workspace, services: MARKER, score=lambda task, result: float("nan")
     )
     with pytest.raises(ValueError, match="episode scorer returned a non-finite score"):
         step(backend)
@@ -800,7 +800,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
     binary.chmod(0o755)
     recipe = harness_recipe(
         tmp_path,
-        lambda workspace, tools: MARKER,
+        lambda workspace, services: MARKER,
         binary=str(binary),
         score=task_order_score,
         tasks=("task one", "task two"),
@@ -818,7 +818,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
 def test_real_episodes_run_on_the_selected_worker_backend(tmp_path, workers, expected, caplog):
-    recipe = harness_recipe(tmp_path, lambda workspace, tools: MARKER, tasks=("task one", "task two"))
+    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, tasks=("task one", "task two"))
     backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=workers)))
     assert backend.evaluator.worker_pool.selection.settings.backend == expected
     assert backend.evaluator.worker_pool.requirements.gpus_per_worker == 0
@@ -959,7 +959,7 @@ def test_collect_failures_grows_the_evaluation_from_traffic(tmp_path: Path) -> N
         return marker_score(task, result)
 
     backend, _ = harness_backend(
-        tmp_path, lambda workspace, tools: MARKER, score=score, evaluation={"collect_failures": True}
+        tmp_path, lambda workspace, services: MARKER, score=score, evaluation={"collect_failures": True}
     )
     result = step(backend, None, *traced("real request A"))
     # The evaluation ran the seed task and the collected prompt, on both sides.
@@ -968,7 +968,7 @@ def test_collect_failures_grows_the_evaluation_from_traffic(tmp_path: Path) -> N
     assert result.state["collected_tasks"] == ["real request A"]
 
     (tmp_path / "off").mkdir()
-    frozen, _ = harness_backend(tmp_path / "off", lambda workspace, tools: MARKER)
+    frozen, _ = harness_backend(tmp_path / "off", lambda workspace, services: MARKER)
     result = step(frozen, None, *traced("real request A"))
     assert result.state["collected_tasks"] == [] and result.metrics["evaluation_task_count"] == 1
 
@@ -977,7 +977,7 @@ def test_the_method_reads_each_traces_record_and_client(tmp_path: Path) -> None:
     seen = []
     backend, _ = harness_backend(
         tmp_path,
-        lambda workspace, tools: seen.append([(trace.record, trace.client) for trace in workspace.traces()]),
+        lambda workspace, services: seen.append([(trace.record, trace.client) for trace in workspace.traces()]),
     )
     step(backend, None, *traced("A1", "U1", clients=("alice", None)))
     assert seen == [[("a0", "alice"), ("a1", "untagged")]]
@@ -1009,7 +1009,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
-        harness_recipe(tmp_path, lambda workspace, tools: next(patches, None), publish="review"),
+        harness_recipe(tmp_path, lambda workspace, services: next(patches, None), publish="review"),
         hold_local_cycles=True,
     )
     try:
@@ -1046,7 +1046,7 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
-        harness_recipe(tmp_path, lambda workspace, tools: next(patches, None), publish="review"),
+        harness_recipe(tmp_path, lambda workspace, services: next(patches, None), publish="review"),
         hold_local_cycles=True,
     )
 
@@ -1088,7 +1088,7 @@ def test_pending_requires_durable_bytes() -> None:
 
 def test_a_publish_discards_the_backends_tree_and_the_release_keeps_the_source_tree(tmp_path: Path) -> None:
     dispatcher = harness_dispatcher(
-        tmp_path, harness_recipe(tmp_path, lambda workspace, tools: MARKER), hold_local_cycles=True
+        tmp_path, harness_recipe(tmp_path, lambda workspace, services: MARKER), hold_local_cycles=True
     )
     try:
         scenario = dispatcher.get_or_create_scenario("render-cleanup")
@@ -1116,7 +1116,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     key = "sk-476-DECISIVE-KEY-0123456789abcdef"
     leak = TreePatch({"config/models.json": json.dumps({"providers": {"leak": {"apiKey": key}}}) + "\n"})
     patches = iter((leak,))
-    built = harness_recipe(tmp_path, lambda workspace, tools: next(patches, None))
+    built = harness_recipe(tmp_path, lambda workspace, services: next(patches, None))
     repository = harness_repository(tmp_path, built.base_artifact_files() or {})
     agent_record_dir = tmp_path / "agent-record"
 

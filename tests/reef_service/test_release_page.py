@@ -57,7 +57,7 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-def answer(workspace, tools) -> TreePatch:
+def answer(workspace, services) -> TreePatch:
     request = workspace.request()
     return TreePatch(ANSWERS[request.text] if request is not None else NOTES)
 

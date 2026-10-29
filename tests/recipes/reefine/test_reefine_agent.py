@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from tests.recipes.reefine.reefine_support import TREE, Served, designed, reefine_step, step_workspace
-from tests.support.harness_steps import step_tools
+from tests.support.harness_steps import step_services
 
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import agent as reefine_agent
@@ -30,7 +30,7 @@ from reef.harness.tree import TreePatch
 from reef.sandbox.e2b import E2BSession
 from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome, SandboxExecutor
 from reef.sandbox.remote import pack
-from reef.train.harness_backend import StepContext, Tools, Workspace
+from reef.train.harness_backend import Services, StepContext, Workspace
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.types import JobData
@@ -206,10 +206,10 @@ def agent_of(binary: Path, provider: MultimodalProvider | None = None, *, timeou
     return ReefineAgent(AgentExecution(get_adapter("pi"), LocalExecutor(), str(binary), timeout_s), 30.0, provider)
 
 
-def agent_step(tmp_path: Path, models: ModelBindings) -> tuple[Workspace, Tools]:
-    """A request step's workspace over ``TREE`` and its tools, the served model ``models``."""
+def agent_step(tmp_path: Path, models: ModelBindings) -> tuple[Workspace, Services]:
+    """A request step's workspace over ``TREE`` and its services, the served model ``models``."""
     workspace = step_workspace(tmp_path, request=ASK)
-    return workspace, step_tools(workspace, models)
+    return workspace, step_services(workspace, models)
 
 
 @pytest.mark.unit
@@ -263,8 +263,10 @@ def test_an_agent_that_changes_nothing_or_fails_its_model_call_hands_back_no_cha
     """A run that writes nothing, or that pi ends on a failed model response (exiting zero all the same), is no
     answer. A reasoning model that spends the reply budget on its reasoning ends the turn with nothing: the step
     names the budget, so the person raises it instead of guessing."""
-    workspace, tools = agent_step(tmp_path, served_of(upstream))
-    answered = answer_with_agent(workspace, tools, TREE, ASK, agent_of(fake_pi(tmp_path, mode), provider_of(upstream)))
+    workspace, services = agent_step(tmp_path, served_of(upstream))
+    answered = answer_with_agent(
+        workspace, services, TREE, ASK, agent_of(fake_pi(tmp_path, mode), provider_of(upstream))
+    )
     assert answered.patch.changes == {} and answered.notes["failure"].startswith(failure)
     assert answered.notes["agent"]["exit_code"] == 0
 
@@ -275,7 +277,7 @@ def test_off_pi_the_agent_stays_idle_and_the_served_model_answers(tmp_path) -> N
     workspace = step_workspace(tmp_path, adapter="dsh")
     served = Served(designed({"rules.md": "Run the tests first.\n"}), json.dumps(REVIEW))
     method = ReefineMethod(agent_of(tmp_path / "no-such-pi"))
-    method.step(StepContext(workspace, step_tools(workspace, ModelBindings(served=served))))
+    method.step(StepContext(workspace, step_services(workspace, ModelBindings(served=served))))
     assert workspace.tree() == TREE.apply(TreePatch({"rules.md": "Run the tests first.\n"}))
     assert workspace.read_output().notes["review"] == REVIEW and "This harness is" in served.prompts[1]
 
@@ -290,8 +292,8 @@ def test_a_run_past_its_limit_keeps_its_tree_and_progress_without_publishing(tmp
         raise EpisodeTimeout("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
-    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
-    answered = answer_with_agent(workspace, tools, TREE, ASK, agent_of(tmp_path / "pi"))
+    workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
+    answered = answer_with_agent(workspace, services, TREE, ASK, agent_of(tmp_path / "pi"))
     assert answered.patch.changes == {} and "past its" in answered.notes["failure"]
     assert (workspace.output / "agent-harness" / "rules.md").read_text() == "Unfinished candidate"
     assert "remains unchecked" in (workspace.output / "progress.md").read_text()
@@ -299,8 +301,8 @@ def test_a_run_past_its_limit_keeps_its_tree_and_progress_without_publishing(tmp
 
 @pytest.mark.unit
 def test_the_tree_reads_back_only_the_changes_a_request_may_make(tmp_path) -> None:
-    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
-    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi"))
+    workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
+    run = AgentRun(workspace, services, TREE, agent_of(tmp_path / "pi"))
     assert run.read() == (TREE, [])
     harness = workspace.harness
     (harness / "skills" / "answer-style" / "SKILL.md").write_text("---\nname: answer-style\ndescription: x\n---\nnew")
@@ -334,8 +336,8 @@ def test_the_tree_reads_back_only_the_changes_a_request_may_make(tmp_path) -> No
 def test_a_binary_scratch_file_and_the_links_of_an_install_leave_the_change_readable(tmp_path) -> None:
     """One stray file does not cost the request: a binary off the layout and the node_modules/ of an npm install,
     its .bin links included, are left out and named, the directory once. A file a request may write must be text."""
-    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
-    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi"))
+    workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
+    run = AgentRun(workspace, services, TREE, agent_of(tmp_path / "pi"))
     harness = workspace.harness
     (harness / "rules.md").write_text("Reply in French.\n")
     (harness / "out.mp3").write_bytes(b"\xff\xfb\x90\x00")
@@ -358,7 +360,7 @@ def test_a_binary_scratch_file_and_the_links_of_an_install_leave_the_change_read
 def test_concurrent_tool_calls_pull_the_sandbox_tree_one_at_a_time(tmp_path) -> None:
     """pi runs the tool calls of one turn at once, and each pull replaces the tree's directory: they take turns, and
     every one answers from a whole copy."""
-    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
+    workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://m", model="m")))
     (workspace.harness / "skills" / "answer-style" / "SKILL.md").write_text("---\nname: x\n---\nnew")
     archive = pack(workspace.harness)
 
@@ -385,7 +387,7 @@ def test_concurrent_tool_calls_pull_the_sandbox_tree_one_at_a_time(tmp_path) -> 
             return archive
 
     sandbox = Sandbox()
-    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi"))
+    run = AgentRun(workspace, services, TREE, agent_of(tmp_path / "pi"))
     run.session = E2BSession(sandbox)
     results: list[dict] = []
     errors: list[BaseException] = []
@@ -408,9 +410,9 @@ def test_concurrent_tool_calls_pull_the_sandbox_tree_one_at_a_time(tmp_path) -> 
 
 def gateway_run(tmp_path: Path, *, timeout_s: float = 60.0) -> tuple[AgentRun, ReefineGateway]:
     """An agent run on a fresh step whose gateway is up; the caller stops the gateway."""
-    workspace, tools = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
-    run = AgentRun(workspace, tools, TREE, agent_of(tmp_path / "pi", timeout_s=timeout_s))
-    gateway = ReefineGateway(run.served, tools.calls, (CheckTool(run), TrialTool(run)), None)
+    workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
+    run = AgentRun(workspace, services, TREE, agent_of(tmp_path / "pi", timeout_s=timeout_s))
+    gateway = ReefineGateway(run.served, services.calls, (CheckTool(run), TrialTool(run)), None)
     run.gateway = gateway
     gateway.start()
     return run, gateway

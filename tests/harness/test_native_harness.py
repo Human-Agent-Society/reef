@@ -657,7 +657,7 @@ def test_native_harness_runs_through_the_evaluation(tmp_path: Path, fake_model) 
     backend = native_backend(
         tmp_path,
         fake_model,
-        lambda workspace, tools: TreePatch(TOOL),
+        lambda workspace, services: TreePatch(TOOL),
         final_answer,
         ("put hello in notes.txt and read it back",),
     )
@@ -987,7 +987,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_comparison(tmp_pat
         backend = native_backend(
             tmp_path,
             model,
-            lambda workspace, tools: TreePatch(native_json("graphs", VERIFY_GRAPH)),
+            lambda workspace, services: TreePatch(native_json("graphs", VERIFY_GRAPH)),
             final_line,
             (
                 "[sieve] how many primes are below 100000? Reply with the count as a plain integer alone on the last line.",
@@ -1937,7 +1937,7 @@ def test_the_binding_rides_in_the_episode_render_and_the_published_tree_is_the_s
     backend = native_backend(
         tmp_path,
         fake_model,
-        lambda workspace, tools: brief,
+        lambda workspace, services: brief,
         lambda task, result: 1.0,
         ("put hello in notes.txt and read it back",),
     )

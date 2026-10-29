@@ -62,7 +62,7 @@ def normalized(text: str) -> str:
 class ACESettings(PluginSettings):
     """The config of ``ACE``.
 
-    Values: ``model`` is a non-empty name that ``ACE.step`` looks up in ``Tools.models``: ``served`` or an
+    Values: ``model`` is a non-empty name that ``ACE.step`` looks up in ``Services.models``: ``served`` or an
     ``evolution.models`` entry. ``sections`` holds one or more names; each name is non-empty text on one line, with single spaces, and no
     two names are equal by ``normalized``. ``max_bullets`` ≥ 1 and ``prune_margin`` ≥ 1.
     ``max_traces_per_step`` ≥ 0, where 0 sets no limit.
@@ -249,9 +249,9 @@ class ACE(Method):
         return cls(ACESettings.parse(config, plugin_class=cls))
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         settings = self.settings
-        model = tools.models[settings.model]
+        model = services.models[settings.model]
         path = workspace.state / PLAYBOOK_FILE
         playbook = Playbook.from_json(path.read_text(encoding="utf-8")) if path.is_file() else Playbook()
         traces = workspace.traces()
@@ -295,7 +295,7 @@ class ACE(Method):
         tree = workspace.tree()
         rules = rules_with(tree.files.get(RULES_FILE, ""), kept.text(settings.sections))
         candidate = tree.apply(TreePatch({RULES_FILE: rules or None}))
-        validation = tools.check(candidate)
+        validation = services.check(candidate)
         if not validation.passed:
             # The playbook stays as the last step left it, so state/ and rules.md still agree.
             workspace.write_output(

@@ -2,8 +2,8 @@
 
 ``Model`` stands in for a deployment's ``ModelBindings``, and ``Served`` is a
 served model binding with canned replies. Both answer a request's plan call
-with no step and every other call with the next canned reply. ``ModelTools``
-are a step's tools around a ``Model``. ``REQUEST`` is
+with no step and every other call with the next canned reply. ``ModelServices``
+are a step's services around a ``Model``. ``REQUEST`` is
 one queued instruction and ``TREE`` a pi head tree with the starter skill
 and a rules file. ``designed`` writes a request reply as the Reefine prompt
 asks for it: the design, the files, and the requires items last.
@@ -28,7 +28,7 @@ from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
-from reef.train.harness_backend import AgentOutcome, Method, Tools, Trace, Workspace
+from reef.train.harness_backend import AgentOutcome, Method, Services, Trace, Workspace
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.types import JobData, TrainStepResult
 
@@ -75,8 +75,8 @@ class Model:
         return None
 
 
-class ModelTools(Tools):
-    """The tools of a text answer's step around a canned model.
+class ModelServices(Services):
+    """The services of a text answer's step around a canned model.
 
     Values: ``bindings`` answer every model call; ``step_calls`` keeps the
     step's activity and sets no budget; ``descriptor`` is the adapter that
@@ -176,7 +176,7 @@ def answer(
     traces: tuple[Trace, ...] = (),
 ) -> Answer:
     """The text answer to ``request`` on ``adapter``, from the replies of ``models``."""
-    return answer_request(tree, request, traces, ModelTools(models, adapter), adapter)
+    return answer_request(tree, request, traces, ModelServices(models, adapter), adapter)
 
 
 def failure_of(written: Answer) -> str:
@@ -233,7 +233,7 @@ __all__ = [
     "SHORT",
     "TREE",
     "Model",
-    "ModelTools",
+    "ModelServices",
     "Served",
     "answer",
     "designed",

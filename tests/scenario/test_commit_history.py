@@ -854,7 +854,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
 
 
 def build_harness_evolve_dispatcher(
-    tmp_path, backend_factory, *, method=lambda workspace, tools: None, agent_record_dir=None
+    tmp_path, backend_factory, *, method=lambda workspace, services: None, agent_record_dir=None
 ):
     """A dispatcher over a pi harness recipe; these tests need an artifact-producing recipe, not its semantics."""
     return Dispatcher(
@@ -894,7 +894,7 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
     started = Event()
     release = Event()
 
-    def blocking_method(workspace, tools):
+    def blocking_method(workspace, services):
         if workspace.traces()[0].record != "a-i1":
             return
         started.set()
@@ -962,7 +962,7 @@ def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_p
     calls = 0
     should_fail = True
 
-    def method(workspace, tools):
+    def method(workspace, services):
         nonlocal calls
         calls += 1
         if should_fail:

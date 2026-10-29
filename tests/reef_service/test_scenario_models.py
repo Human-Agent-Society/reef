@@ -111,8 +111,8 @@ def make_recipe(platform, tmp_path):
     binary.write_text(FAKE_AGENT)
     binary.chmod(0o755)
 
-    def method(workspace, tools):
-        assert tools.models["teacher"].chat([{"role": "user", "content": "method"}]) == "OK"
+    def method(workspace, services):
+        assert services.models["teacher"].chat([{"role": "user", "content": "method"}]) == "OK"
         return TreePatch({"rules.md": "marker\n"})
 
     managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key="platform-key", model="platform-model")

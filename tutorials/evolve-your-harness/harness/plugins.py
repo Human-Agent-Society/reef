@@ -66,7 +66,7 @@ class RulesMethod(Method):
     """
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         traces = failing(workspace.traces())
         if not traces:
             workspace.write_output("no failing trace to learn from")
@@ -74,7 +74,7 @@ class RulesMethod(Method):
         tree = workspace.tree()
         prompt = RULES_PROMPT.substitute(traces=failures_text(traces), rules=tree.files.get("rules.md", "(none yet)"))
         try:
-            reply = tools.models.served.chat(
+            reply = services.models.served.chat(
                 [{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S
             )
         except ModelBindingError as exc:
@@ -108,7 +108,7 @@ class NativeMethod(Method):
     """
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         traces = failing(workspace.traces())
         if not traces:
             workspace.write_output("no failing trace to learn from")
@@ -116,7 +116,7 @@ class NativeMethod(Method):
         tree = workspace.tree()
         prompt = native_evolution.change_prompt(tree, failures_text(traces))
         try:
-            reply = tools.models.served.chat(
+            reply = services.models.served.chat(
                 [{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S
             )
         except ModelBindingError as exc:

@@ -20,13 +20,13 @@ The evaluation and the release are Reef's, shared with weight training:
 
 What a method sees: ``contract`` defines what a method implements
 (``Method``) and what a step gives it (``StepContext``: the ``Workspace`` and
-the ``Tools``); ``workspace`` is the step's directory (``Workspace``,
+the ``Services``); ``workspace`` is the step's directory (``Workspace``,
 ``Trace``), where the method also writes what it says about its step
 (``write_output``). ``agent`` runs the deployment's coding agent for a method
 (``evolution.agent``) and holds ``AgentMethod``, a method that is a folder of
 prompts.
 
-The rest supports a step: ``tools`` implements the tools of a step, ``calls``
+The rest supports a step: ``services`` implements the services of a step, ``calls``
 its model budget, ``state`` the committed algorithm state, ``records`` the
 step records, and ``capabilities`` what the service routes may ask a backend.
 The tree itself is ``reef.harness.tree``; the evaluation, the history and the
@@ -35,7 +35,7 @@ publication policies are ``reef.evaluation.harness``.
 
 from reef.harness.gateway import ModelCalls
 from reef.train.harness_backend.agent.method import AgentMethod
-from reef.train.harness_backend.contract import AgentOutcome, Method, StepContext, Tools
+from reef.train.harness_backend.contract import AgentOutcome, Method, StepContext, Services
 from reef.train.harness_backend.workspace import Trace, Workspace
 
 __all__ = [
@@ -43,8 +43,8 @@ __all__ = [
     "AgentOutcome",
     "Method",
     "ModelCalls",
+    "Services",
     "StepContext",
-    "Tools",
     "Trace",
     "Workspace",
 ]

@@ -206,7 +206,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path)
     called = Event()
     seen = []
 
-    def method(workspace, tools):
+    def method(workspace, services):
         seen.append((workspace.request(), workspace.traces()))
         called.set()
 
@@ -258,7 +258,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path)
 
 
 def test_auto_rejects_manual_requests(tmp_path):
-    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda workspace, tools: None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda workspace, services: None))
     try:
         dispatcher.get_or_create_scenario("s")
         with pytest.raises(ValueError, match="training_mode='manual'"):
@@ -509,7 +509,7 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions()
 @pytest.mark.parametrize("instructions", [False, True], ids=["record-only", "harness"])
 def test_http_training_mode_updates_only_existing_supported_processors(tmp_path, instructions):
     # A record-only recipe makes no job data, so it trains in auto alone; a harness recipe takes instructions.
-    recipe = harness_recipe(tmp_path, lambda workspace, tools: None) if instructions else Recipe()
+    recipe = harness_recipe(tmp_path, lambda workspace, services: None) if instructions else Recipe()
     dispatcher = harness_dispatcher(tmp_path, recipe)
     scenario = dispatcher.get_or_create_scenario("s")
     processor = scenario.trainer.pipeline
@@ -558,7 +558,7 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
 def test_http_mode_change_does_not_wait_for_running_method(tmp_path):
     entered, release = Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         entered.set()
         assert release.wait(5)
 
@@ -594,7 +594,7 @@ def test_http_mode_change_does_not_wait_for_running_method(tmp_path):
 
 
 def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, caplog):
-    def method(workspace, tools):
+    def method(workspace, services):
         return None
 
     dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, method))
@@ -655,7 +655,7 @@ def raising_method(calls, *, poison="poison", error="poison method"):
     """A method that raises on the poison instruction and holds its first attempt open until released."""
     entered, release = Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         request = workspace.request()
         text = request.text if request else None
         calls.append(text)
@@ -673,7 +673,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
     evaluation, and keeps the candidate's change and the method's notes, so the pages show what was tried."""
     from reef.service.release_page import failed_words
 
-    def method(workspace, tools):
+    def method(workspace, services):
         workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
         workspace.write_output("one rules entry", {"entries": 1})
 
@@ -759,7 +759,7 @@ def test_hybrid_skips_a_failed_instruction_before_the_next_and_keeps_the_failure
     calls = []
     entered, release = Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         calls.append(asked(workspace))
         if calls[-1][0] == "poison":
             if len(calls) == 1:
@@ -802,7 +802,7 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
     calls = []
     entered, release, automatic, outage = Event(), Event(), Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         calls.append(asked(workspace))
         if calls[-1][0] == "poison":
             if len(calls) == 1:
@@ -848,7 +848,7 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
 
     seen = []
 
-    def method_again(workspace, tools):
+    def method_again(workspace, services):
         seen.append(asked(workspace))
 
     restarted = harness_dispatcher(tmp_path, recipe_in("hybrid", tmp_path, method_again))
@@ -896,7 +896,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
     calls = []
     entered, release = Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         text = workspace.request().text
         calls.append(text)
         if text == "poison":
@@ -1035,7 +1035,7 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
 def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_path):
     seen = []
 
-    def method(workspace, tools):
+    def method(workspace, services):
         seen.append(asked(workspace)[0])
 
     recipe = recipe_in("manual", tmp_path, method, max_steps=1)
@@ -1114,7 +1114,7 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(processor):
 
 
 def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp_path):
-    recipe = recipe_in("hybrid", tmp_path, lambda workspace, tools: None)
+    recipe = recipe_in("hybrid", tmp_path, lambda workspace, services: None)
     records = SQLiteRecordStore()
     try:
         trainer = _trainer(recipe, records)
@@ -1283,7 +1283,7 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
 def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_path):
     seen = []
 
-    def method(workspace, tools):
+    def method(workspace, services):
         seen.append(asked(workspace))
 
     dispatcher = harness_dispatcher(tmp_path, recipe_in("hybrid", tmp_path, method))
@@ -1366,7 +1366,7 @@ def test_every_mode_releases_the_oldest_held_units_beyond_the_buffer(caplog, mod
 def test_hybrid_collects_the_failures_an_instruction_step_carries(tmp_path):
     calls = []
 
-    def method(workspace, tools):
+    def method(workspace, services):
         calls.append(asked(workspace))
 
     recipe = recipe_in("hybrid", tmp_path, method, batch_size=2, evaluation={"collect_failures": True})

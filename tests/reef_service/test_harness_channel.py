@@ -64,7 +64,7 @@ def channel_dispatcher(
     )
     recipe = replace(
         harness_recipe(
-            tmp_path, lambda workspace, tools: next(candidates, None), seed=seed, score=evaluate, batch_size=batch_size
+            tmp_path, lambda workspace, services: next(candidates, None), seed=seed, score=evaluate, batch_size=batch_size
         ),
         pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )

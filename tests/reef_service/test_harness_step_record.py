@@ -99,7 +99,7 @@ def native_score(task: str, result) -> float:
 
 def native_backend(
     tmp_path: Path,
-    method=lambda workspace, tools: MARKER,
+    method=lambda workspace, services: MARKER,
     *,
     binary: str | None = None,
     workers: int = 1,
@@ -185,9 +185,9 @@ def test_the_record_keeps_every_model_call_through_the_binding_seam(tmp_path: Pa
     request, reply and time, long text cut at the cap with a marker naming what was dropped."""
     long_prompt = "x" * (RECORD_TEXT_CAP + 5)
 
-    def method(workspace, tools):
-        tools.models.served.chat([{"role": "user", "content": "first"}], timeout_s=5.0, max_tokens=8)
-        tools.models.served.chat([{"role": "system", "content": long_prompt}, {"role": "user", "content": "second"}])
+    def method(workspace, services):
+        services.models.served.chat([{"role": "user", "content": "first"}], timeout_s=5.0, max_tokens=8)
+        services.models.served.chat([{"role": "system", "content": long_prompt}, {"role": "user", "content": "second"}])
         return MARKER
 
     backend, _ = harness_backend(tmp_path, method)
@@ -211,8 +211,8 @@ def test_the_record_keeps_every_model_call_through_the_binding_seam(tmp_path: Pa
     assert HarnessTree.read(record / "harness") == PI_SEED.apply(MARKER)
     assert list((record / "output").iterdir()) == []
 
-    def wordy(workspace, tools):
-        tools.models.served.chat([{"role": "user", "content": "go"}], stop=["z" * (RECORD_TEXT_CAP + 2)])
+    def wordy(workspace, services):
+        services.models.served.chat([{"role": "user", "content": "go"}], stop=["z" * (RECORD_TEXT_CAP + 2)])
         return MARKER
 
     (tmp_path / "params").mkdir()
@@ -225,9 +225,9 @@ def test_the_record_keeps_every_model_call_through_the_binding_seam(tmp_path: Pa
 def test_the_record_keeps_a_failed_call_and_the_calls_before_a_budget_stop(tmp_path: Path, served_model) -> None:
     served_model["replies"] = [RuntimeError("endpoint down")]
 
-    def method(workspace, tools):
+    def method(workspace, services):
         try:
-            tools.models.served.chat([{"role": "user", "content": "hi"}])
+            services.models.served.chat([{"role": "user", "content": "hi"}])
         except RuntimeError:
             return
 
@@ -240,9 +240,9 @@ def test_the_record_keeps_a_failed_call_and_the_calls_before_a_budget_stop(tmp_p
 
     served_model["replies"] = ["ok"]
 
-    def greedy(workspace, tools):
+    def greedy(workspace, services):
         while True:
-            tools.models.served.chat([{"role": "user", "content": "more"}])
+            services.models.served.chat([{"role": "user", "content": "more"}])
 
     (tmp_path / "greedy").mkdir()
     backend, _ = harness_backend(tmp_path / "greedy", greedy, max_model_calls_per_step=2)
@@ -255,7 +255,7 @@ def test_the_record_keeps_a_failed_call_and_the_calls_before_a_budget_stop(tmp_p
 
 def test_a_rejected_removal_keeps_its_null_in_the_metrics(tmp_path: Path) -> None:
     removal = TreePatch({"rules.md": None})
-    backend, _ = harness_backend(tmp_path, lambda workspace, tools: removal)
+    backend, _ = harness_backend(tmp_path, lambda workspace, services: removal)
     result = step(backend)
     assert result.metrics["selected"] is False
     assert result.metrics["patch"] == {"rules.md": None}
@@ -363,7 +363,7 @@ def test_an_episode_that_could_not_run_has_no_path_and_a_pi_session_has_no_stage
     assert result.metrics["candidate_paths"] == (None,) and result.metrics["current_paths"] == (None,)
 
     (tmp_path / "pi").mkdir()
-    pi, _ = harness_backend(tmp_path / "pi", lambda workspace, tools: MARKER)
+    pi, _ = harness_backend(tmp_path / "pi", lambda workspace, services: MARKER)
     result = step(pi)
     assert result.metrics["candidate_paths"] == ({"stages": [], "reason": None},)
 
@@ -413,10 +413,10 @@ def test_the_record_redacts_credential_shaped_text_from_the_model_calls(tmp_path
     key = "sk-" + "a" * 24
     served_model["replies"] = [f"use {key} for auth"]
 
-    def method(workspace, tools):
-        tools.models.served.chat([{"role": "user", "content": f"the key is {key}"}])
+    def method(workspace, services):
+        services.models.served.chat([{"role": "user", "content": f"the key is {key}"}])
         # An agent's gateway records the calls it relays itself.
-        tools.calls.record({"source": "agent", "reply": f"the agent used {key}"})
+        services.calls.record({"source": "agent", "reply": f"the agent used {key}"})
         workspace.write_output(f"wrote {key} into the rules")
 
     backend, _ = harness_backend(tmp_path, method)
@@ -433,10 +433,10 @@ def test_a_methods_complete_call_shares_the_budget_and_the_record(tmp_path: Path
     served_model["replies"] = ["echo"]
     served_model["usage"] = {"prompt_tokens": 40, "completion_tokens": 6}
 
-    def method(workspace, tools):
-        tools.models.served.complete({"messages": [{"role": "user", "content": "one"}]}, timeout_s=3.0)
+    def method(workspace, services):
+        services.models.served.complete({"messages": [{"role": "user", "content": "one"}]}, timeout_s=3.0)
         with pytest.raises(RuntimeError, match="budget"):
-            tools.models.served.complete({"messages": [{"role": "user", "content": "two"}]})
+            services.models.served.complete({"messages": [{"role": "user", "content": "two"}]})
         return MARKER
 
     backend, _ = harness_backend(tmp_path, method, max_model_calls_per_step=1)
@@ -454,8 +454,8 @@ def test_a_methods_complete_call_shares_the_budget_and_the_record(tmp_path: Path
 def test_a_long_reply_is_clipped_with_the_marker(tmp_path: Path, served_model) -> None:
     served_model["replies"] = ["y" * (RECORD_TEXT_CAP + 3)]
 
-    def method(workspace, tools):
-        tools.models.served.chat([{"role": "user", "content": "go"}])
+    def method(workspace, services):
+        services.models.served.chat([{"role": "user", "content": "go"}])
         return MARKER
 
     backend, _ = harness_backend(tmp_path, method)

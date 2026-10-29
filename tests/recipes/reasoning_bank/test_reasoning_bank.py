@@ -1,7 +1,7 @@
 """ReasoningBank on the workspace protocol: runs become memory items in the bank and Agent Skills in the tree.
 
-Each step runs on a real workspace (``Workspace.create``) with the backend's own tools (``StepTools``), so every
-model call goes through the step's budgeted bindings and ``tools.check`` is the pi validation. The judge and the
+Each step runs on a real workspace (``Workspace.create``) with the backend's own services (``StepServices``), so every
+model call goes through the step's budgeted bindings and ``services.check`` is the pi validation. The judge and the
 extractor are canned models that answer in order and keep every prompt.
 """
 
@@ -15,7 +15,7 @@ import pytest
 import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import QueueChat
-from tests.support.harness_steps import MODEL, PI_SEED, step_tools
+from tests.support.harness_steps import MODEL, PI_SEED, step_services
 
 from recipes.reasoning_bank import ReasoningBank
 from recipes.reasoning_bank.method import FOCUS
@@ -77,9 +77,9 @@ def run_step(
         samples=samples,
         state_files=state,
     )
-    tools = step_tools(workspace, ModelBindings(served=MODEL, named={"judge": judge, "extract": extractor}))
+    services = step_services(workspace, ModelBindings(served=MODEL, named={"judge": judge, "extract": extractor}))
     method = ReasoningBank.from_config({"judge_model": "judge", "extract_model": "extract", **config})
-    method.step(StepContext(workspace, tools))
+    method.step(StepContext(workspace, services))
     return workspace, workspace.read_output()
 
 

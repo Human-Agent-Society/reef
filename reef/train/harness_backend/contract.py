@@ -3,7 +3,7 @@
 A method is a :class:`Method`. Each step gives it one :class:`StepContext`:
 the step's :class:`~reef.train.harness_backend.workspace.Workspace`, where the
 harness's components and the step's material are files, and the
-:class:`Tools`, the services that Reef runs for the method: model calls, the
+:class:`Services`, the services that Reef runs for the method: model calls, the
 tree check, the evaluation, and a run of the deployment's coding agent. The
 method edits ``context.workspace.harness``; the tree it leaves there is the
 step's candidate, and an unchanged tree skips the step. What it says about the
@@ -36,7 +36,7 @@ class AgentOutcome:
     ``evolution.agent.timeout_s``. ``error`` is why it could not start,
     ``None`` when it started. Exactly one holds: an exit code, a time out or
     an error. ``seconds`` ≥ 0 is how long the run took.
-    Purpose: ``Tools.run_agent`` returns it; the method decides what the run
+    Purpose: ``Services.run_agent`` returns it; the method decides what the run
     is worth, and ``to_json`` goes into its notes.
     """
 
@@ -69,7 +69,7 @@ class AgentOutcome:
         return {"exit_code": self.exit_code, "timed_out": self.timed_out, "error": self.error, "seconds": self.seconds}
 
 
-class Tools(ABC):
+class Services(ABC):
     """What a method may do in one step besides editing its workspace.
 
     Purpose: the backend makes one per step and passes it to ``Method.step``.
@@ -132,25 +132,25 @@ class StepContext:
 
     Values: ``workspace`` is the step's directories: the head tree in
     ``harness/``, the material, the method's state, scratch and output. Data
-    and the harness's components are files there. ``tools`` are the services
+    and the harness's components are files there. ``services`` are the services
     that Reef runs for the method in this step: model calls, the call record,
     the tree check and the evaluation.
     Purpose: the backend makes one per step and passes it to ``Method.step``.
     """
 
     workspace: Workspace
-    tools: Tools
+    services: Services
 
     def __post_init__(self) -> None:
-        if not isinstance(self.workspace, Workspace) or not isinstance(self.tools, Tools):
-            raise TypeError("StepContext needs a Workspace and Tools")
+        if not isinstance(self.workspace, Workspace) or not isinstance(self.services, Services):
+            raise TypeError("StepContext needs a Workspace and Services")
 
 
 class Method(ConfiguredPlugin, ABC):
     """Base class of a harness evolution method.
 
     Values: ``runs_agent`` is True for a method that runs the deployment's
-    coding agent (``Tools.run_agent``); only such a method gets the agent,
+    coding agent (``Services.run_agent``); only such a method gets the agent,
     and the recipe refuses a deployment that configures none for it.
     Purpose: a deployment names the class in ``evolution.method``, the recipe
     builds it with ``from_config``, and the backend calls ``step`` once per
@@ -169,4 +169,4 @@ class Method(ConfiguredPlugin, ABC):
         """
 
 
-__all__ = ["AgentOutcome", "Method", "StepContext", "Tools"]
+__all__ = ["AgentOutcome", "Method", "Services", "StepContext"]

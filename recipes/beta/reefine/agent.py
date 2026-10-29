@@ -66,7 +66,7 @@ from reef.harness.gateway import AgentTool
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.sandbox.environment import download_directory
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
-from reef.train.harness_backend import Tools, Workspace
+from reef.train.harness_backend import Services, Workspace
 from reef.train.harness_backend.agent.run import AgentExecution, agent_env, launch_agent, read_session
 
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
@@ -257,7 +257,7 @@ class AgentRun:
     """One agent run in a step's workspace, and what its two tools, ``check`` and ``trial``, do with its tree.
 
     Values: ``workspace`` is the step's workspace, whose ``harness/`` the
-    agent edits; ``tools`` checks trees and meters the step; ``head`` is the
+    agent edits; ``services`` checks trees and meters the step; ``head`` is the
     tree the step started from; ``agent`` says where and how long the agent
     and its trials run; ``descriptor`` is pi's. ``served`` is the step's
     served model. ``gateway`` and ``session`` are ``None`` until the run
@@ -271,13 +271,13 @@ class AgentRun:
     agent stops.
     """
 
-    def __init__(self, workspace: Workspace, tools: Tools, head: HarnessTree, agent: ReefineAgent) -> None:
+    def __init__(self, workspace: Workspace, services: Services, head: HarnessTree, agent: ReefineAgent) -> None:
         self.workspace = workspace
-        self.tools = tools
+        self.services = services
         self.head = head
         self.agent = agent
         self.descriptor = get_adapter(EXTENSION_ADAPTER)
-        self.served = tools.models.served
+        self.served = services.models.served
         self.gateway: ReefineGateway | None = None
         self.session: EpisodeExecutor | None = None
         #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
@@ -370,10 +370,10 @@ class AgentRun:
         try:
             candidate, unread = self.snapshot()
         except ValueError as error:
-            self.tools.calls.note("check", f"the tree cannot be read: {error}", failed=True)
+            self.services.calls.note("check", f"the tree cannot be read: {error}", failed=True)
             return self.record_check("check", {"valid": False, "problems": [str(error)]})
         # The tree as it stands, the head included: the step skips an unchanged tree, the agent's checks do not.
-        validation = self.tools.check(candidate)
+        validation = self.services.check(candidate)
         changes = self.head.diff(candidate).changes
         result: dict[str, Any] = {
             "valid": validation.passed,
@@ -382,9 +382,9 @@ class AgentRun:
         }
         if not validation.passed:
             result["problems"] = list(validation.problems)
-            self.tools.calls.note("check", f"validation refused the tree: {validation.message()}", failed=True)
+            self.services.calls.note("check", f"validation refused the tree: {validation.message()}", failed=True)
         else:
-            self.tools.calls.note("check", f"validation passed: {', '.join(changes) or 'the head tree, unchanged'}")
+            self.services.calls.note("check", f"validation passed: {', '.join(changes) or 'the head tree, unchanged'}")
         if unread:
             result["unread"] = unread
         return self.record_check("check", result)
@@ -395,11 +395,11 @@ class AgentRun:
         try:
             candidate, unread = self.snapshot()
         except ValueError as error:
-            self.tools.calls.note("trial", f"not run, the tree cannot be read: {error}", failed=True)
+            self.services.calls.note("trial", f"not run, the tree cannot be read: {error}", failed=True)
             return self.record_check("trial", {"ran": False, "refusal": str(error)})
-        validation = self.tools.check(candidate)
+        validation = self.services.check(candidate)
         if not validation.passed:
-            self.tools.calls.note(
+            self.services.calls.note(
                 "trial", f"not run, validation refused the tree: {validation.message()}", failed=True
             )
             return self.record_check("trial", {"ran": False, "refusal": validation.message(), "unread": unread})
@@ -409,7 +409,7 @@ class AgentRun:
                 "trial", {"ran": False, "refusal": "finish the current candidate; trial budget exhausted"}
             )
         self.trials += 1
-        self.tools.calls.note(
+        self.services.calls.note(
             "trial", f"trial {self.trials} running the changed harness: {task or 'scripted session'}"
         )
         binding = ModelBinding(base_url=self.gateway.base_url, model=self.served.model, api=self.served.api)
@@ -446,7 +446,7 @@ class AgentRun:
                     )
                 report = json.loads(report_path.read_text(encoding="utf-8"))
                 result = {"ran": True, "mode": "scripted", **report, "exit_code": outcome.exit_code}
-                self.tools.calls.note(
+                self.services.calls.note(
                     "trial",
                     f"trial {self.trials}: scripted assertions {'passed' if report['passed'] else 'failed'}",
                     failed=not report["passed"],
@@ -456,7 +456,7 @@ class AgentRun:
                 )
         except EpisodeTimeout:
             limit = f"the trial ran past its {timeout:g} s limit"
-            self.tools.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
+            self.services.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
             return self.record_check(
                 "trial",
                 {
@@ -467,7 +467,7 @@ class AgentRun:
                 },
             )
         except EpisodeLaunchError as error:
-            self.tools.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
+            self.services.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
             return self.record_check("trial", {"ran": False, "candidate": checksum, "error": str(error)})
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -478,7 +478,7 @@ class AgentRun:
         if made:
             summary += f", {len(made)} multimodal call{'s' if len(made) != 1 else ''}"
             summary += f" ({len(refused)} refused)" if refused else " (all answered)"
-        self.tools.calls.note("trial", summary, failed=outcome.exit_code != 0 or bool(refused))
+        self.services.calls.note("trial", summary, failed=outcome.exit_code != 0 or bool(refused))
         return self.record_check(
             "trial",
             {
@@ -535,7 +535,7 @@ class TrialTool(AgentTool):
 
 
 def answer_with_agent(
-    workspace: Workspace, tools: Tools, head: HarnessTree, request: TrainingRequest, agent: ReefineAgent
+    workspace: Workspace, services: Services, head: HarnessTree, request: TrainingRequest, agent: ReefineAgent
 ) -> Answer:
     """Run the agent on one request in the step's tree and read its work back: the change with the notes the step
     records, or the empty change with the reason under ``failure``. When the answer's tree is not the one the agent
@@ -545,8 +545,8 @@ def answer_with_agent(
     reference.parent.mkdir(parents=True)
     shutil.copyfile(PI_EXTENSION_API, reference)
     home = workspace.scratch / AGENT_HOME
-    run = AgentRun(workspace, tools, head, agent)
-    gateway = ReefineGateway(run.served, tools.calls, (CheckTool(run), TrialTool(run)), agent.provider)
+    run = AgentRun(workspace, services, head, agent)
+    gateway = ReefineGateway(run.served, services.calls, (CheckTool(run), TrialTool(run)), agent.provider)
     gateway.start()
     run.gateway = gateway
     record: dict[str, Any] = {}
@@ -568,7 +568,7 @@ def answer_with_agent(
         run.deadline = time.monotonic() + limit
         env["REEF_AGENT_DEADLINE_MS"] = str(int((time.time() + limit) * 1000))
         env["REEF_AGENT_FINISH_SECONDS"] = str(run.finish_seconds)
-        tools.calls.note("agent", f"the coding agent started on the request (at most {limit:g} s)")
+        services.calls.note("agent", f"the coding agent started on the request (at most {limit:g} s)")
         outcome, trajectory = launch_pi(
             run.descriptor,
             agent.execution.binary,
@@ -603,7 +603,7 @@ def answer_with_agent(
     except EpisodeTimeout:
         record["timed_out"] = True
     except EpisodeLaunchError as error:
-        tools.calls.note("agent", f"the coding agent run failed: {error}", failed=True)
+        services.calls.note("agent", f"the coding agent run failed: {error}", failed=True)
         answer = failed({}, f"the agent run failed: {error}")
     finally:
         try:
@@ -618,7 +618,7 @@ def answer_with_agent(
             keep_session(home / run.descriptor.trajectory_path, workspace.output / SESSION_FILE)
     if answer is None:
         ended = "ran past its limit" if record.get("timed_out") else f"exited {record.get('exit_code')}"
-        tools.calls.note(
+        services.calls.note(
             "agent",
             f"the coding agent {ended} after {record['seconds']:g} s and {run.trials} trials; reading its tree",
             failed=bool(record.get("timed_out") or record.get("error")) or record.get("exit_code", 0) != 0,
@@ -656,7 +656,7 @@ def read_answer(run: AgentRun, request: TrainingRequest, record: dict[str, Any])
     if refused:
         notes["refused_requires"] = refused
     review, review_failure = review_answer(
-        run.tools.models, request.text, design or None, patch, [*own, *added], adapter=run.descriptor.name
+        run.services.models, request.text, design or None, patch, [*own, *added], adapter=run.descriptor.name
     )
     if review is not None:
         notes["review"] = review

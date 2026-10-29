@@ -1423,7 +1423,7 @@ skipped or fails.
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import (
-       AgentMethod, AgentOutcome, Method, ModelCalls, StepContext, Tools, Trace, Workspace,
+       AgentMethod, AgentOutcome, Method, ModelCalls, Services, StepContext, Trace, Workspace,
    )
 
    class MyMethod(Method):
@@ -1444,7 +1444,7 @@ skipped or fails.
        ``context.workspace.write_output``
    * - ``Method.runs_agent``
      - a class attribute, ``False`` by default; ``True`` for a method that
-       calls ``Tools.run_agent``, which then gets ``evolution.agent`` and is
+       calls ``Services.run_agent``, which then gets ``evolution.agent`` and is
        refused at startup without it
    * - ``AgentMethod``
      - a method that is a folder of prompts (``config``: ``prompts``, the
@@ -1453,8 +1453,8 @@ skipped or fails.
        agent once and reads ``output/summary.md``, ``notes.json`` and
        ``requires.json``
    * - ``StepContext``
-     - ``workspace``, the step's ``Workspace``, and ``tools``, the step's
-       ``Tools``; the backend makes one per step
+     - ``workspace``, the step's ``Workspace``, and ``services``, the step's
+       ``Services``; the backend makes one per step
    * - ``Workspace``
      - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
        paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
@@ -1486,28 +1486,28 @@ skipped or fails.
        ``client``; ``trajectory()`` reads the ATIF trajectory of a traffic
        trace, and returns ``None`` for a rollout, whose episode files the
        history keeps
-   * - ``Tools.models``
+   * - ``Services.models``
      - a ``ModelBindings``: ``served`` and every ``evolution.models`` entry;
        ``chat(messages, *, timeout_s=None, **params)`` returns the assistant
        text, ``complete(body)`` the provider's response. Every call counts
        against ``evolution.max_model_calls_per_step`` and lands in
        ``calls.json``
-   * - ``Tools.calls``
+   * - ``Services.calls``
      - the step's ``ModelCalls``: ``spend()`` counts one call and raises
        ``RuntimeError`` past the budget, ``record(entry)`` appends one call
        to ``calls.json``, and ``note(kind, text, *, failed=False)`` adds one
        line to the step's activity
-   * - ``Tools.check(tree)``
+   * - ``Services.check(tree)``
      - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
        ``problems`` and ``message()``
-   * - ``Tools.evaluate(tree, tasks, *, repeats=1)``
+   * - ``Services.evaluate(tree, tasks, *, repeats=1)``
      - ``repeats`` ``EpisodeRecord`` values per task of the list ``tasks``
        (a single string is refused), task by task; reuses the scored
        episodes the history holds; ``RuntimeError`` without a scorer, or
        when the call needs more episodes than
        ``evolution.max_episodes_per_step`` leaves, and then no episode runs;
        ``ValueError`` for a tree that fails ``check``
-   * - ``Tools.run_agent(prompt, *, tree, model)``
+   * - ``Services.run_agent(prompt, *, tree, model)``
      - one run of the deployment's coding agent in the workspace, its own
        harness ``tree`` rendered after Reef's protocol rules and its model
        calls on the binding ``model`` names, through a gateway that serves

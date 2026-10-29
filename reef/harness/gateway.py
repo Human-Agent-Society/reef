@@ -48,7 +48,7 @@ class ModelCalls(ABC):
     """A budget of model calls, their record, and the live activity of what calls them.
 
     Purpose: a harness evolution step's model calls spend and record through
-    one (``Tools.calls``): its budgeted bindings, and a gateway that relays an
+    one (``Services.calls``): its budgeted bindings, and a gateway that relays an
     agent process's calls.
     """
 

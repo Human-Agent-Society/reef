@@ -26,7 +26,7 @@ failure. Reef serves each item as an Agent Skill, so the agent opens the items t
    slug joins the bank, and an item with a slug that the bank holds replaces that item. Past `max_items` items,
    the oldest items leave the bank.
 5. **Write the tree.** The step writes one skill per item and removes every other `skills/rb-*` skill. The other
-   files of the tree do not change. The step checks the new tree with `tools.check`. When the check fails, neither
+   files of the tree do not change. The step checks the new tree with `services.check`. When the check fails, neither
    the tree nor the bank changes.
 
 A reply that is not the asked JSON skips its run. An item that carries a credential or an instruction override

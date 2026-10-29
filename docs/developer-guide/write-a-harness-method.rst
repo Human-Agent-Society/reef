@@ -21,7 +21,7 @@ At each step, Reef calls ``step`` with a ``StepContext`` of two parts:
 
 - ``context.workspace``: the step's directory. It holds a copy of the head
   tree, the step's material, and the method's own files.
-- ``context.tools``: the services that Reef runs for the method: model calls,
+- ``context.services``: the services that Reef runs for the method: model calls,
   the tree check, the evaluation of a tree on tasks, and a run of the
   deployment's coding agent.
 
@@ -51,7 +51,7 @@ traces that scored below 1, and writes the reply to ``rules.md``:
        """One model call per step: rewrite rules.md from the failing traces."""
 
        def step(self, context: StepContext) -> None:
-           workspace, tools = context.workspace, context.tools
+           workspace, services = context.workspace, context.services
            failing = [trace for trace in workspace.traces() if trace.score is not None and trace.score < 1.0]
            if not failing:
                workspace.write_output("no failing trace")  # harness/ is unchanged, so the step is skipped
@@ -62,9 +62,9 @@ traces that scored below 1, and writes the reply to ``rules.md``:
            )
            rules = tree.files.get("rules.md", "")
            prompt = f"{PROMPT}\n\nRules:\n{rules}\n\nFailing requests:\n{untrusted_text(shown)}"
-           reply = tools.models.served.chat([{"role": "user", "content": prompt}])
+           reply = services.models.served.chat([{"role": "user", "content": prompt}])
            candidate = tree.apply(TreePatch({"rules.md": reply.strip() + "\n"}))
-           validation = tools.check(candidate)
+           validation = services.check(candidate)
            if not validation.passed:
                workspace.write_output(f"the new rules fail validation: {validation.message()}")
                return
@@ -118,7 +118,7 @@ After ``step`` returns, Reef reads the tree in ``harness/``:
 
 - An unchanged tree skips the step.
 - A tree that fails validation skips the step, and the step's ``skipped``
-  metric names the problems. There is no retry, so call ``tools.check``
+  metric names the problems. There is no retry, so call ``services.check``
   before you return.
 - Any other tree is the candidate. The deployment's publication policy
   evaluates it.
@@ -186,34 +186,34 @@ that an offline step ran on a train task (``source`` is ``rollout``):
 Material is client data. See `Untrusted input`_ before its text enters a
 model prompt.
 
-The tools
----------
+The services
+------------
 
-- ``tools.models``: the model bindings. ``served`` is the model under test,
-  and ``tools.models["<name>"]`` is an ``evolution.models`` entry.
+- ``services.models``: the model bindings. ``served`` is the model under test,
+  and ``services.models["<name>"]`` is an ``evolution.models`` entry.
   ``chat(messages, *, timeout_s=None, **params)`` takes OpenAI-shaped
   messages and returns the assistant text. ``complete(body)`` sends a raw
   request body and returns the provider's response.
-- ``tools.calls``: the step's call meter. ``spend()`` counts one call,
+- ``services.calls``: the step's call meter. ``spend()`` counts one call,
   ``record(entry)`` appends one call to the record, and ``note(kind, text,
   *, failed=False)`` adds one line to the step's activity.
-- ``tools.check(tree)``: the ``ValidationResult`` of ``tree`` for the
+- ``services.check(tree)``: the ``ValidationResult`` of ``tree`` for the
   adapter, with ``passed``, ``problems`` and ``message()``.
-- ``tools.evaluate(tree, tasks, *, repeats=1)``: ``repeats`` scored
+- ``services.evaluate(tree, tasks, *, repeats=1)``: ``repeats`` scored
   ``EpisodeRecord`` values per task of the list ``tasks``, task by task.
-- ``tools.run_agent(prompt, *, tree, model)``: one run of the deployment's
+- ``services.run_agent(prompt, *, tree, model)``: one run of the deployment's
   coding agent in the workspace, as an ``AgentOutcome``. Only a method whose
   class sets ``runs_agent`` gets an agent (see `Run a coding agent`_).
 
-Every call through ``tools.models`` counts against
+Every call through ``services.models`` counts against
 ``evolution.max_model_calls_per_step``, and a call past the limit raises
 ``RuntimeError``. Each call lands in the step record's ``calls.json``. A
 process that calls a model by itself, such as a coding agent behind a
-gateway, must call ``tools.calls.spend()`` before each call and
-``tools.calls.record(entry)`` after it. Then the budget and the record stay
+gateway, must call ``services.calls.spend()`` before each call and
+``services.calls.record(entry)`` after it. Then the budget and the record stay
 complete.
 
-``tools.evaluate`` runs episodes as the step's evaluation does: the same
+``services.evaluate`` runs episodes as the step's evaluation does: the same
 rendering, worker pool and scorer. An ``EpisodeRecord`` has the ``task``, the
 ``repeat`` index, the ``score``, the ``reply`` and the ``episode`` id. The
 ``score`` is ``None`` for an episode that could not run, and ``failure`` says
@@ -222,7 +222,7 @@ tree, task, repeat and evaluation context, so asking again costs nothing. Ask
 for more repeats to get new samples. A tree that the method evaluates joins
 the history as a candidate of the step.
 
-``tools.evaluate`` refuses a call, runs no episode, and adds nothing to the
+``services.evaluate`` refuses a call, runs no episode, and adds nothing to the
 history in these cases:
 
 - ``RuntimeError``: the deployment configured no scorer, or the call needs
@@ -234,7 +234,7 @@ history in these cases:
 Run a coding agent
 ~~~~~~~~~~~~~~~~~~
 
-``tools.run_agent`` runs the deployment's coding agent once, and returns when
+``services.run_agent`` runs the deployment's coding agent once, and returns when
 the agent exits or runs past ``evolution.agent.timeout_s``. ``evolution.agent``
 names the agent's adapter (any adapter whose prompt is text, ``pi`` by
 default), its binary, and the sandbox it runs in; see the `configuration
@@ -346,7 +346,7 @@ The deployment's ``evolution.evaluation`` section names the tasks, the scorer
 and the publication policy. `Evaluation: the publication policy
 <../user-guide/evolve-your-harness.rst#evaluation-the-publication-policy>`__
 explains the policies. The evaluation reads the episodes that
-``tools.evaluate`` stored. A candidate that the method already scored on the
+``services.evaluate`` stored. A candidate that the method already scored on the
 step's tasks, ``workspace.evaluation_repeats()`` times each, needs no new
 episodes in the evaluation.
 

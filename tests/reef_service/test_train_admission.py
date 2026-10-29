@@ -33,7 +33,7 @@ def blocking_method():
     """A method that holds its step open until released, so accepted instructions stay stored."""
     entered, release = Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         entered.set()
         release.wait(10)
 
@@ -87,7 +87,7 @@ def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: P
 
 
 def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, lambda workspace, tools: None))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, lambda workspace, services: None))
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher)))

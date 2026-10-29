@@ -57,7 +57,7 @@ def growing_recipe(tmp_path: Path, method, **fields):
     return manual_recipe(tmp_path, method, score=longer, **fields)
 
 
-def adding_rules(workspace: Workspace, tools) -> TreePatch | None:
+def adding_rules(workspace: Workspace, services) -> TreePatch | None:
     """A method whose every request step adds one more rule, which the growing recipe publishes."""
     if workspace.request() is None:
         return None
@@ -89,7 +89,7 @@ async def committed(scenario, count: int, seconds: float = 30.0) -> list[dict]:
 def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_route(tmp_path: Path) -> None:
     seen: list[tuple] = []
 
-    def method(workspace, tools):
+    def method(workspace, services):
         seen.append((workspace.traces(), workspace.request()))
         return MARKER
 
@@ -200,7 +200,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
     never the literal; a malformed list is a caller error; a refusal stores nothing."""
     entered, release = Event(), Event()
 
-    def method(workspace, tools):
+    def method(workspace, services):
         # Holds its step open so the accepted records stay stored while the route is probed.
         entered.set()
         release.wait(10)
@@ -311,7 +311,7 @@ def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tm
     )
     handed: list[list[dict]] = []
 
-    def method(workspace, tools):
+    def method(workspace, services):
         handed.append([dict(item) for item in workspace.request().requires])
         patch, requires = next(answers)
         if patch is not None:
@@ -384,7 +384,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
     person = [{"name": f"P{index}", "kind": "env"} for index in range(6)]
     added = [{"name": f"A{index}", "kind": "env"} for index in range(added_count)]
 
-    def extending(workspace, tools):
+    def extending(workspace, services):
         # A name the person already gave does not take one of the remaining places.
         return answered(workspace, MARKER, requires=(*person[:2], *added))
 
@@ -402,7 +402,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
 
 
 def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
-    def method(workspace, tools):
+    def method(workspace, services):
         return answered(
             workspace, MARKER, requires=tuple({"name": f"ENV_{index}", "kind": "env"} for index in range(8))
         )
@@ -444,10 +444,10 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
     payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
 
-    def adding(workspace, tools):
+    def adding(workspace, services):
         return answered(workspace, MARKER, requires=({"name": "SMTP_HOST", "kind": "env"},))
 
-    def keeping(workspace, tools):
+    def keeping(workspace, services):
         return None
 
     for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
@@ -475,7 +475,7 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
     """The seed's base release requires nothing; the release a request with two items published carries them;
     the manifest of each carries that release's own list."""
 
-    def method(workspace, tools):
+    def method(workspace, services):
         return MARKER if workspace.request() is not None else None
 
     dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
@@ -588,7 +588,7 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
     tree."""
     themed = json.dumps({"defaultThinkingLevel": "off", "theme": "light"}) + "\n"
 
-    def method(workspace, tools):
+    def method(workspace, services):
         if workspace.request() is None:
             return None
         return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": themed})

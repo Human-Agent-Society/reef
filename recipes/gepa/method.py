@@ -18,7 +18,7 @@ samples the next parent.
 
 The parent's minibatch costs no episodes when the parent is the served
 tree: the step's traces are that tree's own run, scores included. Any other
-parent and every child run through ``tools.evaluate``. The archive counts
+parent and every child run through ``services.evaluate``. The archive counts
 metric calls the way GEPA does, whatever the cache saves: the seed's
 validation, every parent and child minibatch, and every accepted candidate's
 validation. So a budget means what it means upstream. With
@@ -39,7 +39,7 @@ from reef.core.plugins import ConfiguredPlugin, PluginSettings
 from reef.evaluation.harness import History
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree
-from reef.train.harness_backend import Method, StepContext, Tools, Trace, Workspace
+from reef.train.harness_backend import Method, StepContext, Services, Trace, Workspace
 
 from .archive import Archive
 from .components import candidate_tree, texts_of
@@ -174,7 +174,7 @@ class GEPA(Method):
         return cls(settings, feedback)
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         path = workspace.state / ARCHIVE_FILE
         tasks = workspace.tasks()
         head = workspace.tree()
@@ -187,12 +187,12 @@ class GEPA(Method):
             repeats=max(1, workspace.evaluation_repeats()),
             rng_seed=self.settings.seed,
         )
-        summary, record = self.iterate(archive, workspace, tools, head, len(tasks))
+        summary, record = self.iterate(archive, workspace, services, head, len(tasks))
         path.write_text(json.dumps(archive.to_state(), indent=2) + "\n", encoding="utf-8")
         workspace.write_output(summary, {**record, "metric_calls": archive.metric_calls})
 
     def iterate(
-        self, archive: Archive, workspace: Workspace, tools: Tools, head: HarnessTree, valset_size: int
+        self, archive: Archive, workspace: Workspace, services: Services, head: HarnessTree, valset_size: int
     ) -> tuple[str, dict[str, Any]]:
         """One GEPA iteration on ``archive``: the step's summary and the iteration's record.
 
@@ -211,7 +211,7 @@ class GEPA(Method):
         traces = [(task, trace) for trace in workspace.traces() if (task := trace.task)][: settings.minibatch_size]
         if not traces:
             return skipped("the step's traces hold no task to run")
-        minibatch = self.minibatch(archive, parent, traces, tools, head)
+        minibatch = self.minibatch(archive, parent, traces, services, head)
         if settings.skip_perfect_score and all(example.score >= settings.perfect_score for example in minibatch):
             return skipped("the parent scored perfectly on the minibatch")
         parent_texts = archive.candidates[parent].texts
@@ -220,7 +220,7 @@ class GEPA(Method):
             return skipped("the served tree holds no evolvable file")
         component = archive.next_component(parent, keys)
         prompt = render_prompt(parent_texts[component], self.records(minibatch))
-        reflection = tools.models.get(settings.reflection_model, tools.models.served)
+        reflection = services.models.get(settings.reflection_model, services.models.served)
         reply = reflection.chat([{"role": "user", "content": prompt}])
         new_text = extract_new_text(reply)
         # The step's calls.json keeps the prompt and the reply. The record leaves them out: it goes into the archive,
@@ -239,12 +239,12 @@ class GEPA(Method):
             return f"the reflection on {component} wrote no new text", record
         child_texts = {**parent_texts, component: new_text}
         child = candidate_tree(head, child_texts)
-        validation = tools.check(child)
+        validation = services.check(child)
         if not validation.passed:
             record["problems"] = list(validation.problems)
             archive.log_proposal(record)
             return f"the child fails validation: {validation.message()}", record
-        episodes = tools.evaluate(child, [example.task for example in minibatch])
+        episodes = services.evaluate(child, [example.task for example in minibatch])
         archive.charge(len(episodes))
         child_scores = task_scores([episode.score for episode in episodes], repeats=1)
         record["child_scores"] = child_scores
@@ -268,7 +268,7 @@ class GEPA(Method):
         ), record
 
     def minibatch(
-        self, archive: Archive, parent: int, traces: Sequence[tuple[str, Trace]], tools: Tools, head: HarnessTree
+        self, archive: Archive, parent: int, traces: Sequence[tuple[str, Trace]], services: Services, head: HarnessTree
     ) -> list[Example]:
         """The parent's run on the tasks of ``traces``, charged as GEPA charges its evaluation of the parent.
 
@@ -282,7 +282,7 @@ class GEPA(Method):
                 for task, trace in traces
             ]
         tasks = [task for task, _ in traces]
-        episodes = tools.evaluate(candidate_tree(head, archive.candidates[parent].texts), tasks)
+        episodes = services.evaluate(candidate_tree(head, archive.candidates[parent].texts), tasks)
         archive.charge(len(episodes))
         return [
             Example(

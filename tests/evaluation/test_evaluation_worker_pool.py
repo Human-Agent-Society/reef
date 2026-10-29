@@ -118,7 +118,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     binary.chmod(0o755)
     recipe = harness_recipe(
         tmp_path,
-        lambda workspace, tools: None,
+        lambda workspace, services: None,
         score=IsolationScorer(),
         tasks=("one",),
         worker_executor=ExecutorSettings(executor_backend, workers=workers),

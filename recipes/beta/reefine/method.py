@@ -34,14 +34,14 @@ class ReefineMethod(Method):
         self.agent = agent
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         head = workspace.tree()
         traces = workspace.traces()
         request = workspace.request()
         adapter = str(workspace.host()["adapter"])
         if request is None:
             layout = get_adapter(adapter).layout
-            patch = None if not traces else learn_from_failures(head, traces, tools.models, layout)
+            patch = None if not traces else learn_from_failures(head, traces, services.models, layout)
             if patch is None:
                 return
             workspace.write_tree(head.apply(patch))
@@ -52,9 +52,9 @@ class ReefineMethod(Method):
             return
         # The agent answers requests on pi alone: its rules and its trials are pi's.
         if self.agent is not None and adapter == EXTENSION_ADAPTER:
-            answer = answer_with_agent(workspace, tools, head, request, self.agent)
+            answer = answer_with_agent(workspace, services, head, request, self.agent)
         else:
-            answer = answer_request(head, request, traces, tools, adapter)
+            answer = answer_request(head, request, traces, services, adapter)
         workspace.write_tree(head.apply(answer.patch))
         workspace.write_output(summary=step_summary(answer.notes), notes=answer.notes, requires=answer.requires)
 

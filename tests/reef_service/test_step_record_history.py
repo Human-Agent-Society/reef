@@ -53,7 +53,7 @@ def test_record_scope_and_limits(tmp_path: Path) -> None:
 
 
 def test_step_record_http_contract(tmp_path: Path) -> None:
-    def method(workspace, tools):
+    def method(workspace, services):
         workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
         workspace.write_output("added a rule", {"rules": 1})
 
@@ -117,8 +117,8 @@ def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Pa
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
-    def method(workspace, tools):
-        tools.models.served.chat([{"role": "user", "content": workspace.request().text}])
+    def method(workspace, services):
+        services.models.served.chat([{"role": "user", "content": workspace.request().text}])
 
     dispatcher = manual_dispatcher(tmp_path, method)
     dispatcher.get_or_create_scenario(SCENARIO)

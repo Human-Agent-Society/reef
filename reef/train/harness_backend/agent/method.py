@@ -10,7 +10,7 @@ step's number and ``{history}`` the history's path from the workspace.
 Every other file of the folder is a file of the agent's tree; a run refuses
 one that no part of the agent's adapter takes.
 
-Each step runs the agent once (``Tools.run_agent``). The tree it leaves in
+Each step runs the agent once (``Services.run_agent``). The tree it leaves in
 ``harness/`` is the candidate; a run that does not exit 0 leaves the head
 tree, so the step skips. The agent says what the step did in ``output/``
 (``summary.md``, ``notes.json``, ``requires.json``), as every method does;
@@ -93,12 +93,12 @@ class AgentMethod(Method):
         return cls(start, resume, HarnessTree(files), settings.model)
 
     def step(self, context: StepContext) -> None:
-        workspace, tools = context.workspace, context.tools
+        workspace, services = context.workspace, context.services
         head = workspace.tree()
         prompt = self.start
         if self.resume is not None and any(workspace.state.iterdir()):
             prompt = self.resume
-        outcome = tools.run_agent(fill(prompt, workspace), tree=self.tree, model=self.model)
+        outcome = services.run_agent(fill(prompt, workspace), tree=self.tree, model=self.model)
         if not outcome.succeeded:
             workspace.write_tree(head)
             workspace.write_output(

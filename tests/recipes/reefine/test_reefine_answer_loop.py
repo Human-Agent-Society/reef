@@ -22,7 +22,7 @@ from tests.recipes.reefine.reefine_support import (
     SHORT,
     TREE,
     Model,
-    ModelTools,
+    ModelServices,
     Served,
     answer,
     designed,
@@ -252,9 +252,9 @@ def test_a_retry_shows_every_key_of_a_refused_config_file_and_cuts_only_its_long
 
 def test_a_refused_answer_is_on_the_activity_while_the_step_runs() -> None:
     """The Activity says an answer was written again, and why, before the step settles, not only in its record."""
-    tools = ModelTools(Model(designed(LOUD), designed(skill("run-tests")), json.dumps(REVIEW)))
-    reefine_answer.answer_request(TREE, REQUEST, (), tools, "pi")
-    (line,) = tools.calls.activity()
+    services = ModelServices(Model(designed(LOUD), designed(skill("run-tests")), json.dumps(REVIEW)))
+    reefine_answer.answer_request(TREE, REQUEST, (), services, "pi")
+    (line,) = services.calls.activity()
     assert (line["kind"], line["failed"]) == ("check", True)
     assert line["text"].startswith("answer 1 written again: the harness refused the files: ")
 

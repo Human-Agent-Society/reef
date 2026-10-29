@@ -14,7 +14,7 @@ import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, PI_SEED, TreeReleases, runtime, step_tools
+from tests.support.harness_steps import COMPONENT, PI_SEED, TreeReleases, runtime, step_services
 
 from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample
@@ -88,8 +88,8 @@ def ace_step(
         samples=samples,
         state_files=state,
     )
-    tools = step_tools(workspace, ModelBindings(served=chat))
-    ACE(settings).step(StepContext(workspace, tools))
+    services = step_services(workspace, ModelBindings(served=chat))
+    ACE(settings).step(StepContext(workspace, services))
     return workspace, workspace.read_output()
 
 
