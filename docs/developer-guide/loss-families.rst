@@ -174,8 +174,8 @@ frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
 Per-job families
 ----------------
 
-A job can select an objective of another family (`Switch methods within a run
-<write-a-recipe.rst#switch-methods-within-a-run>`__). The workers keep their
+A job can select an objective of another family (`Train each kind of sample with its own method
+<write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__). The workers keep their
 startup flags. The family brings its ``--loss-type``, objective hooks,
 advantage routing, wire keys, and the defaults of its family flags. Before the
 family's first job trains, the Slime component validates the family against
@@ -199,9 +199,7 @@ Slime's before-train-step hook. Reef runs any
 keeps its configured curve, so a checkpoint still loads under the startup
 flags. The component records the schedule's progress with each saved
 checkpoint (in the start's ``start.json``), so the next job continues it. A
-job that selects a schedule fails when the run uses ``--decoupled-lr``. A job
-that restarts training (``JobRequest(restart=True)``) starts both Megatron's
-scheduler and the selected schedule at step 0.
+job that selects a schedule fails when the run uses ``--decoupled-lr``.
 
 The distillation base
 ---------------------

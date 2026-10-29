@@ -32,12 +32,12 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, Multimod
 from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_objective
-from reef.train.jobs import FixedJobPlan, JobLoop, JobPlan, JobRequest
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -396,7 +396,7 @@ class WeightTrainingSpec:
 
     ``objective`` is the recipe's objective: a registered name or a dotted
     ``package.module:Objective`` reference. Every job trains with it unless
-    the recipe overrides :meth:`WeightTrainingRecipe.job_plan`. How a job's
+    the recipe overrides :meth:`WeightTrainingRecipe.parameters_by_kind`. How a job's
     data is cut into optimizer steps belongs to the training component.
     """
 
@@ -439,8 +439,8 @@ class WeightTrainingRecipe(Recipe):
     job_parameters: Mapping[str, Any] | None = config_field(
         None,
         help=(
-            "Job parameters that the default job plan sends with every job, beside method; the training "
-            "component refuses a parameter it does not take."
+            "Job parameters that the recipe sends with every job, beside method; the training component "
+            "refuses a parameter it does not take."
         ),
     )
 
@@ -452,23 +452,22 @@ class WeightTrainingRecipe(Recipe):
         """
         return WeightTrainingSpec(objective="")
 
-    def job_plan(self) -> JobPlan:
-        """How this recipe chooses each training job.
+    def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """The parameters of each training job, by the kind of the job's samples.
 
-        The default submits one job each time job data is ready to the recipe's
-        training component, with ``training_spec()``'s objective (the
-        parameter ``method``) and the ``job_parameters`` config, such as a
-        ``scheduling`` or a ``save_interval``. The component's own defaults
-        fill the rest, such as its learning rate. A recipe that switches methods
-        within one run (a supervised phase before policy training, a
-        distillation phase after it) returns its own plan, built from its
-        config fields; the training component switches the objective from one
-        job to the next.
+        The pipeline's sample-to-job stage gives a job the parameters of its
+        samples' kind (``Sample2Job.job_parameters``). The default gives every
+        job ``training_spec()``'s objective (the parameter ``method``) and the
+        ``job_parameters`` config, such as a ``scheduling`` or a
+        ``save_interval``. The component's own defaults fill the rest, such as
+        its learning rate. A recipe that trains each kind with its own method,
+        such as SFT on trajectories and a policy objective on tasks, overrides
+        it; the training component switches the objective from one job to the
+        next. The result must be the same at every call: it is part of each
+        job's identity.
         """
-        spec = type(self).training_spec()
-        parameters = dict(self.job_parameters or {})
-        parameters["method"] = TrainingMethod(spec.objective).to_dict()
-        return FixedJobPlan(JobRequest(parameters))
+        method = TrainingMethod(type(self).training_spec().objective).to_dict()
+        return {kind: {**(self.job_parameters or {}), "method": method} for kind in SAMPLE_KINDS}
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -615,7 +614,8 @@ class WeightTrainingRecipe(Recipe):
                 scenario,
                 records,
                 pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(self.training_component, self.job_plan(), scenario=scenario),
+                job_loop=JobLoop(self.training_component, scenario=scenario),
+                job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
                 report_type=self.report_type,
                 experiment_logger=experiment_logger,

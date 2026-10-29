@@ -34,7 +34,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop, JobLoopState
@@ -115,6 +115,7 @@ class Trainer:
         training_mode: str = "auto",
         task_storage: TaskStorage | None = None,
         samples: SampleStore | None = None,
+        job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None,
         default_job_samples: int | None = None,
     ) -> Trainer:
         """Build a trainer and its pipeline.
@@ -128,6 +129,11 @@ class Trainer:
         unless the stage config sets it; the stage checks its own size rules.
         A trainer that trains with no ``job_samples``, through a stage that
         trains more than its own job data, is a ``PluginConfigError``.
+        ``job_parameters`` is the parameters of each job of ``job_loop``, by
+        the kind of its samples (``PipelineContext.job_parameters``); the
+        pipeline's stage gives them with each job's data. ``None`` gives
+        every kind empty parameters, so the training component's defaults
+        apply.
         """
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend; a job loop holds its own")
@@ -142,6 +148,8 @@ class Trainer:
                 training_mode=training_mode,
                 task_storage=task_storage,
                 samples=samples,
+                # None gives every kind empty parameters: the training component's own defaults.
+                job_parameters={kind: {} for kind in SAMPLE_KINDS} if job_parameters is None else job_parameters,
                 # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
                 default_job_samples=default_job_samples if trains else None,
             )
@@ -583,7 +591,8 @@ class Trainer:
             elif self._job_loop is None:
                 result = self._execute_backend_step(data, scenario_step)
             else:
-                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data).result
+                parameters = self._pipeline.sample2job.job_parameters(data)
+                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data, parameters).result
         with self._lock:
             if data is None:
                 # A new training start set meanwhile replaced the state this poll read: its result is stale.
