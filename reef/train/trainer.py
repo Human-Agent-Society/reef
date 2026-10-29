@@ -114,6 +114,7 @@ class Trainer:
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
         task_storage: TaskStorage | None = None,
+        samples: SampleStore | None = None,
         default_job_samples: int | None = None,
     ) -> Trainer:
         """Build a trainer and its pipeline.
@@ -140,6 +141,7 @@ class Trainer:
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
                 training_mode=training_mode,
                 task_storage=task_storage,
+                samples=samples,
                 # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
                 default_job_samples=default_job_samples if trains else None,
             )
@@ -416,7 +418,7 @@ class Trainer:
             if (
                 samples is not None
                 and self._pipeline.accepts_trajectories
-                and samples.count(after_sequence=self.sample_sequence) > 0
+                and samples.count(after_sequence=self.sample_sequence, kind="trajectory") > 0
             ):
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
@@ -503,16 +505,17 @@ class Trainer:
         # Uploaded trajectories go first in job data, so the trainer reads them before the records.
         while self.sample_store is not None and self._pipeline.accepts_trajectories:
             stored_samples = self.sample_store.page(
-                after_sequence=self.sample_sequence, limit=self._DATA_READ_BATCH_SIZE
+                after_sequence=self.sample_sequence, limit=self._DATA_READ_BATCH_SIZE, kind="trajectory"
             )
             if not stored_samples:
                 break
             for stored in stored_samples:
                 self.sample_sequence = stored.sequence
-                if stored.train_count(self.sample_component) > 0:
+                trajectory = stored.sample
+                if not isinstance(trajectory, TrajectorySample) or stored.train_count(self.sample_component) > 0:
                     continue
                 try:
-                    self._pipeline.push_trajectory(stored.sample_id, stored.sample)
+                    self._pipeline.push_trajectory(stored.sample_id, trajectory)
                 except ValueError:
                     # Admission rendered it; a config that changed since, such as a lower max_tokens, can refuse it.
                     logger.warning(

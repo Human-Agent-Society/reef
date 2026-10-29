@@ -93,7 +93,9 @@ class UploadRecipe(Recipe):
     task_stage: type[NoSamples] = NoSamples
     batches: list[JobData] = field(default_factory=list)
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+    ):
         return Trainer.build(
             scenario,
             records,
@@ -105,6 +107,7 @@ class UploadRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
             # An uploaded trajectory is one sample, so two uploads make one job's data.
             default_job_samples=2,
         )

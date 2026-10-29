@@ -1,15 +1,16 @@
 """Storage contract for the training samples of one scenario.
 
-A client can upload an ATIF trajectory to train on directly. The sample store
-keeps the uploaded trajectories of one scenario in upload order, each with the
-number of committed jobs of each trainer that trained it. A commit lists the
-samples that its job data consumed, by :func:`consumed_sample_id`, and the
-commit history counts them for the commit's trainer in the same transaction as
-the commit (``SQLCommitHistory``). A rebuilt trainer reads only the samples
-that no committed job of its own trained, so in a scenario of several
-components each trainer trains each sample. Archiving the
-scenario retires its samples with its records. Record retention does not
-delete them.
+The sample store keeps the samples of one scenario in the order they arrived:
+the ATIF trajectories that clients upload to train on directly, and the Harbor
+tasks that clients or the deployment import, each in the ``train`` or the
+``eval`` split. Each sample has the number of committed jobs of each trainer
+that trained it. A commit lists the samples that its job data consumed, by
+:func:`consumed_sample_id`, and the commit history counts them for the commit's
+trainer in the same transaction as the commit (``SQLCommitHistory``). A rebuilt
+trainer reads only the samples that no committed job of its own trained, so in
+a scenario of several components each trainer trains each sample. An ``eval``
+task never trains: an evaluation runs it. Archiving the scenario retires its
+samples with its records. Record retention does not delete them.
 """
 
 from __future__ import annotations
@@ -17,16 +18,22 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
 
 from reef.core.errors import ReefError
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import TaskSample, TrajectorySample
+from reef.storage.tasks import SPLIT_NAMES, SplitName
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
 
+SampleKind = Literal["trajectory", "task"]
+SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
+
 
 class SampleConflict(ReefError):
-    """A sample ID is already stored with a different sample."""
+    """A sample ID is already stored with a different sample, kind or split."""
 
 
 def consumed_sample_id(sample_id: str) -> str:
@@ -38,29 +45,42 @@ def consumed_sample_id(sample_id: str) -> str:
 class StoredSample:
     """One sample in a sample store, and the number of committed jobs of each trainer that trained it.
 
-    Values: ``(sequence, sample_id, sample, train_counts)`` is a stored sample
-    if and only if ``sequence`` is a positive int, ``sample_id`` is a non-empty
-    string, ``sample`` is a ``TrajectorySample``, and ``train_counts`` maps
-    strings to positive ints. ``sequence`` is the position of the sample in
-    upload order. ``sample_id`` is the ID that the client gave it.
-    ``train_counts[c]`` is the number of committed jobs of the trainer ``c``
-    whose commit lists ``consumed_sample_id(sample_id)``. ``c`` is the
-    component that the commits name, or ``""`` for the only trainer of a
-    scenario, whose commits name none. A trainer that is not a key has trained
-    the sample 0 times. The value keeps its own copy of ``train_counts``.
+    Values: ``(sequence, sample_id, split, sample, files_digest, train_counts)``
+    is a stored sample if and only if all of these hold:
 
-    Operation: ``train_count(component)`` is ``train_counts`` of the key of
-    ``component`` (``""`` for ``None``), or 0 when it is not a key.
+    * ``sequence`` is a positive int, the position of the sample in arrival order.
+    * ``sample_id`` is a non-empty string: the ID that the client gave a
+      trajectory, or the name of a task.
+    * ``sample`` is a ``TrajectorySample`` or a ``TaskSample``.
+    * A trajectory has ``split`` ``train`` and ``files_digest`` ``None``.
+    * A task has ``split`` ``train`` or ``eval``, and ``files_digest`` is the
+      non-empty digest of its directory in the task file store. Its
+      ``sample.task_path`` is that directory, and ``sample.metadata["task"]``
+      is ``{"name": sample_id, "files_digest": files_digest, "split": split}``.
+    * ``train_counts`` maps strings to positive ints. ``train_counts[c]`` is
+      the number of committed jobs of the trainer ``c`` whose commit lists
+      ``consumed_sample_id(sample_id)``. ``c`` is the component that the
+      commits name, or ``""`` for the only trainer of a scenario, whose
+      commits name none. A trainer that is not a key has trained the sample
+      0 times. The value keeps its own copy of ``train_counts``.
 
-    Purpose: ``SampleStore.page`` makes it. The trainer reads it:
-    ``sequence`` moves the trainer's cursor, ``train_count`` of its own
-    component tells whether one of its committed jobs trained it, and the
-    pipeline puts ``sample`` into job data.
+    Operations: ``kind`` is ``trajectory`` for a ``TrajectorySample`` and
+    ``task`` for a ``TaskSample``. ``train_count(component)`` is
+    ``train_counts`` of the key of ``component`` (``""`` for ``None``), or 0
+    when it is not a key.
+
+    Purpose: ``SampleStore`` makes it. The trainer reads the trajectories:
+    ``sequence`` moves its cursor, and ``train_count`` of its own component
+    tells whether one of its committed jobs trained the sample. A recipe's
+    stage reads the untrained ``train`` tasks, an evaluation the ``eval``
+    tasks, and the task listing every task.
     """
 
     sequence: int
     sample_id: str
-    sample: TrajectorySample
+    split: SplitName
+    sample: TrajectorySample | TaskSample
+    files_digest: str | None = None
     train_counts: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -68,14 +88,29 @@ class StoredSample:
             raise ValueError("a stored sample needs a positive int sequence")
         if not isinstance(self.sample_id, str) or not self.sample_id:
             raise ValueError("a stored sample needs a non-empty sample_id")
-        if not isinstance(self.sample, TrajectorySample):
-            raise TypeError("a stored sample holds a TrajectorySample")
+        if self.split not in SPLIT_NAMES:
+            raise ValueError("a stored sample's split is 'train' or 'eval'")
+        if isinstance(self.sample, TrajectorySample):
+            if self.split != "train" or self.files_digest is not None:
+                raise ValueError("a stored trajectory is in the train split and has no files digest")
+        elif isinstance(self.sample, TaskSample):
+            if not isinstance(self.files_digest, str) or not self.files_digest:
+                raise ValueError("a stored task needs the files digest of its directory")
+            task = {"name": self.sample_id, "files_digest": self.files_digest, "split": self.split}
+            if self.sample.metadata.get("task") != task:
+                raise ValueError(f"a stored task's sample metadata names it as {task}")
+        else:
+            raise TypeError("a stored sample holds a TrajectorySample or a TaskSample")
         if not isinstance(self.train_counts, Mapping) or any(
             not isinstance(component, str) or isinstance(count, bool) or not isinstance(count, int) or count < 1
             for component, count in self.train_counts.items()
         ):
             raise ValueError("a stored sample's train_counts map component names to positive ints")
         object.__setattr__(self, "train_counts", dict(self.train_counts))
+
+    @property
+    def kind(self) -> SampleKind:
+        return "trajectory" if isinstance(self.sample, TrajectorySample) else "task"
 
     def train_count(self, component: str | None) -> int:
         """The number of committed jobs of the trainer ``component`` (``None`` for a scenario's only one) that held it."""
@@ -86,34 +121,70 @@ class SampleStore(ABC):
     """The training samples of one scenario.
 
     Values: the state of a store is a finite sequence of stored samples, in
-    increasing ``sequence``. No two of them have the same ``sample_id``. A
-    stored sample's ``sample`` does not change, and record retention does not
-    remove it. Only a commit changes ``train_counts``: the commit history adds
-    one, for the commit's trainer, for each consumed sample ID that the commit
-    lists. Archiving the
+    increasing ``sequence``. No two of them have the same ``sample_id``, also
+    across kinds. A stored sample's ``sample``, ``split`` and ``files_digest``
+    do not change, and record retention does not remove it. Only a commit
+    changes ``train_counts``: the commit history adds one, for the commit's
+    trainer, for each consumed sample ID that the commit lists. Archiving the
     scenario retires the whole store.
 
-    Purpose: the dispatcher adds the trajectories of each upload (``add``). The
-    trainer reads them in upload order, after its cursor (``page`` and ``count``).
+    Purpose: the dispatcher adds the trajectories of each upload
+    (``add_trajectories``) and the tasks of each task upload or deployment
+    import (``add_tasks``). The trainer reads the trajectories in arrival order,
+    after its cursor (``page`` and ``count`` with ``kind="trajectory"``). A
+    recipe's stage, an evaluation and the task listing read the tasks
+    (``page`` with ``kind="task"``).
     """
 
     @abstractmethod
-    def add(self, samples: tuple[tuple[str, TrajectorySample], ...]) -> bool:
-        """Save each ``(sample_id, sample)`` pair in one transaction, in order. Return True if one or more is new.
+    def add_trajectories(self, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
+        """Save each ``(sample_id, trajectory)`` pair in one transaction, in order. Return True if one or more is new.
 
-        A new sample has no train count. A pair whose ID is stored with the
-        same sample changes nothing. Raises ``ValueError`` if an ID is empty,
-        and ``SampleConflict`` if an ID is stored with a different sample.
-        Then the store saves no sample of the call.
+        A new trajectory is in the ``train`` split and has no train count. A
+        pair whose ID is stored with the same trajectory changes nothing.
+        Raises ``ValueError`` if an ID is empty, and ``SampleConflict`` if an
+        ID is stored with another sample. Then the store saves no sample of the
+        call.
         """
 
     @abstractmethod
-    def page(self, *, after_sequence: int = 0, limit: int = 256) -> tuple[StoredSample, ...]:
-        """Read at most ``limit`` stored samples after ``after_sequence``, in upload order."""
+    def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
+        """Save the Harbor task in each directory to ``split`` in one transaction, in order; return the stored tasks.
+
+        A task's ``sample_id`` is the name of its directory. A new task has no
+        train count. A task that the store holds with the same files and split
+        is returned as it is. Raises ``ValueError`` for another split, and
+        ``SampleConflict`` if a name is stored with other files, in the other
+        split, or as a trajectory. Then the store saves no sample of the call;
+        the task file store may keep copies of the files.
+        """
 
     @abstractmethod
-    def count(self, *, after_sequence: int = 0) -> int:
-        """Return the number of stored samples after ``after_sequence``."""
+    def page(
+        self, *, after_sequence: int = 0, limit: int = 256, kind: SampleKind | None = None
+    ) -> tuple[StoredSample, ...]:
+        """Read at most ``limit`` stored samples after ``after_sequence``, in arrival order; only ``kind``'s if given."""
+
+    @abstractmethod
+    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None) -> int:
+        """Return the number of stored samples after ``after_sequence``; only ``kind``'s if given."""
+
+    def tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
+        """Every stored task, in arrival order; only ``split``'s if given."""
+        found: list[StoredSample] = []
+        after_sequence = 0
+        while page := self.page(after_sequence=after_sequence, kind="task"):
+            found.extend(stored for stored in page if split is None or stored.split == split)
+            after_sequence = page[-1].sequence
+        return tuple(found)
 
 
-__all__ = ["CONSUMED_SAMPLE_PREFIX", "SampleConflict", "SampleStore", "StoredSample", "consumed_sample_id"]
+__all__ = [
+    "CONSUMED_SAMPLE_PREFIX",
+    "SAMPLE_KINDS",
+    "SampleConflict",
+    "SampleKind",
+    "SampleStore",
+    "StoredSample",
+    "consumed_sample_id",
+]

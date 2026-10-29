@@ -50,7 +50,6 @@ from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.train.cordis_backend import CordisBackend, FailureManifest, Mutation, MutationError, Promoter
 from reef.train.cordis_backend.backend import eval_task_paths
 from reef.train.trainer import Trainer
@@ -2099,7 +2098,7 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
         CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
 
 
-def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads_it(
+def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step_reads_it(
     tmp_path: Path, monkeypatch
 ) -> None:
     write_demo_evolution(tmp_path, monkeypatch)
@@ -2107,29 +2106,34 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
     evolution = {
         "propose": "demo_evolution:Propose",
         "evaluate": "demo_evolution:Evaluate",
-        "eval_task_store": IMPORTED_TASK_STORE,
+        "eval_imported_tasks": True,
         "adapter": "terminus",
     }
     built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
-    assert built.tasks == () and built.eval_task_store == IMPORTED_TASK_STORE
+    assert built.tasks == () and built.eval_imported_tasks
 
     with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
-        store = session.tasks.open(IMPORTED_TASK_STORE)
+        samples = session.samples
         with pytest.raises(RecipeConfigError, match="holds no task"):
-            built.build("s", session.records, task_storage=session.tasks)
-        first = store.add_task(directory=task_directory(root, "held-1"), split="eval")
-        store.add_task(directory=task_directory(root, "train-1"), split="train")
-        candidate_backend = built.build("s", session.records, task_storage=session.tasks).candidate_backend
+            built.build("s", session.records, samples=samples)
+        (first,) = samples.add_tasks((task_directory(root, "held-1"),), "eval")
+        samples.add_tasks((task_directory(root, "train-1"),), "train")
+        candidate_backend = built.build("s", session.records, samples=samples).candidate_backend
         assert isinstance(candidate_backend, CordisBackend)
         prepared = candidate_backend.prepare_step(batch(), candidate_backend.initial_state(), 0)
         assert prepared.metrics["evaluation_task_count"] == 1
         # A task that the store gets after the build is in the next step's list.
-        second = store.add_task(directory=task_directory(root, "held-2"), split="eval")
+        (second,) = samples.add_tasks((task_directory(root, "held-2"),), "eval")
         prepared = candidate_backend.prepare_step(batch(), candidate_backend.initial_state(), 0)
         assert prepared.metrics["evaluation_task_count"] == 2
-        assert eval_task_paths(store) == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
-        with pytest.raises(RecipeConfigError, match="needs the task storage"):
+        assert eval_task_paths(samples) == tuple(str(task.sample.task_path) for task in (first, second))
+        with pytest.raises(RecipeConfigError, match="needs the sample store"):
             built.build("s", session.records)
+
+    with pytest.raises(RecipeConfigError, match="eval_task_store is gone"):
+        CordisRecipe.from_environment(
+            {}, config={"evolution": {**evolution, "eval_task_store": "imported-tasks"}}, runtime=runtime()
+        )
 
     with pytest.raises(RecipeConfigError, match=r"cannot be set with evolution\.tasks"):
         CordisRecipe.from_environment({}, config={"evolution": {**evolution, "tasks": ["x"]}}, runtime=runtime())
