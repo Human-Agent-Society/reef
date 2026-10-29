@@ -37,7 +37,7 @@ def manifest(path: Path, train: tuple[str, ...], eval_: tuple[str, ...]) -> Path
 
 def imported(storage: TaskImportingScenarioStorage) -> list[tuple[str, str]]:
     with closing(storage.open("math")) as session:
-        return [(task.sample_id, task.split) for task in session.samples.tasks()]
+        return [(task.sample_id, task.split) for task in session.samples.imported_tasks()]
 
 
 def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) -> None:
@@ -49,7 +49,7 @@ def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) ->
     with closing(TaskImportingScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), task_import)) as storage:
         assert imported(storage) == [("a-task", "train"), ("b-task", "train"), ("c-task", "eval")]
         with closing(storage.open("math")) as session:
-            (evaluated,) = session.samples.tasks(split="eval")
+            (evaluated,) = session.samples.imported_tasks(split="eval")
             assert isinstance(evaluated.sample, TaskSample)
             assert (evaluated.sample.task_path / "environment" / "image.png").read_bytes() == IMAGE
 
@@ -116,7 +116,7 @@ def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> 
     dispatcher = build_dispatcher(settings)
     try:
         samples = dispatcher.get_or_create_scenario("math").store.samples
-        assert [(task.sample_id, task.split) for task in samples.tasks()] == [("a-task", "eval")]
+        assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [("a-task", "eval")]
     finally:
         dispatcher.close()
 

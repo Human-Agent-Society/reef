@@ -319,7 +319,7 @@ class ArtifactEvaluations:
             request, artifact, model = self.checked(current, artifact_id, settings)
             held = {
                 stored.sample_id: stored.sample.task_path
-                for stored in current.store.samples.tasks(split="eval")
+                for stored in current.store.samples.imported_tasks(split="eval")
                 if isinstance(stored.sample, TaskSample)
             }
             unknown = sorted(set(request.task_names) - set(held))

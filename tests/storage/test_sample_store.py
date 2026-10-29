@@ -14,7 +14,7 @@ from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage, postgres_url
 from reef.storage.samples import SampleConflict, consumed_sample_id
-from reef.storage.sql_samples import sample_content
+from reef.storage.sql_samples import trajectory_content
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -54,9 +54,9 @@ def test_uploaded_trajectories_keep_upload_order_per_scenario(storage):
         assert [item.sample for item in stored] == [trajectory("a"), grouped, trajectory("c")]
         page = session.samples.page(after_sequence=stored[0].sequence, limit=1)
         assert [item.sample_id for item in page] == ["t2"]
-        assert session.samples.count() == 3
-        assert session.samples.count(after_sequence=stored[2].sequence) == 0
-        assert other.samples.count() == 0
+        assert len(session.samples.page()) == 3
+        assert len(session.samples.page(after_sequence=stored[2].sequence)) == 0
+        assert len(other.samples.page()) == 0
 
 
 def test_a_retry_changes_nothing_and_a_conflict_saves_no_trajectory(storage):
@@ -79,7 +79,7 @@ def test_uploaded_trajectories_survive_a_restart_and_archive_retires_them(open_d
             assert [item.sample_id for item in session.samples.page()] == ["t1", "t2"]
         storage.archive("math")
         with closing(storage.open("math")) as session:
-            assert session.samples.count() == 0
+            assert len(session.samples.page()) == 0
 
 
 def training_commit(step: int, *consumed: str, component: str | None = None) -> CommitRecord:
@@ -116,7 +116,7 @@ def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(storage):
         session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
         (_, second) = session.samples.page()
         assert second.train_counts == {"": 1, "b": 1}
-        assert (second.train_count(None), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
+        assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
 
 
 def test_a_commit_that_fails_counts_no_sample(storage, monkeypatch):
@@ -153,7 +153,7 @@ def write_legacy_trajectories(connection, *, schema: str | None, storage_id: str
     )
     legacy.create(connection)
     for name, text in (("t1", "a"), ("t2", "b")):
-        content = sample_content(trajectory(text))
+        content = trajectory_content(trajectory(text))
         row = {
             "trajectory_id": name,
             "content_json": content,
@@ -209,12 +209,21 @@ def test_postgres_moves_the_uploaded_trajectories_of_schema_version_9_with_their
     with engine.connect() as connection:
         assert not inspect(connection).has_table("uploaded_trajectory", schema=schema)
         version = Table("schema_version", MetaData(schema=schema), autoload_with=connection)
-        assert connection.execute(select(version.c.version)).scalars().all() == [12]
+        assert connection.execute(select(version.c.version)).scalars().all() == [13]
     engine.dispose()
 
 
 def task_directory(root, name: str, port: int = 9000):
     return write_harbor_task(task_for(name, "record-1", port), root)
+
+
+def test_an_imported_task_keeps_its_binary_files(storage, tmp_path):
+    source = tmp_path / "image-task"
+    (source / "environment").mkdir(parents=True)
+    (source / "environment" / "image.png").write_bytes(bytes(range(256)))
+    with closing(storage.open("math")) as session:
+        (stored,) = session.samples.add_tasks((source,), "eval")
+        assert (stored.sample.task_path / "environment" / "image.png").read_bytes() == bytes(range(256))
 
 
 def test_tasks_keep_their_split_and_files_and_share_the_ids_of_the_trajectories(storage, tmp_path):
@@ -229,10 +238,13 @@ def test_tasks_keep_their_split_and_files_and_share_the_ids_of_the_trajectories(
             "files_digest": train.files_digest,
             "split": "train",
         }
-        assert [(task.sample_id, task.split) for task in samples.tasks()] == [("task-a", "train"), ("held", "eval")]
-        assert [task.sample_id for task in samples.tasks(split="eval")] == ["held"]
+        assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [
+            ("task-a", "train"),
+            ("held", "eval"),
+        ]
+        assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["held"]
         assert [item.sample_id for item in samples.page(kind="trajectory")] == ["t1"]
-        assert samples.count(kind="task") == 2 and samples.count() == 3
+        assert len(samples.page(kind="task")) == 2 and len(samples.page()) == 3
         # The same task again is returned as it is; other files, the other split, or a trajectory's ID conflict.
         assert samples.add_tasks((task_directory(tmp_path / "c", "task-a"),), "train") == (train,)
         with pytest.raises(SampleConflict, match="other content"):
@@ -241,7 +253,20 @@ def test_tasks_keep_their_split_and_files_and_share_the_ids_of_the_trajectories(
             samples.add_tasks((task_directory(tmp_path / "e", "task-a"),), "eval")
         with pytest.raises(SampleConflict, match="stored as a trajectory"):
             samples.add_tasks((task_directory(tmp_path / "f", "t1"),), "train")
-        assert samples.count() == 3
+        assert len(samples.page()) == 3
+
+
+def write_trained_marks(store, *names: str) -> None:
+    """Make the task_trained table of the older schema mark ``names`` of the task store ``store`` trained."""
+    with store.records._transaction(write=True) as connection:
+        legacy = Table(
+            "task_trained",
+            MetaData(schema=store.tables.published.schema),
+            *(Column(key, Text, primary_key=True) for key in (*store.key, "task_name")),
+        )
+        legacy.create(connection, checkfirst=True)
+        for name in names:
+            connection.execute(legacy.insert().values(**store.key, task_name=name))
 
 
 def test_a_start_moves_the_imported_tasks_of_the_old_task_store_with_their_train_counts(
@@ -249,25 +274,45 @@ def test_a_start_moves_the_imported_tasks_of_the_old_task_store_with_their_train
 ):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         store = session.tasks.open("imported-tasks")
-        for port, (name, split) in enumerate((("task-a", "train"), ("task-b", "train"), ("held", "eval"))):
-            store.add_task(directory=task_directory(tmp_path / "tasks", name, 9000 + port), split=split)
-        # The trained mark that the task store kept before the sample store counted training.
-        with store.records._transaction(write=True) as connection:
-            store.records._insert_if_absent(connection, store.tables.trained, {**store.key, "task_name": "task-a"})
+        names = (("task-a", "train"), ("task-b", "train"), ("held", "eval"))
+        store.begin_generation(generation=0, source_record_ids=())
+        directories = tuple(
+            task_directory(tmp_path / "tasks" / name, name, 9000 + port) for port, (name, _) in enumerate(names)
+        )
+        store.save_candidates(generation=0, directories=directories)
+        for index, (_, split) in enumerate(names):
+            store.publish_task(generation=0, index=index, split=split)
+        write_trained_marks(store, "task-a")
         session.commit_step(
             expected_step=0,
             commit=training_commit(1, "rollout:math:rollout:0123456789ab/task-a", component="b"),
         )
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        assert [(task.sample_id, task.split, task.train_counts) for task in session.samples.tasks()] == [
+        assert [(task.sample_id, task.split, task.train_counts) for task in session.samples.imported_tasks()] == [
             ("task-a", "train", {"b": 1}),
             ("task-b", "train", {}),
             ("held", "eval", {}),
         ]
-        (held,) = session.samples.tasks(split="eval")
+        (held,) = session.samples.imported_tasks(split="eval")
         assert isinstance(held.sample, TaskSample) and (held.sample.task_path / "instruction.md").is_file()
         assert session.tasks.open("imported-tasks").tasks() == ()
+
+
+def test_a_start_turns_the_trained_marks_of_generated_tasks_into_train_counts(open_durable_storage, tmp_path):
+    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
+        write_trained_marks(session.tasks.open("generated-tasks"), "g1")
+        write_trained_marks(session.tasks.open("c/generated-tasks"), "g2")
+
+    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
+        task = TaskSample(tmp_path / "g", metadata={"task": {"name": "g"}})
+        session.samples.add_record_samples("", None, (), (("generated-tasks/g1", task),))
+        session.samples.add_record_samples("c", None, (), (("c:generated-tasks/g2", task),))
+        assert train_counts(session) == {"generated-tasks/g1": {"": 1}, "c:generated-tasks/g2": {"c": 1}}
+        with session.tasks.open("generated-tasks").records._transaction(write=False) as connection:
+            assert not inspect(connection).has_table(
+                "task_trained", schema=session.tasks.open("x").tables.published.schema
+            )
 
 
 def test_record_samples_belong_to_their_trainer_and_consume_their_records(storage):
@@ -285,7 +330,7 @@ def test_record_samples_belong_to_their_trainer_and_consume_their_records(storag
 
         assert [item.sample_id for item in samples.page(trainer="a")] == ["upload", "a:r1:0", "a:r2:0"]
         assert [item.sample_id for item in samples.page(trainer="b")] == ["upload", "b:r3:0"]
-        assert samples.count(trainer="a") == 3 and samples.count() == 4
+        assert len(samples.page(trainer="a")) == 3 and len(samples.page()) == 4
         (_, first, _) = samples.page(trainer="a")
         assert (first.component, first.group, first.record_ids) == ("a", "a:r1", ("i1", "r1", "r2"))
         assert samples.page()[0].component is None and samples.page()[0].record_ids == ()

@@ -77,7 +77,7 @@ def test_an_upload_needs_a_recipe_that_accepts_uploaded_trajectories(tmp_path):
             response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("trajectory-1"))
             assert response.status == 400
             assert "does not accept uploaded trajectories" in await response.text()
-            assert dispatcher.get_or_create_scenario("s").store.samples.count() == 0
+            assert len(dispatcher.get_or_create_scenario("s").store.samples.page()) == 0
 
     try:
         asyncio.run(run())
@@ -108,7 +108,7 @@ def test_an_invalid_upload_is_refused_and_saves_nothing(tmp_path):
                 "/reef/trajectories", headers={"Authorization": f"Bearer {TOKEN}"}, json=uploaded("t")
             )
             assert response.status == 400
-            assert dispatcher.get_or_create_scenario("s").store.samples.count() == 0
+            assert len(dispatcher.get_or_create_scenario("s").store.samples.page()) == 0
 
     try:
         asyncio.run(run())
@@ -142,7 +142,7 @@ def test_admission_refuses_an_upload_that_cannot_train_and_jobs_get_the_rendered
             response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("good", "bad"))
             assert response.status == 400
             assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
-            assert dispatcher.get_or_create_scenario("s").store.samples.count() == 0, "nothing of it is saved"
+            assert len(dispatcher.get_or_create_scenario("s").store.samples.page()) == 0, "nothing of it is saved"
             response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1", "t2"))
             assert response.status == 200, await response.text()
             await wait_for_batches(recipe, 1)
