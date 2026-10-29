@@ -23,6 +23,15 @@ prompt that mishandles a task family, a missing skill, or a config default
 that is wrong for the deployment. It also fits a closed model endpoint with no
 weight access. It does not fit when the model itself cannot do the task.
 
+The figure shows what runs on a person's machine, what runs in Reef, and the
+routes between them. The numbers follow one session into one training step.
+
+.. diagram::
+   :caption: The client installs the head as a layer over the person's own configuration and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports, and publishes a selected candidate as the new head.
+
+   <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, and the routes between them">
+   <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, and the routes between them">
+
 The harness tree
 ----------------
 
