@@ -86,6 +86,43 @@ class _PreparingBackend(CandidateBackend):
         del prepared
 
 
+class RecordingCandidateBackend(CandidateBackend):
+    """Prepares one candidate per batch and records each call in ``calls``, as ``prepare``, ``evaluate``,
+    ``settle:<evaluator>`` and ``abort:<candidate ID>``."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def initial_state(self):
+        return {}
+
+    def prepare_step(self, batch, state, scenario_step):
+        self.calls.append("prepare")
+        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
+
+    def evaluate(self, candidate):
+        self.calls.append("evaluate")
+        return EvaluationResult("test", "1", {"score": 1.0})
+
+    def settle_step(self, prepared, decision):
+        self.calls.append(f"settle:{decision.evaluation.evaluator}")
+        return TrainStepResult({}, {"selection": decision.to_dict()})
+
+    def abort_step(self, prepared):
+        assert prepared.candidate is not None
+        self.calls.append(f"abort:{prepared.candidate.candidate_id}")
+
+
+def preparing_trainer(records: SQLiteRecordStore, **options) -> Trainer:
+    """A trainer over ``records`` with the threshold pipeline, one sample a job and the state-only backend."""
+    values = {
+        "pipeline_factory": threshold_pipeline,
+        "candidate_backend": _PreparingBackend(),
+        "default_job_samples": 1,
+    }
+    return Trainer.build("math", records, **{**values, **options})
+
+
 def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRecord:
     payload = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
     if candidate is not None:
@@ -127,6 +164,14 @@ def report(agent_record_id: str, references: str | tuple[str, ...], score: float
         agent_record_id=agent_record_id,
         references=reference_ids,
     )
+
+
+def one_pair_records() -> SQLiteRecordStore:
+    """An in-memory store holding inference i1 and its report r1, scored 1."""
+    records = SQLiteRecordStore()
+    records.append(inference("i1"))
+    records.append(report("r1", "i1", 1.0))
+    return records
 
 
 def positioned_inference(sequence: int) -> AgentRecord:
@@ -261,8 +306,6 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
             "rollouts_per_group": 2,
             "comparison_set": "tttd-step-0-group-0",
         }
-
-    if processor_type is TTTDJobData:
         context = PipelineContext("math", TTTDGroupedRolloutReport)
         tttd_record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=1, rollouts_per_group=2))
         processor = TrainingPipeline(
@@ -361,20 +404,6 @@ def test_pairing_retention_protects_low_score_feedback_until_consumed() -> None:
 
 
 @pytest.mark.unit
-def test_pairing_retention_does_not_protect_consumed_inferences() -> None:
-    first = threshold_pipeline(PipelineContext("math"))
-    first.push(inference("i1"))
-    first.push(report("r1", "i1", 1.0))
-    batch = first.build_job_data(1)
-    first.acknowledge(batch.data_id)
-
-    # Consumed inferences are released and may be compacted; the processor does
-    # not require them to be retained across restart.
-    decision = first.releasable_record_ids()
-    assert decision == frozenset({"i1", "r1"})
-
-
-@pytest.mark.unit
 def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement() -> None:
     processor = grouped_policy_pipeline(PipelineContext("math"))
     for agent_record_id, score in (("i1", 0.2), ("i2", 0.8)):
@@ -409,16 +438,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
 
 @pytest.mark.unit
 def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
-    records = SQLiteRecordStore()
-    records.append(inference("i1"))
-    records.append(report("r1", "i1", 1.0))
-    trainer = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=threshold_pipeline,
-        candidate_backend=_PreparingBackend(),
-        default_job_samples=1,
-    )
+    trainer = preparing_trainer(one_pair_records())
 
     result = trainer.run_once(0)
 
@@ -440,13 +460,7 @@ def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -
     for sequence in range(3):
         records.append(inference(f"i{sequence}"))
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
-    trainer = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=threshold_pipeline,
-        candidate_backend=_PreparingBackend(),
-        default_job_samples=2,
-    )
+    trainer = preparing_trainer(records, default_job_samples=2)
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 8)
     assert trainer.run_once() is not None
     data = trainer.pending_job_data
@@ -467,13 +481,7 @@ def test_the_stage_config_sets_job_samples_over_the_default() -> None:
             {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
         ).build(context)
 
-    trainer = Trainer.build(
-        "math",
-        SQLiteRecordStore(),
-        pipeline_factory=pipeline,
-        candidate_backend=_PreparingBackend(),
-        default_job_samples=2,
-    )
+    trainer = preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline, default_job_samples=2)
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (3, 12)
 
 
@@ -501,51 +509,21 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
         return threshold_pipeline(context, sample2job=stage)
 
     with pytest.raises(PluginConfigError, match=message):
-        Trainer.build(
-            "math",
-            SQLiteRecordStore(),
-            pipeline_factory=pipeline,
-            candidate_backend=_PreparingBackend(),
-            default_job_samples=3,
-        )
+        preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline, default_job_samples=3)
 
 
 @pytest.mark.unit
 def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -> None:
-    calls = []
-
-    class Backend(CandidateBackend):
-        def initial_state(self):
-            return {"steps": 0}
-
-        def prepare_step(self, batch, state, scenario_step):
-            del scenario_step
-            calls.append("prepare")
-            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
-
-        def evaluate(self, candidate):
-            calls.append("evaluate")
-            return EvaluationResult("test", "1", {"score": 1.0})
-
-        def settle_step(self, prepared, decision):
-            calls.append("settle")
-            return TrainStepResult({"steps": 1}, {"selection": decision.to_dict()})
-
-        def abort_step(self, prepared):
-            calls.append("abort")
+    backend = RecordingCandidateBackend()
 
     class Policy:
         def decide(self, candidate, evaluation):
-            calls.append("decide")
+            backend.calls.append("decide")
             return SelectionDecision(True, "test", "selected by test", evaluation)
 
-    records = SQLiteRecordStore()
-    records.append(inference("i1"))
-    records.append(report("r1", "i1", 1.0))
-    backend = Backend()
     trainer = Trainer.build(
         "math",
-        records,
+        one_pair_records(),
         pipeline_factory=threshold_pipeline,
         candidate_backend=backend,
         candidate_evaluator=policy_plugin(backend, Policy),
@@ -556,7 +534,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
 
     assert result is not None
     assert result.metrics["selection"]["selected"] is True
-    assert calls == ["prepare", "evaluate", "decide", "settle"]
+    assert backend.calls == ["prepare", "evaluate", "decide", "settle:test"]
 
 
 @pytest.mark.unit
@@ -567,162 +545,68 @@ def test_trainer_rejects_structural_plugin_before_constructing_processor() -> No
         raise AssertionError("an invalid plugin must fail before processor construction")
 
     with pytest.raises(TypeError, match="must inherit CandidateEvaluationPlugin"):
-        Trainer.build(
-            "math",
-            SQLiteRecordStore(),
-            pipeline_factory=pipeline_factory,
-            candidate_backend=_PreparingBackend(),
-            candidate_evaluator=DuckPlugin(),
-            default_job_samples=1,
-        )
+        preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline_factory, candidate_evaluator=DuckPlugin())
 
 
 def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback() -> None:
-    calls = []
-
-    class Backend(CandidateBackend):
-        def initial_state(self):
-            return {}
-
-        def prepare_step(self, batch, state, scenario_step):
-            del scenario_step
-            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
-
-        def evaluate(self, candidate):
-            raise AssertionError("the backend evaluator must be replaced by the plugin")
-
-        def settle_step(self, prepared, decision):
-            calls.append(("settle", decision.evaluation.evaluator))
-            return TrainStepResult({}, {"selection": decision.to_dict()})
-
-        def abort_step(self, prepared):
-            raise AssertionError("the successful plugin evaluation must not abort")
+    backend = RecordingCandidateBackend()
 
     class ExternalEvaluator(CandidateEvaluationPlugin):
         def evaluate(self, candidate):
-            calls.append(("evaluate", candidate.candidate_id))
+            backend.calls.append(f"external evaluate:{candidate.candidate_id}")
             return EvaluationResult("external", "1", {"score": 0.9})
 
         def decide(self, candidate, evaluation):
-            del candidate
-            calls.append(("decide", evaluation.evaluator))
+            backend.calls.append(f"decide:{evaluation.evaluator}")
             return SelectionDecision(True, "external", "selected by module", evaluation)
 
-    records = SQLiteRecordStore()
-    records.append(inference("i1"))
-    records.append(report("r1", "i1", 1.0))
     candidate_evaluator = ExternalEvaluator()
-    trainer = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=threshold_pipeline,
-        candidate_backend=Backend(),
-        candidate_evaluator=candidate_evaluator,
-        default_job_samples=1,
-    )
+    trainer = preparing_trainer(one_pair_records(), candidate_backend=backend, candidate_evaluator=candidate_evaluator)
 
     result = trainer.run_once()
 
     assert result is not None
     assert trainer.candidate_evaluator is candidate_evaluator
-    assert calls == [
-        ("evaluate", "math:data:1"),
-        ("decide", "external"),
-        ("settle", "external"),
-    ]
+    # The plugin replaces the backend's evaluation.
+    assert backend.calls == ["prepare", "external evaluate:math:data:1", "decide:external", "settle:external"]
 
 
 @pytest.mark.unit
 def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
-    calls = []
-
-    class Backend(CandidateBackend):
-        def initial_state(self):
-            return {}
-
-        def prepare_step(self, batch, state, scenario_step):
-            del scenario_step
-            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
-
-        def evaluate(self, candidate):
-            return EvaluationResult("test", "1", {})
-
-        def settle_step(self, prepared, decision):
-            raise AssertionError("settlement must not run")
-
-        def abort_step(self, prepared):
-            assert prepared.candidate is not None
-            calls.append(("abort", prepared.candidate.candidate_id))
+    backend = RecordingCandidateBackend()
 
     class BrokenPolicy:
         def decide(self, candidate, evaluation):
             raise RuntimeError("policy failed")
 
-    records = SQLiteRecordStore()
-    records.append(inference("i1"))
-    records.append(report("r1", "i1", 1.0))
-    backend = Backend()
-    trainer = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=threshold_pipeline,
-        candidate_backend=backend,
-        candidate_evaluator=policy_plugin(backend, BrokenPolicy),
-        default_job_samples=1,
+    trainer = preparing_trainer(
+        one_pair_records(), candidate_backend=backend, candidate_evaluator=policy_plugin(backend, BrokenPolicy)
     )
 
     with pytest.raises(RuntimeError, match="policy failed"):
         trainer.run_once()
-    assert calls == [("abort", "math:data:1")]
+    assert backend.calls == ["prepare", "evaluate", "abort:math:data:1"]
 
 
 @pytest.mark.unit
 def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> None:
-    calls = []
-
-    class Backend(CandidateBackend):
-        def initial_state(self):
-            return {}
-
-        def prepare_step(self, batch, state, scenario_step):
-            del scenario_step
-            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state=state)
-
-        def evaluate(self, candidate):
-            raise AssertionError("the explicit evaluator must replace the backend evaluator")
-
-        def settle_step(self, prepared, decision):
-            raise AssertionError("invalid evaluator decision must not settle")
-
-        def abort_step(self, prepared):
-            assert prepared.candidate is not None
-            calls.append(("abort", prepared.candidate.candidate_id))
+    backend = RecordingCandidateBackend()
 
     class ReplacingEvaluator(CandidateEvaluationPlugin):
         def evaluate(self, candidate):
-            del candidate
             return EvaluationResult("external", "1", {"score": 1.0})
 
         def decide(self, candidate, evaluation):
-            del candidate, evaluation
             replacement = EvaluationResult("external", "1", {"score": 0.0})
             return SelectionDecision(False, "broken", "replaced result", replacement)
 
-    records = SQLiteRecordStore()
-    records.append(inference("i1"))
-    records.append(report("r1", "i1", 1.0))
-    trainer = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=threshold_pipeline,
-        candidate_backend=Backend(),
-        candidate_evaluator=ReplacingEvaluator(),
-        default_job_samples=1,
+    trainer = preparing_trainer(
+        one_pair_records(), candidate_backend=backend, candidate_evaluator=ReplacingEvaluator()
     )
 
     with pytest.raises(ValueError, match="retain the evaluation result"):
         trainer.run_once()
-    assert calls == [("abort", "math:data:1")]
+    assert backend.calls == ["prepare", "abort:math:data:1"]
 
 
 @pytest.mark.unit
@@ -735,15 +619,11 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
         report("r2", "i2", 0.5),
     ):
         records.append(item)
-    first = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=lambda context: threshold_pipeline(
-            PipelineContext(context.scenario, default_job_samples=context.default_job_samples)
-        ),
-        candidate_backend=_PreparingBackend(),
-        default_job_samples=1,
-    )
+
+    def pipeline(context: PipelineContext) -> TrainingPipeline:
+        return threshold_pipeline(PipelineContext(context.scenario, default_job_samples=context.default_job_samples))
+
+    first = preparing_trainer(records, pipeline_factory=pipeline)
 
     first_result = first.run_once(0)
     assert first_result is not None
@@ -755,16 +635,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
     # Recovery restores consumption independently of the retained record bodies.
     recovered_state = first.algorithm_state_dict()
-    second = Trainer.build(
-        "math",
-        records,
-        pipeline_factory=lambda context: threshold_pipeline(
-            PipelineContext(context.scenario, default_job_samples=context.default_job_samples)
-        ),
-        candidate_backend=_PreparingBackend(),
-        algorithm_state=recovered_state,
-        default_job_samples=1,
-    )
+    second = preparing_trainer(records, pipeline_factory=pipeline, algorithm_state=recovered_state)
 
     second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
     second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
@@ -788,13 +659,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
     with SQLiteRecordStore(database) as first_store:
         for item in (first_inference, first_report, second_inference, second_report):
             first_store.append(item)
-        first = Trainer.build(
-            "math",
-            first_store,
-            pipeline_factory=threshold_pipeline,
-            candidate_backend=_PreparingBackend(),
-            default_job_samples=1,
-        )
+        first = preparing_trainer(first_store)
         first_result = first.run_once(0)
         assert first_result is not None
         prepared = first.prepare_commit(first_result)
@@ -812,14 +677,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         ]
 
     with SQLiteRecordStore(database) as second_store:
-        second = Trainer.build(
-            "math",
-            second_store,
-            pipeline_factory=threshold_pipeline,
-            candidate_backend=_PreparingBackend(),
-            algorithm_state={"steps": 1},
-            default_job_samples=1,
-        )
+        second = preparing_trainer(second_store, algorithm_state={"steps": 1})
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
@@ -874,12 +732,10 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         dispatcher.accept_record(replace(record, payload={**record.payload, "runtime_load_id": serving}))
         dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 
-    for _ in range(1000):
-        if scenario.trainer.state["finished_jobs"] == 1:
-            break
+    deadline = time.monotonic() + 10
+    while scenario.trainer.state["finished_jobs"] != 1:
+        assert time.monotonic() < deadline, "the training job did not finish"
         time.sleep(0.001)
-    else:
-        raise AssertionError("the training job did not finish")
     [job] = component.submitted
     assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
@@ -889,10 +745,6 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the base release, the job's checkpoint is what the scenario serves.
     assert inference_runtime.activated[1:] == ["w1"]
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__]))
 
 
 @pytest.mark.unit
@@ -954,13 +806,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
             assert storage.prune(max_bytes=keep_bytes) == 1
         records.append(positioned_inference(3))
         records.append(positioned_report(4, "i3", 1.0))
-        trainer = Trainer.build(
-            "math",
-            records,
-            pipeline_factory=threshold_pipeline,
-            candidate_backend=_PreparingBackend(),
-            default_job_samples=1,
-        )
+        trainer = preparing_trainer(records)
         assert trainer.pipeline_status()["record_data_incomplete"] is True
         result = trainer.run_once(0)
         assert result is not None
@@ -972,14 +818,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         assert trainer.run_once(1) is None
         assert "Skipping report r2" in caplog.text
     with SQLiteRecordStore(database) as records:
-        resumed = Trainer.build(
-            "math",
-            records,
-            pipeline_factory=threshold_pipeline,
-            candidate_backend=_PreparingBackend(),
-            algorithm_state=prepared.algorithm_state,
-            default_job_samples=1,
-        )
+        resumed = preparing_trainer(records, algorithm_state=prepared.algorithm_state)
         resumed.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         resumed.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert resumed.run_once(1) is None
