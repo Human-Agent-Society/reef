@@ -9,7 +9,7 @@ content hash that ignores ``task.toml`` and the hint, and ``oracle_check`` runs 
 ``harbor`` command line, once with Harbor's oracle agent (the reference solution) and once with its nop
 agent (nothing), and accepts the task only when the first scores 1 and the second scores below 1:
 solvable, and not for free. A check that could not run, because ``harbor`` is not installed or a run
-ended without a trial to read (an exit code, a timeout, no Docker daemon), raises ``OracleUnavailable``
+ended without a trial to read (an exit code, a timeout, an environment that cannot start), raises ``OracleUnavailable``
 rather than refusing the task. One gate is reef's own: the team requires a pytest file under ``tests/``,
 reef requires a file under ``tests/`` that names the reward file, since its verifiers are shell scripts
 that write it.
@@ -368,7 +368,7 @@ def wait_or_kill(process: subprocess.Popen[str], *, deadline: float) -> None:
 
 
 def stop_process_groups(processes: Sequence[subprocess.Popen[str]], *, grace_s: float) -> None:
-    """A term to every group, so Harbor's compose children can take their containers down; a kill after ``grace_s``."""
+    """A term to every group, so Harbor can stop the environments it started; a kill after ``grace_s``."""
     for process in processes:
         signal_process_group(process, signal.SIGTERM)
     deadline = time.monotonic() + grace_s
@@ -424,8 +424,8 @@ def run_harbor_agent(
 ) -> TrialOutcome:
     """Run ``agent`` on the task through the harbor command line in Harbor's ``environment``, and read the trial.
 
-    The child runs in its own process group and inherits this process's environment, so a key such as
-    ``E2B_API_KEY`` reaches Harbor.
+    The child runs in its own process group and inherits this process's environment, so the credentials of the
+    environment (``reef.sandbox.task_environment``) reach Harbor.
     """
     command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
     registry = runs if runs is not None else HarborRuns()

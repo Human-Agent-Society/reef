@@ -49,14 +49,7 @@ from reef.record2sample.generator import (
     readiness_probes,
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.record2sample.generator.service import (
-    CLOSE_GRACE_S,
-    HARBOR_E2B_NAMES,
-    DockerProbe,
-    EnvironmentVariableProbe,
-    HarborProbe,
-    ModuleProbe,
-)
+from reef.record2sample.generator.service import CLOSE_GRACE_S, HarborProbe
 from reef.record2sample.generator.wire import (
     WireError,
     designer_request_document,
@@ -66,6 +59,7 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
+from reef.sandbox.task_environment import HARBOR_E2B_NAMES, DockerProbe, EnvironmentVariableProbe, ModuleProbe
 from reef.service.deploy.generator import GeneratorSettings
 
 pytestmark = pytest.mark.unit
@@ -717,7 +711,7 @@ def test_the_stack_probes_look_for_reef_eval_harbor_and_docker(
     )
 
 
-KEY_REASON = "E2B_API_KEY is not set where reef serve starts the generator; export it before reef serve starts"
+KEY_REASON = "E2B_API_KEY is not set; export it before reef serve starts"
 
 
 def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(

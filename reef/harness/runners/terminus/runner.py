@@ -43,6 +43,7 @@ from reef.harness.runners.terminus.tree import (
 )
 from reef.sandbox.process import ISOLATION_ENV
 from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.sandbox.task_environment import HARBOR_TASK_ENVIRONMENTS
 
 #: Harbor's default when the tree has no code extension.
 AGENT_NAME = "terminus-2"
@@ -217,8 +218,8 @@ def run(task: str) -> int:
     trials = Path(os.environ.get(TRIALS_DIR_ENV) or sessions.parent / "trials")
     trials.mkdir(parents=True, exist_ok=True)
     environment = os.environ.get(ENVIRONMENT_ENV, "docker")
-    if environment != "docker" and environment not in REMOTE_TASK_ENVIRONMENTS:
-        choices = ", ".join(("docker", *sorted(REMOTE_TASK_ENVIRONMENTS)))
+    if environment not in HARBOR_TASK_ENVIRONMENTS:
+        choices = ", ".join(sorted(HARBOR_TASK_ENVIRONMENTS))
         raise TerminusTreeError(f"unsupported terminus environment {environment!r}; use one of {choices}")
 
     names_before_run = {path.name for path in trials.iterdir()}

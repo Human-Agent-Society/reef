@@ -19,8 +19,8 @@ process starts its first sandbox it stops the ones its deployment left (:meth:`R
 never another deployment's.
 
 A provider module (:mod:`reef.sandbox.e2b`, :mod:`reef.sandbox.modal`) implements the sandbox's start, its file and
-command primitives, and the launch of one process. :mod:`reef.sandbox.config` is the only place that names a
-provider.
+command primitives, and the launch of one process. :mod:`reef.sandbox.config` selects a provider for an
+executor, and :mod:`reef.sandbox.task_environment` names the Harbor task environments.
 """
 
 from __future__ import annotations

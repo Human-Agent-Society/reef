@@ -15,9 +15,9 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``POST /rollouts``: an agent runs rollouts of a written task (a job). Reef keeps no record of
   their model calls; each rollout comes back with its reward and its answered calls (``turns``).
 - ``GET /jobs/{id}``: a job's state and result.
-- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and the Harbor environment can
-  run tasks (Docker answers, or for ``e2b`` the E2B key is set and the e2b package imports); until then 503
-  naming what is missing, so ``reef serve`` waits on a generator that cannot check tasks or run rollouts.
+- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and the host has what the Harbor
+  environment needs (``reef.sandbox.task_environment``); until then 503 naming what is missing, so ``reef serve``
+  waits on a generator that cannot check tasks or run rollouts.
 
 Jobs run at the same time on one job worker; a rollout job waits only for the service's rollout slots, so a
 proposal or a check never waits behind rollouts. Closing the service stops the harbor runs a job has in flight, so
@@ -29,14 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib
-import importlib.util
 import json
 import logging
-import os
 import shutil
-import subprocess
-import sys
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -80,78 +75,17 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
-from reef.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.sandbox.task_environment import (
+    ModuleProbe,
+    ReadinessProbe,
+    checked_task_environment,
+    task_environment_probes,
+)
 
 logger = logging.getLogger(__name__)
 
-DOCKER_PROBE_TIMEOUT_S = 5.0
-#: The Harbor environments the generator runs its checks and rollouts in: local Docker, or E2B cloud sandboxes.
-HARBOR_ENVIRONMENTS = ("docker", "e2b")
-#: The names Harbor's e2b environment imports from the e2b package (harbor/environments/e2b.py); without one of them
-#: Harbor marks the environment missing and every check fails.
-HARBOR_E2B_NAMES = ("ALL_TRAFFIC", "AsyncSandbox", "AsyncTemplate", "FileType", "SandboxNetworkOpts", "Template")
-
 
 # ------------------------------------------------------------- the readiness
-
-
-class ReadinessProbe(ABC):
-    """One thing the generator needs before it can check tasks and run their rollouts."""
-
-    name: str = ""
-
-    @abstractmethod
-    def missing(self) -> str:
-        """Why the need is not met, or an empty string when it is."""
-
-
-class ModuleProbe(ReadinessProbe):
-    """A module imports under this interpreter; ``find_spec`` looks without importing."""
-
-    def __init__(self, module: str, *, hint: str = "") -> None:
-        self.name = module
-        self.module = module
-        self.hint = hint
-
-    def missing(self) -> str:
-        if importlib.util.find_spec(self.module) is not None:
-            return ""
-        reason = f"{self.module} does not import under {sys.executable}"
-        return f"{reason}; {self.hint}" if self.hint else reason
-
-
-class ModuleNamesProbe(ReadinessProbe):
-    """A module imports under this interpreter and defines the names a caller imports from it.
-
-    Values: ``module`` is a non-empty module name, and ``name`` is the same name. ``names`` is a tuple of non-empty
-    attribute names. ``hint`` is text appended to a reason, empty for none. ``missing`` returns "" if and only if
-    ``module`` imports and defines every name in ``names``; otherwise it returns a reason that names the module, the
-    interpreter and the import error or the absent names, followed by ``hint``.
-    Purpose: ``readiness_probes`` checks the e2b package with the names Harbor's e2b environment imports, so an e2b
-    too old for Harbor fails readiness instead of every check.
-    """
-
-    def __init__(self, module: str, names: tuple[str, ...], *, hint: str = "") -> None:
-        if not isinstance(module, str) or not module:
-            raise ValueError("module must be a non-empty module name")
-        if not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names):
-            raise ValueError("names must be a tuple of non-empty attribute names")
-        self.name = module
-        self.module = module
-        self.names = names
-        self.hint = hint
-
-    def missing(self) -> str:
-        try:
-            namespace = vars(importlib.import_module(self.module))
-        except ImportError as exc:
-            reason = f"{self.module} does not import under {sys.executable}: {exc}"
-        else:
-            absent = [name for name in self.names if name not in namespace]
-            if not absent:
-                return ""
-            reason = f"{self.module} under {sys.executable} lacks {', '.join(absent)}"
-        return f"{reason}; {self.hint}" if self.hint else reason
 
 
 class HarborProbe(ReadinessProbe):
@@ -168,83 +102,17 @@ class HarborProbe(ReadinessProbe):
         return "" if shutil.which(self.harbor) is not None else f"{self.harbor} is not an executable"
 
 
-class DockerProbe(ReadinessProbe):
-    """The Docker daemon answers ``docker version``, so Harbor can build and run a task's container."""
-
-    name = "docker"
-
-    def __init__(self, *, docker: str = "docker", timeout_s: float = DOCKER_PROBE_TIMEOUT_S) -> None:
-        self.docker = docker
-        self.timeout_s = timeout_s
-
-    def missing(self) -> str:
-        if shutil.which(self.docker) is None:
-            return f"the {self.docker} command line is not on PATH"
-        try:
-            completed = subprocess.run(
-                [self.docker, "version"], capture_output=True, text=True, timeout=self.timeout_s, check=False
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return f"{self.docker} version did not answer: {exc}"
-        if completed.returncode != 0:
-            return f"{self.docker} version exited {completed.returncode}: {completed.stderr.strip()[:500]}"
-        return ""
-
-
-class EnvironmentVariableProbe(ReadinessProbe):
-    """A variable of this process's environment is set and not empty.
-
-    Values: ``variable`` is a non-empty variable name, and ``name`` is the same name. ``hint`` is text appended to
-    a reason, empty for none. ``missing`` returns "" if and only if ``os.environ[variable]`` is set and not empty;
-    otherwise it returns "<variable> is not set where reef serve starts the generator", followed by ``hint``. It
-    names the variable and never its value, since the value can be a secret.
-    Purpose: ``readiness_probes`` makes one for each credential variable of the ``e2b`` environment; the
-    ``/healthz`` handler reads ``missing``.
-    """
-
-    def __init__(self, variable: str, *, hint: str = "") -> None:
-        if not isinstance(variable, str) or not variable:
-            raise ValueError("variable must be a non-empty environment variable name")
-        self.name = variable
-        self.variable = variable
-        self.hint = hint
-
-    def missing(self) -> str:
-        if os.environ.get(self.variable):
-            return ""
-        reason = f"{self.variable} is not set where reef serve starts the generator"
-        return f"{reason}; {self.hint}" if self.hint else reason
-
-
 def readiness_probes(*, harbor: str | None = None, environment: str = "docker") -> tuple[ReadinessProbe, ...]:
     """What checking a task and running its rollouts takes: reef-eval, the harbor command line, and ``environment``.
 
-    ``docker`` needs a Docker daemon that answers. ``e2b`` needs its credential variables in
-    ``REMOTE_TASK_ENVIRONMENTS`` (``E2B_API_KEY``) and the e2b and dockerfile-parse packages, which Harbor's
-    e2b environment imports. Raise ``ValueError`` for a name outside ``HARBOR_ENVIRONMENTS``.
+    The needs of the Harbor task environment come from ``reef.sandbox.task_environment.task_environment_probes``;
+    the generator adds only its own. Raise ``ValueError`` for an environment that module cannot check.
     """
-    stack = (
+    return (
         ModuleProbe("reef_eval", hint="a dependency of reef-infra; reinstall reef-infra"),
         HarborProbe(harbor=harbor),
+        *task_environment_probes(environment, credential_hint="export it before reef serve starts"),
     )
-    if environment == "docker":
-        return (*stack, DockerProbe())
-    if environment == "e2b":
-        return (
-            *stack,
-            *(
-                EnvironmentVariableProbe(variable, hint="export it before reef serve starts")
-                for variable in REMOTE_TASK_ENVIRONMENTS["e2b"]
-            ),
-            ModuleNamesProbe(
-                "e2b", HARBOR_E2B_NAMES, hint="Harbor's e2b environment needs it; install reef-infra[e2b]"
-            ),
-            ModuleProbe(
-                "dockerfile_parse",
-                hint="Harbor's e2b environment reads each task's Dockerfile with it; install reef-infra[e2b]",
-            ),
-        )
-    raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
 
 
 # reef serve kills the generator 30 s after its term; the harbor grace and the worker's close must both fit in that
@@ -268,7 +136,8 @@ class HarborChecks(TaskChecks):
     """The checks through the harbor command line, in one Harbor environment.
 
     Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is one of
-    ``HARBOR_ENVIRONMENTS``. ``runs`` is the registry of harbor children, or None for a registry per check.
+    ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is the registry of harbor children, or None
+    for a registry per check.
     Purpose: the generator process makes it with the ``runs`` of its job runner, so closing the runner stops a
     check; ``CheckJob`` calls ``oracle``, which runs both of a task's harbor runs in ``environment``.
     """
@@ -276,10 +145,8 @@ class HarborChecks(TaskChecks):
     def __init__(
         self, *, harbor: str | None = None, environment: str = "docker", runs: HarborRuns | None = None
     ) -> None:
-        if environment not in HARBOR_ENVIRONMENTS:
-            raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
         self.harbor = harbor
-        self.environment = environment
+        self.environment = checked_task_environment(environment)
         self.runs = runs
 
     def oracle(self, task_path: Path) -> OracleResult:
@@ -309,8 +176,8 @@ class ReefGeneratorRollouts(GeneratorRollouts):
     Values: ``reef_url`` is the Reef service the agent's calls go to, with ``token`` as its bearer or None.
     ``work_dir`` is where the runners keep trials. ``agent`` is a Harbor agent config mapping or None for
     Terminus 2, and ``agent_host`` an address of this host the task's sandbox reaches, or None. ``environment`` is
-    one of ``HARBOR_ENVIRONMENTS``, for every rollout. ``rollout_slots`` is a semaphore with ``concurrency`` slots,
-    a positive int.
+    one of ``reef.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, for every rollout. ``rollout_slots`` is a
+    semaphore with ``concurrency`` slots, a positive int.
     Purpose: the generator process makes it; ``RolloutJob`` calls ``run_rollouts``. The service's job worker runs
     every rollout on its one event loop, so all calls share the rollout slots.
     """
@@ -326,8 +193,7 @@ class ReefGeneratorRollouts(GeneratorRollouts):
         environment: str = "docker",
         concurrency: int = 2,
     ) -> None:
-        if environment not in HARBOR_ENVIRONMENTS:
-            raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
+        environment = checked_task_environment(environment)
         if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
             raise ValueError("concurrency must be a positive int")
         self.reef_url = reef_url

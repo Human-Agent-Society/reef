@@ -172,7 +172,7 @@ package's own submodules and third-party libraries):
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``record2sample``, ``evaluation``, ``sandbox``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``cli``
      - ``service``, ``core``
 

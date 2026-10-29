@@ -6,8 +6,9 @@ files through Harbor's ``BaseEnvironment`` interface. It supports Reef's local
 and bubblewrap executors, and the cloud sandboxes of E2B and Modal. Harness rendering and candidate
 evaluation remain outside this package.
 
-Callers do not need to know which sandbox runs their commands. Only
-``reef.sandbox.config`` names a sandbox kind or a cloud provider:
+Callers do not need to know which sandbox runs their commands. These
+interfaces of ``reef.sandbox`` name the sandbox kinds and cloud providers for
+them:
 
 - ``build_executor`` reads the deployment's ``executor`` setting and returns an
   ``ProgramExecutor``.
@@ -19,8 +20,32 @@ Callers do not need to know which sandbox runs their commands. Only
 - ``reef.sandbox.remote.REMOTE_TASK_ENVIRONMENTS`` lists the Harbor environment
   types that run a task's containers on a provider, each with the variables
   its credentials come from.
+- ``reef.sandbox.task_environment`` names every Harbor task environment type
+  (``HARBOR_TASK_ENVIRONMENTS``) and checks what a host needs to run tasks in
+  the ones it has probes for (``PROBED_TASK_ENVIRONMENTS``: ``docker`` and
+  ``e2b``). ``task_environment_probes(environment)`` returns a readiness probe
+  for each need, such as the Docker daemon, or the E2B key, the e2b package and
+  dockerfile-parse; ``checked_task_environment`` refuses any other name.
 
 Every other caller uses these interfaces.
+
+Executors and Harbor task environments
+--------------------------------------
+
+The two run different things. A ``ProgramExecutor`` launches one program,
+such as a harness's pinned binary, locally, in bubblewrap, or in an E2B or
+Modal sandbox, and ``ExecutorEnvironment`` adapts one to Harbor's
+``BaseEnvironment`` without building a task image. A Harbor task environment
+is where Harbor builds a task's ``environment/Dockerfile``, starts it, runs
+the task's agent and verifier in it and stops it.
+
+The generator service's checks (``harbor run -e`` children) and rollouts
+(in-process Harbor trials) use only Harbor's task environment lifecycle: they
+select an environment by name, read its needs from
+``reef.sandbox.task_environment``, and reuse nothing from the executors. The
+Terminus harness layers the two: an executor launches its runner, and the
+runner then drives a Harbor task environment, so that harness also checks that
+the jail passes the environment's credentials.
 
 
 Run a command

@@ -1,4 +1,4 @@
-"""Build the executor a deployment selected; the only place that names a sandbox kind."""
+"""Build the executor a deployment selected; the only place that names an executor kind."""
 
 from __future__ import annotations
 
