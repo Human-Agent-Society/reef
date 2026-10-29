@@ -22,6 +22,7 @@ import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 
+from reef.artifact.files import DirectoryFiles
 from reef.core.requirements import REQUIRE_KINDS
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.rollouts.model_binding import ModelBindingError
@@ -1273,19 +1274,19 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     for relative, text in files.items():
         (tree / relative).parent.mkdir(parents=True, exist_ok=True)
         (tree / relative).write_text(text, encoding="utf-8")
-    layout.check(tree)
+    layout.check(DirectoryFiles(tree))
     (tree / ENTRIES_FILE).write_text(json.dumps(base_entries), encoding="utf-8")
-    layout.check(tree)
+    layout.check(DirectoryFiles(tree))
     (tree / "notes.txt").write_text("extra", encoding="utf-8")
     with pytest.raises(ValueError, match=r"extra \['notes.txt'\]"):
-        layout.check(tree)
+        layout.check(DirectoryFiles(tree))
     (tree / "notes.txt").unlink()
     (tree / "native" / "models.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match=r"native/models\.json differs from the render"):
-        layout.check(tree)
+        layout.check(DirectoryFiles(tree))
     (tree / ENTRIES_FILE).write_text(json.dumps([{"id": "x", "name": "unknown_kind"}]), encoding="utf-8")
     with pytest.raises(ValueError, match="the harness entries are refused"):
-        layout.check(tree)
+        layout.check(DirectoryFiles(tree))
     assert CordisRecipe.from_environment(
         {},
         config={**load_recipe_config(materialized), "evolution": {**config["evolution"], "seed": []}},

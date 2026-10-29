@@ -52,6 +52,7 @@ from reef.artifact.artifact import (
     ArtifactValidator,
 )
 from reef.artifact.composite import compose_release
+from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_content_id
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
@@ -69,23 +70,31 @@ from reef.artifact.repository import (
     StagedReleaseRepositoryBackend,
 )
 from reef.artifact.sources import (
+    REFERENCE_FILE,
     ArtifactSourceReader,
     ArtifactSources,
+    DirectorySource,
     DownloadedSnapshot,
     FileReader,
     HuggingFaceReader,
+    HuggingFaceRevision,
+    HuggingFaceRevisionFiles,
     HuggingFaceSource,
+    S3PrefixFiles,
     S3Reader,
-    directory_content_id,
+    SourceFiles,
     download_huggingface_snapshot,
     parse_huggingface_source,
+    read_reference,
 )
 
 __all__ = [
+    "REFERENCE_FILE",
     "AdapterArtifactError",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
+    "ArtifactFiles",
     "ArtifactMaterializationError",
     "ArtifactNotFound",
     "ArtifactPublicationError",
@@ -98,12 +107,16 @@ __all__ = [
     "BaseArtifactSource",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
+    "DirectoryFiles",
+    "DirectorySource",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",
     "FileReader",
     "GitLFSRepositoryBackend",
     "GitLFSRepositoryBackendFactory",
     "HuggingFaceReader",
+    "HuggingFaceRevision",
+    "HuggingFaceRevisionFiles",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
     "PEFTValidator",
@@ -113,11 +126,14 @@ __all__ = [
     "RepositoryBackend",
     "RepositoryBackendContext",
     "RepositoryBackendFactory",
+    "S3PrefixFiles",
     "S3Reader",
+    "SourceFiles",
     "StagedReleaseRepositoryBackend",
     "compose_release",
     "directory_content_id",
     "download_huggingface_snapshot",
     "parse_huggingface_source",
     "read_peft_config",
+    "read_reference",
 ]
