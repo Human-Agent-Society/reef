@@ -18,7 +18,7 @@ from reef.core.tasks import write_harbor_task
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.sft import SFTRecord2Record
-from reef.recipe.sft_then_rl import SFTThenRLJobData, SFTThenRLJobPlan, SFTThenRLJobSettings, SFTThenRLRecipe
+from reef.recipe.sft_then_rl import SFTThenRLJobData, SFTThenRLJobSettings, SFTThenRLRecipe
 from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.commits import CommitRecord
@@ -26,7 +26,6 @@ from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext
-from reef.train.jobs import JobPlanContext, JobRequest
 from reef.train.pipeline import TrainingPipeline
 
 ROLLOUT = {"rollouts_per_task": 2}
@@ -169,19 +168,19 @@ def test_in_manual_mode_an_imported_task_job_waits_for_an_instruction_and_consum
     pipeline.close()
 
 
-def test_the_plan_gives_a_task_job_the_rl_request_and_any_other_job_the_sft_request(tmp_path: Path) -> None:
-    sft, rl = JobRequest({"method": "sft"}), JobRequest({"method": "rl", "rollout": ROLLOUT})
-    plan = SFTThenRLJobPlan(sft, rl)
-
-    def context(*items: Any) -> JobPlanContext:
-        return JobPlanContext(JobData("support:data:1", items), 0, None)
-
+def test_a_task_job_gets_the_rl_parameters_and_any_other_job_the_sft_parameters(tmp_path: Path) -> None:
+    built = recipe(task_job_parameters={"rollout": ROLLOUT})
+    samples = SQLiteScenarioStorage(None).open("support").samples
+    context = PipelineContext(
+        "support", TeacherContextReport, samples=samples, job_parameters=built.parameters_by_kind()
+    )
+    stage = SFTThenRLJobData(context, SFTThenRLJobSettings(job_samples=2))
+    sft, rl = built.parameters_by_kind()["trajectory"], built.parameters_by_kind()["task"]
     task = TaskSample(tmp_path)
-    assert plan.next_job(context(atif("t1"))) is sft
-    assert plan.next_job(context()) is sft, "an instruction without samples is not a task job"
-    assert plan.next_job(context(task, replace(task, task_path=tmp_path / "b"))) is rl
+    assert stage.job_parameters(JobData("support:data:1", (atif("t1"),))) == sft
+    assert stage.job_parameters(JobData("support:data:2", (task, replace(task, task_path=tmp_path / "b")))) == rl
     with pytest.raises(ValueError, match="holds both trajectories and tasks"):
-        plan.next_job(context(atif("t1"), task))
+        stage.job_parameters(JobData("support:data:3", (atif("t1"), task)))
 
 
 def recipe(**config: Any) -> SFTThenRLRecipe:
@@ -190,13 +189,12 @@ def recipe(**config: Any) -> SFTThenRLRecipe:
 
 def test_the_recipe_trains_sft_jobs_with_sft_and_task_jobs_with_task_group() -> None:
     built = recipe(job_parameters={"save_interval": 4}, task_job_parameters={"rollout": ROLLOUT})
-    plan = built.job_plan()
-    assert isinstance(plan, SFTThenRLJobPlan)
-    assert plan.sft.parameters == {
+    parameters = built.parameters_by_kind()
+    assert parameters["trajectory"] == {
         "save_interval": 4,
         "method": {"objective": "reef.recipe.sft:SftObjective", "learning_rate_schedule": None},
     }
-    assert plan.rl.parameters == {
+    assert parameters["task"] == {
         "rollout": ROLLOUT,
         "method": {"objective": "task_group", "learning_rate_schedule": None},
     }

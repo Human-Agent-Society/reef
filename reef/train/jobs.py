@@ -1,8 +1,9 @@
-"""The control plane's side of training jobs: the recipe's job plan and one weight trainer's job loop.
+"""The control plane's side of training jobs: one weight trainer's job loop.
 
 A weight trainer does not drive training steps. When a job's data is ready, the
-recipe's ``JobPlan`` gives the job's parameters, and the ``JobLoop`` submits
-the job to the trainer's ``TrainingComponent``. The trainer commits the
+pipeline's sample-to-job stage gives the job's data and parameters
+(``Sample2Job.make_job_data`` and ``Sample2Job.job_parameters``), and the
+``JobLoop`` submits the job to the trainer's ``TrainingComponent``. The trainer commits the
 submission, which consumes the records of the job's data. While the job runs, the
 trainer commits each checkpoint that it saves as an artifact. Training never
 activates an artifact: the scenario's activation rule decides whether it
@@ -13,10 +14,8 @@ starts from the job's last saved checkpoint, whether or not it serves.
 
 from __future__ import annotations
 
-import json
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,95 +32,6 @@ def require_count(value: object, name: str) -> None:
     """Raise ``ValueError`` unless ``value`` is a non-negative int (not a bool)."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative int")
-
-
-@dataclass(frozen=True)
-class JobRequest:
-    """The parameters of the job a plan asks for, and whether the job restarts training.
-
-    A value holds ``parameters``: a mapping whose values encode as JSON. The
-    value keeps its own copy, because the parameters are part of the job's
-    identity. ``restart`` is a bool: when it is True, the job starts from the
-    weights of the trainer's start with no training state
-    (``TrainingComponent.fresh_start``), for example at the switch from SFT to
-    RL. A ``JobPlan`` makes the value, and ``JobLoop.submit`` reads it. Reef
-    reads none of the parameters; the component's own defaults fill the ones
-    a request leaves out.
-    """
-
-    parameters: Mapping[str, Any] = field(default_factory=dict)
-    restart: bool = False
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.parameters, Mapping):
-            raise TypeError("JobRequest.parameters must be a mapping")
-        if not isinstance(self.restart, bool):
-            raise TypeError("JobRequest.restart must be a bool")
-        parameters = dict(self.parameters)
-        json.dumps(parameters, allow_nan=False)
-        object.__setattr__(self, "parameters", parameters)
-
-
-@dataclass(frozen=True)
-class JobPlanContext:
-    """What a plan reads when it chooses the next job.
-
-    ``data`` is the data the job trains. ``finished_jobs`` is the number of
-    this trainer's jobs that ended, finished or failed, a non-negative int.
-    ``last_job`` is the outcome of the last of them, and it is ``None``
-    exactly when ``finished_jobs`` is 0. ``JobLoop.submit`` makes the value
-    and ``JobPlan.next_job`` reads it.
-    """
-
-    data: JobData
-    finished_jobs: int
-    last_job: JobOutcome | None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.data, JobData):
-            raise TypeError("JobPlanContext.data must be a JobData")
-        require_count(self.finished_jobs, "JobPlanContext.finished_jobs")
-        if self.last_job is not None and not isinstance(self.last_job, JobOutcome):
-            raise TypeError("JobPlanContext.last_job must be a JobOutcome or None")
-        if (self.last_job is None) != (self.finished_jobs == 0):
-            raise ValueError("JobPlanContext.last_job is None exactly when no job has ended")
-
-
-class JobPlan(ABC):
-    """The recipe's choice of each training job's parameters.
-
-    A recipe that trains in phases, such as SFT for its first jobs and then a
-    policy objective, returns a ``method`` parameter per phase. The same
-    training component switches the objective from one job to the next.
-    """
-
-    @abstractmethod
-    def next_job(self, context: JobPlanContext) -> JobRequest:
-        """The request for the job that trains ``context.data``.
-
-        The result must depend only on ``context``: after the service restarts, the
-        trainer asks again with the same context and must get the same
-        request, because the request is part of the job's identity.
-        """
-
-    def experiment_config(self) -> Mapping[str, Any]:
-        """A non-secret description of the plan, which experiment runs record."""
-        return {"job_plan": f"{type(self).__module__}.{type(self).__qualname__}"}
-
-
-class FixedJobPlan(JobPlan):
-    """A plan that gives every job the same ``request``: one job, with the same parameters, whenever job data is ready."""
-
-    def __init__(self, request: JobRequest) -> None:
-        if not isinstance(request, JobRequest):
-            raise TypeError(f"FixedJobPlan requires a JobRequest, got {type(request).__name__}")
-        self.request = request
-
-    def next_job(self, context: JobPlanContext) -> JobRequest:
-        return self.request
-
-    def experiment_config(self) -> Mapping[str, Any]:
-        return {"job_plan": "fixed", "parameters": dict(self.request.parameters)}
 
 
 @dataclass(frozen=True)
@@ -223,27 +133,18 @@ class JobCommit:
 class JobLoop:
     """Submit a weight trainer's jobs to its training component, and turn their checkpoints into commits.
 
-    ``component`` runs the jobs; ``plan`` gives their parameters; ``scenario``
-    is the non-empty name of the trainer's scenario, which is part of each
-    job's identity, so two scenarios never share a job. ``submit`` and
+    ``component`` runs the jobs; ``scenario`` is the non-empty name of the
+    trainer's scenario, which is part of each job's identity, so two scenarios
+    never share a job. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
-    def __init__(
-        self,
-        component: TrainingComponent,
-        plan: JobPlan,
-        *,
-        scenario: str,
-    ) -> None:
+    def __init__(self, component: TrainingComponent, *, scenario: str) -> None:
         if not isinstance(component, TrainingComponent):
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
-        if not isinstance(plan, JobPlan):
-            raise TypeError(f"plan must be a JobPlan, got {type(plan).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
-        self.plan = plan
         self.scenario = scenario
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
@@ -264,28 +165,21 @@ class JobLoop:
         }
         return job_id_for(self.component.name, start, identity, parameters)
 
-    def submit(self, state: JobLoopState, data: JobData) -> JobCommit:
-        """Submit the plan's job for ``data``; the result records the running job and its start.
+    def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
+        """Submit the job that trains ``data`` with ``parameters``; the result records the running job.
 
-        The job starts from ``state.start``, or from a fresh start of those
-        weights when the request restarts training, under ``job_id``. Raise
-        ``ValueError`` when ``state`` has a running job, or when the component
-        cannot restart training from its start.
+        The job starts from ``state.start``, under ``job_id``. ``parameters``
+        is the mapping that the pipeline's sample-to-job stage gives for
+        ``data``, which encodes as JSON. Raise ``ValueError`` when ``state``
+        has a running job.
         """
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
-        request = self.plan.next_job(JobPlanContext(data, state.finished_jobs, state.last_job))
-        if not isinstance(request, JobRequest):
-            raise TypeError(f"{type(self.plan).__name__}.next_job must return a JobRequest")
         backend = self.component.name
-        start = self.component.fresh_start(state.start) if request.restart else state.start
-        job_id = self.job_id(state, start, data, request.parameters)
-        self.component.submit(TrainingJob(job_id, backend, start, data, request.parameters))
-        # The fresh start is the trainer's start from now on: a job that saves nothing leaves it in place.
-        submitted = JobLoopState(start, RunningJob(job_id), state.finished_jobs, state.last_job)
+        job_id = self.job_id(state, state.start, data, parameters)
+        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters))
+        submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
-        if request.restart:
-            event["restart"] = True
         return JobCommit(
             TrainStepResult(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
         )

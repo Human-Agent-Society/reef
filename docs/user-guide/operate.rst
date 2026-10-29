@@ -239,7 +239,7 @@ Every checkpoint that a job saves becomes an artifact. Without an ``evaluation``
 
 How often a job saves depends on the backend:
 
-- A Slime or Tinker job saves a checkpoint every ``save_interval`` optimizer steps, and at its end. ``save_interval`` is a job parameter: the recipe's job plan sets it, and ``recipe.config.job_parameters`` sets it for the default plan. Without it, a job saves one checkpoint at its end.
+- A Slime or Tinker job saves a checkpoint every ``save_interval`` optimizer steps, and at its end. ``save_interval`` is a job parameter: ``recipe.config.job_parameters`` sets it. Without it, a job saves one checkpoint at its end.
 - A Slime checkpoint is the Megatron checkpoint and its HF export (with LoRA, the PEFT adapter). Each run of ``save_interval`` steps trains as one Slime rollout (one ``rollout_id``, Slime's unit of training). ``save-interval`` in ``training.options`` does not change this cadence. Megatron requires ``save-interval`` together with ``save``, so keep both set.
 
 A Slime deployment bounds its checkpoints on disk with options in ``training.options``:

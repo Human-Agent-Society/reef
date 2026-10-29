@@ -37,7 +37,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlanContext
+from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -473,13 +473,11 @@ def _checkpoint_commits(dispatcher: Dispatcher) -> list[CommitRecord]:
 
 
 @pytest.mark.unit
-def test_sao_job_plan_submits_every_batch_with_the_sao_objective() -> None:
-    plan = SAORecipe(**runtime_bindings()).job_plan()
+def test_sao_submits_every_batch_with_the_sao_objective() -> None:
+    parameters = SAORecipe(**runtime_bindings()).parameters_by_kind()["trajectory"]
 
-    assert isinstance(plan, FixedJobPlan)
-    request = plan.next_job(JobPlanContext(JobData("math:1"), 0, None))
-    assert TrainingMethod.from_dict(request.parameters["method"]) == TrainingMethod("sao")
-    assert set(request.parameters) == {"method"}, "the training component owns the step schedule"
+    assert TrainingMethod.from_dict(parameters["method"]) == TrainingMethod("sao")
+    assert set(parameters) == {"method"}, "the training component owns the step schedule"
 
 
 @pytest.mark.integration
@@ -629,11 +627,8 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             store,
             pipeline_factory=lambda context: sao_processor(context),
-            job_loop=JobLoop(
-                component,
-                SAORecipe(**runtime_bindings(component)).job_plan(),
-                scenario="math",
-            ),
+            job_loop=JobLoop(component, scenario="math"),
+            job_parameters=SAORecipe(**runtime_bindings(component)).parameters_by_kind(),
             algorithm_state=algorithm_state,
             default_job_samples=1,
         )
