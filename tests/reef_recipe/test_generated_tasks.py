@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self
 
@@ -310,15 +310,12 @@ class InlineWorker(BackgroundJobWorker):
         self.generation = None
 
 
-class DeferredWorker(BackgroundJobWorker):
+class DeferredWorker(InlineWorker):
     """Takes a round the moment it is submitted and runs it on ``finish``; the outcome lands on the next poll."""
 
     def __init__(self) -> None:
-        super().__init__(Unbound(), thread_name="test-rounds", concurrency=1)
-        self.generation: BackgroundJobRunner | None = None
-        self.submitted: list[SupportsReceipt] = []
+        super().__init__()
         self.waiting: list[SupportsReceipt] = []
-        self.finished: list[SupportsReceipt] = []
 
     def submit(self, job: SupportsReceipt) -> bool:
         self.submitted.append(job)
@@ -331,14 +328,7 @@ class DeferredWorker(BackgroundJobWorker):
             raise RuntimeError("no generation bound")
         jobs, self.waiting = self.waiting, []
         for job in jobs:
-            self.finished.append(asyncio.run(self.generation.run(job)))
-
-    def poll(self) -> list[SupportsReceipt]:
-        outcomes, self.finished = self.finished, []
-        return outcomes
-
-    def close(self) -> None:
-        self.generation = None
+            self.outcomes.append(asyncio.run(self.generation.run(job)))
 
 
 def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
@@ -414,11 +404,8 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     task_generator = ScriptedGenerator([generated(0, 0, 1) + generated(0, 2)])
     p, service = rounds(tmp_path, task_generator, tasks_per_step=3)
     status = p.status()["task_generation"]
-    assert status["generator"] == "ScriptedGenerator" and (status["next"], status["completed"], status["of"]) == (
-        0,
-        0,
-        3,
-    )
+    assert status["generator"] == "ScriptedGenerator"
+    assert (status["next"], status["completed"], status["of"]) == (0, 0, 3)
     assert looked(p), "the three saved tasks are the next job's data"
     status = p.status()["task_generation"]
     assert (status["next"], status["completed"]) == (1, 1)
@@ -839,22 +826,9 @@ def test_no_session_waits_once_the_rounds_are_over(tmp_path: Path) -> None:
     assert len(task_generator.requests) == 1
 
 
-def test_a_restart_does_not_generate_again_from_replayed_sessions_of_a_complete_generation(tmp_path: Path) -> None:
-    worker = DeferredWorker()
-    first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, **SOURCES)
-    sessions(first, "a")
-    first.ready(BATCH_SIZE)
-    worker.finish()
-    first.ready(BATCH_SIZE)
-    first.close()
-    task_generator = ScriptedGenerator()
-    restarted, _ = rounds(tmp_path, task_generator, **SOURCES)
-    sessions(restarted, "a")
-    looked(restarted)
-    assert [source_ids(request) for request in task_generator.requests][:1] == [[]], "session a is not used again"
-
-
-def test_replayed_sessions_of_a_complete_generation_do_not_use_up_a_round(tmp_path: Path) -> None:
+def test_replayed_sessions_of_a_complete_generation_are_not_used_again_and_do_not_use_up_a_round(
+    tmp_path: Path,
+) -> None:
     config: dict[str, Any] = {"rounds": 2, "source_tag": "source=session", "source_records_per_round": 1}
     worker = DeferredWorker()
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, **config)
@@ -1041,17 +1015,39 @@ def test_a_stage_without_from_config_cannot_be_named_in_the_pipeline_section() -
         recipe.build_pipeline(PipelineContext("one"))
 
 
-def test_a_task_whose_result_cannot_be_saved_still_trains_and_the_next_job_saves_it(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]))
-    store = p.record2sample.task_store
+def fail_first_result_saves(
+    store: Any, error: Exception, *, times: int | None = None
+) -> tuple[Callable[..., None], list[Exception]]:
+    """Make the save of the result of ``harbor-00000-000`` raise ``error``, ``times`` times or always.
+
+    Returns the store's original ``write_document`` and the list of the errors raised so far."""
     write_document = store.write_document
+    raised: list[Exception] = []
 
     def failing_write_document(*, key: str, document: str) -> None:
-        if key == "rollout/harbor-00000-000":
-            raise OSError(28, "No space left on device")
+        if key == "rollout/harbor-00000-000" and (times is None or len(raised) < times):
+            raised.append(error)
+            raise error
         write_document(key=key, document=document)
 
     store.write_document = failing_write_document
+    return write_document, raised
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(28, "No space left on device"),
+        sqlalchemy.exc.OperationalError("INSERT", {}, Exception("database is locked")),
+    ],
+    ids=["disk-full", "database-locked"],
+)
+def test_a_task_whose_result_cannot_be_saved_still_trains_and_the_next_job_saves_it(
+    tmp_path: Path, error: Exception
+) -> None:
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]))
+    store = p.record2sample.task_store
+    write_document, _ = fail_first_result_saves(store, error)
     looked(p)
     train_job(p)
     assert set(rollout_results(store)) == {"harbor-00000-001"}
@@ -1077,20 +1073,10 @@ def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_
 def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedback(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)
-    store = p.record2sample.task_store
-    write_document = store.write_document
-    failures = {"count": 0}
-
-    def flaky_write_document(*, key: str, document: str) -> None:
-        if key == "rollout/harbor-00000-000" and failures["count"] == 0:
-            failures["count"] += 1
-            raise OSError(28, "No space left on device")
-        write_document(key=key, document=document)
-
-    store.write_document = flaky_write_document
+    _, raised = fail_first_result_saves(p.record2sample.task_store, OSError(28, "No space left on device"), times=1)
     looked(p)
     train_job(p)
-    assert failures["count"] == 1
+    assert len(raised) == 1
     assert task_generator.result_generations == [0], "the delivery job saved the result again, then delivered"
 
 
@@ -1145,16 +1131,8 @@ def test_a_task_that_trained_before_its_result_was_saved_gets_it_when_the_restar
     tmp_path: Path,
 ) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
-    store = p.record2sample.task_store
-    write_document = store.write_document
-
-    def failing_write_document(*, key: str, document: str) -> None:
-        if key == "rollout/harbor-00000-000":
-            raise OSError(28, "No space left on device")
-        write_document(key=key, document=document)
-
     # The first task's result is never saved, but both tasks train before the stop.
-    store.write_document = failing_write_document
+    fail_first_result_saves(p.record2sample.task_store, OSError(28, "No space left on device"))
     looked(p)
     train_job(p)
     p.close()
@@ -1166,25 +1144,6 @@ def test_a_task_that_trained_before_its_result_was_saved_gets_it_when_the_restar
     again.job_ended(JobOutcome("job", "tinker", "finished", {"rollout_rewards": rewards}))
     assert rollout_results(again.record2sample.task_store)["harbor-00000-000"].rollout_rewards == (1.0, 0.0)
     assert asyncio.run(again.record2sample.deliver_results()) == "" and task_generator.result_generations == [0]
-
-
-def test_a_result_that_the_database_fails_to_save_still_trains_and_is_saved_later(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
-    store = p.record2sample.task_store
-    write_document = store.write_document
-
-    def locked_write_document(*, key: str, document: str) -> None:
-        if key == "rollout/harbor-00000-000":
-            raise sqlalchemy.exc.OperationalError("INSERT", {}, Exception("database is locked"))
-        write_document(key=key, document=document)
-
-    store.write_document = locked_write_document
-    looked(p)
-    train_job(p)
-    assert p.status()["task_store"]["trained"] == 2, "both tasks trained"
-    store.write_document = write_document
-    assert asyncio.run(p.record2sample.run(DeliveryJob(receipt="delivery"))).error == ""
-    assert 0 in delivered_generations(store)
 
 
 def test_a_round_that_ran_out_of_attempts_is_retried_with_the_same_sessions(tmp_path: Path) -> None:

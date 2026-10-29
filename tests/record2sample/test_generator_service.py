@@ -52,6 +52,7 @@ from reef.record2sample.generator import (
     ReefGeneratorRollouts,
     TaskChecks,
     TaskNameConflict,
+    WrittenTask,
     readiness_probes,
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -217,6 +218,13 @@ def request() -> DesignerRequest:
     return DesignerRequest(target="shell tasks with hidden state", skill="inspection", experience_text="LAST TIME: ok")
 
 
+async def propose_and_write(generator: HttpGenerator) -> tuple[HarborTask, WrittenTask]:
+    """Propose the task of generation 1, index 0, and write it under the service's task root."""
+    proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+    assert proposed.task is not None
+    return proposed.task, await generator.write_task(proposed.task)
+
+
 def test_a_proposal_comes_back_as_a_task_with_the_designers_record_id(tmp_path: Path) -> None:
     built, designer, _, _ = service(tmp_path)
 
@@ -293,63 +301,33 @@ def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_b
     assert designer.calls[0]["model"] == "m"
 
 
-def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_path: Path) -> None:
+def test_a_task_is_written_once_and_a_duplicate_or_a_name_conflict_is_refused(tmp_path: Path) -> None:
     built, _, _, _ = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
-        assert written.path == tmp_path / "tasks" / proposed.task.name and written.digest == proposed.task.digest
-        assert read_harbor_task(written.path) == proposed.task
-        again = await generator.write_task(proposed.task)
+        task, written = await propose_and_write(generator)
+        assert written.path == tmp_path / "tasks" / task.name and written.digest == task.digest
+        assert read_harbor_task(written.path) == task
+        again = await generator.write_task(task)
         assert again.path == written.path and written.created and not again.created, "staging again returns it"
         with pytest.raises(DuplicateTask, match="duplicate"):
-            await generator.write_task(
-                HarborTask(
-                    name="other-name",
-                    instruction=proposed.task.instruction,
-                    tests=proposed.task.tests,
-                    environment=proposed.task.environment,
-                    solution=proposed.task.solution,
-                )
-            )
-        with pytest.raises(GeneratorError, match="a different task holds the name"):
-            await generator.write_task(
-                HarborTask(
-                    name=proposed.task.name,
-                    instruction=proposed.task.instruction + "Hurry.\n",
-                    tests=proposed.task.tests,
-                    environment=proposed.task.environment,
-                )
-            )
-        await generator.delete_task(proposed.task.name)
-        assert not written.path.exists()
-        with pytest.raises(GeneratorError, match=r"refused \(404\)"):
-            await generator.delete_task(proposed.task.name)
-        with pytest.raises(GeneratorError, match=r"refused \(400\).*not a task name"):
-            await generator.delete_task("bad name")
-        return None
-
-    run_with(built, body)
-
-
-def test_a_taken_name_is_a_name_conflict_told_apart_from_a_duplicate(tmp_path: Path) -> None:
-    built, _, _, _ = service(tmp_path)
-
-    async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        await generator.write_task(proposed.task)
+            await generator.write_task(replace(task, name="other-name"))
+        # A taken name is a name conflict, told apart from a duplicate.
         with pytest.raises(TaskNameConflict, match="a different task holds the name harbor-00001-000-inspection"):
             await generator.write_task(
                 HarborTask(
-                    name=proposed.task.name,
-                    instruction=proposed.task.instruction + "Hurry.\n",
-                    tests=proposed.task.tests,
-                    environment=proposed.task.environment,
+                    name=task.name,
+                    instruction=task.instruction + "Hurry.\n",
+                    tests=task.tests,
+                    environment=task.environment,
                 )
             )
+        await generator.delete_task(task.name)
+        assert not written.path.exists()
+        with pytest.raises(GeneratorError, match=r"refused \(404\)"):
+            await generator.delete_task(task.name)
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*not a task name"):
+            await generator.delete_task("bad name")
         return None
 
     run_with(built, body)
@@ -360,12 +338,10 @@ def test_a_check_runs_the_oracle_on_a_task_under_the_root_only(tmp_path: Path) -
     built, _, checks, _ = service(tmp_path, checks=StandInChecks(is_solvable=False))
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        task, written = await propose_and_write(generator)
         result = await generator.check(written.path)
         assert not result.is_solvable and result.reason == "the oracle scored 0" and result.oracle_reward == 0.0
-        assert result == await generator.check(Path(proposed.task.name)), "a name under the root is the same task"
+        assert result == await generator.check(Path(task.name)), "a name under the root is the same task"
         with pytest.raises(GeneratorError, match="not a task directory under"):
             await generator.check(tmp_path)
         return None
@@ -379,9 +355,7 @@ def test_a_check_that_could_not_run_is_a_failed_job_the_client_raises(tmp_path: 
     error = "OracleUnavailable: harbor run -a oracle exited 2: docker is not running"
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        _, written = await propose_and_write(generator)
         submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
         with pytest.raises(GeneratorError, match=f"job {submitted['job']} failed: {error}"):
             await generator.job_result(submitted)
@@ -403,9 +377,7 @@ def test_closing_the_service_stops_the_harbor_run_of_the_job_in_flight(tmp_path:
     built, _, _, _ = service(tmp_path, checks=HarborChecks(harbor=str(harbor), runs=runs), jobs=JobRunner(runs))
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        _, written = await propose_and_write(generator)
         submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
         deadline = time.monotonic() + 10.0
         while not runs.pids() and time.monotonic() < deadline:
@@ -430,9 +402,7 @@ def test_a_job_that_never_finishes_is_given_up_after_the_job_timeout(tmp_path: P
     built, _, checks, _ = service(tmp_path, checks=StandInChecks(gate=gate))
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        _, written = await propose_and_write(generator)
         impatient = HttpGenerator(generator.url, poll_s=0.01, job_timeout_s=0.05)
         try:
             with pytest.raises(GeneratorError, match=r"check job \w+ is still running after [\d.]+ s"):
@@ -451,9 +421,7 @@ def test_a_check_and_a_second_rollout_job_run_while_a_rollout_job_waits(tmp_path
     built, _, _, _ = service(tmp_path, rollouts=rollouts)
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        _, written = await propose_and_write(generator)
         arguments = {"scenario": "spade", "arm": "plain", "count": 1}
         running = [
             asyncio.ensure_future(
@@ -541,10 +509,14 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
     ):
         asyncio.run(generator_rollouts.run_rollouts(tmp_path / "t", **rollout_arguments))  # type: ignore[arg-type]
     assert environments == ["docker", "docker", "e2b", "e2b"]
-    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b"):
-        HarborChecks(environment="")
+    assert HarborChecks(environment="e2b").environment == "e2b"
+    # An environment the generator cannot probe is refused.
+    for environment in ("", "modal"):
+        with pytest.raises(ValueError, match=f"the Harbor environment must be docker or e2b, not '{environment}'"):
+            HarborChecks(environment=environment)
     for fields, message in (
         ({"environment": ""}, "the Harbor environment must be docker or e2b"),
+        ({"environment": "modal"}, "the Harbor environment must be docker or e2b, not 'modal'"),
         ({"concurrency": 0}, "concurrency must be a positive int"),
     ):
         with pytest.raises(ValueError, match=message):
@@ -555,9 +527,7 @@ def test_a_rollout_job_runs_the_arm_with_its_files_and_comes_back_as_rollouts(tm
     built, _, _, rollouts = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        _, written = await propose_and_write(generator)
         ran = await generator.run_rollouts(
             written.path,
             scenario="spade",
@@ -794,17 +764,6 @@ def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
     assert run_with(built, body) == (200, {"ok": True, "tasks_root": str(tmp_path / "tasks")})
 
 
-def test_the_checks_and_the_rollouts_refuse_an_environment_the_generator_cannot_probe(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
-        HarborChecks(environment="modal")
-    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
-        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="modal")
-    assert HarborChecks(environment="e2b").environment == "e2b"
-    assert (
-        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b").environment == "e2b"
-    )
-
-
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     task = HarborTask(
         name="t",
@@ -1017,8 +976,18 @@ def test_legacy_proposal_without_source_fields_still_works(tmp_path: Path) -> No
     run_with(built, body)
 
 
-@pytest.mark.parametrize("failure", ["missing", "binary", "symlink", "oversized"])
-def test_invalid_materials_fail_before_proposing(tmp_path: Path, failure: str) -> None:
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("missing", "asset"),
+        ("binary", "asset"),
+        ("symlink", "asset"),
+        ("oversized", "asset"),
+        # A snapshot with too many files is not partially forwarded.
+        ("too-many-files", "128 files"),
+    ],
+)
+def test_invalid_materials_fail_before_proposing(tmp_path: Path, failure: str, message: str) -> None:
     built, designer, _, _ = service(tmp_path)
     material = tmp_path / "material"
     if failure == "binary":
@@ -1028,32 +997,15 @@ def test_invalid_materials_fail_before_proposing(tmp_path: Path, failure: str) -
         (material / "outside").symlink_to(tmp_path, target_is_directory=True)
     elif failure == "oversized":
         material.write_bytes(b"x" * (256 * 1024 + 1))
+    elif failure == "too-many-files":
+        material.mkdir()
+        for index in range(129):
+            (material / f"input-{index}.txt").write_text("text")
 
     async def body(generator: HttpGenerator) -> None:
-        with pytest.raises(ValueError, match="asset"):
+        with pytest.raises(ValueError, match=message):
             await generator.propose(
                 DesignerRequest(TaskGenerationRequest((), "rebuild", (material,))),
-                scenario="spade",
-                generation=0,
-                index=0,
-                tags={},
-            )
-
-    run_with(built, body)
-    assert designer.calls == []
-
-
-def test_a_snapshot_with_too_many_files_is_not_partially_forwarded(tmp_path: Path) -> None:
-    built, designer, _, _ = service(tmp_path)
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    for index in range(129):
-        (snapshot / f"input-{index}.txt").write_text("text")
-
-    async def body(generator: HttpGenerator) -> None:
-        with pytest.raises(ValueError, match="128 files"):
-            await generator.propose(
-                DesignerRequest(TaskGenerationRequest((), "rebuild", (snapshot,))),
                 scenario="spade",
                 generation=0,
                 index=0,
@@ -1104,9 +1056,7 @@ def test_worker_scope_stops_harbor_without_a_shared_registry(tmp_path: Path, mon
     built, _, _, _ = service(tmp_path, checks=HarborChecks(harbor=str(harbor)))
 
     async def body(generator: HttpGenerator) -> object:
-        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
-        assert proposed.task is not None
-        written = await generator.write_task(proposed.task)
+        _, written = await propose_and_write(generator)
         submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
         deadline = time.monotonic() + 5
         while not pid_path.exists() and time.monotonic() < deadline:

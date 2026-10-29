@@ -21,110 +21,35 @@ class StubInferenceHandler(InferenceHandler):
         return {"ok": True}
 
 
-def _payload_for(path: str) -> dict:
-    if path == "/reef/report":
-        return {"score": 1.0}
-    return {"model": "reef", "messages": []}
-
-
 @pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/reef/report"])
 @pytest.mark.parametrize(
-    "path",
-    ["/v1/chat/completions", "/reef/report"],
+    "registered, headers",
+    [
+        (False, {}),
+        # A deployment serves one recipe, so requests cannot choose one: a stray
+        # ``x-reef-recipe`` is an ordinary unknown header and changes nothing.
+        (False, {"x-reef-recipe": "different"}),
+        # A registered scenario keeps its binding.
+        (True, {}),
+    ],
+    ids=["new", "stray-recipe-header", "registered"],
 )
-def test_new_scenario_is_created_for_every_request_type(path: str) -> None:
+def test_every_request_type_creates_or_reuses_the_scenario(path: str, registered: bool, headers: dict) -> None:
     async def run() -> None:
         dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        client = TestClient(
-            TestServer(
-                create_app(
-                    dispatcher,
-                    inference_handler=StubInferenceHandler(),
-                )
+        if registered:
+            RequestService(dispatcher).accept(
+                {"x-reef-scenario": "scenario"}, {"score": 1.0}, request_type=RequestType.REPORT
             )
-        )
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=StubInferenceHandler())))
         await client.start_server()
         try:
-            response = await client.post(
-                path,
-                headers={"x-reef-scenario": "new-scenario"},
-                json=_payload_for(path),
-            )
+            payload = {"score": 1.0} if path == "/reef/report" else {"model": "reef", "messages": []}
+            response = await client.post(path, headers={"x-reef-scenario": "scenario", **headers}, json=payload)
 
             assert response.status == 200
-            assert dispatcher.registry.get_optional("new-scenario") is not None
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "path",
-    ["/v1/chat/completions", "/reef/report"],
-)
-def test_recipe_header_is_not_part_of_the_protocol(path: str) -> None:
-    """A deployment serves one recipe, so requests cannot choose one: a stray
-    ``x-reef-recipe`` is an ordinary unknown header and changes nothing."""
-
-    async def run() -> None:
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        client = TestClient(
-            TestServer(
-                create_app(
-                    dispatcher,
-                    inference_handler=StubInferenceHandler(),
-                )
-            )
-        )
-        await client.start_server()
-        try:
-            response = await client.post(
-                path,
-                headers={"x-reef-scenario": "new-scenario", "x-reef-recipe": "different"},
-                json=_payload_for(path),
-            )
-
-            assert response.status == 200
-            assert dispatcher.registry.get_optional("new-scenario") is not None
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "path",
-    ["/v1/chat/completions", "/reef/report"],
-)
-def test_registered_scenario_keeps_its_binding_for_every_request_type(path: str) -> None:
-    async def run() -> None:
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-        RequestService(dispatcher).accept(
-            {"x-reef-scenario": "registered"},
-            {"score": 1.0},
-            request_type=RequestType.REPORT,
-        )
-        client = TestClient(
-            TestServer(
-                create_app(
-                    dispatcher,
-                    inference_handler=StubInferenceHandler(),
-                )
-            )
-        )
-        await client.start_server()
-        try:
-            response = await client.post(
-                path,
-                headers={"x-reef-scenario": "registered"},
-                json=_payload_for(path),
-            )
-
-            assert response.status == 200
-            assert dispatcher.registry.get_optional("registered") is not None
+            assert dispatcher.registry.get_optional("scenario") is not None
         finally:
             await client.close()
 
