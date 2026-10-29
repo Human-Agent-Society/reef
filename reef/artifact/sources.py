@@ -244,6 +244,14 @@ class HuggingFaceRevision:
     def uri(self) -> str:
         return f"hf://{self.repo}@{self.commit}"
 
+    @classmethod
+    def parse(cls, uri: str) -> HuggingFaceRevision:
+        """The revision ``hf://<repo>@<commit>`` names (``uri``); ``ValueError`` for another form."""
+        repo, separator, commit = uri.removeprefix("hf://").rpartition("@")
+        if not uri.startswith("hf://") or not separator:
+            raise ValueError(f"a Hugging Face revision is hf://<repo>@<commit>, got {uri!r}")
+        return cls(repo, commit)
+
     def to_dict(self) -> dict[str, str]:
         return {"uri": f"hf://{self.repo}", "version": self.commit}
 

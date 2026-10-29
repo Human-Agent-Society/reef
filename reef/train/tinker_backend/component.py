@@ -1,6 +1,8 @@
 """Tinker as a training component: each job trains its data remotely, from the job's start checkpoint.
 
-A job starts from ``job.start``, a directory that holds a Tinker checkpoint
+``TinkerJobComponent`` is the job loop that every component on a Tinker-compatible service shares;
+``TinkerTrainingComponent`` trains a LoRA on it, and ``reef.train.tinker_backend.full`` all the parameters on
+Spindle. A job starts from ``job.start``, a directory that holds a Tinker checkpoint
 manifest, or from the base checkpoint when ``start`` is ``None``. The manifest
 carries the remote training state, the learning-rate schedule's progress and
 the objective's state, so a job that starts from it continues all three. Each
@@ -19,6 +21,7 @@ import fcntl
 import hashlib
 import json
 import math
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,13 +34,13 @@ from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
-from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
+from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.tinker_backend.client import TinkerClient
-from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.config import TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, roll_out, task_name
 
@@ -82,16 +85,16 @@ class TinkerJobParameters:
             raise ValueError("learning_rate must be positive and kl_coef non-negative")
 
 
-class TinkerTrainingComponent(LocalJobComponent):
-    """Train each job as remote Tinker sessions from the job's start checkpoint, in a background thread.
+class TinkerJobComponent(LocalJobComponent, ABC):
+    """Train each job as remote sessions on a Tinker-compatible service from the job's start, in a background thread.
 
     A job's parameters are ``TinkerJobParameters``: ``method``, optionally
     ``scheduling``, and ``batch_size``, ``kl_coef``, ``learning_rate``,
     ``save_interval`` and ``rollout``, where ``batch_size``, ``kl_coef`` and
-    ``learning_rate`` default to the component's ``TinkerConfig``. ``submit``
-    refuses any other parameter or a malformed value. Jobs of several
-    scenarios can share the component, since each job trains from its own
-    start.
+    ``learning_rate`` default to the component's ``TinkerServiceConfig``.
+    ``submit`` refuses any other parameter or a malformed value. Jobs of
+    several scenarios can share the component, since each job trains from its
+    own start.
 
     A job's data is trajectories, which it trains as they are, or Harbor
     tasks (``TaskSample``), a task job. A task job needs the ``rollout``
@@ -108,17 +111,23 @@ class TinkerTrainingComponent(LocalJobComponent):
     data; an intermediate checkpoint (``save_interval``) carries the state of
     the job's start, since the objective computes its state for the whole data.
 
-    ``config.state_dir`` holds ``base/`` (the base checkpoint),
-    ``imported/<digest>/`` (starts taken from releases) and ``jobs/`` (see
-    ``LocalJobComponent``); a saved checkpoint is ``jobs/<job_id>/<step>/``,
-    which holds its manifest alone. A checkpoint directory is both the start
-    of a later job and the release Reef publishes. The weights stay on the
-    service: a serving runtime that loads them into its own engines downloads
-    them from the manifest's ``sampler_path`` (``TinkerSamplerWeights``).
+    ``config.state_dir`` holds ``base/`` (the base start, which
+    ``prepare_base`` writes), ``imported/<digest>/`` (starts taken from
+    releases) and ``jobs/`` (see ``LocalJobComponent``); a saved checkpoint is
+    ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
+    directory is both the start of a later job and the release Reef publishes.
+    The weights stay on the service. A subclass decides the parameterization:
+    which checkpoints it trains (``validated``), what its base is
+    (``prepare_base``, ``start_at``), and which releases it imports.
     """
 
     def __init__(
-        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, sampler: TinkerSampler | None = None
+        self,
+        base_model: str,
+        config: TinkerServiceConfig,
+        client: TinkerClient,
+        *,
+        sampler: TinkerSampler | None = None,
     ) -> None:
         self._model = base_model
         self._config = config
@@ -135,19 +144,49 @@ class TinkerTrainingComponent(LocalJobComponent):
         try:
             super().__init__(self._root / "jobs")
             self._base = self._root / "base"
-            if not (self._base / MANIFEST).exists():
-                # The untrained adapter is the base checkpoint: the base artifact holds it as a release.
-                untrained = client.initialize()
-                untrained.write(self._base)
-            self._validated(TinkerCheckpoint.read(self._base))
+            self.prepare_base()
+            self.start_at(self._base)
         except BaseException:
             self._state_lock.close()
             raise
         self.start_jobs()
 
-    @property
-    def name(self) -> str:
-        return "tinker"
+    @abstractmethod
+    def prepare_base(self) -> None:
+        """Write the base start into ``base/`` when it is not there; the constructor then checks it with ``start_at``."""
+
+    @abstractmethod
+    def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
+        """``checkpoint`` when this component trains it: of its model, service and parameterization; else ``ValueError``."""
+
+    def start_at(self, directory: Path) -> TinkerCheckpoint | FreshStart:
+        """The start that ``directory`` holds: a checkpoint manifest that ``validated`` takes; else ``ValueError``."""
+        if not (directory / MANIFEST).is_file():
+            raise ValueError(f"the start {directory} holds no Tinker checkpoint manifest")
+        return self.validated(TinkerCheckpoint.read(directory))
+
+    def check_manifest(self, files: ArtifactFiles) -> None:
+        """Raise ``ValueError`` unless ``files`` hold a manifest that ``validated`` takes and whose state resolves."""
+        if MANIFEST not in files.paths():
+            raise ValueError(f"a Tinker release holds {MANIFEST}")
+        try:
+            checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
+        except (TypeError, ValueError) as exc:
+            # A manifest from outside Reef may have any shape; ``from_dict`` refuses unknown fields with TypeError.
+            raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
+        self._client.check_remote(self.validated(checkpoint))
+
+    def import_manifest(self, release: Path) -> str:
+        """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
+        if not (release / MANIFEST).exists():
+            raise ValueError(f"artifact is missing {MANIFEST}")
+        checkpoint = self.validated(TinkerCheckpoint.read(release))
+        digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
+        imported = self._root / "imported" / digest
+        if not imported.exists():
+            # The manifest names the remote state; the exported adapter is not needed to train from it.
+            checkpoint.write(imported)
+        return str(imported)
 
     @property
     def release_format(self) -> None:
@@ -158,46 +197,13 @@ class TinkerTrainingComponent(LocalJobComponent):
     def state_dir(self) -> Path:
         return self._root
 
-    def _validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
-        checkpoint.check_compatible(self._model, service=self._config.base_url, lora_rank=self._config.lora_rank)
-        return checkpoint
-
     @property
     def shares_scenarios(self) -> bool:
         return True
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The untrained adapter's release: its manifest."""
-        inputs = {"model": self._model, "lora_rank": str(self._config.lora_rank)}
-        if self._config.base_url is not None:
-            inputs["service"] = self._config.base_url
-        return BaseArtifactSource(model_directory=self._base, inputs=inputs)
-
     @property
     def base_start(self) -> str:
         return str(self._base)
-
-    def check_release(self, files: ArtifactFiles) -> None:
-        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
-        if MANIFEST not in files.paths():
-            raise ValueError(f"a Tinker release holds {MANIFEST}")
-        try:
-            checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
-        except (TypeError, ValueError) as exc:
-            # A manifest from outside Reef may have any shape; ``from_dict`` refuses unknown fields with TypeError.
-            raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
-        self._client.check_remote(self._validated(checkpoint))
-
-    def import_start(self, release: Path) -> str:
-        if not (release / MANIFEST).exists():
-            raise ValueError(f"artifact is missing {MANIFEST}")
-        checkpoint = self._validated(TinkerCheckpoint.read(release))
-        digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
-        imported = self._root / "imported" / digest
-        if not imported.exists():
-            # The manifest names the remote state; the exported adapter is not needed to train from it.
-            checkpoint.write(imported)
-        return str(imported)
 
     def job_parameters(self, parameters: Mapping[str, Any]) -> TinkerJobParameters:
         """``parameters`` over the component's defaults; ``ValueError`` for an unknown or a malformed parameter."""
@@ -218,9 +224,7 @@ class TinkerTrainingComponent(LocalJobComponent):
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
         if job.start is not None:
-            if not (Path(job.start) / MANIFEST).is_file():
-                raise ValueError(f"the job's start {job.start} holds no Tinker checkpoint manifest")
-            self._validated(TinkerCheckpoint.read(Path(job.start)))
+            self.start_at(Path(job.start))
         tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
         if tasks and len(tasks) != len(job.data.samples):
             raise ValueError("a Tinker job trains either trajectories or tasks, not both")
@@ -249,7 +253,7 @@ class TinkerTrainingComponent(LocalJobComponent):
             self._state_lock.close()
 
     def task_rollouts(
-        self, job: TrainingJob, directory: Path, start: TinkerCheckpoint, settings: RolloutSettings
+        self, job: TrainingJob, directory: Path, start: TinkerCheckpoint | FreshStart, settings: RolloutSettings
     ) -> TaskJobRollouts:
         """The rollouts of a task job: those of an earlier attempt, else new ones on the start's sampler."""
         record = directory / ROLLOUTS_FILE
@@ -268,7 +272,8 @@ class TinkerTrainingComponent(LocalJobComponent):
             self._sampler,
             start.sampler_path,
             model=self._model,
-            runtime_load_id=f"tinker:{start.sampler_path}",
+            # A fresh start names no sampler: its rollouts sample the base model.
+            runtime_load_id=f"tinker:{start.sampler_path or f'base:{self._model}'}",
             work_dir=directory / "rollouts",
         )
         write_json(
@@ -282,7 +287,7 @@ class TinkerTrainingComponent(LocalJobComponent):
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
-        start = self._validated(TinkerCheckpoint.read(Path(job.start)))
+        start = self.start_at(Path(job.start))
         method = parameters.method
         data = job.data
         rollout_metrics: dict[str, Any] = {}
@@ -318,7 +323,7 @@ class TinkerTrainingComponent(LocalJobComponent):
         saved = self.saved(directory)
         # A resumed job continues after its last saved checkpoint, from that checkpoint.
         done = saved[-1].step if saved else 0
-        current = TinkerCheckpoint.read(Path(saved[-1].path)) if saved else start
+        current: TinkerCheckpoint | FreshStart = TinkerCheckpoint.read(Path(saved[-1].path)) if saved else start
         for first in range(done, len(steps), interval):
             if self.stopping(directory):
                 break
@@ -334,7 +339,7 @@ class TinkerTrainingComponent(LocalJobComponent):
             # Only the job's last checkpoint has trained all the data that the objective's next state is for.
             final = last == len(steps)
             current = replace(
-                self._validated(checkpoint),
+                self.validated(checkpoint),
                 learning_rate_schedule_state=schedule_state,
                 algorithm_state=dict(prepared.next_algorithm_state) if final else dict(start.algorithm_state),
                 objective=(method.objective if prepared.next_algorithm_state else None) if final else start.objective,
@@ -356,3 +361,54 @@ class TinkerTrainingComponent(LocalJobComponent):
                 ),
             )
         return {**prepared.metrics, **rollout_metrics}
+
+
+class TinkerTrainingComponent(TinkerJobComponent):
+    """Train a LoRA of rank ``config.lora_rank`` on the base model, on Tinker or a Tinker-compatible service.
+
+    The base start, ``base/``, is the untrained adapter's checkpoint, which the
+    client saves the first time (``TinkerClient.initialize``). Serving reads
+    each saved checkpoint from its artifact: Tinker's sampler
+    (``reef.inference.tinker``) reads the manifest, and a serving runtime that
+    loads the weights into its own engines downloads the adapter from the
+    manifest's ``sampler_path`` (``TinkerSamplerWeights``). An import is a
+    manifest of a LoRA of the model, rank and service.
+    """
+
+    def __init__(
+        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, sampler: TinkerSampler | None = None
+    ) -> None:
+        self._lora_rank = config.lora_rank
+        super().__init__(base_model, config, client, sampler=sampler)
+
+    @property
+    def name(self) -> str:
+        return "tinker"
+
+    def prepare_base(self) -> None:
+        if not (self._base / MANIFEST).exists():
+            # The untrained adapter is the base checkpoint: the base artifact holds it as a release.
+            self._client.initialize().write(self._base)
+
+    def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
+        checkpoint.check_compatible(self._model, service=self._config.base_url)
+        if checkpoint.lora_rank != self._lora_rank:
+            raise ValueError(
+                f"the Tinker checkpoint is no rank {self._lora_rank} LoRA of {self._model}: "
+                f"its rank is {checkpoint.lora_rank}"
+            )
+        return checkpoint
+
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The untrained adapter's release: its manifest."""
+        inputs = {"model": self._model, "lora_rank": str(self._lora_rank)}
+        if self._config.base_url is not None:
+            inputs["service"] = self._config.base_url
+        return BaseArtifactSource(model_directory=self._base, inputs=inputs)
+
+    def check_release(self, files: ArtifactFiles) -> None:
+        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
+        self.check_manifest(files)
+
+    def import_start(self, release: Path) -> str:
+        return self.import_manifest(release)

@@ -131,6 +131,10 @@ trains LoRA adapters remotely without local GPUs. Tinker's sampler serves
 them by default. Reef's SGLang engines serve them instead when the
 ``inference`` section configures engines: the control plane downloads each
 release's adapter from its sampler path; see `Train with Tinker <../user-guide/tinker.rst>`__.
+The ``spindle_full`` backend trains all the parameters of one Hugging Face
+revision on a Spindle deployment, and Spindle's sampler serves the releases;
+see `Train all the parameters on Spindle
+<../user-guide/tinker.rst#train-all-the-parameters-on-spindle>`__.
 ``training.backend`` also accepts an installed ``reef.training_backends``
 entry-point name or an importable ``package.module:Deployment`` class. The
 selected definition validates its settings. It names the services that the

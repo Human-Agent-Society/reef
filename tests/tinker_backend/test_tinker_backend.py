@@ -381,9 +381,9 @@ def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(confi
     held = TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler", service="https://spindle.example")
     assert TinkerCheckpoint.from_dict(held.to_dict()) == held
     assert "service" not in TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler").to_dict()
-    held.check_compatible(MODEL, service="https://spindle.example", lora_rank=32)
+    held.check_compatible(MODEL, service="https://spindle.example")
     with pytest.raises(ValueError, match="not by the configured service hosted Tinker"):
-        held.check_compatible(MODEL, service=None, lora_rank=32)
+        held.check_compatible(MODEL, service=None)
 
 
 def test_the_base_artifact_is_the_untrained_adapter_and_imports_as_any_release(component, objective, tmp_path):
@@ -411,7 +411,7 @@ def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(co
     with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
         component.check_release(DirectoryFiles(release))
     TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
-    with pytest.raises(ValueError, match="rank 8 LoRA"):
+    with pytest.raises(ValueError, match=r"no rank 32 LoRA of .*: its rank is 8"):
         component.check_release(DirectoryFiles(release))
     (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
     with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
@@ -426,7 +426,7 @@ def test_exclusive_state_dir_and_model_validation(component, config, inference, 
     other.write(tmp_path / "other")
     with pytest.raises(ValueError, match="base model"):
         inference.activate_checkpoint(Artifact.local(tmp_path / "other"))
-    with pytest.raises(ValueError, match="LoRA of base model"):
+    with pytest.raises(ValueError, match="is of base model other/model"):
         component.import_start(tmp_path / "other")
     (tmp_path / "other" / MANIFEST).unlink()
     (tmp_path / "other" / "weights.bin").write_bytes(b"not a manifest")
