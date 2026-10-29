@@ -849,6 +849,8 @@ It has two values:
   the proposer gets the instruction and up to ``job_samples`` traces (by default
   ``evolution.batch_size``), possibly none. The traces are scored traces, or
   unscored records when the ``pipeline`` section names the inference stages.
+  An RL task job of ``sft-then-rl``'s imported tasks also starts only for an
+  instruction.
 
 Records arrive and the buffer fills in both modes, so a switch from ``manual``
 to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
