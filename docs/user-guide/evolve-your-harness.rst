@@ -212,8 +212,8 @@ decides which of the two a deployment accepts.
 - ``auto`` (the default): steps start from job data of recorded traffic
   alone. Training requests are refused.
 - ``manual``: steps start from training requests alone, as the tutorial's
-  ``deployment.yaml`` sets. Each request step also reads the traces that an
-  automatic step would take next. Ordinary traffic never starts evolution.
+  ``deployment.yaml`` sets. Each request step also reads the traces of the
+  manual buffer, which a client fills. Ordinary traffic never starts evolution.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
 between the two.
@@ -257,10 +257,10 @@ traffic alone trains, unscored, for methods that judge for themselves.
      record2sample:
        module: reef.train.cordis_backend.processor:InferenceSamples
 
-Reef keeps the traces that wait for a step in the scenario's sample store. A
-step takes the oldest waiting traces: at most
+Reef keeps the traces that wait for a step in the scenario's sample store. An
+automatic step takes the oldest waiting traces: at most
 ``pipeline.sample2job.config.buffer_size`` traces (default ``job_samples``).
-Later traces wait for the next steps. This applies in every mode.
+Later traces wait for the next steps.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -275,10 +275,15 @@ e.g. what fields a request carries, the screens its text passes, and what
 happens to a request whose step fails.
 
 The ``pipeline`` stages trigger no evolution in this mode, but traces are
-still collected. A request step does not wait for ``job_samples`` traces. The
-proposer receives the training request and the traces that automatic job data
-would take next: up to ``buffer_size`` traces, or none. It uses both to make
-a mutation.
+still collected in the sample store. A request step does not wait for
+``job_samples`` traces. The proposer receives the training request and the
+traces of the manual buffer, or none. New traces do not join the manual buffer
+by themselves: a client lists them (``GET /reef/scenarios/{scenario}/samples``)
+and adds the ones that the step should read (`Choose the samples that train
+<../reference/http-api.rst#choose-the-samples-that-train>`__). A switch from
+``auto`` to ``manual`` starts the manual buffer with the traces that the next
+automatic step would take. The proposer uses the request and the traces to
+make a mutation.
 
 Propose: mutation to the harness tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -450,7 +455,8 @@ The evaluation suite consists of the seed tasks specified in
 configure ``evolution.promote_failures: true``, which adds failing traces'
 prompts to the evaluation set permanently. This also means the method's
 rollout scorer must be able to score any arbitrary prompt. A
-request step in ``manual`` promotes the failures it carries the same way.
+request step in ``manual`` promotes the failures of its manual buffer the same
+way.
 
 A promoted prompt is real client traffic, so it is screened before it
 becomes a task. A prompt carrying a key-shaped literal meets the tree's own

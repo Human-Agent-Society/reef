@@ -844,17 +844,19 @@ It has two values:
   samples: the untrained samples that the next job takes.
   ``POST /reef/train`` is refused.
 - ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
-  instruction's job takes the samples that automatic job data would take next:
-  the samples of the buffer. A weight recipe waits until the buffer holds
-  ``job_samples`` samples, then trains them; the instruction text goes into the commit's
-  ``training_request`` metrics. Harness evolution runs the instruction at once:
-  the proposer gets the instruction and up to ``buffer_size`` traces (by
-  default ``job_samples``, which defaults to ``evolution.batch_size``),
-  possibly none. The traces are scored traces, or
-  unscored records when the ``pipeline`` section names the inference stages.
+  job trains the manual buffer: the samples that a client chose with the
+  buffer routes (`Choose the samples that train
+  <http-api.rst#choose-the-samples-that-train>`__). New samples do not join it
+  by themselves, in any recipe. A weight recipe waits until the manual buffer
+  holds a sample, then trains the whole buffer; the instruction text goes into
+  the commit's ``training_request`` metrics. Harness evolution runs the
+  instruction at once: the proposer gets the instruction and the traces of the
+  manual buffer, possibly none.
 
-Records arrive and the buffer fills in both modes, so a switch from ``manual``
-to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
+Records arrive and the sample store fills in both modes, so a switch from
+``manual`` to ``auto`` can train on data already collected. A switch from
+``auto`` to ``manual`` puts the samples that the next automatic job would take
+into the manual buffer. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
 ``NotImplementedError``. A stage that trains only its own job data, such as
 generated tasks, supports only ``auto``. Harness evolution requires a proposer

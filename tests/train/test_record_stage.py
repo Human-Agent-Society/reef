@@ -13,6 +13,7 @@ from tests.train.test_record_stage_job_data_parity import CountingBackend, infer
 
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord
+from reef.core.errors import ManualBufferRefused
 from reef.record2record import (
     GroupDecision,
     InferenceRecord2Record,
@@ -740,3 +741,25 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert "later-report" in restored.skipped_record_ids
     # Consumption changes training eligibility, not the stored diagnostic payload.
     assert records.get("s", "aborted") == aborted
+
+
+@pytest.mark.unit
+def test_the_manual_buffer_holds_one_kind_of_sample_that_the_trainer_can_train() -> None:
+    context = PipelineContext("s", training_mode="manual")
+    processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
+    store = processor.store.store
+    store.add_trajectories((("upload", TRAJECTORY),))
+    store.add_record_samples("", None, ("r1",), (("r1:0", TaskSample(Path("task"))),))
+    store.add_record_samples("other", None, ("r2",), (("other:r2:0", TRAJECTORY),))
+    processor.insert_into_buffer(("upload",))
+    with pytest.raises(ValueError, match="one kind"):
+        processor.insert_into_buffer(("r1:0",))
+    with pytest.raises(ValueError, match="cannot train the samples"):
+        processor.insert_into_buffer(("other:r2:0",))
+    assert processor.buffer() == ("upload",)
+    processor.remove_from_buffer(("upload",))
+    processor.insert_into_buffer(("r1:0",))
+    assert processor.buffer() == ("r1:0",)
+    processor.set_training_mode("auto")
+    with pytest.raises(ManualBufferRefused):
+        processor.remove_from_buffer(("r1:0",))

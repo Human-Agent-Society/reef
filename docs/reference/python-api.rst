@@ -515,8 +515,12 @@ The session contract is:
        order: the uploaded trajectories, the imported Harbor tasks of the
        ``train`` and ``eval`` splits, and the samples that each trainer made
        from records. Each sample has ``train_counts``, the
-       number of committed jobs of each trainer that trained it. It closes with the session and
-       survives restarts when ``durable``.
+       number of committed jobs of each trainer that trained it. It also keeps
+       each trainer's manual buffer (``manual_buffer``,
+       ``insert_into_buffer``, ``remove_from_buffer``); a commit removes the
+       samples that it trained from its trainer's manual buffer in the same
+       transaction. It closes with the session and survives restarts when
+       ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
        (including inactive releases), activations, and new training starts.
