@@ -12,7 +12,7 @@
     adapter, in one result.
 ``render``
     ``render_tree``: a tree and an optional model binding to the files an
-    adapter's binary reads, for an episode or for a client.
+    adapter's binary reads, for a rollout or for a client.
 """
 
 from reef.harness.tree.layout import TreeKind, TreeLocation, locate, source_path

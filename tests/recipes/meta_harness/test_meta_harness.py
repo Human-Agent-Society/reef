@@ -2,7 +2,7 @@
 
 Steps run through the phases the trainer runs (``backend_step``) and are
 decided by ``compare`` on means, as a Meta-Harness deployment selects. The
-episodes run the fake pi binary, and ``MarkerScorer`` scores 1 when the rules
+rollouts run the fake pi binary, and ``MarkerScorer`` scores 1 when the rules
 carry the marker, so the seed and a tree without the marker score 0.
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import (
     ALTERNATE,
@@ -120,7 +120,7 @@ def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer
     assert (candidate.origin, candidate.notes["hypothesis"]) == ("method", "the marker helps")
 
 
-def test_full_history_branches_from_a_rejected_candidate_and_reads_its_episode_records(tmp_path: Path) -> None:
+def test_full_history_branches_from_a_rejected_candidate_and_reads_its_rollout_records(tmp_path: Path) -> None:
     chat = QueueChat(proposal_reply(SEED, LOSER), proposal_reply(LOSER, IMPROVED))
     backend, releases = meta_harness_backend(tmp_path, chat, max_traces=3, trace_chars=300)
 
@@ -139,18 +139,18 @@ def test_full_history_branches_from_a_rejected_candidate_and_reads_its_episode_r
         {"t1": [0.0]},
         dict(LOSER.files),
     )
-    # The traffic first, then the episodes in turns: the served tree's, then the newest candidate's.
+    # The traffic first, then the rollouts in turns: the served tree's, then the newest candidate's.
     traces = state["traces"]
     assert [(trace["source"], trace.get("candidate_id")) for trace in traces] == [
         ("traffic", None),
         ("evaluation", SEED.checksum()),
         ("evaluation", LOSER.checksum()),
     ]
-    episode = traces[2]
-    assert (episode["task"], episode["repeat"], episode["score"], episode["failure"]) == ("t1", 0, 0.0, None)
-    # The excerpt of the episode's record directory: its record files, cut to trace_chars around a note.
-    assert episode["record"].startswith("--- episode.json ---") and "characters left out" in episode["record"]
-    assert "Answer quickly." in episode["record"]
+    rollout = traces[2]
+    assert (rollout["task"], rollout["repeat"], rollout["score"], rollout["failure"]) == ("t1", 0, 0.0, None)
+    # The excerpt of the rollout's record directory: its record files, cut to trace_chars around a note.
+    assert rollout["record"].startswith("--- rollout.json ---") and "characters left out" in rollout["record"]
+    assert "Answer quickly." in rollout["record"]
 
 
 def test_incumbent_only_branches_from_the_served_tree_and_shows_the_refused_reply_next(tmp_path: Path) -> None:
@@ -209,12 +209,12 @@ def test_an_invalid_or_repeated_tree_leaves_the_head_unchanged_and_joins_the_att
         (2, "invalid"),
         (3, "duplicate"),
     ]
-    assert list(backend.history.candidates) == [SEED.checksum()] and not backend.history.episodes
+    assert list(backend.history.candidates) == [SEED.checksum()] and not backend.history.rollouts
 
 
 @pytest.mark.parametrize(
     ("settings", "budget"),
-    [({"max_candidates": 1}, "max_candidates"), ({"max_target_episodes": 2}, "max_target_episodes")],
+    [({"max_candidates": 1}, "max_candidates"), ({"max_target_rollouts": 2}, "max_target_rollouts")],
 )
 def test_a_spent_budget_stops_the_search_before_a_model_call(tmp_path: Path, settings: dict, budget: str) -> None:
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
@@ -235,15 +235,15 @@ def test_a_retried_step_proposes_again_the_tree_its_failed_attempt_proposed(tmp_
             raise RuntimeError("the decision is unavailable")
 
     chat = QueueChat(proposal_reply(SEED, IMPROVED), proposal_reply(SEED, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat, max_candidates=1, max_target_episodes=2)
+    backend, releases = meta_harness_backend(tmp_path, chat, max_candidates=1, max_target_rollouts=2)
     with pytest.raises(RuntimeError, match="unavailable"):
         run(backend, releases, backend.initial_state(), 1, policy=FailingDecision(backend, statistic="mean"))
 
     retried = run(backend, releases, backend.initial_state(), 1)
 
     assert retried.metrics["selected"] is True and len(chat.prompts) == 2
-    # Both trees' scores come from the failed attempt's episodes.
-    assert (retried.metrics["episodes_run"], retried.metrics["episodes_cached"]) == (0, 2)
+    # Both trees' scores come from the failed attempt's rollouts.
+    assert (retried.metrics["rollouts_run"], retried.metrics["rollouts_cached"]) == (0, 2)
 
 
 def test_the_reply_is_one_object_of_the_four_proposal_fields() -> None:
@@ -291,7 +291,7 @@ def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: 
     assert isinstance(recipe.build("general-task", SQLiteRecordStore(), releases=releases), Trainer)
 
 
-def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tmp_path, monkeypatch) -> None:
+def test_terminus_extension_uses_shared_recipe_rollout_runner_and_publication(tmp_path, monkeypatch) -> None:
     # Replace only process launch and the remote trial. Rendering, model
     # binding, Harbor's agent contract, scoring, selection and commit are real.
     pytest.importorskip("reef_eval")
@@ -302,8 +302,8 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     from harbor.models.trial.config import TrialConfig
     from harbor.utils.import_path import import_class
 
+    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
     from reef.harness.runners.terminus import runner
-    from reef.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = HarnessTree({**SEED.files, "extensions/agent.py": code})
@@ -351,7 +351,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
         executor="sandbox",
         sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},
     )
-    evolution["evaluation"].update(episode_timeout_s=17, forbid_residue=True, tasks=["test/hello-world"])
+    evolution["evaluation"].update(rollout_timeout_s=17, forbid_residue=True, tasks=["test/hello-world"])
     recipe = build_recipe(
         config["implementation"],
         {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"},
@@ -360,7 +360,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     )
     recipe = dataclasses.replace(
         recipe,
-        scorer=resolve_episode_scorer(lambda task, result: result.trajectory[0]["reward"]),
+        scorer=resolve_rollout_scorer(lambda task, result: result.trajectory[0]["reward"]),
         models={"proposer": QueueChat(proposal_reply(SEED, proposed))},
     )
     dispatcher = harness_dispatcher(tmp_path, recipe, hold_local_cycles=True)

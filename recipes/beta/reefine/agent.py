@@ -55,13 +55,13 @@ from recipes.beta.reefine.multimodal import MultimodalProvider
 from recipes.beta.reefine.prompts import prompt
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
+from reef.execution.sandbox.environment import download_directory, execute
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.trajectory import final_assistant_text, reader_for
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.trajectory import final_assistant_text, reader_for
 from reef.harness.tree import HarnessTree, TreePatch, locate, render_tree
-from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
 from reef.train.harness_backend import Tools, Workspace
 
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
@@ -103,7 +103,7 @@ class AgentExecution:
     ``ReefineMethod`` runs the agent on a request step with it.
     """
 
-    executor: EpisodeExecutor
+    executor: ProgramExecutor
     binary: str
     timeout_s: float
     trial_timeout_s: float
@@ -155,7 +155,7 @@ def rendered_files(tree: HarnessTree, binding: ModelBinding, descriptor: Adapter
 def launch_pi(
     descriptor: AdapterDescriptor,
     binary: str,
-    executor: EpisodeExecutor,
+    executor: ProgramExecutor,
     files: Mapping[str, str],
     prompt_text: str,
     env: Mapping[str, str],
@@ -283,7 +283,7 @@ class AgentRun(WorkspaceTools):
         self.descriptor = get_adapter(EXTENSION_ADAPTER)
         self.served = tools.models.served
         self.gateway: AgentGateway | None = None
-        self.session: EpisodeExecutor | None = None
+        self.session: ProgramExecutor | None = None
         #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
         #: pull replaces the tree's directory, so one call at a time reads it.
         self.workspace_lock = threading.Lock()
@@ -309,7 +309,7 @@ class AgentRun(WorkspaceTools):
             lines = "".join(json.dumps(check, ensure_ascii=False) + "\n" for check in self.checks)
             (self.workspace.output / CHECKS_FILE).write_text(lines, encoding="utf-8")
 
-    def executor(self) -> EpisodeExecutor:
+    def executor(self) -> ProgramExecutor:
         """The run's session, which reaches the gateway; the agent's executor before the run starts."""
         return self.agent.executor if self.session is None else self.session
 
@@ -457,7 +457,7 @@ class AgentRun(WorkspaceTools):
                 return self.record_check(
                     "trial", {**result, "candidate": checksum, "seconds": round(time.monotonic() - started, 1)}
                 )
-        except EpisodeTimeout:
+        except RolloutTimeout:
             limit = f"the trial ran past its {timeout:g} s limit"
             self.tools.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
             return self.record_check(
@@ -469,7 +469,7 @@ class AgentRun(WorkspaceTools):
                     "provider_calls": self.gateway.provider_calls_since(before),
                 },
             )
-        except EpisodeLaunchError as error:
+        except RolloutLaunchError as error:
             self.tools.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
             return self.record_check("trial", {"ran": False, "candidate": checksum, "error": str(error)})
         finally:
@@ -563,9 +563,9 @@ def answer_with_agent(
                     "maxTokens (Reef renders the model binding's max_output_tokens into it)"
                 )
             break
-    except EpisodeTimeout:
+    except RolloutTimeout:
         record["timed_out"] = True
-    except EpisodeLaunchError as error:
+    except RolloutLaunchError as error:
         tools.calls.note("agent", f"the coding agent run failed: {error}", failed=True)
         answer = failed({}, f"the agent run failed: {error}")
     finally:

@@ -155,7 +155,7 @@ class Workspace:
 
         ``tree`` goes to ``harness/`` and ``state_files`` (relative path to
         text) to ``state/``. ``material/`` gets one trace per sample, the
-        request, the evaluation's ``tasks`` and ``repeats`` (0 when no episode
+        request, the evaluation's ``tasks`` and ``repeats`` (0 when no rollout
         can run), the manifest and the host facts.
         """
         workspace = cls(Path(root), Path(history_dir), step)
@@ -208,7 +208,7 @@ class Workspace:
         return tuple(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["tasks"])
 
     def evaluation_repeats(self) -> int:
-        """The episodes the evaluation runs per task and tree; 0 when the deployment configured no scorer."""
+        """The rollouts the evaluation runs per task and tree; 0 when the deployment configured no scorer."""
         return int(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["repeats"])
 
     def host(self) -> Mapping[str, Any]:

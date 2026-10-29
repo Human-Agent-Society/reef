@@ -2,7 +2,7 @@
 
 ``QueueChat`` is a model that answers canned replies: the Meta-Harness, ACE
 and ReasoningBank tests give it to their method. ``proposal_reply`` is one
-reply of the Meta-Harness proposer. ``MarkerScorer`` scores an episode of the
+reply of the Meta-Harness proposer. ``MarkerScorer`` scores a rollout of the
 fake pi binary of ``tests.support.harness_steps`` by the marker in the rules
 it rendered. ``meta_harness_sections`` is a deployment's recipe section over
 that binary, and ``meta_harness_recipe`` the recipe built from it with a
@@ -18,15 +18,15 @@ from typing import Any
 
 from tests.support.harness_steps import make_pi_binary
 
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
 
-#: What the scorer looks for in the rules an episode ran with.
+#: What the scorer looks for in the rules a rollout ran with.
 MARKER = "META-HARNESS-WINNER"
 #: The seed tree, and two improvements of it that carry the marker.
 SEED = HarnessTree({"rules.md": "Answer carefully.\n"})
@@ -60,10 +60,10 @@ def proposal_reply(parent: HarnessTree, tree: HarnessTree, *, hypothesis: str = 
     )
 
 
-class MarkerScorer(EpisodeScorer):
-    """1.0 when the episode's rendered rules carry ``MARKER``, else 0.0."""
+class MarkerScorer(RolloutScorer):
+    """1.0 when the rollout's rendered rules carry ``MARKER``, else 0.0."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         last = result.trajectory[-1] if result.trajectory else {}
         return 1.0 if MARKER in str(last.get("rules", "")) else 0.0
 

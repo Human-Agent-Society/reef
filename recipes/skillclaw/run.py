@@ -214,13 +214,10 @@ class RunService:
         """Committed pool versions beyond the bootstrap, the night counter.
 
         Every completed step appends a training commit row - a skipped night
-        included - so the counter is the distinct releases those
-        rows introduced, not the row count.
+        included - but only a step that made an artifact is listed, so the
+        counter is the number of training artifacts.
         """
-        versions = self.dispatcher.list_releases(self.scenario)
-        baseline = {row["release_id"] for row in versions if row.get("operation") != "training"}
-        trained = {row["release_id"] for row in versions if row.get("operation") == "training"}
-        return len(trained - baseline)
+        return sum(1 for row in self.dispatcher.list_artifacts(self.scenario) if row["operation"] == "training")
 
     def training_step(self) -> int:
         current = self.dispatcher.get_or_create_scenario(self.scenario)
@@ -610,7 +607,7 @@ def main() -> None:
 
 
 def solve() -> None:
-    """One reef-eval episode on the bundled ``harbor/`` task: the sibling
+    """One reef-eval rollout on the bundled ``harbor/`` task: the sibling
     examples' smoke idiom (``lab.run(harbor_dir, agent)``), against the same
     embedded service the campaign runs, so the recorded exchange carries the
     served pool's catalog. The task is self-contained (plain base image plus
@@ -641,7 +638,7 @@ def solve() -> None:
     try:
         lab = Lab(run_dir / "lab")
         row = asyncio.run(lab.run(str(HERE / "harbor"), agent))
-        print(f"episode reward: {row.rewards}")
+        print(f"rollout reward: {row.rewards}")
     finally:
         service.stop()
 

@@ -8,7 +8,7 @@ import time
 import pytest
 from tests.reef_service.test_skill_delivery import FakeStream
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import RollbackComponent, finished_jobs
+from tests.support.artifact_versions import ImportingComponent, finished_jobs
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -451,7 +451,7 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     initial.mkdir()
     (initial / "model.txt").write_text("w0")
     observer = _CapturingObserver()
-    component = RollbackComponent(tmp_path / "checkpoints")
+    component = ImportingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),

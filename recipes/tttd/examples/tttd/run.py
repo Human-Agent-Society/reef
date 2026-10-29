@@ -1,6 +1,6 @@
 """The TTT-Discover loop, in the open.
 
-One episode:
+One rollout:
 
     solve  — reef-eval runs the selected harbor/ task under our agent; every
              rollout is
@@ -41,7 +41,7 @@ async def main() -> None:
         raise RuntimeError(f"Harbor trial failed: {error}")
     if not row.rewards:
         raise RuntimeError(f"Harbor trial returned no rewards: {row.uri}")
-    print(f"episode reward: {row.rewards}")
+    print(f"rollout reward: {row.rewards}")
 
 
 asyncio.run(main())

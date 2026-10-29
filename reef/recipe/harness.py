@@ -1,7 +1,7 @@
 """The harness evolution recipe: one recipe for every harness evolution method.
 
 ``HarnessEvolutionRecipe`` reads the ``evolution`` config section and builds
-one ``HarnessBackend`` per scenario, with the evaluator, the publication
+one ``HarnessBackend`` per scenario, with the evaluator, the selection
 policy and the surface around it. A method is a
 ``reef.train.harness_backend.Method`` that the deployment names in
 ``evolution.method``; a method needs no recipe of its own. A recipe subclass
@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.config import Settings, config_option
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
@@ -36,22 +38,24 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.harness import (
     ComparePolicy,
-    EpisodeScorer,
     EvaluationSettings,
     EvaluationTasks,
     FloorPolicy,
-    HarnessEpisodeEvaluator,
+    HarnessRolloutEvaluator,
     History,
     NoEvaluationPolicy,
     Promoter,
+    RolloutScorer,
     evaluation_selection,
 )
+from reef.execution.sandbox.config import build_executor
+from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.delivery import create_harness_surface
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
-from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.harness.tree import HarnessTree, TreeKind, validate_tree
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -61,11 +65,9 @@ from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sample2job.traces import TraceJobData
-from reef.sandbox.config import build_executor
-from reef.sandbox.process import EpisodeExecutor
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import Surface
+from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Method
@@ -92,9 +94,10 @@ class EvolutionSettings(Settings):
     metadata. ``state_dir`` is the directory of every scenario's proposals,
     history and step records. ``batch_size`` ≥ 1 is the traces of one
     automatic step. Every other count is ≥ 0, where 0 turns its limit off.
-    ``publish`` is ``auto`` or ``review``; ``review_kinds`` name tree kinds.
-    ``executor`` and ``sandbox`` choose where episodes run
-    (``reef.sandbox.config.build_executor``).
+    The retired ``publish`` and ``review_kinds`` are refused: the top-level
+    ``activation`` section decides whether a kept tree serves.
+    ``executor`` and ``sandbox`` choose where rollouts run
+    (``reef.execution.sandbox.config.build_executor``).
     Purpose: ``HarnessEvolutionRecipe`` parses it from the deployment and
     builds the backend from it.
     """
@@ -114,13 +117,11 @@ class EvolutionSettings(Settings):
         0, help="Skip automatic steps after this many rejections in a row. 0 sets no limit."
     )
     max_model_calls_per_step: int = config_option(0, help="The most model calls of one step. 0 sets no limit.")
-    max_episodes_per_step: int = config_option(0, help="The most episodes a method runs in one step. 0 sets no limit.")
+    max_rollouts_per_step: int = config_option(0, help="The most rollouts a method runs in one step. 0 sets no limit.")
     max_pending_proposals: int = config_option(8, help="The most client proposals that wait for a step.")
-    publish: str = config_option("auto", help="auto serves a selected tree at once; review holds it for a person.")
-    review_kinds: tuple[str, ...] = config_option((), help="Tree kinds whose change always waits for a person.")
     client_models: tuple[str, ...] = config_option((), help="Models an installed client may switch to.")
-    executor: str = config_option("local", help="Where episodes run: local, sandbox or e2b.")
-    sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the episode executor.")
+    executor: str = config_option("local", help="Where rollouts run: local, sandbox or e2b.")
+    sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the rollout executor.")
 
     def __post_init__(self) -> None:
         if not self.state_dir.strip():
@@ -133,17 +134,12 @@ class EvolutionSettings(Settings):
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
-            ("max_episodes_per_step", self.max_episodes_per_step),
+            ("max_rollouts_per_step", self.max_rollouts_per_step),
         ):
             if value < 0:
                 raise ValueError(f"evolution.{label} must be at least 0 (0 turns the limit off)")
         if self.max_pending_proposals < 1:
             raise ValueError("evolution.max_pending_proposals must be at least 1")
-        if self.publish not in ("auto", "review"):
-            raise ValueError("evolution.publish must be 'auto' or 'review'")
-        kinds = tuple(TreeKind)
-        if any(kind not in kinds for kind in self.review_kinds):
-            raise ValueError(f"evolution.review_kinds must name tree kinds: {', '.join(kinds)}")
         if "served" in self.models:
             raise ValueError("evolution.models may not name a model 'served'; that is the model under test")
 
@@ -151,6 +147,26 @@ class EvolutionSettings(Settings):
 def plugin_name(setting: str | Mapping[str, Any]) -> str:
     """A stable text form of a plugin setting: the reference, or its JSON with sorted keys."""
     return setting if isinstance(setting, str) else json.dumps(dict(setting), sort_keys=True, default=str)
+
+
+@dataclass(frozen=True)
+class HarnessLayout(ArtifactLayout):
+    """The layout of a harness artifact for the adapter ``descriptor``, which an import must meet (RFC #980).
+
+    A directory meets it when its files, read as UTF-8 text, form a
+    ``HarnessTree`` that passes ``validate_tree`` for ``descriptor``: the
+    files a release of the harness component stores.
+    Purpose: ``HarnessEvolutionRecipe.build_surface`` binds it on the harness
+    component; the committer checks an imported harness with it.
+    """
+
+    descriptor: AdapterDescriptor
+
+    def check(self, files: ArtifactFiles) -> None:
+        tree = HarnessTree({relative: files.read_bytes(relative).decode("utf-8") for relative in files.paths()})
+        validation = validate_tree(tree, self.descriptor)
+        if not validation.passed:
+            raise ValueError(f"the harness tree fails validation: {validation.message()}")
 
 
 @dataclass(frozen=True)
@@ -173,7 +189,7 @@ class ScenarioModels(ModelBindingsResolver):
         runtime = self.config.runtime
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
-        # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
+        # The scenario's own model is served by this Reef too, so a rollout reaches it through the same route.
         binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
@@ -184,17 +200,17 @@ class HarnessEvolutionRecipe(Recipe):
     """Harness evolution of one adapter's harness tree by one method.
 
     Values: ``method`` is the deployment's ``Method``. ``evolution`` and
-    ``evaluation`` are the parsed sections. ``scorer`` scores each episode,
+    ``evaluation`` are the parsed sections. ``scorer`` scores each rollout,
     and ``promoter`` picks the prompts that promotion adds: each is the
     plugin that ``evaluation`` names, or the instance that a recipe built in
     Python receives, and ``None`` when there is neither. ``seed`` is the first
     tree of a new scenario. ``models`` and ``model_metadata`` are the parsed
-    ``evolution`` entries. ``executor`` runs the episodes;
-    ``worker_executor`` places the episode workers (``execution.evolution``).
+    ``evolution`` entries. ``executor`` runs the rollouts;
+    ``worker_executor`` places the rollout workers (``execution.evolution``).
     The model under test is the recipe's inference runtime. It reaches the
     method as ``tools.models.served``, and the adapter's ``model_binding``
-    templates write it into each evaluation episode, so neither the seed nor
-    a published tree ever carries a provider.
+    templates write it into each evaluation rollout, so neither the seed nor
+    a kept tree ever carries a provider.
     Purpose: a deployment names it as its recipe; the service builds it once
     from the deployment config, and ``build`` makes each scenario's trainer
     over a ``HarnessBackend``.
@@ -204,14 +220,14 @@ class HarnessEvolutionRecipe(Recipe):
     evolution: EvolutionSettings
     evaluation: EvaluationSettings
     seed: HarnessTree = field(default_factory=lambda: HarnessTree({}))
-    scorer: EpisodeScorer | None = None
+    scorer: RolloutScorer | None = None
     promoter: Promoter | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
+    executor: ProgramExecutor = field(default_factory=lambda: build_executor(None))
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     model_name: str | None = None
-    #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation rollouts sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
@@ -289,6 +305,12 @@ class HarnessEvolutionRecipe(Recipe):
         if not isinstance(section, Mapping):
             raise RecipeConfigError("harness evolution requires an 'evolution' config section")
         try:
+            for retired in ("publish", "review_kinds"):
+                if retired in section:
+                    raise ValueError(
+                        f"evolution.{retired} is gone: the activation section decides whether a kept tree serves "
+                        "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
+                    )
             evolution = EvolutionSettings.from_config(
                 {key: value for key, value in section.items() if key != "evaluation"}, setting="evolution"
             )
@@ -299,7 +321,7 @@ class HarnessEvolutionRecipe(Recipe):
             scorer = (
                 None
                 if evaluation.scorer is None
-                else EpisodeScorer.from_setting(evaluation.scorer, setting="evolution.evaluation.scorer")
+                else RolloutScorer.from_setting(evaluation.scorer, setting="evolution.evaluation.scorer")
             )
             promoter = (
                 None
@@ -345,7 +367,7 @@ class HarnessEvolutionRecipe(Recipe):
         """The served model's endpoint.
 
         With the service known and a scenario named, this Reef's own
-        evaluation route for that scenario: an episode then samples the
+        evaluation route for that scenario: a rollout then samples the
         release the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
@@ -407,6 +429,7 @@ class HarnessEvolutionRecipe(Recipe):
             served_metadata = None
         return create_harness_surface(
             get_adapter(self.evolution.adapter),
+            layout=HarnessLayout(get_adapter(self.evolution.adapter)),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             model_metadata=self.model_metadata,
@@ -414,9 +437,14 @@ class HarnessEvolutionRecipe(Recipe):
             client_models=client_models,
         )
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The seed tree's files: a new scenario's base release, which the first step builds on."""
-        return dict(self.seed.files) or None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The seed tree as the base harness, which a new scenario serves and the first step builds on.
+
+        The files are the seed tree's files; the empty seed makes a base
+        harness with no files. The input is the seed tree's checksum, so a
+        scenario opens only on a base made from the same seed.
+        """
+        return BaseArtifactSource(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's proposals, history and step records: what a delete archives beside the record store."""
@@ -502,19 +530,17 @@ class HarnessEvolutionRecipe(Recipe):
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,
                 max_model_calls_per_step=self.evolution.max_model_calls_per_step,
-                max_episodes_per_step=self.evolution.max_episodes_per_step,
+                max_rollouts_per_step=self.evolution.max_rollouts_per_step,
                 recheck_every=self.evaluation.recheck_every,
-                publish=self.evolution.publish,
-                review_kinds=frozenset(TreeKind(kind) for kind in self.evolution.review_kinds),
             ),
             records=StepRecord(root / STEPS_DIR),
             inbox=ProposalInbox(root / PROPOSALS_DIR, self.evolution.max_pending_proposals),
         )
 
     def build_evaluator(
-        self, descriptor: AdapterDescriptor, models: ModelBindings, history: History, scorer: EpisodeScorer
-    ) -> HarnessEpisodeEvaluator:
-        """The episode evaluator: the adapter's binary installed, the worker pool placed, ``scorer`` bound."""
+        self, descriptor: AdapterDescriptor, models: ModelBindings, history: History, scorer: RolloutScorer
+    ) -> HarnessRolloutEvaluator:
+        """The rollout evaluator: the adapter's binary installed, the worker pool placed, ``scorer`` bound."""
         executor, binary = self.executor.for_program(AdapterProgram(descriptor), binary=self.evolution.binary)
         executor.preflight()
         selection, requirements = evaluation_selection(scorer, self.worker_executor)
@@ -525,7 +551,7 @@ class HarnessEvolutionRecipe(Recipe):
             scorer_name = f"{type(scorer).__module__}:{type(scorer).__qualname__}@{id(scorer):x}"
         else:
             scorer_name = plugin_name(setting)
-        return HarnessEpisodeEvaluator(
+        return HarnessRolloutEvaluator(
             descriptor=descriptor,
             scorer=scorer,
             scorer_name=scorer_name,
@@ -540,8 +566,8 @@ class HarnessEvolutionRecipe(Recipe):
                 sort_keys=True,
                 default=str,
             ),
-            episode_timeout_s=self.evaluation.episode_timeout_s,
-            episode_repeats=self.evaluation.repeats,
+            rollout_timeout_s=self.evaluation.rollout_timeout_s,
+            rollout_repeats=self.evaluation.repeats,
             executor=executor,
             forbid_residue=self.evaluation.forbid_residue,
             worker_selection=selection,

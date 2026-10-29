@@ -51,12 +51,12 @@ class StepProgress:
     Values: ``request_id`` names the instruction the step answers, ``None``
     for an automatic step or a client's proposal. ``phase`` is
     ``"proposing"`` from the moment the step claims its record directory
-    until a candidate exists, then ``"evaluating"`` while the episodes run.
+    until a candidate exists, then ``"evaluating"`` while the rollouts run.
     ``started_at`` is the step's start in seconds since the epoch.
     ``step_record`` is the step's record directory, which the step claims
     before it reports any progress.
-    ``episodes_total`` ≥ 0 is the evaluation's episode count once the
-    episodes are laid out, else ``None``. ``activity`` is what the method did
+    ``rollouts_total`` ≥ 0 is the evaluation's rollout count once the
+    rollouts are laid out, else ``None``. ``activity`` is what the method did
     so far, oldest first, each ``{at, kind, text}`` with ``failed`` on a line
     that went wrong.
     Purpose: the backend replaces it at each phase change; the request page
@@ -67,7 +67,7 @@ class StepProgress:
     phase: str
     started_at: float
     step_record: str
-    episodes_total: int | None = None
+    rollouts_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -75,9 +75,9 @@ class StepProgress:
             raise ValueError("StepProgress.phase must be 'proposing' or 'evaluating'")
         if not isinstance(self.step_record, str) or not self.step_record:
             raise ValueError("StepProgress.step_record must name the step's record directory")
-        total = self.episodes_total
+        total = self.rollouts_total
         if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
-            raise ValueError("StepProgress.episodes_total must be an integer of at least 0 or None")
+            raise ValueError("StepProgress.rollouts_total must be an integer of at least 0 or None")
 
 
 class StepProgressReader(ABC):

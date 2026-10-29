@@ -6,15 +6,17 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.sources import SourceFiles
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
@@ -26,10 +28,11 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.runtime.deployment import close_runtimes
 from reef.scenario.admission import ScenarioAdmission
+from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
-from reef.storage.scenario import ScenarioStorage
+from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
 
 logger = logging.getLogger(__name__)
@@ -281,9 +284,10 @@ class Dispatcher(ScenarioLifecycle):
                 moved.append(str(destination))
         return moved
 
-    def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
+    def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
+        """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).releases()
+            return self.registry.require(scenario).artifacts()
 
     def read_records(
         self, scenario: str, *, after_sequence: int = 0, limit: int = 50, request_type: RequestType | None = None
@@ -329,13 +333,44 @@ class Dispatcher(ScenarioLifecycle):
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
             }
 
-    def promote(self, scenario: str, release_id: str) -> ArtifactRef:
-        """Serve a pending release: the rollback path under its own record operation."""
-        return self.rollback(scenario, release_id, operation="promote")
-
-    def rollback(self, scenario: str, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
+    def activate(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Make ``artifact_id`` the active artifact of ``component`` in ``scenario``; no training start moves."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).rollback(release_id, operation=operation)
+            return self.registry.require(scenario).activate(artifact_id, component)
+
+    def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).train_from(artifact_id, component)
+
+    def import_target(self, scenario: str, component: str | None) -> str:
+        """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
+
+        Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an unknown component or one that
+        takes no import. An unknown scenario is refused before its lock is made, so a request for any name adds none.
+        """
+        if not self.registry.has(scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_target(component)
+
+    def import_artifact(
+        self,
+        scenario: str,
+        files: SourceFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
+        directory: Path,
+    ) -> ComponentArtifact:
+        """Publish ``files`` as a new artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
+
+        Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
+        """
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_artifact(
+                files, component, source=source, directory=directory
+            )
 
     def current_artifact(
         self,
@@ -413,6 +448,50 @@ class Dispatcher(ScenarioLifecycle):
             published = ingest.append_tasks(current, directories, split)
             self.local_workers.wake(current)
             return published
+
+    @contextmanager
+    def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
+        """The loaded scenario ``scenario``, loaded again when it was unloaded, held under its lock.
+
+        Raise ``UnknownScenario`` when the scenario does not exist. The caller must not keep the scenario, or its
+        storage session, after the block: an unload closes the session.
+        """
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            yield current
+
+    def set_evaluation_and_activation(
+        self, scenario: str, *, artifact_evaluation: Mapping[str, object] | None, activation: object
+    ) -> Mapping[str, object] | None:
+        """Store how Reef evaluates and activates each new artifact of ``scenario``; see
+        :meth:`ScenarioRegistry.set_evaluation_and_activation`."""
+        return self.registry.set_evaluation_and_activation(
+            scenario, artifact_evaluation=artifact_evaluation, activation=activation
+        )
+
+    def stored_settings(self, scenario: str) -> ScenarioSettings:
+        """The settings stored for ``scenario``; defaults when none are stored."""
+        return self.registry.stored_settings(scenario)
+
+    def scenario_settings(self, scenario: str) -> dict[str, Any]:
+        """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
+
+        ``training_mode`` and ``model`` are what the loaded scenario runs. ``artifact_evaluation`` and
+        ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
+        scenario's ``activation``, else the deployment's. Raise ``UnknownScenario`` for an unknown scenario.
+        """
+        with self.locked_scenario(scenario) as current:
+            settings = self.registry.stored_settings(scenario)
+            return {
+                "scenario": scenario,
+                "training_mode": current.training_mode,
+                "model": current.model_config.view(),
+                "artifact_evaluation": settings.artifact_evaluation,
+                "activation": settings.activation,
+                "effective_activation": self.registry.effective_activation(settings),
+            }
 
     def imported_tasks(self, scenario: str) -> tuple[tuple[StoredTask, bool], ...]:
         """The scenario's imported tasks in publication order, each with whether it trained."""

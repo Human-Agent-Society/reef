@@ -16,6 +16,7 @@ from aiohttp import web
 
 from reef.artifact import Artifact
 from reef.core.errors import ReefError
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.remote import server as server_module
 from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
@@ -31,7 +32,7 @@ from reef.runtime.deployment import (
 )
 from reef.runtime.interfaces import InferenceBackend, WeightFiles
 from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime, FullWeightServingRuntime
+from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
 from reef.surface.adapter import adapter_name
 
 CONTROL_TOKEN = "control-secret"

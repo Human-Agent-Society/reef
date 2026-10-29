@@ -16,7 +16,7 @@ sao/
   slime/          the Slime loss family: DIS ratio, critic (value model)
   examples/
     imo_answerbench/  the runnable loop: three IMOAnswerBench problems as Harbor tasks
-    ceobench/         CEO-Bench through Reef, trained by the episode
+    ceobench/         CEO-Bench through Reef, trained by the rollout
 ```
 
 ## Where the rest is documented

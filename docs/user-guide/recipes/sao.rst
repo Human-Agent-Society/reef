@@ -128,8 +128,8 @@ rollout adds one ``training`` entry to the scenario's version chain:
 .. code:: bash
 
    curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/sao-smoke/releases
-   # {"scenario": "sao-smoke", "releases": [{"operation": "training", "current": true, ...}, ...]}
+     http://127.0.0.1:8900/reef/scenarios/sao-smoke/artifacts
+   # {"scenario": "sao-smoke", "artifacts": [{"operation": "training", "active": true, ...}, ...]}
 
 The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
 critic ``grad_norm``, and the asynchrony metrics
@@ -150,8 +150,8 @@ next week's dashboard appears, the finished week's decision turns (the tool
 calls that changed the company) are reported with the week's credit, its
 change in company value (cash plus the engine's subscription run-rate over
 the weeks left) and the discounted changes of the weeks after it, scaled
-against the weeks before, so the recipe trains while the episode runs. The
-example's README records the reward-shaping choices and the recorded episodes.
+against the weeks before, so the recipe trains while the rollout runs. The
+example's README records the reward-shaping choices and the recorded rollouts.
 
 .. code:: bash
 

@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,13 @@ from reef.artifact import (
     Artifact,
     ArtifactConflict,
     ArtifactSourceError,
+    BaseArtifactSource,
     GitLFSRepositoryBackend,
     GitLFSRepositoryBackendFactory,
     RepositoryBackendContext,
 )
+from reef.artifact.git_client import GitClient
+from reef.artifact.git_lfs import HUB_REFS, _GitWorkspace, token_config
 from reef.core.plugins import PluginConfigError
 
 
@@ -66,7 +70,7 @@ def test_git_lfs_repository_publishes_with_a_relative_work_directory(
         tmp_path / "artifacts.git",
         work_dir=Path("work"),
         cache_dir=tmp_path / "cache",
-        bootstrap_files={"rules.md": "old rules\n"},
+        base=BaseArtifactSource(files={"rules.md": "old rules\n"}),
     )
     parent = backend.fork()
     candidate = tmp_path / "candidate"
@@ -84,36 +88,68 @@ def test_git_lfs_repository_publishes_with_a_relative_work_directory(
 
 
 @pytest.mark.integration
-def test_local_repository_base_carries_the_bootstrap_files_and_an_existing_base_wins(
+def test_the_base_artifact_is_imported_once_and_a_changed_configuration_is_refused(
     tmp_path: Path,
     fake_git_lfs: None,
 ) -> None:
-    """A recipe's seed lands in the base artifact of a new local repository, so a fresh scenario
-    forks a tree with files; a later constructor with a different seed keeps the base that exists."""
+    """The base artifact of a new repository holds the recipe's files, with the inputs it came from. A later
+    backend with equal inputs opens the same base; one with other inputs is refused, naming both."""
     remote = tmp_path / "artifacts.git"
     seeded = GitLFSRepositoryBackend(
         "first",
         remote,
         work_dir=tmp_path / "work-first",
         cache_dir=tmp_path / "cache",
-        bootstrap_files={"pi-agent/AGENTS.md": "seed rules\n", "pi-agent/skills/a/SKILL.md": "# a\n"},
+        base=BaseArtifactSource(
+            files={"pi-agent/AGENTS.md": "seed rules\n", "pi-agent/skills/a/SKILL.md": "# a\n"},
+            inputs={"seed": "one"},
+        ),
     )
-    base = seeded.resolve_release()
+    base = seeded.resolve_release("base")
+    assert base.parent_release_id is None
+    assert base.content_id == BaseArtifactSource(inputs={"seed": "one"}).content_id
     tree = seeded.materialize(base).local_path
     assert tree is not None
     assert (tree / "pi-agent" / "AGENTS.md").read_text(encoding="utf-8") == "seed rules\n"
     assert (tree / "pi-agent" / "skills" / "a" / "SKILL.md").read_text(encoding="utf-8") == "# a\n"
-    later = GitLFSRepositoryBackend(
+    manifest = json.loads((tree / "reef-artifact.json").read_text(encoding="utf-8"))
+    assert manifest["source"] == {"kind": "import", "inputs": {"seed": "one"}}
+
+    reopened = GitLFSRepositoryBackend(
         "second",
         remote,
         work_dir=tmp_path / "work-second",
         cache_dir=tmp_path / "cache",
-        bootstrap_files={"pi-agent/AGENTS.md": "other rules\n"},
+        base=BaseArtifactSource(files={"pi-agent/AGENTS.md": "rendered anew\n"}, inputs={"seed": "one"}),
     )
-    assert later.resolve_release().release_id == base.release_id
-    kept = later.materialize(later.resolve_release()).local_path
-    assert kept is not None
-    assert (kept / "pi-agent" / "AGENTS.md").read_text(encoding="utf-8") == "seed rules\n"
+    assert reopened.resolve_release("base") == base
+
+    with pytest.raises(ArtifactSourceError, match=r"imported from \{'seed': 'one'\}.*configures \{'seed': 'two'\}"):
+        GitLFSRepositoryBackend(
+            "third",
+            remote,
+            work_dir=tmp_path / "work-third",
+            cache_dir=tmp_path / "cache",
+            base=BaseArtifactSource(inputs={"seed": "two"}),
+        )
+
+
+@pytest.mark.integration
+def test_a_repository_whose_base_was_not_imported_is_refused(tmp_path: Path, fake_git_lfs: None) -> None:
+    """An older Reef's empty base carries no import record, so its repository does not open."""
+    remote = tmp_path / "artifacts.git"
+    GitLFSRepositoryBackend("first", remote, work_dir=tmp_path / "work-first", cache_dir=tmp_path / "cache")
+    clone = tmp_path / "rewrite"
+    run_git("clone", "-q", str(remote), str(clone))
+    run_git("-C", str(clone), "fetch", "-q", "origin", "refs/reef/base")
+    run_git("-C", str(clone), "checkout", "-q", "FETCH_HEAD")
+    manifest = clone / "reef-artifact.json"
+    manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "source": {"kind": "empty"}}))
+    run_git("-C", str(clone), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "old base")
+    run_git("-C", str(clone), "push", "-qf", "origin", "HEAD:refs/reef/base")
+
+    with pytest.raises(ArtifactSourceError, match="was not imported"):
+        GitLFSRepositoryBackend("second", remote, work_dir=tmp_path / "work-second", cache_dir=tmp_path / "cache")
 
 
 @pytest.mark.integration
@@ -121,7 +157,7 @@ def test_configured_factory_seeds_the_base_from_its_context(tmp_path: Path, fake
     context = RepositoryBackendContext(
         work_dir=tmp_path / "work",
         cache_dir=tmp_path / "cache",
-        bootstrap_files={"agent/AGENTS.md": "seed rules\n"},
+        base=BaseArtifactSource(files={"agent/AGENTS.md": "seed rules\n"}),
     )
     factory = GitLFSRepositoryBackendFactory.from_config(
         {"repository": str(tmp_path / "artifacts.git")}, context=context
@@ -254,6 +290,66 @@ def test_local_repository_bootstrap_is_idempotent_across_constructors(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("competing_inputs", "refusal"),
+    [({}, None), ({"seed": "other"}, r"imported from \{'seed': 'other'\}.*configures \{\}")],
+    ids=["equal-inputs", "other-inputs"],
+)
+def test_a_constructor_reads_a_base_imported_after_it_found_none(
+    competing_inputs: dict[str, str],
+    refusal: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_lfs: None,
+) -> None:
+    """A second constructor imports the base after the first found none and before the first lists the refs.
+    The first then opens that base, or refuses it when it came from other inputs."""
+    remote = tmp_path / "artifacts.git"
+    first_work_dir = (tmp_path / "work-first").resolve()
+    has_refs = _GitWorkspace.has_refs
+    competitors: list[GitLFSRepositoryBackend] = []
+
+    def import_competing_base(workspace: _GitWorkspace) -> bool:
+        if workspace.work_dir == first_work_dir:
+            # The first constructor read no base from the empty repository. The second imports one now.
+            assert run_git("--git-dir", str(remote), "for-each-ref") == ""
+            competitors.append(
+                GitLFSRepositoryBackend(
+                    "second",
+                    remote,
+                    work_dir=tmp_path / "work-second",
+                    cache_dir=tmp_path / "cache-second",
+                    base=BaseArtifactSource(inputs=competing_inputs),
+                )
+            )
+        return has_refs(workspace)
+
+    monkeypatch.setattr(_GitWorkspace, "has_refs", import_competing_base)
+
+    with nullcontext() if refusal is None else pytest.raises(ArtifactSourceError, match=refusal):
+        first = GitLFSRepositoryBackend("first", remote, work_dir=first_work_dir, cache_dir=tmp_path / "cache-first")
+        assert first.resolve_release() == competitors[0].resolve_release()
+    (competitor,) = competitors
+    release = competitor.resolve_release()
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == release.release_id
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == release.release_id
+
+
+@pytest.mark.integration
+def test_a_repository_with_releases_but_no_base_is_refused(tmp_path: Path, fake_git_lfs: None) -> None:
+    """An older Reef's repository has a head but no base. A constructor refuses it and imports no base."""
+    remote = tmp_path / "artifacts.git"
+    first = GitLFSRepositoryBackend("first", remote, work_dir=tmp_path / "work-first", cache_dir=tmp_path / "cache")
+    head_release_id = first.resolve_release().release_id
+    run_git("--git-dir", str(remote), "update-ref", "-d", "refs/reef/base")
+
+    with pytest.raises(ArtifactSourceError, match="has releases but no base artifact"):
+        GitLFSRepositoryBackend("second", remote, work_dir=tmp_path / "work-second", cache_dir=tmp_path / "cache")
+    assert run_git("--git-dir", str(remote), "for-each-ref", "refs/reef/base") == ""
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == head_release_id
+
+
+@pytest.mark.integration
 def test_git_lfs_repository_imports_forks_publishes_and_materializes(
     tmp_path: Path,
     fake_git_lfs: None,
@@ -271,15 +367,15 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
 
     backend_factory = GitLFSRepositoryBackend.factory(
         remote,
-        "org/model@main",
         work_dir=tmp_path / "work",
         cache_dir=tmp_path / "cache",
-        snapshot_download=lambda **kwargs: str(snapshot),
+        base=BaseArtifactSource(model_directory=snapshot, inputs={"model": "org/model", "version": "upstream-sha"}),
     )
 
     backend = backend_factory("math")
     code_backend = backend_factory("code")
     initial = backend.resolve_release()
+    assert backend.resolve_release("base") == initial
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == initial.release_id
 
@@ -296,6 +392,7 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
         remote,
         work_dir=tmp_path / "fresh-work",
         cache_dir=tmp_path / "fresh-cache",
+        base=BaseArtifactSource(inputs={"model": "org/model", "version": "upstream-sha"}),
     )
     assert fresh_factory.has_registration("math")
     assert not fresh_factory.has_registration("unregistered")
@@ -466,7 +563,7 @@ def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(tmp_path:
 
 
 @pytest.mark.integration
-def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
+def test_the_base_model_goes_under_its_component_beside_the_seed_files(
     tmp_path: Path,
     fake_git_lfs: None,
 ) -> None:
@@ -479,12 +576,14 @@ def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
 
     backend = GitLFSRepositoryBackend.factory(
         remote,
-        "org/model@main",
         work_dir=tmp_path / "work",
         cache_dir=tmp_path / "cache",
-        snapshot_download=lambda **kwargs: str(snapshot),
-        bootstrap_files={"harness/AGENTS.md": "seed rules\n"},
-        bootstrap_subdirectory="weights",
+        base=BaseArtifactSource(
+            files={"harness/AGENTS.md": "seed rules\n"},
+            model_directory=snapshot,
+            model_component="weights",
+            inputs={"weights.model": "org/model"},
+        ),
     )("agent")
 
     base = backend.materialize(backend.resolve_release())
@@ -493,15 +592,12 @@ def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
     assert (base.local_path / "weights" / "model.safetensors").read_text() == "weights"
     assert (base.local_path / "harness" / "AGENTS.md").read_text() == "seed rules\n"
     assert not (base.local_path / "config.json").exists()
-    manifest = json.loads(run_git("--git-dir", str(remote), "show", f"{base.ref.release_id}:reef-artifact.json"))
-    assert manifest["source"]["component"] == "weights"
     with pytest.raises(ValueError, match="directory name"):
         GitLFSRepositoryBackend.factory(
             remote,
-            "org/model@main",
             work_dir=tmp_path / "w2",
             cache_dir=tmp_path / "c2",
-            bootstrap_subdirectory="../x",
+            base=BaseArtifactSource(model_directory=snapshot, model_component="../x"),
         )("agent")
 
 
@@ -596,14 +692,12 @@ def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs:
     (snapshot / "model.safetensors").symlink_to(blobs / "weights")
     backend = GitLFSRepositoryBackend.factory(
         remote,
-        "org/model@main",
         work_dir=tmp_path / "work",
         cache_dir=tmp_path / "cache",
-        snapshot_download=lambda **kwargs: str(snapshot),
-        bootstrap_files={"AGENTS.md": "seed\n"},
+        base=BaseArtifactSource(files={"AGENTS.md": "seed\n"}, model_directory=snapshot),
     )("agent")
     head = backend.fork()
-    # The bootstrap rewrote .gitattributes in the work tree, not the Hugging Face blob behind the snapshot.
+    # The import rewrote .gitattributes in the work tree, not the Hugging Face blob behind the snapshot.
     assert (blobs / "attributes").read_text() == "*.bin filter=lfs\n"
     assert (blobs / "weights").read_text() == "base"
     assert "*.safetensors filter=lfs" in backend.materialize(head).local_path.joinpath(".gitattributes").read_text()
@@ -628,3 +722,97 @@ def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path,
     (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
     with pytest.raises(ArtifactSourceError, match=r"broken symlink: .*sub/gone"):
         backend.publish(Artifact.local(source), expected_parent=head)
+
+
+def hub_like_remote(tmp_path: Path) -> Path:
+    """A bare repository with a ``main`` branch of its own, as a new Hugging Face repo has."""
+    remote = tmp_path / "hub.git"
+    run_git("init", "--bare", "-q", str(remote))
+    seed = tmp_path / "hub-seed"
+    run_git("init", "-q", str(seed))
+    (seed / ".gitattributes").write_text("*.safetensors filter=lfs diff=lfs merge=lfs -text\n")
+    run_git("-C", str(seed), "add", ".gitattributes")
+    run_git("-C", str(seed), "-c", "user.name=hub", "-c", "user.email=hub@example", "commit", "-qm", "initial commit")
+    run_git("-C", str(seed), "push", "-q", str(remote), "HEAD:refs/heads/main")
+    return remote
+
+
+@pytest.mark.integration
+def test_the_hub_layout_keeps_releases_on_tags_and_moving_refs_on_branches(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = hub_like_remote(tmp_path)
+    factory = GitLFSRepositoryBackend.factory(
+        remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache", refs=HUB_REFS
+    )
+    # The repo's own main branch is no ref of the backend's, so the repository counts as new.
+    backend = factory("math")
+    base = backend.resolve_release()
+    forked = backend.fork()
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "AGENTS.md").write_text("be brief\n")
+    published = backend.publish(Artifact.local(candidate), expected_parent=forked)
+    pending = backend.publish(Artifact.local(candidate), expected_parent=published, advance_head=False)
+
+    encoded = base64.urlsafe_b64encode(b"math").decode().rstrip("=")
+    refs = dict(line.split()[::-1] for line in run_git("--git-dir", str(remote), "show-ref").splitlines())
+    assert refs.keys() == {
+        "refs/heads/main",
+        "refs/heads/reef/base",
+        "refs/heads/reef/head",
+        f"refs/heads/reef/scenarios/{encoded}",
+        f"refs/tags/reef/releases/{pending.release_id}",
+    }
+    assert refs["refs/heads/reef/base"] == base.release_id
+    assert refs[f"refs/heads/reef/scenarios/{encoded}"] == refs["refs/heads/reef/head"] == published.release_id
+    # A release's ID is its commit, so a release on the Hub is the revision of that commit.
+    assert backend.resolve_release(pending.release_id) == pending
+    assert factory.has_registration("math") and factory.list_registrations() == ("math",)
+
+    # A repository keeps one layout: the other is refused instead of hiding the releases.
+    with pytest.raises(ArtifactSourceError, match="keeps its refs under refs/heads/reef/ and refs/tags/reef/"):
+        GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "reef-work", cache_dir=tmp_path / "reef-cache")
+
+
+def test_a_token_authorizes_its_https_host_only_and_stays_out_of_commands(tmp_path: Path) -> None:
+    token = "hf_secret_token"
+    config = token_config("https://huggingface.co/org/artifacts", token)
+    client = GitClient(tmp_path, config)
+    header = run_git_with(
+        client, "config", "--get-urlmatch", "http.extraHeader", "https://huggingface.co/org/artifacts"
+    )
+    assert header == f"Authorization: Basic {base64.b64encode(f'reef:{token}'.encode()).decode()}"
+    assert run_git_with(client, "config", "--get-urlmatch", "http.extraHeader", "https://example.com/other") == ""
+    with pytest.raises(ArtifactSourceError) as refused:
+        client.run(("git", "config", "--get", "no.such.key"), source_error=True)
+    assert token not in str(refused.value)
+    with pytest.raises(ValueError, match="https:// repository"):
+        token_config("git@huggingface.co:org/artifacts", token)
+
+
+def run_git_with(client: GitClient, *args: str) -> str:
+    """``client``'s output of ``git args``, or empty when git finds nothing."""
+    try:
+        return client.run(("git", *args), source_error=True)
+    except ArtifactSourceError:
+        return ""
+
+
+@pytest.mark.integration
+def test_configured_factory_reads_the_ref_layout_and_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_git_lfs: None
+) -> None:
+    context = RepositoryBackendContext(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    config = {
+        "repository": "https://huggingface.co/org/artifacts",
+        "refs": "branches-and-tags",
+        "token_env": "HF_TOKEN",
+    }
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    with pytest.raises(ArtifactSourceError, match="needs the variable HF_TOKEN"):
+        GitLFSRepositoryBackendFactory.from_config(config, context=context)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_token")
+    factory = GitLFSRepositoryBackendFactory.from_config(config, context=context)
+    assert factory._refs == HUB_REFS
+    assert factory._git_config == token_config(config["repository"], "hf_secret_token")
+    with pytest.raises(PluginConfigError, match="refs must be one of"):
+        GitLFSRepositoryBackendFactory.from_config({"repository": "a", "refs": "custom"}, context=context)

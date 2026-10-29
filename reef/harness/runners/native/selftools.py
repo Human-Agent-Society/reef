@@ -1,7 +1,7 @@
 """The self referential tools of the serve form: inspect the harness, try a change on this process, propose it to Reef.
 
 Three built-in tools, built in code and registered only by ``reef-native
-serve --self-tools``; the episode form never sees them, so a candidate cannot
+serve --self-tools``; the rollout form never sees them, so a candidate cannot
 pass the checks by calling them, and a tree file cannot take their names. They
 run in process whatever ``REEF_NATIVE_ENFORCE`` says, since they are reef's
 code and not the tree's. The order a model should use is inspect, then try,
@@ -147,7 +147,7 @@ class SelfTools(ToolRunner):
                 "release_id": row.get("release_id"),
                 "parent_release_id": row.get("parent_release_id"),
                 "operation": row.get("operation"),
-                "pending": row.get("pending", False),
+                "active": bool(row.get("active")),
                 "recorded_at": row.get("recorded_at"),
                 "evaluation": row.get("metrics"),
             }
@@ -179,7 +179,7 @@ class SelfTools(ToolRunner):
         for path in patch.changes:
             location = locate(path)
             if location is not None and location.kind in ALWAYS_REVIEWED_KINDS:
-                raise ToolFailed(f"{path} is reviewed code: propose it, a person promotes it")
+                raise ToolFailed(f"{path} is reviewed code: propose it, a person activates it")
         return self._state.try_patch(patch, secrets.token_hex(4))
 
 

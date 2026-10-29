@@ -33,7 +33,7 @@ from typing import Any
 
 from recipes.beta.reefine.multimodal import MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.inference.provider_protocol import (
     ANTHROPIC_CLIENT_HEADERS,
     ANTHROPIC_PATHS,
