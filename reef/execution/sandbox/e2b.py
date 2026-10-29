@@ -1,4 +1,4 @@
-"""Run rollout processes in an E2B cloud sandbox (:mod:`reef.sandbox.remote`).
+"""Run rollout processes in an E2B cloud sandbox (:mod:`reef.execution.sandbox.remote`).
 
 An E2B sandbox is a microVM of its own. :class:`E2BExecutor` is the deployment's
 setting (the API key, the template, how long a sandbox may live);
@@ -19,8 +19,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
-from reef.sandbox.process import ProcessOutcome, RolloutLaunchError, RolloutTimeout, SandboxProgram, SandboxUnavailable
-from reef.sandbox.remote import (
+from reef.execution.sandbox.process import (
+    ProcessOutcome,
+    RolloutLaunchError,
+    RolloutTimeout,
+    SandboxProgram,
+    SandboxUnavailable,
+)
+from reef.execution.sandbox.remote import (
     SANDBOX_MARGIN_S,
     TUNNEL_PORT_BASE,
     RemoteExecutor,

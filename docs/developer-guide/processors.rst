@@ -263,7 +263,10 @@ the work to a worker that the stage owns, and its ``pull`` returns the result
 when the work ends. Until then the set waits, and the pipeline holds its
 records. The stage returns one result for each pushed set, one time. A result
 for a set that does not wait makes ``ready()`` raise ``ValueError``. The
-stage's ``close`` stops its worker.
+stage's ``close`` stops its worker. A worker that cannot finish cleanup within
+its close timeout raises ``TimeoutError``; callers must not treat that as completed
+shutdown. See `background job ownership <sandboxes.rst#background-job-ownership>`__
+for cancellation and resource ownership.
 
 Uploaded trajectories
 ---------------------

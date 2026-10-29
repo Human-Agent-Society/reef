@@ -1514,9 +1514,20 @@ Absent by default. When present, ``reef serve`` starts the generator service
 it, and publishes its address as ``${endpoints.generator}`` for the
 generated-task stages to consume. The generator writes and checks Harbor tasks and runs their rollouts for the
 generated-task recipe and for a task generator such as SPADE, under the same
-interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
-``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
-place it on the host that has Docker. The generator runs its proposals, checks and rollouts at the same time.
+interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
+host needs the ``harbor`` command line and the Harbor environment that
+``generator.environment`` selects; the Reef service itself needs neither. The
+default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
+in an E2B cloud sandbox, so a host without Docker, such as a cluster node with
+only Apptainer, uses it. It needs ``E2B_API_KEY`` exported where ``reef serve``
+starts and ``reef-infra[e2b]`` in the generator's interpreter; the readiness
+check looks there, so ``generator.harbor`` must come from the same Python
+environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
+compose services), an agent inside the sandbox cannot reach a
+``generator.agent-host`` on a private host, and E2B builds a template for each
+new task image. ``execution.generator`` selects the generator's executor, so a
+deployment can place it on another host. The generator runs its proposals,
+checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
 
 .. config::
@@ -1528,6 +1539,7 @@ place it on the host that has Docker. The generator runs its proposals, checks a
    generator.agent | terminus-2 | the Harbor agent each rollout runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores a rollout whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
+   generator.environment | docker | the Harbor environment of the oracle and nop checks and of the rollouts: ``docker`` or ``e2b``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker
    generator.concurrency | 2 | rollouts in flight across all rollout requests of the generator service
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``
