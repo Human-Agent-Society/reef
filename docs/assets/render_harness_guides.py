@@ -245,8 +245,8 @@ def adapter_modes(theme: str, fonts) -> str:
         write(
             40,
             MODES_H - 20,
-            "terminus runs Harbor tasks with its own runner, which takes the task directory; the other adapters "
-            "use the middle column.",
+            "The middle column needs an npm install. terminus runs Harbor tasks with its own runner, which takes "
+            "the task directory.",
             BODY,
             p["muted"],
         )
