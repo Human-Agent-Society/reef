@@ -51,7 +51,7 @@ Components of the pool:
   The lag counts the versions that the scenario served after the producing one.
 
 The package depends only on ``reef.core``, ``reef.runtime.interfaces``,
-``reef.observability``, ``reef.background_jobs``, and ``reef.pipeline_context``. Thus record-to-sample and
+``reef.observability``, ``reef.execution.jobs``, and ``reef.pipeline_context``. Thus record-to-sample and
 the trainer can both use it.
 """
 

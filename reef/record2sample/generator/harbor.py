@@ -9,7 +9,7 @@ content hash that ignores ``task.toml`` and the hint, and ``oracle_check`` runs 
 ``harbor`` command line, once with Harbor's oracle agent (the reference solution) and once with its nop
 agent (nothing), and accepts the task only when the first scores 1 and the second scores below 1:
 solvable, and not for free. A check that could not run, because ``harbor`` is not installed or a run
-ended without a trial to read (an exit code, a timeout, no Docker daemon), raises ``OracleUnavailable``
+ended without a trial to read (an exit code, a timeout, an environment that cannot start), raises ``OracleUnavailable``
 rather than refusing the task. One gate is reef's own: the team requires a pytest file under ``tests/``,
 reef requires a file under ``tests/`` that names the reward file, since its verifiers are shell scripts
 that write it.
@@ -17,22 +17,18 @@ that write it.
 
 from __future__ import annotations
 
-import contextlib
 import fnmatch
 import hashlib
 import json
 import os
 import re
 import shutil
-import signal
-import subprocess
-import threading
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, primary_reward
+from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
 from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
@@ -351,97 +347,86 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     return TrialOutcome(reward=float(value), exception=exception_text, agent_note=agent_note)
 
 
-def signal_process_group(process: subprocess.Popen[str], signum: int) -> None:
-    """Signal the whole group of a child that is still running; a group already gone is no error."""
-    if process.poll() is None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signum)
-
-
-def wait_or_kill(process: subprocess.Popen[str], *, deadline: float) -> None:
-    """Wait for the child until the monotonic ``deadline``; a kill to its whole group when it is still there."""
-    try:
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        signal_process_group(process, signal.SIGKILL)
-        process.wait()
-
-
-def stop_process_groups(processes: Sequence[subprocess.Popen[str]], *, grace_s: float) -> None:
-    """A term to every group, so Harbor's compose children can take their containers down; a kill after ``grace_s``."""
-    for process in processes:
-        signal_process_group(process, signal.SIGTERM)
-    deadline = time.monotonic() + grace_s
-    for process in processes:
-        wait_or_kill(process, deadline=deadline)
-
-
 class HarborRuns:
-    """The harbor children in flight, each its own process group: started here so a closed registry refuses one."""
+    """Compatibility adapter for callers that explicitly own several Harbor checks.
+
+    scope is one initially open ProcessScope. pids reports its active children;
+    terminate_all closes it, signals with the supplied grace and waits for reaping.
+    New generator jobs instead receive their worker's per-job process scope.
+    """
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.live: dict[int, subprocess.Popen[str]] = {}
-        self.is_closed = False
+        self.scope = ProcessScope()
 
-    def start(self, command: Sequence[str]) -> subprocess.Popen[str]:
-        """Start ``command`` in its own session and keep it until ``release``; refused once the runs are closed."""
-        with self.lock:
-            if self.is_closed:
-                raise RuntimeError("the generator is stopping; no new harbor run")
-            process = subprocess.Popen(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True
-            )
-            self.live[process.pid] = process
-        return process
-
-    def release(self, process: subprocess.Popen[str]) -> None:
-        with self.lock:
-            self.live.pop(process.pid, None)
+    @property
+    def is_closed(self) -> bool:
+        return self.scope.closed
 
     def pids(self) -> tuple[int, ...]:
-        with self.lock:
-            return tuple(self.live)
+        return self.scope.pids()
 
     def terminate_all(self, *, grace_s: float = STOP_GRACE_S) -> tuple[int, ...]:
-        """Close the runs, then stop every live group: a term, and a kill for what is still alive after ``grace_s``."""
-        with self.lock:
-            self.is_closed = True
-            processes = list(self.live.values())
-        stop_process_groups(processes, grace_s=grace_s)
-        return tuple(process.pid for process in processes)
+        pids = self.scope.pids()
+        self.scope.request_stop(grace_seconds=grace_s)
+        self.scope.wait_closed()
+        return pids
 
 
 def run_harbor_agent(
-    task_path: Path, agent: str, jobs_path: Path, *, harbor: str, timeout_s: float, runs: HarborRuns | None = None
+    task_path: Path,
+    agent: str,
+    jobs_path: Path,
+    *,
+    harbor: str,
+    timeout_s: float,
+    environment: str = "docker",
+    runs: HarborRuns | None = None,
 ) -> TrialOutcome:
-    """Run ``agent`` on the task through the harbor command line, in its own process group, and read the trial."""
-    command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", "docker", "-o", str(jobs_path), "-n", "1"]
-    registry = runs if runs is not None else HarborRuns()
-    process = registry.start(command)
+    """Run ``agent`` on the task through the harbor command line in Harbor's ``environment``, and read the trial.
+
+    The child runs in its own process group and inherits this process's environment, so the credentials of the
+    environment (``reef.execution.sandbox.task_environment``) reach Harbor.
+    """
+    command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
+    scope = runs.scope if runs is not None else CURRENT_PROCESS_SCOPE.get()
+    if scope is None:
+        scope = ProcessScope()
     try:
-        with process:
-            try:
-                _, stderr = process.communicate(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                stop_process_groups([process], grace_s=STOP_GRACE_S)
-                raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s") from None
-    finally:
-        registry.release(process)
-    if process.returncode != 0:
-        if registry.is_closed:
-            raise RuntimeError(f"harbor run -a {agent} was stopped with the generator")
-        # A traceback names its error last; the whole of it stays beside the run for the person who reads it.
+        result = scope.run(
+            ProcessRequest(
+                argv=tuple(command),
+                cwd=Path.cwd(),
+                env=dict(os.environ),
+                timeout_seconds=timeout_s,
+                grace_seconds=STOP_GRACE_S,
+                capture_stdout=False,
+            )
+        )
+    except ProcessScopeClosed as exc:
+        raise RuntimeError("the generator is stopping; no new harbor run") from exc
+    if result.reason == "timed_out":
+        raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s")
+    if result.reason == "stopped":
+        raise RuntimeError(f"harbor run -a {agent} was stopped with the generator")
+    if result.exit_code != 0:
         jobs_path.mkdir(parents=True, exist_ok=True)
-        (jobs_path / STDERR_FILE).write_text(stderr, encoding="utf-8")
-        raise RuntimeError(f"harbor run -a {agent} exited {process.returncode}: {stderr.strip()[-500:]}")
+        (jobs_path / STDERR_FILE).write_text(result.stderr, encoding="utf-8")
+        raise RuntimeError(f"harbor run -a {agent} exited {result.exit_code}: {result.stderr.strip()[-500:]}")
     return trial_outcome(jobs_path)
 
 
 def oracle_check(
-    task_path: Path, *, harbor: str | None = None, timeout_s: float = ORACLE_TIMEOUT_S, runs: HarborRuns | None = None
+    task_path: Path,
+    *,
+    harbor: str | None = None,
+    environment: str = "docker",
+    timeout_s: float = ORACLE_TIMEOUT_S,
+    runs: HarborRuns | None = None,
 ) -> OracleResult:
-    """Solvable, and not for free: the reference solution scores 1 and doing nothing scores below 1 under Harbor."""
+    """Solvable, and not for free: the reference solution scores 1 and doing nothing scores below 1 under Harbor.
+
+    Both runs use the Harbor environment ``environment``.
+    """
     executable = harbor if harbor is not None else shutil.which("harbor")
     if executable is None:
         raise OracleUnavailable("the harbor command line is not installed")
@@ -451,7 +436,13 @@ def oracle_check(
     # A run that left no trial to read says nothing about the task; only a trial's verdict can refuse it.
     try:
         oracle = run_harbor_agent(
-            task_path, "oracle", jobs_path / "oracle", harbor=executable, timeout_s=timeout_s, runs=runs
+            task_path,
+            "oracle",
+            jobs_path / "oracle",
+            harbor=executable,
+            timeout_s=timeout_s,
+            environment=environment,
+            runs=runs,
         )
     except (RuntimeError, ValueError, OSError) as exc:
         raise OracleUnavailable(str(exc)[:500]) from exc
@@ -464,7 +455,15 @@ def oracle_check(
             reason = f"{reason}; {oracle.agent_note}"
         return OracleResult(is_solvable=False, reason=reason, oracle_reward=oracle.reward)
     try:
-        nop = run_harbor_agent(task_path, "nop", jobs_path / "nop", harbor=executable, timeout_s=timeout_s, runs=runs)
+        nop = run_harbor_agent(
+            task_path,
+            "nop",
+            jobs_path / "nop",
+            harbor=executable,
+            timeout_s=timeout_s,
+            environment=environment,
+            runs=runs,
+        )
     except (RuntimeError, ValueError, OSError) as exc:
         raise OracleUnavailable(str(exc)[:500]) from exc
     if nop.reward is None or nop.reward >= 1.0:

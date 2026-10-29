@@ -31,9 +31,9 @@ from recipes.openclawrl.prm import (
 )
 from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS, SessionIndex
 from recipes.openclawrl.turns import TurnJob, TurnJudgment, main_turn_message, turn_job, turn_request_messages
-from reef.background_jobs import BackgroundJobWorker
 from reef.core.config import config_option
 from reef.core.records_types import AgentRecord, RequestType
+from reef.execution.jobs import BackgroundJobWorker
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, Record2RecordSettings, RecordJudging
 

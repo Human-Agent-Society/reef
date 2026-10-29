@@ -15,7 +15,7 @@ The map, one subpackage per job:
     the two programs Reef ships, native and terminus.
 ``rollouts/``
     one headless run and its reading: launch on a rendered root through any
-    ``reef.sandbox`` executor (``run``), the adapter as the program that
+    ``reef.execution.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
     the version pin and the trajectory readers.
 ``runners/``

@@ -15,8 +15,9 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``POST /rollouts``: an agent runs rollouts of a written task (a job). Reef keeps no record of
   their model calls; each rollout comes back with its reward and its answered calls (``turns``).
 - ``GET /jobs/{id}``: a job's state and result.
-- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
-  then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check tasks or run rollouts.
+- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and the host has what the Harbor
+  environment needs (``reef.execution.sandbox.task_environment``); until then 503 naming what is missing, so ``reef serve``
+  waits on a generator that cannot check tasks or run rollouts.
 
 Jobs run at the same time on one job worker; a rollout job waits only for the service's rollout slots, so a
 proposal or a check never waits behind rollouts. Closing the service stops the harbor runs a job has in flight, so
@@ -27,13 +28,11 @@ root: a restarted service serves the same root.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
-import importlib.util
 import json
 import logging
 import shutil
-import subprocess
-import sys
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -44,10 +43,17 @@ from pathlib import Path
 from aiohttp import web
 from reef_client.client import ReefClientError
 
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.evaluation import RolloutRequest
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.execution.processes import CURRENT_PROCESS_SCOPE
+from reef.execution.sandbox.task_environment import (
+    ModuleProbe,
+    ReadinessProbe,
+    checked_task_environment,
+    task_environment_probes,
+)
 from reef.harness.client.tasks import TaskRollout, TaskRolloutError, TaskRolloutRunner, checked_labels
 from reef.record2sample.generator.designer import (
     Designer,
@@ -80,35 +86,8 @@ from reef.record2sample.generator.wire import (
 
 logger = logging.getLogger(__name__)
 
-DOCKER_PROBE_TIMEOUT_S = 5.0
-
 
 # ------------------------------------------------------------- the readiness
-
-
-class ReadinessProbe(ABC):
-    """One thing the generator needs before it can check tasks and run their rollouts."""
-
-    name: str = ""
-
-    @abstractmethod
-    def missing(self) -> str:
-        """Why the need is not met, or an empty string when it is."""
-
-
-class ModuleProbe(ReadinessProbe):
-    """A module imports under this interpreter; ``find_spec`` looks without importing."""
-
-    def __init__(self, module: str, *, hint: str = "") -> None:
-        self.name = module
-        self.module = module
-        self.hint = hint
-
-    def missing(self) -> str:
-        if importlib.util.find_spec(self.module) is not None:
-            return ""
-        reason = f"{self.module} does not import under {sys.executable}"
-        return f"{reason}; {self.hint}" if self.hint else reason
 
 
 class HarborProbe(ReadinessProbe):
@@ -125,35 +104,16 @@ class HarborProbe(ReadinessProbe):
         return "" if shutil.which(self.harbor) is not None else f"{self.harbor} is not an executable"
 
 
-class DockerProbe(ReadinessProbe):
-    """The Docker daemon answers ``docker version``, so Harbor can build and run a task's container."""
+def readiness_probes(*, harbor: str | None = None, environment: str = "docker") -> tuple[ReadinessProbe, ...]:
+    """What checking a task and running its rollouts takes: reef-eval, the harbor command line, and ``environment``.
 
-    name = "docker"
-
-    def __init__(self, *, docker: str = "docker", timeout_s: float = DOCKER_PROBE_TIMEOUT_S) -> None:
-        self.docker = docker
-        self.timeout_s = timeout_s
-
-    def missing(self) -> str:
-        if shutil.which(self.docker) is None:
-            return f"the {self.docker} command line is not on PATH"
-        try:
-            completed = subprocess.run(
-                [self.docker, "version"], capture_output=True, text=True, timeout=self.timeout_s, check=False
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return f"{self.docker} version did not answer: {exc}"
-        if completed.returncode != 0:
-            return f"{self.docker} version exited {completed.returncode}: {completed.stderr.strip()[:500]}"
-        return ""
-
-
-def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]:
-    """What checking a task and running its rollouts takes: reef-eval, the harbor command line and Docker."""
+    The needs of the Harbor task environment come from ``reef.execution.sandbox.task_environment.task_environment_probes``;
+    the generator adds only its own. Raise ``ValueError`` for an environment that module cannot check.
+    """
     return (
         ModuleProbe("reef_eval", hint="a dependency of reef-infra; reinstall reef-infra"),
         HarborProbe(harbor=harbor),
-        DockerProbe(),
+        *task_environment_probes(environment, credential_hint="export it before reef serve starts"),
     )
 
 
@@ -175,14 +135,24 @@ class TaskChecks(ABC):
 
 
 class HarborChecks(TaskChecks):
-    """The checks through the harbor command line; ``runs`` shared with the job runner so closing it stops a check."""
+    """The checks through the harbor command line, in one Harbor environment.
 
-    def __init__(self, *, harbor: str | None = None, runs: HarborRuns | None = None) -> None:
+    Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is one of
+    ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is an explicit caller-owned HarborRuns,
+    or None to use the worker's job scope (a fresh scope outside a worker).
+    Purpose: ``CheckJob`` calls ``oracle``, which runs both checks in ``environment``. The default generator
+    delegates process ownership and shutdown to its worker.
+    """
+
+    def __init__(
+        self, *, harbor: str | None = None, environment: str = "docker", runs: HarborRuns | None = None
+    ) -> None:
         self.harbor = harbor
+        self.environment = checked_task_environment(environment)
         self.runs = runs
 
     def oracle(self, task_path: Path) -> OracleResult:
-        return oracle_check(task_path, harbor=self.harbor, runs=self.runs)
+        return oracle_check(task_path, harbor=self.harbor, environment=self.environment, runs=self.runs)
 
 
 class GeneratorRollouts(ABC):
@@ -205,7 +175,13 @@ class GeneratorRollouts(ABC):
 class ReefGeneratorRollouts(GeneratorRollouts):
     """A rollout runner per call, its rollouts tagged with the arm; at most ``concurrency`` rollouts of all calls in flight.
 
-    The service's job worker runs every rollout on its one event loop, so all calls share the rollout slots.
+    Values: ``reef_url`` is the Reef service the agent's calls go to, with ``token`` as its bearer or None.
+    ``work_dir`` is where the runners keep trials. ``agent`` is a Harbor agent config mapping or None for
+    Terminus 2, and ``agent_host`` an address of this host the task's sandbox reaches, or None. ``environment`` is
+    one of ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``, for every rollout. ``rollout_slots`` is a
+    semaphore with ``concurrency`` slots, a positive int.
+    Purpose: the generator process makes it; ``RolloutJob`` calls ``run_rollouts``. The service's job worker runs
+    every rollout on its one event loop, so all calls share the rollout slots.
     """
 
     def __init__(
@@ -216,13 +192,18 @@ class ReefGeneratorRollouts(GeneratorRollouts):
         token: str | None = None,
         agent: Mapping[str, object] | None = None,
         agent_host: str | None = None,
+        environment: str = "docker",
         concurrency: int = 2,
     ) -> None:
+        environment = checked_task_environment(environment)
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise ValueError("concurrency must be a positive int")
         self.reef_url = reef_url
         self.work_dir = Path(work_dir)
         self.token = token
         self.agent = agent
         self.agent_host = agent_host
+        self.environment = environment
         self.rollout_slots = asyncio.Semaphore(concurrency)
 
     async def run_rollouts(
@@ -246,6 +227,7 @@ class ReefGeneratorRollouts(GeneratorRollouts):
             token=self.token,
             agent=self.agent,
             agent_host=self.agent_host,
+            environment=self.environment,
             labels={**tags, "arm": arm},
             extra_instruction_paths=extra_instruction_paths,
             is_reporting=False,
@@ -339,15 +321,35 @@ class ProposalJob(Job):
 
 
 class CheckJob(Job):
+    """One task check, with the Job state fields and kind fixed to check.
+
+    checks implements TaskChecks; task_path is a Path for the task to check.
+    run returns the serialized oracle result or propagates its error. On
+    cancellation it requests process shutdown and awaits the synchronous check
+    thread before propagating cancellation. The HTTP handler creates this job;
+    JobRunner executes it and stores its result.
+    """
+
     kind = "check"
 
     def __init__(self, checks: TaskChecks, task_path: Path) -> None:
+        if not isinstance(checks, TaskChecks) or not isinstance(task_path, Path):
+            raise ValueError("a check job needs TaskChecks and a task Path")
         super().__init__()
         self.checks = checks
         self.task_path = task_path
 
     async def run(self) -> dict[str, object]:
-        return oracle_document(await asyncio.to_thread(self.checks.oracle, self.task_path))
+        pending = asyncio.create_task(asyncio.to_thread(self.checks.oracle, self.task_path))
+        try:
+            return oracle_document(await asyncio.shield(pending))
+        except asyncio.CancelledError:
+            scope = CURRENT_PROCESS_SCOPE.get()
+            if scope is not None:
+                scope.request_stop(grace_seconds=CLOSE_GRACE_S)
+            with contextlib.suppress(RuntimeError):
+                await pending
+            raise
 
 
 class RolloutJob(Job):
@@ -398,14 +400,21 @@ class JobTicket(SupportsReceipt):
 
 
 class JobRunner(BackgroundJobRunner):
-    """Runs the service's jobs at the same time on one job worker; closing stops the harbor runs in flight, then the worker.
+    """The generator's job registry and runner, with one BackgroundJobWorker.
 
-    A job is queued, running, then done or failed. ``get`` reads a job's state by its ID, and marks a job that the
-    worker gave up, such as one cancelled at close, as failed.
+    jobs maps each submitted Job.id to that Job, initially empty; lock protects
+    registry access. runs is None for worker-owned processes or an explicit
+    HarborRuns also stopped at close. worker executes at most MAX_JOBS_IN_FLIGHT
+    jobs. submit returns the registered job or raises after removing a refused
+    submission. run stores its result or error. get returns the matching job or
+    None, translating worker cancellation into failed state. close stops
+    admission and waits for cleanup, propagating an incomplete-close error.
     """
 
     def __init__(self, runs: HarborRuns | None = None) -> None:
-        self.runs = runs if runs is not None else HarborRuns()
+        if runs is not None and not isinstance(runs, HarborRuns):
+            raise ValueError("runs must be HarborRuns or None")
+        self.runs = runs
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
         # A rollout job waits for rollout slots, not for job slots; the limit only bounds what one client can queue.
@@ -432,7 +441,9 @@ class JobRunner(BackgroundJobRunner):
             return self.jobs.get(job_id)
 
     def close(self) -> None:
-        self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
+        self.worker.request_stop()
+        if self.runs is not None:
+            self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
         self.worker.close()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:

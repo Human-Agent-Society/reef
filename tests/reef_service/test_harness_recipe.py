@@ -28,6 +28,7 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.evaluation.harness import RolloutEvaluationWorker, ScoreComparisonPlugin
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError, ModelBindings, ModelBindingsResolver
 from reef.harness.rollouts.run import RolloutResult
@@ -37,7 +38,6 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.sandbox.process import LocalExecutor
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisBackend, FailureManifest, Mutation, MutationError, Promoter
@@ -1656,7 +1656,7 @@ def test_recipe_selects_the_rollout_executor(tmp_path: Path, monkeypatch) -> Non
     local = CordisRecipe.from_environment({}, config=config(executor="local"))
     assert type(local.executor).__name__ == "LocalExecutor"
 
-    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(RecipeConfigError, match="bubblewrap"):
         CordisRecipe.from_environment({}, config=config(executor="sandbox"))
 

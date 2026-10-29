@@ -39,12 +39,12 @@ from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
+from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2record import (

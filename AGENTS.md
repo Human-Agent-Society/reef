@@ -61,9 +61,8 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
-| `reef/sandbox/` | Shared execution and isolation through Harbor environments, file transfer, and process/session cleanup |
+| `reef/execution/` | Shared job scheduling, local process ownership, sandbox isolation, file transfer, and cleanup |
 | `reef/record2record/` | The record-to-record stage: which records Reef uses and in what order (report grouping, judging, eligibility checks, selection order) |
-| `reef/background_jobs.py` | A worker that runs asynchronous jobs, such as judge calls, off the trainer thread |
 | `reef/record2sample/` | The record-to-sample stage: one record set into samples (`Record2Sample`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
 | `reef/sample2job/` | The sample-to-job stage: the samples of the selected record sets into one training job's data (`Sample2Job`), and the job size `job_samples` |
 | `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |

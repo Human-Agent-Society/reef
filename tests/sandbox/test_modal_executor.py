@@ -13,12 +13,12 @@ from typing import Any
 
 import pytest
 
-import reef.sandbox.modal as modal_sandbox
-import reef.sandbox.remote as remote
-from reef.sandbox.config import build_executor, remote_executor
-from reef.sandbox.modal import ModalExecutor, ModalSession
-from reef.sandbox.process import RolloutLaunchError, RolloutTimeout, SandboxProgram, SandboxUnavailable
-from reef.sandbox.remote import REMOTE_BASE, TUNNEL_PORT_BASE, deployment_owner
+import reef.execution.sandbox.modal as modal_sandbox
+import reef.execution.sandbox.remote as remote
+from reef.execution.sandbox.config import build_executor, remote_executor
+from reef.execution.sandbox.modal import ModalExecutor, ModalSession
+from reef.execution.sandbox.process import RolloutLaunchError, RolloutTimeout, SandboxProgram, SandboxUnavailable
+from reef.execution.sandbox.remote import REMOTE_BASE, TUNNEL_PORT_BASE, deployment_owner
 
 
 class Program(SandboxProgram):

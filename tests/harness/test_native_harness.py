@@ -22,6 +22,7 @@ from tests.support._trajectories import recorded_trajectory
 
 from reef.evaluation import BackendAlwaysSelectPlugin
 from reef.evaluation.harness import ScoreComparisonPlugin
+from reef.execution.sandbox.process import SandboxExecutor
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.rollouts.run import run_rollout
@@ -47,7 +48,6 @@ from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition, tree_files
-from reef.sandbox.process import SandboxExecutor
 from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.types import JobData
 

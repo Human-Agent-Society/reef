@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
@@ -32,6 +33,8 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
 from reef.evaluation.harness import FloorPlugin, RolloutScorer, ScoreComparisonPlugin, evaluation_selection
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
@@ -47,8 +50,6 @@ from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
-from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
@@ -154,20 +155,20 @@ class HarnessLayout(ArtifactLayout):
 
     descriptor: AdapterDescriptor
 
-    def check(self, directory: Path) -> None:
-        entries = read_entries(directory)
+    def check(self, files: ArtifactFiles) -> None:
+        entries = read_entries(files)
         refusal = entries_refusal(entries, self.descriptor)
         if refusal is not None:
             raise ValueError(f"the harness entries are refused: {refusal}")
         expected = harness_files(self.descriptor, entries)
-        actual = {path.relative_to(directory).as_posix(): path for path in directory.rglob("*") if path.is_file()}
-        missing, extra = sorted(set(expected) - set(actual)), sorted(set(actual) - set(expected))
+        actual = set(files.paths())
+        missing, extra = sorted(set(expected) - actual), sorted(actual - set(expected))
         if missing or extra:
             raise ValueError(
                 f"a harness artifact holds exactly the render of its entries: missing {missing}, extra {extra}"
             )
-        for relative, path in actual.items():
-            if relative != ENTRIES_FILE and path.read_bytes() != expected[relative].encode("utf-8"):
+        for relative in actual:
+            if relative != ENTRIES_FILE and files.read_bytes(relative) != expected[relative].encode("utf-8"):
                 raise ValueError(f"{relative} differs from the render of the harness entries")
 
 

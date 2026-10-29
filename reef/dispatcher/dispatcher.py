@@ -16,6 +16,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.sources import SourceFiles
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
@@ -358,12 +359,34 @@ class Dispatcher(ScenarioLifecycle):
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).train_from(artifact_id, component)
 
-    def import_artifact(
-        self, scenario: str, directory: Path, component: str | None, *, source: Mapping[str, str]
-    ) -> ComponentArtifact:
-        """Publish ``directory`` as a new artifact of ``component`` in ``scenario``; nothing serves or trains it yet."""
+    def import_target(self, scenario: str, component: str | None) -> str:
+        """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
+
+        Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an unknown component or one that
+        takes no import. An unknown scenario is refused before its lock is made, so a request for any name adds none.
+        """
+        if not self.registry.has(scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).import_artifact(directory, component, source=source)
+            return self.registry.require(scenario).import_target(component)
+
+    def import_artifact(
+        self,
+        scenario: str,
+        files: SourceFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
+        directory: Path,
+    ) -> ComponentArtifact:
+        """Publish ``files`` as a new artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
+
+        Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
+        """
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).import_artifact(
+                files, component, source=source, directory=directory
+            )
 
     def current_artifact(
         self,

@@ -35,6 +35,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from reef.core.prompts import untrusted_text
+from reef.execution.sandbox.environment import download_directory, execute
+from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.rollouts.requests import REQUESTS_SKILL_ID, request_entries
 from reef.harness.rollouts.trajectory import reader_for
@@ -44,8 +46,6 @@ from reef.harness.tree.render import render_composition
 from reef.recipe.reefine import evolution
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.recipe.reefine.multimodal import MultimodalProvider
-from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
 from reef.train.types import TrajectorySample

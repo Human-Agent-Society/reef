@@ -767,42 +767,69 @@ Artifact imports
 
 ``POST /reef/scenarios/{scenario}/artifacts`` imports a directory as a new
 artifact of one component (`Import an artifact
-<../user-guide/operate.rst#import-an-artifact>`__). Two contracts decide what an
-import accepts.
+<../user-guide/operate.rst#import-an-artifact>`__). A source reader opens the
+files that the URI names, the component's layout checks them where the source
+keeps them, and then Reef stores a copy, or a reference to a Hugging Face
+revision that cannot change. Two contracts decide what an import accepts.
 
 A component's layout is the ``layout`` of its ``ComponentSurface``, an
-``reef.surface.ArtifactLayout``. ``check(directory)`` returns when the
-directory holds an artifact in the layout of the component's releases, and
-the remote weights that it names exist. Otherwise it raises ``ValueError``,
-and Reef answers HTTP 400. ``None``, the default, means that the component
-takes no import. The built-in recipes bind one:
+``reef.surface.ArtifactLayout``. ``check(files)`` returns when ``files`` are
+an artifact in the layout of the component's releases, and the remote weights
+that they name exist. Otherwise it raises ``ValueError``, and Reef answers
+HTTP 400 before it copies anything. ``None``, the default, means that the
+component takes no import. ``files`` is a ``reef.artifact.ArtifactFiles``. It
+gives ``paths()``, and ``sha256(path)`` and ``read_bytes(path)`` for each path.
+Read only the files that the check needs: on an S3 prefix or a Hugging Face
+revision, each read downloads that file. The built-in recipes bind one:
 
 - A weight recipe binds ``ReleaseLayout(training_component)``, which calls
   the component's ``check_release`` (see `Training jobs and components`_).
+  For full weights and adapters it reads only file names and
+  ``adapter/adapter_config.json``.
 - A harness recipe binds ``HarnessLayout``. ``reef-entries.json`` must hold
   entries that a seed may hold, and the other files must be exactly their
   render for the adapter.
 
-After the layout, the release's own admission check runs, as at a training
-publication.
+After the layout, the release's own admission check runs on what Reef stores,
+as at a training publication.
 
-A source reader fetches the directory that a URI names. It is a subclass of
-``reef.artifact.ArtifactSourceReader`` with two members:
+A source reader is a subclass of ``reef.artifact.ArtifactSourceReader`` with
+two members:
 
 .. code:: python
 
    @property
    def schemes(self) -> tuple[str, ...]: ...
 
-   def fetch(self, uri: str, directory: Path) -> str: ...
+   def open(self, uri: str) -> SourceFiles: ...
 
-``fetch`` writes the files of ``uri`` into the empty ``directory`` and returns
-the version that it read, or ``""`` when the source has no version. Raise
-``ValueError`` for a URI that names nothing the reader can read, and
-``ArtifactSourceError`` when the source fails. Reef ships ``HuggingFaceReader``
-(``hf``), ``FileReader`` (``file``) and ``S3Reader`` (``s3``). A deployment adds
-readers in ``storage.artifact_sources``. A configured reader replaces the
-built-in reader of a scheme that it reads.
+``open`` returns the ``reef.artifact.SourceFiles`` that ``uri`` names, and
+reads at most a listing. Raise ``ValueError`` for a URI that names nothing the
+reader can read, and ``ArtifactSourceError`` when the source fails.
+``SourceFiles`` adds three members to ``ArtifactFiles``:
+
+- ``version``: the version that the source served, or ``""`` when it has none.
+- ``reference``: ``None`` when Reef stores a copy. Otherwise, the files, as
+  paths and bytes, that Reef stores instead, for a source that keeps the
+  files fixed.
+- ``copy_into(directory)``: write the files into the empty ``directory``.
+
+Reef ships ``HuggingFaceReader`` (``hf``), ``FileReader`` (``file``) and
+``S3Reader`` (``s3``), whose files are ``HuggingFaceRevisionFiles``,
+``DirectorySource`` and ``S3PrefixFiles``. A deployment adds readers in
+``storage.artifact_sources``. A configured reader replaces the built-in reader
+of a scheme that it reads.
+
+``HuggingFaceRevisionFiles`` has a reference when the URI names a full
+40-digit commit SHA. Reef stores the reference instead of a copy only when the
+component's layout says that its readers resolve one
+(``ArtifactLayout.resolves_references``; ``ReleaseLayout`` does for releases
+that hold weight files). Then Reef stores only ``hf-reference.json``,
+``{"uri": "hf://org/model", "version": "<commit>"}``, and
+``reef.artifact.read_reference(directory)`` reads it back. The built-in
+serving runtimes load such a release from the revision's snapshot, which
+Hugging Face downloads once into its cache. A runtime that loads models from
+the Hub can read the reference and download nothing.
 
 Record storage and audit
 ------------------------
