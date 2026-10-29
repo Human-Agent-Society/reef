@@ -18,7 +18,7 @@ them when a tree is rendered for an episode.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -202,18 +202,20 @@ class TreeLayout:
         located = {path: self.locate(path) for path in paths}
         return {path: location.part.name for path, location in located.items() if location is not None}
 
-    def locate_render(self, path: str) -> TreeLocation | None:
+    def locate_render(self, path: str, known: Container[str] = ()) -> TreeLocation | None:
         """The part that renders to ``path`` and the name it holds, or ``None`` when no part renders there.
 
         A config part renders no path of its own. When two parts render to one path, such as Codex's skills and
-        commands, the part declared first takes it: ``locate(part.tree_path(name))`` of the result renders to
-        ``path`` again.
+        commands, the first part whose tree path is in ``known`` takes it, else the part declared first:
+        ``locate(part.tree_path(name))`` of the result renders to ``path`` again.
         """
-        for part in self.parts.values():
-            name = part.match_render(path)
-            if name is not None:
-                return TreeLocation(part, name)
-        return None
+        locations = [
+            TreeLocation(part, name) for part in self.parts.values() if (name := part.match_render(path)) is not None
+        ]
+        for location in locations:
+            if location.part.tree_path(location.name) in known:
+                return location
+        return locations[0] if locations else None
 
 
 def check_template(template: str, where: str) -> bool:

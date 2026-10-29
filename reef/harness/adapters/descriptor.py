@@ -357,21 +357,21 @@ class AdapterDescriptor:
         return {path: text.replace("{root}", placed) if path in config_paths else text for path, text in files.items()}
 
 
-def _require_str(data: Mapping[str, Any], key: str, where: str) -> str:
+def require_str(data: Mapping[str, Any], key: str, where: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value:
         raise DescriptorError(f"{where} requires a non-empty string {key!r}")
     return value
 
 
-def _str_list(value: Any, where: str) -> tuple[str, ...]:
+def str_list(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise DescriptorError(f"{where} must be a list of non-empty strings")
     return tuple(value)
 
 
-def _relative_paths(value: Any, where: str) -> tuple[str, ...]:
-    paths = _str_list(value, where)
+def relative_paths(value: Any, where: str) -> tuple[str, ...]:
+    paths = str_list(value, where)
     for path in paths:
         pure = PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] == "workspace":
@@ -387,12 +387,12 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"cannot load adapter descriptor {path}: {exc}") from exc
     if not isinstance(data, Mapping):
         raise DescriptorError(f"adapter descriptor {path} must be a YAML object")
-    name = _require_str(data, "name", "descriptor")
+    name = require_str(data, "name", "descriptor")
     where = f"descriptor {name!r}"
     unknown = sorted(str(key) for key in data if key not in ADAPTER_KEYS)
     if unknown:
         raise DescriptorError(f"{where} has unknown keys: {', '.join(unknown)}")
-    config_targets = _parse_config_targets(data.get("config"), where)
+    config_targets = parse_config_targets(data.get("config"), where)
     try:
         layout = layout_from_evolve(
             data.get("evolve"), {target: config.path for target, config in config_targets.items()}, name
@@ -407,7 +407,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         variable is None or (isinstance(variable, str) and variable.isidentifier()) for variable in dirs.values()
     ):
         raise DescriptorError(f"{where} 'dirs' must map directories to the variable that moves each, or null")
-    state = _relative_paths([str(directory) for directory in dirs], f"{where} 'dirs'")
+    state = relative_paths([str(directory) for directory in dirs], f"{where} 'dirs'")
     run = data.get("run")
     if not isinstance(run, Mapping) or not set(run) <= {"episode", "layer"}:
         raise DescriptorError(f"{where} requires 'run': its episode, and optionally its layer")
@@ -446,30 +446,30 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     renderer = AdapterRenderer
     if data.get("renderer") is not None:
         renderer = AdapterRenderer.referenced_class(
-            _reference(data["renderer"], AdapterRenderer, f"{where} 'renderer'")
+            parse_plugin_reference(data["renderer"], AdapterRenderer, f"{where} 'renderer'")
         )
     execution_validator = None
     if data.get("execution_validator") is not None:
         setting = f"{where} 'execution_validator'"
         validator_class = ExecutionValidator.referenced_class(
-            _reference(data["execution_validator"], ExecutionValidator, setting)
+            parse_plugin_reference(data["execution_validator"], ExecutionValidator, setting)
         )
         execution_validator = validator_class()
-    model_binding = _parse_model_binding(data.get("model"), config_targets, where)
-    layer = _parse_layer(run.get("layer"), where)
+    model_binding = parse_model_binding(data.get("model"), config_targets, where)
+    layer = parse_layer(run.get("layer"), where)
     return AdapterDescriptor(
         name=name,
-        binary=_require_str(data, "binary", where),
-        argv=_str_list(episode.get("argv"), f"{where} run episode 'argv'"),
+        binary=require_str(data, "binary", where),
+        argv=str_list(episode.get("argv"), f"{where} run episode 'argv'"),
         env=env,
         config_targets=config_targets,
         layout=layout,
-        trajectory_format=_require_str(sessions, "format", f"{where} sessions"),
-        trajectory_path=_require_str(sessions, "path", f"{where} sessions"),
+        trajectory_format=require_str(sessions, "format", f"{where} sessions"),
+        trajectory_path=require_str(sessions, "path", f"{where} sessions"),
         cleanup_whitelist=tuple(f"{directory}/**" for directory in state),
         writable_paths=state,
         renderer=renderer,
-        install=_parse_install(data.get("install"), where),
+        install=parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         is_prompt_task_directory=is_prompt_task_directory,
         host_env=dict(host_env),
@@ -480,7 +480,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     )
 
 
-def _parse_layer(raw: Any, where: str) -> AdapterLayer | None:
+def parse_layer(raw: Any, where: str) -> AdapterLayer | None:
     """``run.layer``, or ``None`` without one; DescriptorError names the first malformed field."""
     if raw is None:
         return None
@@ -503,7 +503,7 @@ def _parse_layer(raw: Any, where: str) -> AdapterLayer | None:
         raise DescriptorError(f"{where}: {exc}") from exc
 
 
-def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
+def parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
     if not isinstance(raw, Mapping) or "primary" not in raw:
         raise DescriptorError(f"{where} requires config with a 'primary' target")
     targets: dict[str, ConfigTarget] = {}
@@ -514,14 +514,14 @@ def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
         if not isinstance(defaults, Mapping):
             raise DescriptorError(f"{where} config target {target_name!r} defaults must be an object")
         targets[str(target_name)] = ConfigTarget(
-            path=_require_str(target, "path", f"{where} config target {target_name!r}"),
+            path=require_str(target, "path", f"{where} config target {target_name!r}"),
             defaults=dict(defaults),
-            checks=_parse_checks(target.get("checks", []), defaults, f"{where} config target {target_name!r} checks"),
+            checks=parse_checks(target.get("checks", []), defaults, f"{where} config target {target_name!r} checks"),
         )
     return targets
 
 
-def _parse_checks(raw: Any, defaults: Mapping[str, Any], where: str) -> tuple[ConfigCheck, ...]:
+def parse_checks(raw: Any, defaults: Mapping[str, Any], where: str) -> tuple[ConfigCheck, ...]:
     """A target's ``checks``: each with ``key`` (one key or a list), ``match`` and an optional ``reason``.
 
     A check with a list of keys is one check per key, in order. A check without a key is refused, so a forgotten key
@@ -543,7 +543,7 @@ def _parse_checks(raw: Any, defaults: Mapping[str, Any], where: str) -> tuple[Co
                 f"{place} requires a key: dot separated key names, or {WHOLE_FILE_KEY!r} for the whole file"
             )
         keys = entry["key"]
-        for key in _str_list(keys, f"{place} key") if isinstance(keys, list) else [keys]:
+        for key in str_list(keys, f"{place} key") if isinstance(keys, list) else [keys]:
             if not isinstance(key, str) or (key != WHOLE_FILE_KEY and "" in key.split(".")):
                 raise DescriptorError(
                     f"{place} key must be dot separated key names, or {WHOLE_FILE_KEY!r} for the whole file"
@@ -558,7 +558,7 @@ def _parse_checks(raw: Any, defaults: Mapping[str, Any], where: str) -> tuple[Co
     return tuple(checks)
 
 
-def _parse_model_binding(
+def parse_model_binding(
     raw: Any,
     config_targets: Mapping[str, ConfigTarget],
     where: str,
@@ -591,42 +591,42 @@ def _parse_model_binding(
     return parsed
 
 
-def _parse_install(raw: Any, where: str) -> InstallSpec | None:
+def parse_install(raw: Any, where: str) -> InstallSpec | None:
     if raw is None:
         return None
     if not isinstance(raw, Mapping):
         raise DescriptorError(f"{where} 'install' must be an object")
-    kind = _require_str(raw, "kind", f"{where} install")
+    kind = require_str(raw, "kind", f"{where} install")
     if kind not in INSTALL_KINDS:
         known = ", ".join(INSTALL_KINDS)
         raise DescriptorError(f"{where} install kind {kind!r} is not supported; known kinds: {known}")
-    package = _require_str(raw, "package", f"{where} install")
+    package = require_str(raw, "package", f"{where} install")
     if not _INSTALL_PACKAGE_PATTERN.fullmatch(package):
         raise DescriptorError(f"{where} install 'package' {package!r} must match {_INSTALL_PACKAGE_PATTERN.pattern}")
-    version = _require_str(raw, "version", f"{where} install")
+    version = require_str(raw, "version", f"{where} install")
     if not _INSTALL_VERSION_PATTERN.fullmatch(version):
         raise DescriptorError(f"{where} install 'version' {version!r} must match {_INSTALL_VERSION_PATTERN.pattern}")
     repository = ref = ""
     if kind == "git":
-        repository = _require_str(raw, "repository", f"{where} install")
+        repository = require_str(raw, "repository", f"{where} install")
         if not _INSTALL_REPOSITORY_PATTERN.fullmatch(repository):
             raise DescriptorError(
                 f"{where} install 'repository' {repository!r} must match {_INSTALL_REPOSITORY_PATTERN.pattern}"
             )
-        ref = _require_str(raw, "ref", f"{where} install")
+        ref = require_str(raw, "ref", f"{where} install")
         if not _INSTALL_VERSION_PATTERN.fullmatch(ref):
             raise DescriptorError(f"{where} install 'ref' {ref!r} must match {_INSTALL_VERSION_PATTERN.pattern}")
     return InstallSpec(
         kind=kind,
         package=package,
         version=version,
-        binary_path=_require_str(raw, "binary_path", f"{where} install"),
+        binary_path=require_str(raw, "binary_path", f"{where} install"),
         repository=repository,
         ref=ref,
     )
 
 
-def _reference(value: Any, base: type[Plugin], where: str) -> PluginReference:
+def parse_plugin_reference(value: Any, base: type[Plugin], where: str) -> PluginReference:
     """The plugin reference that ``value``, a ``package.module:ClassName`` string, makes; DescriptorError unless
     its class inherits ``base``."""
     if not isinstance(value, str):

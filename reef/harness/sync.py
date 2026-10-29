@@ -157,9 +157,10 @@ class ImportedTree:
 def import_files(files: Mapping[str, str], base: HarnessTree, descriptor: AdapterDescriptor) -> ImportedTree:
     """``files``, by render path, as ``descriptor``'s tree: ``base``'s config files and a tree file per part file.
 
-    ``base`` is the release the client installed. A file that no part renders to is ignored, and an empty one is
-    no file: a layer writes an empty rules file for a tree that has none. The imported files replace every other
-    file of ``base``, so a file the person removed is removed from the tree too.
+    ``base`` is the release the client installed. A file that two parts render to goes back to the part whose tree
+    path ``base`` holds, else to the part declared first. A file that no part renders to is ignored, and an empty
+    one is no file: a layer writes an empty rules file for a tree that has none. The imported files replace every
+    other file of ``base``, so a file the person removed is removed from the tree too.
     """
     kept = {}
     for path, text in base.files.items():
@@ -169,7 +170,7 @@ def import_files(files: Mapping[str, str], base: HarnessTree, descriptor: Adapte
     imported = {}
     ignored = []
     for path, text in files.items():
-        location = descriptor.layout.locate_render(path)
+        location = descriptor.layout.locate_render(path, base.files)
         if location is None:
             ignored.append(path)
         elif text.strip():

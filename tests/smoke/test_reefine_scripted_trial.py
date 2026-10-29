@@ -147,9 +147,11 @@ def test_agent_restores_saved_progress_and_deadline_without_old_history(tmp_path
         "REEF_AGENT_DEADLINE_MS": str(int(time.time() * 1000) + 30000),
         "REEF_AGENT_FINISH_SECONDS": "60",
     }
+    # The agent keeps its progress in the step's output/, beside the workspace.
+    (tmp_path / "output").mkdir()
     outcome, report = run_script(tmp_path, files, plan, env)
     assert report["passed"] and outcome.exit_code == 0, (report, outcome.stderr)
-    assert "API_MARKER" in (tmp_path / "workspace/progress.md").read_text()
+    assert "API_MARKER" in (tmp_path / "output/progress.md").read_text()
 
 
 def test_script_reports_extension_errors_even_when_payload_checks_pass(tmp_path: Path) -> None:

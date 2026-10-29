@@ -114,18 +114,25 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
 
 
 def test_run_py_help_names_the_modes() -> None:
+    # run.sh puts the repository on PYTHONPATH so run.py can import the recipe; do the same here.
+    environment = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
     done = subprocess.run(
-        [sys.executable, str(TUTORIAL / "run.py"), "--help"], capture_output=True, text=True, cwd=TUTORIAL
+        [sys.executable, str(TUTORIAL / "run.py"), "--help"],
+        capture_output=True,
+        text=True,
+        cwd=TUTORIAL,
+        env=environment,
     )
     assert done.returncode == 0, done.stderr
     for mode in ("install", "bugfix", "research", "measure"):
         assert mode in done.stdout
-    assert (
-        "--n"
-        in subprocess.run(
-            [sys.executable, str(TUTORIAL / "run.py"), "measure", "--help"], capture_output=True, text=True
-        ).stdout
+    measure = subprocess.run(
+        [sys.executable, str(TUTORIAL / "run.py"), "measure", "--help"],
+        capture_output=True,
+        text=True,
+        env=environment,
     )
+    assert "--n" in measure.stdout, measure.stderr
 
 
 def test_run_sh_refuses_an_unknown_mode_before_touching_anything() -> None:

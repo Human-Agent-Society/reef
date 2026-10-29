@@ -26,10 +26,7 @@ def test_a_rendered_tree_reads_back_as_the_tree(adapter: str) -> None:
     files = {"skills/fix/SKILL.md": SKILL, "config/primary.json": "{}\n"}
     if "rules" in descriptor.layout.parts:
         files["rules.md"] = "Answer briefly.\n"
-    command = descriptor.layout.parts["command"]
-    # Codex renders a command where it renders a skill, so its command reads back as the skill below.
-    if command.renders != descriptor.layout.parts["skill"].renders:
-        files[command.tree_path("ship")] = COMMAND
+    files[descriptor.layout.parts["command"].tree_path("ship")] = COMMAND
     tree = HarnessTree(files)
     # The config files, the plugin's manifests and Reef's own code read back as nothing.
     assert import_files(render_tree(tree, descriptor), tree, descriptor).tree == tree
@@ -53,9 +50,14 @@ def test_an_import_replaces_the_heads_files_and_ignores_what_no_part_renders_to(
     assert imported.ignored == ("pi-agent/auth.json", "pi-agent/sessions/one.jsonl")
 
 
-def test_codex_reads_a_file_where_a_skill_and_a_command_both_render_as_the_skill() -> None:
-    imported = import_files({"plugin/skills/ship/SKILL.md": COMMAND}, HarnessTree({}), get_adapter("codex"))
-    assert imported.tree == HarnessTree({"skills/ship/SKILL.md": COMMAND})
+def test_codex_reads_a_file_where_a_skill_and_a_command_both_render_as_the_part_the_base_has() -> None:
+    codex = get_adapter("codex")
+    files = {"plugin/skills/ship/SKILL.md": COMMAND}
+    # A command the release had stays a command, so an unchanged sync changes nothing.
+    base = HarnessTree({"commands/ship.md": COMMAND})
+    assert import_files(files, base, codex).tree == base
+    # A file the release did not have is the part declared first, the skill.
+    assert import_files(files, HarnessTree({}), codex).tree == HarnessTree({"skills/ship/SKILL.md": COMMAND})
 
 
 def test_the_merge_keeps_each_sides_own_changes_and_merges_text_parts_by_line() -> None:

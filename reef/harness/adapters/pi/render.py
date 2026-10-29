@@ -8,7 +8,10 @@ text carries none both, the description being the text's first line.
 A release is a pi package in ``plugin/``. A package carries skills, prompts and
 extensions, but no rules file and no settings, so ``finalize_render`` adds
 Reef's extension, which adds ``plugin/rules.md`` to the system prompt and
-applies ``plugin/settings.json``. pi reads ``models.json`` only from its own
+applies ``plugin/settings.json``. The package's manifest loads that extension
+before the tree's: pi runs ``before_agent_start`` handlers in load order, so a
+tree's extension that replaces the system prompt replaces the rules too, as it
+replaces pi's own context files. pi reads ``models.json`` only from its own
 directory, so ``layer_files`` adds an extension that registers the layer's
 provider on a person's machine.
 """
@@ -73,11 +76,30 @@ export default function (pi: any) {
 """
 
 
+#: The package's manifest. Without one, pi loads a package's extensions in directory listing order, which differs
+#: between file systems. pi loads a path once, so the extensions directory adds the tree's after Reef's.
+PACKAGE_MANIFEST = """\
+{
+  "name": "reef-harness",
+  "private": true,
+  "pi": {
+    "extensions": ["extensions/reef/index.ts", "extensions"],
+    "skills": ["skills"],
+    "prompts": ["prompts"]
+  }
+}
+"""
+
+
 class PiAdapterRenderer(AdapterRenderer):
     @staticmethod
     def finalize_render(files: dict[str, str]) -> dict[str, str]:
         # A directory, not a file, so no extension part of the tree takes its path.
-        return {**files, "plugin/extensions/reef/index.ts": REEF_EXTENSION}
+        return {
+            **files,
+            "plugin/extensions/reef/index.ts": REEF_EXTENSION,
+            "plugin/package.json": PACKAGE_MANIFEST,
+        }
 
     @staticmethod
     def layer_files(files: dict[str, str]) -> dict[str, str]:
