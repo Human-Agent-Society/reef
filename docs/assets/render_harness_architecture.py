@@ -2,7 +2,8 @@
 """Rebuild the harness evolution architecture diagrams: python3 docs/assets/render_harness_architecture.py
 
 Writes harness-architecture-light.svg and harness-architecture-dark.svg: what
-runs on a person's machine, what runs in Reef, and the routes between them.
+runs on a person's machine, what runs in Reef, and the routes between them, with
+the two ways a step gets its traces: online from sessions, offline from tasks.
 The drawing is static. It embeds IBM Plex Sans and IBM Plex Mono from the
 font cache of render_architecture.py.
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 from render_architecture import arrow, cap, font_files, text
 
 ROOT = Path(__file__).resolve().parent
-W, H = 1372, 1110
+W, H = 1372, 1280
 
 THEMES = {
     "light": {
@@ -48,6 +49,8 @@ THEMES = {
 COL_W, GAP, BOX_H = 220, 40, 76
 X = [56 + k * (COL_W + GAP) for k in range(5)]
 WIDE = 2 * COL_W + GAP
+# The workspace stops short of the last column's right edge, so the tasks reach the episodes beside it.
+WORKSPACE_W = X[4] + 150 - X[3]
 
 # Each row's top: A on the person's machine, B in Reef.
 ROWS = {"A1": 124, "A2": 244, "B1": 446, "B2": 574, "B3": 738, "B4": 870, "B5": 990}
@@ -55,31 +58,35 @@ A1, A2, B1, B2, B3, B4, B5 = ROWS.values()
 MACHINE_TOP, MACHINE_BOTTOM = 84, 336
 REEF_TOP, REEF_BOTTOM = 406, 1084
 BAND_TOP, BAND_BOTTOM = 706, 966
+# The two ways a step gets its traces, under Reef, with recipes for each.
+MODES_TOP, MODE_H = 1136, 116
+MODE_W = (X[4] + COL_W - X[0] - GAP) // 2
 
 TITLE, BODY, MONO = 18, 14, 13
 
-# The boxes: (column, row, columns spanned, kind, step number or None, title, line or "").
+# The boxes: (column, row, width, kind, step number or None, title, line or "").
 # A line that starts with a backquote is code, in the mono face.
 BOXES = [
-    (0, "A1", 1, "machine", None, "Agent command", "runs reef-client"),
-    (2, "A1", 1, "machine", None, "Layer install", "the head, rendered"),
-    (3, "A1", 1, "machine", None, "Your own config", "Reef never reads it"),
-    (0, "A2", 2, "machine", None, "reef-client", "`connect · run · sync"),
-    (2, "A2", 2, "machine", 1, "Your agent", "`claude · pi · opencode · codex"),
-    (4, "A2", 1, "store", None, "Model provider", "OpenAI or Anthropic API"),
-    (0, "B1", 1, "reef", None, "Client install", "the head as a layer"),
-    (1, "B1", 1, "reef", None, "Client import", "merges onto the head"),
-    (2, "B1", 1, "reef", 3, "Feedback", "a score per session"),
-    (3, "B1", 1, "reef", 2, "Model proxy", "forwards and records"),
-    (0, "B2", 2, "store", None, "Releases", "every tree, in Git; the newest is the head"),
-    (2, "B2", 2, "store", None, "Records", "raw traces: model calls and reports"),
-    (3, "B3", 2, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),
-    (2, "B3", 1, "reef", 5, "Method", "`step(context)"),
-    (1, "B3", 1, "reef", 6, "Check", "`validate_tree"),
-    (2, "B4", 2, "reef", 7, "Evaluation", "runs each task as an episode, scores it"),
-    (4, "B4", 1, "reef", None, "Episodes", "`run.episode"),
-    (1, "B4", 1, "reef", None, "Policy", "compare or floor"),
-    (0, "B4", 1, "reef", 8, "Release rule", "publish, hold or drop"),
+    (0, "A1", COL_W, "machine", None, "Agent command", "runs reef-client"),
+    (2, "A1", COL_W, "machine", None, "Layer install", "the head, rendered"),
+    (3, "A1", COL_W, "machine", None, "Your own config", "Reef never reads it"),
+    (0, "A2", WIDE, "machine", None, "reef-client", "`connect · run · sync"),
+    (2, "A2", WIDE, "machine", 1, "Your agent", "`claude · pi · opencode · codex"),
+    (4, "A2", COL_W, "store", None, "Model provider", "OpenAI or Anthropic API"),
+    (0, "B1", COL_W, "reef", None, "Client install", "the head as a layer"),
+    (1, "B1", COL_W, "reef", None, "Client import", "merges onto the head"),
+    (2, "B1", COL_W, "reef", 3, "Feedback", "a score per session"),
+    (3, "B1", COL_W, "reef", 2, "Model proxy", "forwards and records"),
+    (0, "B2", WIDE, "store", None, "Releases", "every tree, in Git; the newest is the head"),
+    (2, "B2", WIDE, "store", None, "Records", "raw traces: model calls and reports"),
+    (4, "B2", COL_W, "store", None, "Tasks", "Harbor tasks: train · eval"),
+    (3, "B3", WORKSPACE_W, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),
+    (2, "B3", COL_W, "reef", 5, "Method", "`step(context)"),
+    (1, "B3", COL_W, "reef", 6, "Check", "`validate_tree"),
+    (2, "B4", WIDE, "reef", 7, "Evaluation", "runs each task as an episode, scores it"),
+    (4, "B4", COL_W, "reef", None, "Episodes", "`run.episode"),
+    (1, "B4", COL_W, "reef", None, "Policy", "compare or floor"),
+    (0, "B4", COL_W, "reef", 8, "Release rule", "publish, hold or drop"),
 ]
 
 
@@ -121,6 +128,19 @@ def card(p, x, y, w, kind, title, line, number=None, dashed=False):
     return "".join(out)
 
 
+def mode(p, x, kind, title, lines):
+    """One way a step gets its traces: a title and its lines, the last one naming recipes."""
+    out = [
+        f'<rect x="{x}" y="{MODES_TOP}" width="{MODE_W}" height="{MODE_H}" rx="9" fill="{p["card"]}" '
+        f'stroke="{p[kind]}" stroke-width="1.4"/>',
+        write(x + 18, MODES_TOP + 31, title, TITLE, p[kind], 600),
+    ]
+    for index, line in enumerate(lines):
+        last = index == len(lines) - 1
+        out.append(write(x + 18, MODES_TOP + 57 + 22 * index, line, BODY, p["ink"] if last else p["muted"]))
+    return "".join(out)
+
+
 def path(p, points, color=None, width=1.3):
     """A line through `points`, with an arrowhead at the last point."""
     color = color or p["line"]
@@ -153,11 +173,19 @@ def render(theme: str, fonts) -> str:
             f"Reef's model proxy, which records them, and a report scores a session. In a training step, the "
             f"workspace gets the head and a batch of raw traces, a method edits the copy, the check and the "
             f"evaluation test the candidate, and the release rule publishes a selected candidate as the new head. "
-            f'After a session, the client sends the changed files back, and Reef merges them onto the head.">'
+            f"After a session, the client sends the changed files back, and Reef merges them onto the head. "
+            f"An offline deployment gets its traces from uploaded Harbor tasks instead: the train tasks run on the "
+            f'head as episodes, and the eval tasks score the candidates.">'
         ),
         f"<style>\n{faces}</style>",
         write(40, 44, "Harness evolution: what runs where", 24, p["ink"], 600),
-        write(40, 68, "Numbers 1 to 8 follow one session into one training step.", 15, p["muted"]),
+        write(
+            40,
+            68,
+            "Numbers 1 to 8 follow one session into one training step. Offline, uploaded tasks give the traces.",
+            15,
+            p["muted"],
+        ),
     ]
     legend_x = W - 40
     for label, kind in reversed([("your machine", "machine"), ("Reef", "reef"), ("storage and outside", "store")]):
@@ -179,8 +207,8 @@ def render(theme: str, fonts) -> str:
     o.append(zone(p, 48, BAND_TOP, W - 48, BAND_BOTTOM, "reef", p["band"]))
     o.append(cap(72, B3 + 44, "one training step", p["reef"]))
 
-    for column, row, span, kind, number, title, line in BOXES:
-        o.append(card(p, X[column], ROWS[row], WIDE if span == 2 else COL_W, kind, title, line, number))
+    for column, row, width, kind, number, title, line in BOXES:
+        o.append(card(p, X[column], ROWS[row], width, kind, title, line, number))
     o.append(card(p, X[0], B5, X[4] + COL_W - X[0], "reef", "Adapter", "", dashed=True))
     o.append(write(X[0] + 104, B5 + 33, "reef/harness/adapters/<agent>/adapter.yaml", MONO, p["ink"], mono=True))
     o.append(
@@ -213,7 +241,14 @@ def render(theme: str, fonts) -> str:
     o.append(write(X[2] + 44, route_y, "POST /reef/report", MONO, p["ink"], mono=True))
     o.append(pair(p, X[3] + 30, top, bottom))
     o.append(write(X[3] + 56, route_y, "POST /reef/scenarios/<s>/v1/*", MONO, p["ink"], mono=True))
-    o.append(path(p, [(X[3] + COL_W, B1 + 38), (X[4] + 110, B1 + 38), (X[4] + 110, A2 + BOX_H)]))
+    provider_y = REEF_TOP - 14
+    o.append(path(p, [(X[3] + 190, B1), (X[3] + 190, provider_y), (X[4] + 60, provider_y), (X[4] + 60, A2 + BOX_H)]))
+    # The tasks come from outside the machine's session: whoever runs the deployment uploads them.
+    upload_x = X[4] + 170
+    o.append(write(upload_x, MACHINE_BOTTOM + 24, "your Harbor tasks", BODY, p["muted"], anchor="middle"))
+    o.append(path(p, [(upload_x, MACHINE_BOTTOM + 32), (upload_x, B2)]))
+    o.append(write(upload_x - 10, B1 + 30, "POST /reef/scenarios/", MONO, p["ink"], anchor="end", mono=True))
+    o.append(write(upload_x - 10, B1 + 48, "<s>/tasks", MONO, p["ink"], anchor="end", mono=True))
 
     # In Reef: the routes read and write the storage.
     o.append(path(p, [(X[0] + 110, B2), (X[0] + 110, B1 + BOX_H)]))
@@ -227,7 +262,13 @@ def render(theme: str, fonts) -> str:
     traces_x = X[3] + 170
     o.append(path(p, [(traces_x, B2 + BOX_H), (traces_x, B3)]))
     o.append(badge(p, traces_x + 26, route_y - 2, 4, "reef"))
-    o.append(write(traces_x + 46, route_y + 3, "a batch of raw traces", BODY, p["ink"]))
+    o.append(write(traces_x + 46, route_y + 3, "online: a batch of raw traces", BODY, p["ink"]))
+    # Offline: the tasks run as episodes, and the train tasks' episodes are the workspace's traces.
+    tasks_x, rollouts_x = X[4] + 190, X[4] + 60
+    o.append(path(p, [(tasks_x, B2 + BOX_H), (tasks_x, B4)]))
+    o.append(write(tasks_x - 8, B4 - 22, "tasks", MONO, p["muted"], anchor="end", mono=True))
+    o.append(path(p, [(rollouts_x, B4), (rollouts_x, B3 + BOX_H)]))
+    o.append(write(rollouts_x - 12, B4 - 22, "offline: train-task rollouts", BODY, p["ink"], anchor="end"))
     o.extend(path(p, [(X[k], B3 + BOX_H // 2), (X[k - 1] + COL_W, B3 + BOX_H // 2)]) for k in (3, 2))
     check_x, evaluation_x, elbow_y = X[1] + 110, X[2] + 60, B4 - 28
     o.append(path(p, [(check_x, B3 + BOX_H), (check_x, elbow_y), (evaluation_x, elbow_y), (evaluation_x, B4)]))
@@ -238,6 +279,35 @@ def render(theme: str, fonts) -> str:
     commit_x = X[0] + COL_W - 16
     o.append(path(p, [(commit_x, B4), (commit_x, B2 + BOX_H)], p["reef"], width=1.8))
     o.append(write(commit_x - 10, elbow_y - 7, "published", MONO, p["reef"], anchor="end", mono=True))
+
+    # The two ways a step gets its traces, and recipes for each.
+    o.append(cap(56, MODES_TOP - 18, "two ways to evolve", p["muted"]))
+    o.append(
+        mode(
+            p,
+            X[0],
+            "machine",
+            "Online: learn from sessions",
+            [
+                "Steps 1 to 4: the person's sessions, scored by reports, are the traces.",
+                "Agents with a layer: claude, pi, opencode, codex.",
+                "Recipes: ACE, ReasoningBank (policy: none); GEPA (compare on eval prompts).",
+            ],
+        )
+    )
+    o.append(
+        mode(
+            p,
+            X[0] + MODE_W + GAP,
+            "reef",
+            "Offline: learn from uploaded tasks",
+            [
+                "Train tasks run on the head; eval tasks score each candidate.",
+                "Agent: terminus, which runs Harbor task directories.",
+                "Recipes: GEPA with TrainTaskRollouts; Meta-Harness (compare).",
+            ],
+        )
+    )
 
     o.append("</svg>")
     return "\n".join(o)

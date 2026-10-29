@@ -25,12 +25,16 @@ weight access. It does not fit when the model itself cannot do the task.
 
 The figure shows what runs on a person's machine, what runs in Reef, and the
 routes between them. The numbers follow one session into one training step.
+A step gets its traces in one of two ways. Online, they are the sessions that
+people run and score. Offline, they are the episodes of uploaded train tasks
+(`Offline runs on uploaded tasks <#offline-runs-on-uploaded-tasks>`__). The
+bottom row names recipes for each way.
 
 .. diagram::
-   :caption: The client installs the head as a layer over the person's own configuration and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports, and publishes a selected candidate as the new head.
+   :caption: The client installs the head as a layer over the person's own configuration and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports or of uploaded train tasks, and publishes a selected candidate as the new head.
 
-   <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, and the routes between them">
-   <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, and the routes between them">
+   <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
+   <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
 
 The harness tree
 ----------------
