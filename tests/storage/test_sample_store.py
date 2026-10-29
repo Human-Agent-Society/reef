@@ -209,7 +209,7 @@ def test_postgres_moves_the_uploaded_trajectories_of_schema_version_9_with_their
     with engine.connect() as connection:
         assert not inspect(connection).has_table("uploaded_trajectory", schema=schema)
         version = Table("schema_version", MetaData(schema=schema), autoload_with=connection)
-        assert connection.execute(select(version.c.version)).scalars().all() == [11]
+        assert connection.execute(select(version.c.version)).scalars().all() == [12]
     engine.dispose()
 
 
@@ -306,3 +306,20 @@ def test_sqlite_adds_the_record_sample_columns_to_an_older_sample_table(tmp_path
         assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("t1", None, None, ())
         session.samples.add_record_samples("", None, ("r1",), (("r1:0", trajectory("b")),))
         assert session.samples.consumed_record_ids("") == {"r1"}
+
+
+def test_a_trainers_manual_buffer_keeps_store_order_and_a_commit_removes_what_it_trained(storage):
+    with closing(storage.open("math")) as session:
+        samples = session.samples
+        samples.add_trajectories((("t1", trajectory("a")), ("t2", trajectory("b")), ("t3", trajectory("c"))))
+        samples.insert_into_buffer("", ("t3", "t1"))
+        samples.insert_into_buffer("", ("t1",))
+        samples.insert_into_buffer("other", ("t2",))
+        assert samples.manual_buffer("") == ("t1", "t3")
+        assert [item.sample_id for item in samples.get(("t3", "t1", "missing"))] == ["t1", "t3"]
+        samples.remove_from_buffer("", ("t3", "missing"))
+        assert samples.manual_buffer("") == ("t1",)
+        # The commit of the lone trainer trains t1: it leaves that trainer's buffer, not another's.
+        samples.insert_into_buffer("", ("t2",))
+        session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
+        assert samples.manual_buffer("") == ("t2",) and samples.manual_buffer("other") == ("t2",)
