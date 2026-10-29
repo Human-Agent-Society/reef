@@ -113,7 +113,7 @@ work as they do for weight training; evolve and sync are the harness's own:
 .. flow::
    :loop: the agent runs the new head, and its model calls are the next data
 
-   Data :: the agent's model calls and reports, uploaded tasks, requests
+   Data :: the agent's model calls and reports, uploaded tasks
    Evolve :: the method edits a copy of the head tree into a candidate
    Evaluation* :: scores the candidate against the head
    Release :: a selected candidate becomes the new head
@@ -130,8 +130,8 @@ Each part is one relation between a few values. ``T`` is a harness tree
      - Definition
      - Details
    * - Data
-     - Records and uploaded tasks give ``D``, one step's job data: traces,
-       train tasks, or a request. Weight training uses the same pipeline.
+     - Records and uploaded tasks give ``D``, one step's job data: traces
+       or train tasks. Weight training uses the same pipeline.
      - `Step data`_
    * - Evolve
      - ``method(T, D, s) = (T', s')``: from the head tree ``T``, the data
@@ -161,29 +161,13 @@ Each part is one relation between a few values. ``T`` is a harness tree
 Step data
 ~~~~~~~~~
 
-A step starts from recorded traffic, from a training request
-(``POST /reef/train``), or from both. ``recipe.config.training_mode``
-chooses which:
-
-- ``auto`` (the default): steps start from recorded traffic alone. Training
-  requests are rejected.
-- ``manual``: steps start from training requests alone. Reef still records
-  traffic, but uses it only after a switch to ``auto`` or ``hybrid``.
-- ``hybrid``: steps start from either. A queued request goes first, one per
-  step, and that step also gets up to ``job_samples`` waiting traces.
-
-``POST /reef/scenarios/{scenario}/update`` switches a running deployment
-between the modes. `Manual training
-<../reference/http-api.rst#manual-training>`__ documents the request fields,
-the screens a request's text passes, and what happens when its step fails.
-
-In ``auto`` and ``hybrid`` mode, a step starts when
+A step starts from recorded traffic, when
 ``pipeline.sample2job.config.job_samples`` traces wait. Without that key, it
 is ``evolution.batch_size`` (default 1). By default, one trace is one valid
 scored report, a passing report included. A report over several model calls
 is one trace that holds every call in order. Reef keeps at most
 ``pipeline.sample2job.config.buffer_size`` waiting traces (default four times
-``job_samples``) and drops the oldest ones beyond that, in every mode.
+``job_samples``) and drops the oldest ones beyond that.
 
 To evolve on recorded inference traffic without reports, name the inference
 stages. Every inference is then one unscored trace, for methods that judge
@@ -230,9 +214,8 @@ Upload the tasks while the service runs, with
 `Upload Harbor tasks <../reference/http-api.rst#upload-harbor-tasks>`__), or
 import them with the deployment's ``task-import`` section. The first train
 task starts the run. The stage needs an adapter that runs task directories
-(``terminus``) and a scorer, and startup refuses it without them. It runs in
-``auto`` and ``hybrid`` mode; a ``manual`` scenario refuses it. Recorded
-traffic and training requests still start steps, and they go first. After a
+(``terminus``) and a scorer, and startup refuses it without them. Recorded
+traffic still starts steps, and it goes first. After a
 restart, the run continues after the last committed step. A task uploaded
 during an epoch joins the next epoch.
 
@@ -240,8 +223,8 @@ The method
 ~~~~~~~~~~
 
 Reef runs the method once per step in a workspace. The workspace holds a
-copy of the head tree, the step's traces, the request when the step answers
-one, the evaluation tasks, and the method's files from earlier steps. The
+copy of the head tree, the step's traces, the evaluation tasks, and the
+method's files from earlier steps. The
 tree that the method leaves there is the candidate. Reef skips the step when
 the tree is unchanged or fails validation for the adapter; there is no retry.
 `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
@@ -444,7 +427,7 @@ nothing usually means the episodes could not run: vLLM, for example, needs
 
 To run a long-lived deployment without the example's driver, start
 ``configs/deployment.yaml`` from the repository root. It listens on
-``127.0.0.1:8901``, runs in ``hybrid`` mode, and keeps state under
+``127.0.0.1:8901`` and keeps state under
 ``tutorials/evolve-your-harness/work/deployment/``:
 
 .. code:: bash
@@ -529,56 +512,21 @@ How the layer goes over your own configuration depends on the agent:
        loads skills from no directory an argument names, so the release's
        skills and config stay out of your sessions.
 
-Reef learns from your sessions in two ways. A client that grades a run sends
-``POST /reef/report`` with a score over the receipts of its model calls. Or
-you ask for a change in plain words (`Ask for a harness change`_).
-
-A release's ``requires`` items name what the machine must provide: an ``env``
-variable, a ``permission``, a ``service``, or a ``binary``, each with an
-optional ``check`` and a ``prompt`` sentence. ``requires`` covers the
-release's whole chain of changes. Read a check before you run it.
+Reef learns from your sessions through reports: a client that grades a run
+sends ``POST /reef/report`` with a score over the receipts of its model calls.
 
 A client of its own uses the routes under ``reef-client`` (see `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__):
 
 - ``GET /reef/harness`` serves the head release as a JSON manifest:
   ``files`` by render path, ``release_id``, its parent, the ``evaluation``
-  metrics of the step that published it, and ``requires``.
+  metrics of the step that published it.
   ``?release_id=<id>`` serves an older release. ``?form=source`` serves the
   source tree. ``?form=client&service_url=<url>&root=<directory>`` serves
   the release as a layer for an install at ``<directory>``, bound to
   ``<url>/reef/scenarios/<scenario>``, with the command that runs the agent.
 - ``POST /reef/harness/import`` merges a person's harness files onto the
   head as a new release.
-
-Ask for a harness change
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-You can ask for a change in plain words. A scenario in ``manual`` or
-``hybrid`` mode takes training requests. Switch a scenario in ``auto`` mode
-first:
-
-.. code:: bash
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"training_mode": "hybrid"}' \
-     "$REEF_URL/reef/scenarios/code-repair/update"
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
-     -d '{"text": "run the tests before you report a fix as done", "session": "me", "release_id": ""}' \
-     "$REEF_URL/reef/train"
-
-The answer carries the request's id and ``page_path``, a page that a browser
-opens as is. Acceptance does not mean that the change passed the evaluation.
-The page follows the step while it runs, then shows the result, the method's
-summary, the patch, and the next action.
-``GET /reef/harness/requests/<id>/progress`` gives the same state as JSON.
-
-Every method can read the request, but how well it answers one depends on the
-method. The beta `Reefine <../../recipes/beta/reefine/README.md>`__ recipe is
-made for requests. Its example, ``recipes/beta/reefine/examples/``, runs the
-path from the request to a session on the new tree on one machine.
 
 Promote a pending release
 ~~~~~~~~~~~~~~~~~~~~~~~~~

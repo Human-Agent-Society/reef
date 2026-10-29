@@ -1,7 +1,7 @@
 # Run from the repository root:
 # reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
-# This is the long-running pi deployment: it takes training requests
-# (hybrid) and holds extensions for a promote. The separate serve.yaml and
+# This is the long-running pi deployment: it learns from every scored report
+# and holds extensions for a promote. The separate serve.yaml and
 # serve-native.yaml files remain inputs to the short-lived ./run.sh demo for
 # its pi and native variants.
 reef:
@@ -20,8 +20,7 @@ recipe:
       # The default pipeline stages batch every valid scored report, a passing one included.
       # batch_size 1 makes each report one evolve step.
       batch_size: 1
-      # One call to the served model rewrites rules.md from the failing traces, and from the request when a
-      # person asks with POST /reef/train.
+      # One call to the served model rewrites rules.md from the failing traces.
       method: tutorials.evolve-your-harness.harness.plugins:RulesMethod
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_parts: [extension]
@@ -62,8 +61,6 @@ recipe:
             9,30
 
             Reply with the median as a plain integer alone on the last line.'
-    # The person asks with POST /reef/train while the deployment keeps learning from failures.
-    training-mode: hybrid
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

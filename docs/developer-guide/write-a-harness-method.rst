@@ -148,8 +148,6 @@ after the step as the step record.
   traffic sample of the step's job data, with its ATIF ``trajectory.json``.
   An offline step then adds one ``trace.json`` per train task it rolled out
   on the head tree.
-- ``request.json`` (``request()``): the ``TrainingRequest`` that the step
-  answers. Only a request step has it; ``request()`` is ``None`` otherwise.
 - ``evaluation.json`` (``tasks()``, ``evaluation_repeats()``): the step's
   evaluation tasks, the seed tasks first, and the episodes per task and tree
   (0 when the deployment configured no scorer).
@@ -274,23 +272,18 @@ for the agent's adapter.
 What the method says
 --------------------
 
-A method says what its step did in three optional files of ``output/``. Every
+A method says what its step did in two optional files of ``output/``. Every
 method writes them the same way, whether it is Python code or a coding agent:
 
 - ``summary.md``: plain text that says what the step did. The step pages show
   it, and the commit metrics keep it as ``method_summary``.
 - ``notes.json``: a JSON object, kept as ``method_notes``. Reef never reads it
   to make a decision.
-- ``requires.json``: what the change needs on the person's machine, a JSON
-  array of ``reef.core.requirements`` items. Reef reads it on a request step
-  only (see `Answer a training request`_).
 
-``workspace.write_output(summary, notes, requires)`` writes the three files and
-raises ``ValueError`` before it writes any of them when ``notes`` is not a JSON
-object or an item of ``requires`` is not a requirement. After ``step``
-returns, Reef reads the files. It refuses a ``notes.json`` or
-``requires.json`` that is not valid and names it in the commit metrics'
-``method_output_refused``. The step record keeps ``output/`` with the summary
+``workspace.write_output(summary, notes)`` writes the two files and raises
+``ValueError``, writing neither, when ``notes`` is not a JSON object. After
+``step`` returns, Reef reads the files. It refuses a ``notes.json`` that is
+not valid and names it in the commit metrics' ``method_output_refused``. The step record keeps ``output/`` with the summary
 and notes redacted and clipped, and the history keeps the summary and notes
 with the candidate, whether the step publishes or not.
 
@@ -345,25 +338,6 @@ This code reads what happened to the previous step's candidate:
        selected = decision.selected  # published, or held for review
        scores = history.scores(decision.tree, workspace.tasks(), repeats=repeats)
        head_scores = history.scores(decision.head, workspace.tasks(), repeats=repeats)
-
-Answer a training request
--------------------------
-
-In ``manual`` and ``hybrid`` training mode, a step can answer a request from
-``POST /reef/train`` (see `Manual training
-<../reference/http-api.rst#manual-training>`__). Every method takes such a
-step. ``workspace.request()`` returns the ``TrainingRequest``: ``id``,
-``text``, ``session``, ``release_id``, ``requires``, and ``client``, the
-client's report of its machine. The text is client text (see `Untrusted
-input`_). In ``manual`` mode the step has no traces. In ``hybrid`` mode it has
-up to ``job_samples`` traces from the next automatic job data, or none.
-
-Return ``requires`` when the change needs something on the person's machine
-that the request did not name: an ``env`` variable, a ``permission``, a
-``service`` or a ``binary``. Reef screens each item for credentials and
-instruction overrides. It adds the items that pass to the request's own
-items in the step's ``training_request.requires``, and the release manifest
-serves them to clients.
 
 Evaluation
 ----------
@@ -509,7 +483,7 @@ complete methods in this repository.
 Untrusted input
 ---------------
 
-Traces and request text are client-controlled data. Wrap their text with
+Traces are client-controlled data. Wrap their text with
 ``reef.core.prompts.untrusted_text`` before it enters a model prompt. The
 function puts the text in a block with random delimiters, so the text cannot
 close the block and pose as the prompt's author.

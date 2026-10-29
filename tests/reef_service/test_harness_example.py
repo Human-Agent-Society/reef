@@ -24,7 +24,6 @@ from tests.support.config_helpers import load_harness_deployment as load_config
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 
-from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
@@ -161,17 +160,13 @@ def test_the_rules_method_rewrites_rules_md_from_the_failing_traces(tmp_path, pl
     assert result.metrics["method_notes"] == {"failing_traces": 1} and result.metrics["selected"] is True
 
 
-def test_the_rules_method_answers_a_request_and_skips_when_it_has_nothing_to_learn(tmp_path, plugins) -> None:
+def test_the_rules_method_skips_when_it_has_nothing_to_learn(tmp_path, plugins) -> None:
     served = Served("```\nAnswer in English.\n```")
     backend = method_backend(tmp_path, plugins.RulesMethod(), served, seed=PI_SEED)
-    request = TrainingRequest("Always answer in English.", "s", "base", "ask-1")
-    answered = backend_step(backend, JobData("demo:1", (), request=request), backend.initial_state())
-    assert "Always answer in English." in served.prompts[-1]
-    assert answered.metrics["method_summary"] == "rewrote rules.md from 0 failing trace(s) and the request"
     # A passing trace alone teaches nothing: no model call, and the step skips with the method's reason.
-    passing = backend_step(backend, JobData("demo:2", (PASSING,)), answered.state)
-    assert len(served.prompts) == 1 and passing.metrics["skipped"] == "the method left the head tree unchanged"
-    assert passing.metrics["method_summary"] == "no failing trace and no request to learn from"
+    passing = backend_step(backend, JobData("demo:2", (PASSING,)), backend.initial_state())
+    assert served.prompts == [] and passing.metrics["skipped"] == "the method left the head tree unchanged"
+    assert passing.metrics["method_summary"] == "no failing trace to learn from"
     backend.models = ModelBindings(served=Served(ModelBindingError("model endpoint unreachable: refused")))
     failed = backend_step(backend, JobData("demo:3", (FAILING,)), passing.state)
     assert failed.metrics["method_summary"] == "the model call failed: model endpoint unreachable: refused"
@@ -358,12 +353,11 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert isinstance(built, HarnessEvolutionRecipe) and built.evolution.adapter == "pi"
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
-    # The person asks while it keeps learning from failures; the method reads the request beside the traces.
-    assert built.training_mode == "hybrid" and type(built.method).__name__ == "RulesMethod"
+    assert built.training_mode == "auto" and type(built.method).__name__ == "RulesMethod"
     records = SQLiteRecordStore()
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = replace(built, evolution=local).build("demo", records, releases=releases_for(built))
-    assert trainer.pipeline.training_mode == "hybrid"
+    assert trainer.pipeline.training_mode == "auto"
     # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
     assert trainer.job_samples == 1
     trainer.close()
@@ -371,8 +365,8 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
 
 
 def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> None:
-    """The long-running deployment takes requests and holds a win that touches a code extension for a promote;
-    the two demo files run in auto, where a request is refused, and hold nothing back."""
+    """The long-running deployment holds a win that touches a code extension for a promote; the two demo files
+    hold nothing back."""
     from reef.recipe.registry import build_named_recipe
     from reef.service.assembly import _upstream_runtime
 
@@ -383,11 +377,9 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
     monkeypatch.setenv("PWD", str(REPO_ROOT))
     monkeypatch.chdir(REPO_ROOT)
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
-    assert config["data"]["training_mode"] == "hybrid"
     assert config["evolution"]["review_parts"] == ["extension"]
     for name in ("serve", "serve-native"):
-        demo = load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
-        assert demo["data"]["training_mode"] == "auto" and "review_parts" not in demo["evolution"]
+        assert "review_parts" not in load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")["evolution"]
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},

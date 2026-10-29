@@ -71,9 +71,6 @@ recipe:
             9,30
             Reply with the median as a plain integer alone on the last line.
 
-    # The default: nobody asks in this demo, and auto refuses POST /reef/train.
-    training-mode: auto
-
 inference:
   upstream-url: http://127.0.0.1:8000
   upstream-api-key: ${REEF_UPSTREAM_API_KEY}

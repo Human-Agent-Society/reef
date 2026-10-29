@@ -48,13 +48,6 @@ Newest first. Each row names its scenario ``step`` (0 for the creation row), the
 
 For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
 
-Read what a release requires
-----------------------------
-
-A request sent to ``POST /reef/train`` may name what its change needs where the harness runs, and the method may add items of its own. The commit that answered the request carries the merged list as ``training_request.requires``: ``{name, kind, check, prompt}`` items, where ``kind`` is ``permission``, ``env``, ``service`` or ``binary``. A releases row in ``GET /reef/harness/releases`` carries its own step's list. The ``requires`` of ``GET /reef/harness`` is the union over the release's chain (a promote continues at the release it promoted), the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. Each step's page shows both under Setup.
-
-Reef runs no check. A client checks each item where the harness runs before it runs the release: an ``env`` item's variable is set, a ``binary`` item's program is on the PATH, and any other ``check`` command exits 0. A person should read a check before the client runs it. ``recipes/beta/reefine/examples/run.py`` shows one such client: it refuses to install a release with an unmet item and prints each item's ``prompt``.
-
 Choose a starting release
 -------------------------
 

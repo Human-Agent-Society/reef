@@ -79,7 +79,7 @@ A harness evolution method is a `Method` subclass that implements `step(context)
 3. `workspace.write_tree(...)` leaves the tree with the new `rules.md`. The backend then checks the tree and runs the evaluation.
 4. `workspace.write_output(...)` says what the step did: the summary is text for people, and the notes are JSON for the commit metrics.
 
-A step that leaves the tree unchanged is skipped, and its `method_summary` metric says why: no failing trace and no request, a failed model call, or an empty reply. `NativeMethod` follows the same steps with the prompt in `harness/native_prompt.md`, and its reply becomes one file of the native loop.
+A step that leaves the tree unchanged is skipped, and its `method_summary` metric says why: no failing trace, a failed model call, or an empty reply. `NativeMethod` follows the same steps with the prompt in `harness/native_prompt.md`, and its reply becomes one file of the native loop.
 
 ## Worker execution
 
@@ -140,8 +140,6 @@ needed.
 Defaults: port `8901`, no Reef access token unless `REEF_TOKEN` is set, state
 under `work/deployment/`. Use `--reef.port` and `--reef.token` to override the
 port and access token. The `run.sh` demo keeps its separate configuration and state.
-
-`data.training_mode` has three values. `deployment.yaml` sets `hybrid`: the deployment keeps learning from failures, and a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)); the next step answers the request first, with no mode switch, and `RulesMethod` shows the model the request beside the step's failing traces. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `manual` runs instructions only and never trains on traffic; no file here selects it, because a measurement that wants one step per instruction and no failure driven step between them sets it, in its `data` section or on a running deployment with `POST /reef/scenarios/{scenario}/update`.
 
 Pull the tree from this service with `GET /reef/harness` and report feedback
 against the receipts of its model calls with `POST /reef/report`, as

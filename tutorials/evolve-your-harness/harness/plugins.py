@@ -25,7 +25,7 @@ from reef.train.harness_backend import Method, StepContext, Trace
 
 from . import evolution, native_evolution
 
-#: The prompt of ``RulesMethod``: ``$traces``, ``$request`` and ``$rules`` take the step's values.
+#: The prompt of ``RulesMethod``: ``$traces`` and ``$rules`` take the step's values.
 RULES_PROMPT = Template(Path(__file__).with_name("rules_prompt.md").read_text(encoding="utf-8"))
 #: The limits of the one model call of a step. A stalled endpoint holds the training thread for the whole timeout
 #: before the step skips. Raise both for a local thinking model, which spends its reply budget on reasoning first.
@@ -59,26 +59,20 @@ class RulesMethod(Method):
     Purpose: ``serve.yaml`` and ``deployment.yaml`` name it in
     ``evolution.method``; the harness backend calls ``step`` once per step.
 
-    ``step`` shows the served model the failing traces, the person's request
-    when the step answers one (``POST /reef/train``), and the current
+    ``step`` shows the served model the failing traces and the current
     ``rules.md``. The rules the model answers become the new ``rules.md``.
-    A step with neither a failing trace nor a request, or whose model call
-    fails, leaves the tree unchanged: the step skips, and its summary says why.
+    A step without a failing trace, or whose model call fails, leaves the
+    tree unchanged: the step skips, and its summary says why.
     """
 
     def step(self, context: StepContext) -> None:
         workspace, tools = context.workspace, context.tools
         traces = failing(workspace.traces())
-        request = workspace.request()
-        if not traces and request is None:
-            workspace.write_output("no failing trace and no request to learn from")
+        if not traces:
+            workspace.write_output("no failing trace to learn from")
             return
         tree = workspace.tree()
-        prompt = RULES_PROMPT.substitute(
-            traces=failures_text(traces),
-            request="(none)" if request is None else untrusted_text(request.text, "request"),
-            rules=tree.files.get("rules.md", "(none yet)"),
-        )
+        prompt = RULES_PROMPT.substitute(traces=failures_text(traces), rules=tree.files.get("rules.md", "(none yet)"))
         try:
             reply = tools.models.served.chat(
                 [{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S
@@ -93,10 +87,9 @@ class RulesMethod(Method):
             workspace.write_output("the model replied with no rules")
             return
         workspace.write_tree(tree.apply(TreePatch({"rules.md": rules + "\n"})))
-        summary = f"rewrote rules.md from {len(traces)} failing trace(s)"
-        if request is not None:
-            summary += " and the request"
-        workspace.write_output(summary, {"failing_traces": len(traces)})
+        workspace.write_output(
+            f"rewrote rules.md from {len(traces)} failing trace(s)", {"failing_traces": len(traces)}
+        )
 
 
 class NativeMethod(Method):
@@ -109,10 +102,9 @@ class NativeMethod(Method):
     ``step`` shows the served model the failing traces and the tree's skill
     and native files. The change the model answers is a skill, a native tool,
     a native hook, a native agent or the main graph (``native_evolution``),
-    and it is written into the tree. The method reads no request. A step
-    without a failing trace, whose model call fails, or whose reply holds no
-    usable change leaves the tree unchanged: the step skips, and its summary
-    says why.
+    and it is written into the tree. A step without a failing trace, whose
+    model call fails, or whose reply holds no usable change leaves the tree
+    unchanged: the step skips, and its summary says why.
     """
 
     def step(self, context: StepContext) -> None:
