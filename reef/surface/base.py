@@ -148,13 +148,23 @@ class ArtifactLayout(ABC):
 
     ``check(files)`` returns when ``files`` are an artifact of the component, in the layout of the component's
     releases, and every remote path they name resolves on the component's service. Otherwise it raises
-    ``ValueError`` naming what does not hold. ``files`` is the copied directory or a revision kept by reference
-    (RFC #995), so a check reads files through it and reads no more of them than it needs. Purpose: a recipe binds
-    it on ``ComponentSurface.layout``; the committer checks an import with it.
+    ``ValueError`` naming what does not hold. ``files`` is the source's files, wherever the source keeps them, so a
+    check reads files through it and reads no more of them than it needs.
+
+    ``resolves_references`` is true when every reader of the component's artifacts resolves a reference
+    (``REFERENCE_FILE``, RFC #995) to the revision's files; then an import from a source that keeps its files fixed
+    stores the reference instead of a copy. The default is false: an import always stores a copy.
+
+    Purpose: a recipe binds it on ``ComponentSurface.layout``; the committer checks an import with it and decides
+    what the import stores.
     """
 
     @abstractmethod
     def check(self, files: ArtifactFiles) -> None: ...
+
+    @property
+    def resolves_references(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True)
