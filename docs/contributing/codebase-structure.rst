@@ -115,8 +115,8 @@ import a concrete integration.
 | ``reef/harness/``       | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
 |                         | rollouts, trajectories                                   |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
-|                         | and environment lifecycle through Harbor                 | policy                                     |
+| ``reef/execution/``     | job scheduling, process ownership, isolation,            | harness rendering, evaluation, recipe      |
+|                         | file transfer and environment lifecycle                  | policy                                     |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``recipes/``            | one method per package: recipe, processor, objective,    | shared machinery, or another method        |
 |                         | and its runnable examples                                |                                            |
@@ -157,24 +157,31 @@ package's own submodules and third-party libraries):
      - ``surface``, ``artifact``, ``core``
    * - ``inference``
      - ``runtime``, ``artifact``, ``core``
-   * - ``sandbox``
+   * - ``execution``
      - ``core``
    * - ``harness``
-     - ``sandbox``, ``runtime``, ``core``
+     - ``execution``, ``runtime``, ``core``
    * - ``evaluation``
-     - ``harness``, ``sandbox``, ``runtime``, ``core``
+     - ``harness``, ``execution``, ``runtime``, ``core``
    * - ``train``
-     - ``evaluation``, ``harness``, ``sandbox``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``harness``, ``execution``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``harness``, ``sandbox``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``harness``, ``execution``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``scenario``
      - ``recipe``, ``train``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``record2sample``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``cli``
      - ``service``, ``core``
+
+``execution/lifecycle.py`` defines the shared ``Execution`` interface using
+only the standard library. ``execution/processes.py`` adds local process
+ownership and depends only on that interface and the standard library.
+``execution/jobs.py`` depends only on these two modules and the standard library. Sandbox executors and generator checks also use
+``execution/processes.py`` for local child ownership. The shared worker must not import
+``execution.sandbox`` or its providers and executor adapters.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request

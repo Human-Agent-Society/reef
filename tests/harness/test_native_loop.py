@@ -37,6 +37,7 @@ from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
 from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import Context, FiberState
 from reef.harness.compose.loader import Loader
@@ -59,7 +60,6 @@ from reef.harness.tree.nodes import (
     validate_native_loop,
 )
 from reef.harness.tree.render import RenderError, render_composition, render_native_module, tree_files
-from reef.sandbox.process import LocalExecutor
 from reef.train.cordis_backend import CordisBackend, Mutation
 
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.

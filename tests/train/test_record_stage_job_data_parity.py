@@ -32,10 +32,10 @@ from recipes.sdpo.recipe import SDPORecipe
 from recipes.tttd import TTTDGroupedRolloutReport
 from recipes.tttd.recipe import TTTDRecipe
 from reef.artifact import ArtifactRef
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import NoSettings
 from reef.core.reports import ReportBase, TeacherContextReport
+from reef.execution.jobs import SupportsReceipt
 from reef.record2record import (
     ExclusiveReportRecord2Record,
     GroupDecision,

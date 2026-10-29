@@ -390,7 +390,12 @@ def test_core_storage_and_sandbox_only_depend_on_lower_layers() -> None:
     allowed = {
         "core": ("reef.core",),
         "storage": ("reef.core", "reef.storage"),
-        "sandbox": ("reef.core", "reef.sandbox"),
+        "execution/sandbox": (
+            "reef.core",
+            "reef.execution.lifecycle",
+            "reef.execution.processes",
+            "reef.execution.sandbox",
+        ),
     }
     for owner, prefixes in allowed.items():
         for path in sorted((REPO_ROOT / "reef" / owner).rglob("*.py")):
@@ -530,11 +535,34 @@ def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
             assert _imports_of(imported, dependency) == [], module_name
 
 
-def test_background_jobs_depend_only_on_the_standard_library() -> None:
-    # Processors in every package use the worker, so it imports no Reef module.
-    tree = ast.parse((REPO_ROOT / "reef" / "background_jobs.py").read_text(encoding="utf-8"))
-    targets = _imported_modules(tree, package="reef")
-    assert not [target for target in targets if target == "reef" or target.startswith("reef.")]
+def test_execution_package_has_no_legacy_entry_points() -> None:
+    for name in ("sandbox", "background_jobs.py", "processes.py"):
+        assert not (REPO_ROOT / "reef" / name).exists()
+    tree = ast.parse((REPO_ROOT / "reef/execution/__init__.py").read_text(encoding="utf-8"))
+    assert _imported_modules(tree, package="reef.execution") == []
+
+
+def test_execution_jobs_depend_only_on_processes_and_lifecycle() -> None:
+    # Keep the shared worker independent of the sandbox subsystem.
+    tree = ast.parse((REPO_ROOT / "reef/execution/jobs.py").read_text(encoding="utf-8"))
+    targets = _imported_modules(tree, package="reef.execution")
+    assert all(
+        target.split(".")[0] in sys.stdlib_module_names
+        or target.startswith(("reef.execution.processes.", "reef.execution.lifecycle."))
+        for target in targets
+    )
+
+
+def test_processes_depend_only_on_the_standard_library_and_lifecycle() -> None:
+    tree = ast.parse((REPO_ROOT / "reef/execution/processes.py").read_text(encoding="utf-8"))
+    imports = _imported_modules(tree, package="reef.execution")
+    assert all(
+        target.split(".")[0] in sys.stdlib_module_names or target.startswith("reef.execution.lifecycle.")
+        for target in imports
+    )
+    tree = ast.parse((REPO_ROOT / "reef/execution/lifecycle.py").read_text(encoding="utf-8"))
+    imports = _imported_modules(tree, package="reef.execution")
+    assert all(target.split(".")[0] in sys.stdlib_module_names for target in imports)
 
 
 def test_record_to_record_stage_depends_only_on_contracts_below_training() -> None:
@@ -543,7 +571,7 @@ def test_record_to_record_stage_depends_only_on_contracts_below_training() -> No
         "reef.core",
         "reef.runtime.interfaces",
         "reef.observability",
-        "reef.background_jobs",
+        "reef.execution.jobs",
         "reef.pipeline_context",
         "reef.record2record",
     )
