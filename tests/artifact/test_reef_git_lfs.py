@@ -21,7 +21,7 @@ from reef.artifact import (
     RepositoryBackendContext,
 )
 from reef.artifact.git_client import GitClient
-from reef.artifact.git_lfs import HUB_REFS, _GitWorkspace, token_config
+from reef.artifact.git_lfs import HUB_REFS, _GitWorkspace, same_file, token_config
 from reef.core.plugins import PluginConfigError
 
 
@@ -33,29 +33,6 @@ def run_git(*args: str, cwd: Path | None = None) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
-
-
-@pytest.mark.integration
-def test_git_lfs_repository_initializes_default_local_repository(
-    tmp_path: Path,
-    fake_git_lfs: None,
-) -> None:
-    remote = tmp_path / "artifacts.git"
-
-    backend = GitLFSRepositoryBackend(
-        "math",
-        remote,
-        work_dir=tmp_path / "work",
-        cache_dir=tmp_path / "cache",
-    )
-
-    initial = backend.resolve_release()
-    assert remote.is_dir()
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
-    assert run_git("-C", str(tmp_path / "work" / "repository"), "config", "--local", "core.hooksPath") == str(
-        tmp_path / "work" / "repository" / ".git" / "reef-hooks"
-    )
-    assert not hasattr(backend.fork(), "scenario")
 
 
 @pytest.mark.integration
@@ -240,26 +217,20 @@ def test_local_repository_bootstrap_recovers_after_missing_git_lfs(
 
 
 @pytest.mark.integration
-def test_local_repository_bootstrap_repairs_missing_latest(
+def test_local_repository_bootstrap_creates_the_repository_and_repairs_a_missing_head(
     tmp_path: Path,
     fake_git_lfs: None,
 ) -> None:
     remote = tmp_path / "artifacts.git"
-    first = GitLFSRepositoryBackend(
-        "math",
-        remote,
-        work_dir=tmp_path / "first-work",
-        cache_dir=tmp_path / "first-cache",
-    )
+    first = GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "first-work", cache_dir=tmp_path / "cache")
     initial = first.resolve_release()
+    assert remote.is_dir()
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
+    clone = tmp_path / "first-work" / "repository"
+    assert run_git("-C", str(clone), "config", "--local", "core.hooksPath") == str(clone / ".git" / "reef-hooks")
     run_git("--git-dir", str(remote), "update-ref", "-d", "refs/reef/head")
 
-    recovered = GitLFSRepositoryBackend(
-        "math",
-        remote,
-        work_dir=tmp_path / "recovered-work",
-        cache_dir=tmp_path / "recovered-cache",
-    )
+    recovered = GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "second-work", cache_dir=tmp_path / "c2")
 
     assert recovered.resolve_release() == initial
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == initial.release_id
@@ -425,56 +396,22 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
         backend.publish(Artifact.local(candidate), expected_parent=math)
 
 
+def trained_weights(directory: Path, contents: bytes) -> Artifact:
+    (directory / "weights").mkdir(parents=True)
+    (directory / "weights" / "adapter_model.safetensors").write_bytes(contents)
+    return Artifact.local(directory)
+
+
 @pytest.mark.integration
-def test_a_fresh_scenario_forks_a_head_whose_history_holds_lfs_objects_it_never_fetched(
+def test_fresh_workspaces_fork_and_publish_with_real_lfs_over_objects_they_never_fetched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two trained adapter versions: a new scenario's workspace fetches only the head's objects, and its fork push
-    must not ask Git LFS to upload the older version it never fetched, which the remote already holds."""
-    global_config = tmp_path / "gitconfig"
-    global_config.touch()
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
-    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-    remote = tmp_path / "artifacts.git"
-    first = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a", cache_dir=tmp_path / "cache-a")
-    ref = first.fork()
-    for version in (1, 2):
-        candidate = tmp_path / f"trained-{version}"
-        (candidate / "weights").mkdir(parents=True)
-        (candidate / "weights" / "adapter_model.safetensors").write_bytes(f"adapter v{version}".encode() * 100)
-        ref = first.publish(Artifact.local(candidate), expected_parent=ref)
-    second = GitLFSRepositoryBackend(
-        "scenario-b", remote, work_dir=tmp_path / "work-b", cache_dir=tmp_path / "cache-b"
-    )
-    forked = second.fork()
-    assert forked.parent_release_id == ref.release_id
-    weights = second.materialize(forked).local_path / "weights" / "adapter_model.safetensors"
-    assert weights.read_bytes() == b"adapter v2" * 100
-    # A restarted service publishes from a fresh workspace too: its push adds one commit over history it never
-    # fetched the objects of.
-    restarted = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a2", cache_dir=tmp_path / "c2")
-    candidate = tmp_path / "trained-3"
-    (candidate / "weights").mkdir(parents=True)
-    (candidate / "weights" / "adapter_model.safetensors").write_bytes(b"adapter v3" * 100)
-    assert restarted.publish(Artifact.local(candidate), expected_parent=ref).parent_release_id == ref.release_id
-    # A candidate saved for review from a fresh workspace pushes to a new ref and leaves the head alone: the check
-    # still stops at history the remote already holds.
-    fresh = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a3", cache_dir=tmp_path / "c3")
-    pending_candidate = tmp_path / "trained-4"
-    (pending_candidate / "weights").mkdir(parents=True)
-    (pending_candidate / "weights" / "adapter_model.safetensors").write_bytes(b"adapter v4" * 100)
-    head = fresh.current()
-    pending = fresh.publish(Artifact.local(pending_candidate), expected_parent=head, advance_head=False)
-    assert pending.parent_release_id == head.release_id and fresh.current() == head
+    """A new scenario's workspace fetches no LFS objects, so neither its fork push nor a later publish or pending
+    release from a fresh workspace may ask Git LFS to upload the trained version, which the remote already holds.
 
-
-@pytest.mark.integration
-@pytest.mark.parametrize("hook_source", ["none", "global", "template"])
-def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hook_source: str,
-) -> None:
+    A global ``core.hooksPath`` and a Git template both install user hooks that fail; Reef's clones must run their own
+    hooks only and leave the user's configuration and hooks unchanged.
+    """
     global_config = tmp_path / "gitconfig"
     global_config.touch()
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
@@ -483,57 +420,45 @@ def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
     hooks.mkdir(parents=True)
     hook_contents = "#!/bin/sh\necho 'unrelated user hook must not run' >&2\nexit 1\n"
     for name in ("pre-push", "post-checkout"):
-        hook = hooks / name
-        hook.write_text(hook_contents)
-        hook.chmod(0o755)
-    if hook_source == "global":
-        run_git("config", "--global", "core.hooksPath", str(hooks))
-    elif hook_source == "template":
-        monkeypatch.setenv("GIT_TEMPLATE_DIR", str(hooks.parent))
+        (hooks / name).write_text(hook_contents)
+        (hooks / name).chmod(0o755)
+    run_git("config", "--global", "core.hooksPath", str(hooks))
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(hooks.parent))
     original_config = global_config.read_text()
     remote = tmp_path / "artifacts.git"
-    first = GitLFSRepositoryBackend(
-        "scenario-a",
-        remote,
-        work_dir=tmp_path / "work-a",
-        cache_dir=tmp_path / "cache-a",
-    )
-    initial = first.fork()
-    candidate = tmp_path / "trained"
-    candidate.mkdir()
-    weights = candidate / "model-00001-of-00001.safetensors"
-    weights.write_bytes(b"trained weights")
-    trained = first.publish(Artifact.local(candidate), expected_parent=initial)
+    first = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a", cache_dir=tmp_path / "cache-a")
+    trained = first.publish(trained_weights(tmp_path / "trained-1", b"adapter v1" * 100), expected_parent=first.fork())
 
     second = GitLFSRepositoryBackend(
-        "scenario-b",
-        remote,
-        work_dir=tmp_path / "work-b",
-        cache_dir=tmp_path / "cache-b",
+        "scenario-b", remote, work_dir=tmp_path / "work-b", cache_dir=tmp_path / "cache-b"
     )
     forked = second.fork(metadata={"source_scenario": "scenario-a"})
 
     assert forked.parent_release_id == trained.release_id
     assert second.metadata() == {"source_scenario": "scenario-a"}
     assert run_git("--git-dir", str(remote), "rev-parse", second.ref_name) == forked.release_id
-    inherited_weights = tmp_path / "work-b" / "repository" / weights.name
+    inherited_weights = tmp_path / "work-b" / "repository" / "weights" / "adapter_model.safetensors"
     assert inherited_weights.read_text().startswith("version https://git-lfs.github.com/spec/v1")
 
-    fresh = GitLFSRepositoryBackend(
-        "scenario-b",
-        remote,
-        work_dir=tmp_path / "fresh-work",
-        cache_dir=tmp_path / "fresh-cache",
+    # A restarted service materializes, saves a pending release and publishes from a fresh workspace.
+    fresh = GitLFSRepositoryBackend("scenario-b", remote, work_dir=tmp_path / "fresh-work", cache_dir=tmp_path / "c2")
+    materialized = fresh.materialize(forked).local_path
+    assert materialized is not None
+    assert (materialized / "weights" / "adapter_model.safetensors").read_bytes() == b"adapter v1" * 100
+    assert not (materialized / ".git").exists()
+    # A pending release pushes to a new ref and leaves the head alone: the LFS check still stops at history the
+    # remote already holds.
+    pending = fresh.publish(
+        trained_weights(tmp_path / "trained-2", b"adapter v2" * 100), expected_parent=forked, advance_head=False
     )
-    materialized = fresh.materialize(forked)
-    assert materialized.local_path is not None
-    assert materialized.local_path.joinpath(weights.name).read_bytes() == b"trained weights"
-    assert not (materialized.local_path / ".git").exists()
+    assert pending.parent_release_id == forked.release_id and fresh.current() == forked
+    published = fresh.publish(trained_weights(tmp_path / "trained-3", b"adapter v3" * 100), expected_parent=forked)
+    assert published.parent_release_id == forked.release_id and fresh.current() == published
+
     assert global_config.read_text() == original_config
     for name in ("pre-push", "post-checkout"):
         assert (hooks / name).read_text() == hook_contents
-        if hook_source == "template":
-            assert (tmp_path / "fresh-work" / "repository" / ".git" / "hooks" / name).read_text() == hook_contents
+        assert (tmp_path / "fresh-work" / "repository" / ".git" / "hooks" / name).read_text() == hook_contents
 
 
 @pytest.mark.integration
@@ -617,6 +542,16 @@ def test_a_published_file_is_linked_into_the_release_cache_not_copied(tmp_path: 
     materialized = backend.materialize(published)
     assert materialized.local_path == cached
     assert json.loads((cached / "reef-artifact.json").read_text())["parent_release_id"] == head.release_id
+
+
+@pytest.mark.unit
+def test_same_file_names_one_inode_and_a_missing_path_names_none(tmp_path: Path) -> None:
+    (tmp_path / "file").write_text("x")
+    os.link(tmp_path / "file", tmp_path / "link")
+    (tmp_path / "copy").write_text("x")
+    assert same_file(tmp_path / "file", tmp_path / "link")
+    assert not same_file(tmp_path / "file", tmp_path / "copy")
+    assert not same_file(tmp_path / "file", tmp_path / "missing")
 
 
 @pytest.mark.integration

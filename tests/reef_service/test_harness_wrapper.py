@@ -5,16 +5,18 @@ from __future__ import annotations
 import contextlib
 import functools
 import hashlib
+import http.server
 import io
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
-import tempfile
 import textwrap
+import threading
 import time
 import urllib.error
 import uuid
@@ -24,12 +26,21 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import (
     CLIENT_COMMANDS,
+    CaptureProxy,
+    WrapperError,
+    _create_temp_composition,
+    _extract_reef_url,
+    _met,
+    _reef_token,
     doctor,
     harness,
     main,
     next_commands,
+    page,
+    release_usage,
     report,
     result_line,
     run_agent,
@@ -40,7 +51,12 @@ from reef.harness.client.wrapper import (
     update,
     wait_request,
 )
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.step_result import missed_rollouts
+from reef.harness.tree.render import render_composition
+
+#: How often each HTTP server here checks for shutdown: the default 0.5 s would make every close wait that long.
+SHUTDOWN_POLL_SECONDS = 0.01
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +65,20 @@ def cache_home(tmp_path, monkeypatch) -> Path:
     cache = tmp_path / "cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     return cache
+
+
+def serve(handler: type[http.server.BaseHTTPRequestHandler]) -> http.server.ThreadingHTTPServer:
+    """A server for ``handler`` on a free local port, running in a daemon thread."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def free_port() -> int:
+    """A local port no server listens on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 class _Response:
@@ -62,6 +92,13 @@ class _Response:
         return b"{}"
 
 
+def write_executable(path: Path, text: str) -> Path:
+    """``path`` holding ``text``, executable."""
+    path.write_text(text)
+    path.chmod(0o755)
+    return path
+
+
 def _write_spool_entry(
     directory: Path, scenario: str, state: str, *, sequence: int = 1, receipt: str | None = "receipt-1"
 ) -> Path:
@@ -71,10 +108,11 @@ def _write_spool_entry(
     return path
 
 
-def _make_fake_pi(tmp_path: Path, reef_port: int) -> Path:
+def _make_fake_pi(tmp_path: Path) -> Path:
     """A fake pi binary that makes one HTTP call to its models.json baseUrl."""
     binary = tmp_path / "fake-pi"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -91,16 +129,16 @@ def _make_fake_pi(tmp_path: Path, reef_port: int) -> Path:
             )
             urllib.request.urlopen(req, timeout=5).read()
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     return binary
 
 
 def _make_fake_opencode(tmp_path: Path) -> Path:
     """A fake opencode binary that reads opencode.json and calls the provider baseURL."""
     binary = tmp_path / "fake-opencode"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -117,9 +155,8 @@ def _make_fake_opencode(tmp_path: Path) -> Path:
             )
             urllib.request.urlopen(req, timeout=5).read()
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     return binary
 
 
@@ -146,106 +183,67 @@ def _make_compose(tmp_path: Path, reef_port: int) -> str:
     return str(compose)
 
 
+def write_rendered_tree(
+    root: Path, adapter: str, binding: ModelBinding, nodes: tuple[tuple[str, dict], ...] = ()
+) -> dict[str, str]:
+    """The files ``render_composition`` makes for ``nodes`` and then ``binding``'s nodes, written under ``root``."""
+    descriptor = get_adapter(adapter)
+    files = render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    return files
+
+
+def make_claude_compose(tmp_path: Path, settings: dict | None = None) -> Path:
+    """A claude tree whose settings.json holds ``settings``, by default a binding to a Reef that is never called."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    binding = settings if settings is not None else {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}
+    (compose / "settings.json").write_text(json.dumps(binding) + "\n")
+    return compose
+
+
 @pytest.mark.unit
-def test_run_agent_captures_receipts_and_report_posts_them(tmp_path) -> None:
-    """run_agent starts a proxy that captures receipts; report POSTs them to reef."""
-    import http.server
-    import threading
+@pytest.mark.parametrize(
+    ("adapter", "env_var", "args"),
+    [("pi", "PI_CODING_AGENT_DIR", ["-p", "fix the bug"]), ("opencode", "OPENCODE_CONFIG_DIR", ["run", "hi"])],
+)
+def test_run_agent_captures_receipts_and_report_posts_them(tmp_path, adapter, env_var, args) -> None:
+    """run_agent starts a proxy that captures receipts; report POSTs them to reef. The opencode path reads
+    opencode.json and rewrites provider.*.options.baseURL."""
+    reef = _FakeReef({}, receipt="test-receipt-123")
+    if adapter == "pi":
+        compose, binary = _make_compose(tmp_path, reef.port), _make_fake_pi(tmp_path)
+    else:
+        compose, binary = _make_opencode_compose(tmp_path, reef.port), _make_fake_opencode(tmp_path)
 
-    receipt_id = "test-receipt-123"
-    reports: list[dict] = []
-
-    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            if self.path.startswith("/v1/chat/completions"):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("x-reef-agent-record-id", receipt_id)
-                self.end_headers()
-                self.wfile.write(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
-            elif self.path == "/reef/report":
-                reports.append(body)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
-
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), FakeReefHandler)
-    reef_port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    compose = _make_compose(tmp_path, reef_port)
-    binary = _make_fake_pi(tmp_path, reef_port)
-
-    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
-    with patch.dict(os.environ, env):
+    with patch.dict(os.environ, {"REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
         with contextlib.suppress(SystemExit):
-            run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "fix the bug"])
+            run_agent(str(binary), compose, "test-scenario", adapter, env_var, args)
 
         (captures_file,) = tmp_path.glob("*.pending.json")
-        assert captures_file.exists()
-        data = json.loads(captures_file.read_text())
-        receipts = [t["receipt"] for t in data["turns"] if t.get("receipt")]
-        assert receipt_id in receipts
+        assert [turn["receipt"] for turn in json.loads(captures_file.read_text())["turns"]] == ["test-receipt-123"]
 
-        report("test-scenario", "pi", 0.0, "missed the empty-token case")
+        report("test-scenario", adapter, 0.0, "missed the empty-token case")
+    reef.close()
 
-        assert len(reports) == 1
-        assert reports[0]["score"] == 0.0
-        assert reports[0]["feedback"] == "missed the empty-token case"
-        assert receipt_id in reports[0]["references"]
-        assert not captures_file.exists()
-
-    server.shutdown()
+    (posted,) = reef.posts("/reef/report")
+    assert posted["body"]["score"] == 0.0
+    assert posted["body"]["feedback"] == "missed the empty-token case"
+    assert posted["body"]["references"] == ["test-receipt-123"]
+    assert not captures_file.exists()
+    # No release file beside the tree: the model call carries no release tag.
+    (call,) = reef.posts("/v1/chat/completions")
+    assert "x-reef-tag-release" not in call["headers"]
 
 
 @pytest.mark.unit
 def test_same_scenario_runs_remain_independently_reportable(tmp_path) -> None:
     """Completing another run must not overwrite the first run's receipts."""
-    import http.server
-    import threading
-
-    receipt_ids = iter(("first-receipt", "second-receipt"))
-    reports: list[dict] = []
-
-    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            if self.path.startswith("/v1/chat/completions"):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("x-reef-agent-record-id", next(receipt_ids))
-                self.end_headers()
-                self.wfile.write(b'{"choices":[{"message":{"content":"ok"}}]}')
-            elif self.path == "/reef/report":
-                reports.append(body)
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"{}")
-
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeReefHandler)
-    reef_port = server.server_address[1]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    compose = _make_compose(tmp_path, reef_port)
-    binary = _make_fake_pi(tmp_path, reef_port)
+    reef = _FakeReef({}, receipt=["first-receipt", "second-receipt"])
+    compose = _make_compose(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path)
 
     with patch.dict(os.environ, {"REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
         for _ in range(2):
@@ -254,17 +252,17 @@ def test_same_scenario_runs_remain_independently_reportable(tmp_path) -> None:
 
         report("same-scenario", "pi", 1.0, "first")
         report("same-scenario", "pi", 0.0, "second")
+    reef.close()
 
-    assert [item["references"] for item in reports] == [["first-receipt"], ["second-receipt"]]
-    server.shutdown()
+    assert [call["body"]["references"] for call in reef.posts("/reef/report")] == [
+        ["first-receipt"],
+        ["second-receipt"],
+    ]
 
 
 @pytest.mark.unit
 def test_run_completed_during_report_remains_pending(tmp_path) -> None:
     """A reporter consumes only the spool entry that it claimed before I/O."""
-    import http.server
-    import threading
-
     receipt_ids = iter(("old-receipt", "new-receipt"))
     reports: list[dict] = []
     report_started = threading.Event()
@@ -272,34 +270,25 @@ def test_run_completed_during_report_remains_pending(tmp_path) -> None:
 
     class FakeReefHandler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            if self.path.startswith("/v1/chat/completions"):
-                self.send_response(200)
-                self.send_header("x-reef-agent-record-id", next(receipt_ids))
-                self.end_headers()
-                self.wfile.write(b"{}")
-            elif self.path == "/reef/report":
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(200)
+            if self.path == "/reef/report":
                 reports.append(body)
                 if body["references"] == ["old-receipt"]:
                     report_started.set()
                     assert finish_report.wait(5)
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"{}")
-
-        def do_GET(self):
-            self.send_response(200)
+            else:
+                self.send_header("x-reef-agent-record-id", next(receipt_ids))
+            self.send_header("Content-Length", "2")
             self.end_headers()
+            self.wfile.write(b"{}")
 
         def log_message(self, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeReefHandler)
-    reef_port = server.server_address[1]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    compose = _make_compose(tmp_path, reef_port)
-    binary = _make_fake_pi(tmp_path, reef_port)
+    server = serve(FakeReefHandler)
+    compose = _make_compose(tmp_path, server.server_address[1])
+    binary = _make_fake_pi(tmp_path)
 
     with patch.dict(os.environ, {"REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
         with contextlib.suppress(SystemExit):
@@ -412,21 +401,6 @@ def test_report_carries_the_installed_release_as_metadata(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_run_agent_tags_records_with_the_installed_release(tmp_path) -> None:
-    """run_agent reads the release file and sends x-reef-tag-release, so the record
-    keeps which release answered."""
-    from reef.harness.client import wrapper as harness_wrapper
-
-    compose = tmp_path / "reef-harness" / "pi-agent"
-    compose.mkdir(parents=True)
-    (tmp_path / "reef-harness" / ".reef-harness-release").write_text(
-        json.dumps({"release_id": "rel-7"}), encoding="utf-8"
-    )
-    assert harness_wrapper._installed_release(str(compose)) == "rel-7"
-    assert harness_wrapper._installed_release(str(tmp_path / "missing")) is None
-
-
-@pytest.mark.unit
 def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
     """An evolved tool that runs ``pi`` gets this harness's own binary, wherever
     the install put it, even when no pi is on the person's PATH."""
@@ -435,8 +409,9 @@ def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
     bin_dir.mkdir(parents=True)
     binary = bin_dir / "pi"
     seen = tmp_path / "path.txt"
-    binary.write_text(f'#!/usr/bin/env python3\nimport os\nopen({str(seen)!r}, "w").write(os.environ["PATH"])\n')
-    binary.chmod(0o755)
+    write_executable(
+        binary, f'#!/usr/bin/env python3\nimport os\nopen({str(seen)!r}, "w").write(os.environ["PATH"])\n'
+    )
 
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     with patch.dict(os.environ, env), contextlib.suppress(SystemExit):
@@ -454,7 +429,8 @@ def test_pi_sessions_outlive_the_run_so_a_later_run_can_resume_them(tmp_path) ->
     compose = _make_compose(tmp_path, 1)
     binary = tmp_path / "fake-pi"
     seen = tmp_path / "seen.txt"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
@@ -465,9 +441,8 @@ def test_pi_sessions_outlive_the_run_so_a_later_run_can_resume_them(tmp_path) ->
             sessions.mkdir(parents=True, exist_ok=True)
             (sessions / f"{{len(list(sessions.glob('*.jsonl')))}}.jsonl").write_text("{{}}\\n")
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
 
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     env.pop("PI_CODING_AGENT_SESSION_DIR", None)
@@ -480,79 +455,60 @@ def test_pi_sessions_outlive_the_run_so_a_later_run_can_resume_them(tmp_path) ->
     assert sorted(p.name for p in (Path(compose) / "sessions" / "--project--").iterdir()) == ["0.jsonl", "1.jsonl"]
 
 
-@pytest.mark.unit
-def test_hermes_state_database_outlives_the_run_so_a_later_run_can_resume_it(tmp_path) -> None:
-    """hermes reads its sessions from state.db; the run finds a database already kept in the installed tree."""
+def make_hermes_compose(tmp_path: Path) -> Path:
+    """A hermes home whose config.yaml binds a Reef that is never called."""
     compose = tmp_path / "compose"
     compose.mkdir()
     (compose / "config.yaml").write_text(
         yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
     )
+    return compose
+
+
+@pytest.mark.unit
+def test_hermes_state_database_session_snapshots_and_logs_outlive_the_run(tmp_path) -> None:
+    """hermes reads its sessions from state.db, writes a session snapshot under sessions/ and its log under logs/ in
+    the home, which a run points at a temp copy. The run finds a database already kept in the installed tree; a
+    second run sees what the first wrote, and all of it stays in the installed tree."""
+    compose = make_hermes_compose(tmp_path)
     binary = tmp_path / "fake-hermes"
     seen = tmp_path / "seen.txt"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
             import os, sqlite3, sys
             from pathlib import Path
-            path = Path(os.environ["HERMES_HOME"]) / "state.db"
-            header = path.read_bytes()[:16]
-            database = sqlite3.connect(path)
+            home = Path(os.environ["HERMES_HOME"])
+            header = (home / "state.db").read_bytes()[:16]
+            database = sqlite3.connect(home / "state.db")
             database.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT)")
-            open({str(seen)!r}, "a").write(f"{{header!r}} {{[row for (row,) in database.execute('SELECT id FROM sessions')]}}\\n")
+            rows = [row for (row,) in database.execute("SELECT id FROM sessions")]
+            found = sorted(p.name for p in (home / "sessions").glob("*.json"))
+            log = home / "logs" / "agent.log"
+            logged = log.read_text().split() if log.exists() else []
+            open({str(seen)!r}, "a").write(f"{{header!r}} {{rows}} {{found}} {{logged}}\\n")
             database.execute("INSERT INTO sessions VALUES (?)", (sys.argv[-1],))
             database.commit()
-            """
-        )
-    )
-    binary.chmod(0o755)
-
-    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
-        for prompt in ("first", "second"):
-            with contextlib.suppress(SystemExit):
-                run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["-q", prompt])
-
-    assert seen.read_text().splitlines() == ["b'SQLite format 3\\x00' []", "b'SQLite format 3\\x00' ['first']"]
-
-
-@pytest.mark.unit
-def test_hermes_session_snapshots_and_logs_outlive_the_run(tmp_path) -> None:
-    """hermes writes a session snapshot under sessions/ and its log under logs/ in the home, which a run points at
-    a temp copy; a second run sees what the first wrote, and both stay in the installed tree."""
-    compose = tmp_path / "compose"
-    compose.mkdir()
-    (compose / "config.yaml").write_text(
-        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
-    )
-    binary = tmp_path / "fake-hermes"
-    seen = tmp_path / "seen.txt"
-    binary.write_text(
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env python3
-            import os, sys
-            from pathlib import Path
-            home = Path(os.environ["HERMES_HOME"])
-            found = sorted(p.name for p in (home / "sessions").glob("*.json"))
-            logged = (home / "logs" / "agent.log").read_text().split() if (home / "logs" / "agent.log").exists() else []
-            open({str(seen)!r}, "a").write(f"{{found}} {{logged}}\\n")
             (home / "sessions").mkdir(exist_ok=True)
             (home / "sessions" / f"session_{{sys.argv[-1]}}.json").write_text("{{}}")
-            (home / "logs").mkdir(exist_ok=True)
-            with open(home / "logs" / "agent.log", "a") as log:
-                log.write(sys.argv[-1] + "\\n")
+            log.parent.mkdir(exist_ok=True)
+            with open(log, "a") as handle:
+                handle.write(sys.argv[-1] + "\\n")
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
 
     with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
         for prompt in ("first", "second"):
             with contextlib.suppress(SystemExit):
                 run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["-q", prompt])
 
-    assert seen.read_text().splitlines() == ["[] []", "['session_first.json'] ['first']"]
+    assert seen.read_text().splitlines() == [
+        "b'SQLite format 3\\x00' [] [] []",
+        "b'SQLite format 3\\x00' ['first'] ['session_first.json'] ['first']",
+    ]
     assert sorted(p.name for p in (compose / "sessions").iterdir()) == ["session_first.json", "session_second.json"]
     assert (compose / "logs" / "agent.log").read_text().split() == ["first", "second"]
 
@@ -561,14 +517,12 @@ def test_hermes_session_snapshots_and_logs_outlive_the_run(tmp_path) -> None:
 def test_after_a_hermes_session_the_wrapper_names_the_resume_command_that_works(tmp_path, capsys) -> None:
     """hermes ends by naming `hermes --resume <id>`, which runs outside this install; the wrapper then names
     `reef-hermes --resume <id>` for the one session this run wrote, and nothing when the run wrote none."""
-    compose = tmp_path / "compose"
-    (compose / "sessions").mkdir(parents=True)
-    (compose / "config.yaml").write_text(
-        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
-    )
+    compose = make_hermes_compose(tmp_path)
+    (compose / "sessions").mkdir()
     (compose / "sessions" / "session_20260924_000000_older.json").write_text("{}")
     binary = tmp_path / "fake-hermes"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -577,9 +531,8 @@ def test_after_a_hermes_session_the_wrapper_names_the_resume_command_that_works(
             if sys.argv[-1] != "none":
                 (Path(os.environ["HERMES_HOME"]) / "sessions" / f"session_{sys.argv[-1]}.json").write_text("{}")
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
         with contextlib.suppress(SystemExit):
             run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["20260924_183446_468762"])
@@ -595,19 +548,11 @@ def test_after_a_hermes_session_the_wrapper_names_the_resume_command_that_works(
 def test_hermes_finds_the_agent_commands_in_a_session_and_in_a_rollout(tmp_path) -> None:
     """A reef-hermes session's home is a temp copy, so HERMES_HOME/.. is not the install root; the commands
     root is still found there, through REEF_HARNESS_DEST, and a rollout home still finds it beside itself."""
-    import subprocess
-
-    from reef.harness.adapters import get_adapter
-    from reef.harness.rollouts.model_binding import ModelBinding
-    from reef.harness.tree.render import render_composition
-
-    descriptor = get_adapter("hermes")
-    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy")
-    command = ("agent_command", {"name": "summarize", "text": "Summarize the request."})
     root = tmp_path / "reef-harness"
-    for relative, text in render_composition([command, *binding.compose_nodes(descriptor)], descriptor).items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy")
+    write_rendered_tree(
+        root, "hermes", binding, (("agent_command", {"name": "summarize", "text": "Summarize the request."}),)
+    )
     home = root / "hermes"
     script = tmp_path / "fake-hermes.py"
     seen = tmp_path / "seen.txt"
@@ -643,11 +588,7 @@ def test_hermes_finds_the_agent_commands_in_a_session_and_in_a_rollout(tmp_path)
 def test_capture_proxy_prints_no_traceback_when_a_client_resets_a_kept_alive_connection(capsys) -> None:
     """hermes drops a kept alive connection with a reset after its calls; the proxy ends it quietly, and any other
     error still prints its traceback."""
-    import socket
     import struct
-    import threading
-
-    from reef.harness.client.wrapper import CaptureProxy
 
     proxy = CaptureProxy("http://127.0.0.1:9", "reset-scenario", None)
     proxy.start()
@@ -682,12 +623,11 @@ def test_capture_proxy_prints_no_traceback_when_a_client_resets_a_kept_alive_con
 def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
     """A kept file the binary creates, or renames a new file over, is copied back with its mode after the run;
     a later run reads it through the link."""
-    compose = tmp_path / "claude-tree" / "claude"
-    compose.mkdir(parents=True)
-    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
+    compose = make_claude_compose(tmp_path)
     binary = tmp_path / "fake-claude"
     seen = tmp_path / "seen.txt"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
@@ -701,9 +641,8 @@ def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
             staging.chmod(0o600)
             os.replace(staging, path)
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
 
     with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
         for prompt in ("first", "second"):
@@ -725,22 +664,16 @@ def test_codex_folder_trust_outlives_the_run_outside_the_tree_and_only_for_the_s
     the answer for the session's folder in ~/.reef/trust, readable by the person alone, and adds it to the next
     session's copy; trust a command wrote for another folder is dropped, and the installed config.toml never
     changes."""
-    from reef.harness.adapters import get_adapter
-    from reef.harness.rollouts.model_binding import ModelBinding
-    from reef.harness.tree.render import render_composition
-
-    descriptor = get_adapter("codex")
     binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy", api="responses")
+    write_rendered_tree(tmp_path / "tree", "codex", binding)
     compose = tmp_path / "tree" / "codex"
-    for relative, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
-        (tmp_path / "tree" / relative).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / "tree" / relative).write_text(text, encoding="utf-8")
     installed = (compose / "config.toml").read_bytes()
     project = tmp_path / "project"
     project.mkdir()
     binary = tmp_path / "fake-codex"
     seen = tmp_path / "seen.txt"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
@@ -753,9 +686,8 @@ def test_codex_folder_trust_outlives_the_run_outside_the_tree_and_only_for_the_s
                 handle.write('\\n[projects."' + os.getcwd() + '"]\\ntrust_level = "trusted"\\n')
                 handle.write('\\n[projects."/elsewhere"]\\ntrust_level = "trusted"\\n')
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     monkeypatch.chdir(project)
     with patch.dict(
         os.environ, {**os.environ, "HOME": str(tmp_path / "home"), "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
@@ -892,68 +824,6 @@ def _make_opencode_compose(tmp_path: Path, reef_port: int) -> str:
     return str(compose)
 
 
-@pytest.mark.unit
-def test_opencode_run_agent_captures_receipts_and_report_posts_them(tmp_path) -> None:
-    """The opencode adapter path: reads opencode.json, rewrites provider.*.options.baseURL."""
-    import http.server
-    import threading
-
-    receipt_id = "opencode-receipt-456"
-    reports: list[dict] = []
-
-    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            if self.path.startswith("/v1/chat/completions"):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("x-reef-agent-record-id", receipt_id)
-                self.end_headers()
-                self.wfile.write(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
-            elif self.path == "/reef/report":
-                reports.append(body)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
-
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), FakeReefHandler)
-    reef_port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    compose = _make_opencode_compose(tmp_path, reef_port)
-    binary = _make_fake_opencode(tmp_path)
-
-    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
-    with patch.dict(os.environ, env):
-        with contextlib.suppress(SystemExit):
-            run_agent(str(binary), compose, "oc-scenario", "opencode", "OPENCODE_CONFIG_DIR", ["run", "hi"])
-
-        (captures_file,) = tmp_path.glob("*.pending.json")
-        assert captures_file.exists()
-        data = json.loads(captures_file.read_text())
-        receipts = [t["receipt"] for t in data["turns"] if t.get("receipt")]
-        assert receipt_id in receipts
-
-        report("oc-scenario", "opencode", 1.0, "good job")
-
-        assert len(reports) == 1
-        assert reports[0]["score"] == 1.0
-        assert receipt_id in reports[0]["references"]
-        assert not captures_file.exists()
-
-    server.shutdown()
-
-
 def _make_native_compose(tmp_path: Path, reef_port: int) -> str:
     """A minimal native tree: the rendered model binding pointing at reef, rules, and empty tool and hook dirs."""
     compose = tmp_path / "native-compose" / "native"
@@ -971,15 +841,13 @@ def _make_native_compose(tmp_path: Path, reef_port: int) -> str:
 
 def _make_native_launcher(tmp_path: Path) -> Path:
     """reef-native as the installed console script would be: this interpreter running the loop."""
-    import sys
-
     root = Path(__file__).resolve().parents[2]
     binary = tmp_path / "reef-native"
-    binary.write_text(
+    write_executable(
+        binary,
         f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(root)!r})\n"
-        "from reef.harness.runners.native import main\nsys.exit(main())\n"
+        "from reef.harness.runners.native import main\nsys.exit(main())\n",
     )
-    binary.chmod(0o755)
     return binary
 
 
@@ -987,46 +855,8 @@ def _make_native_launcher(tmp_path: Path) -> Path:
 def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp_path, capsys) -> None:
     """The native adapter path: the wrapper rewrites models.json base_url to the proxy, the loop reads it
     through REEF_NATIVE_DIR, its session log lands beside the installed tree, and the receipt reports."""
-    import http.server
-    import threading
-
-    receipt_id = "native-receipt-789"
-    reports: list[dict] = []
-    seen: list[dict] = []
-
-    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            if self.path.startswith("/v1/chat/completions"):
-                seen.append({"headers": dict(self.headers), "body": body})
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("x-reef-agent-record-id", receipt_id)
-                self.end_headers()
-                self.wfile.write(
-                    json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}).encode()
-                )
-            elif self.path == "/reef/report":
-                reports.append(body)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
-
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), FakeReefHandler)
-    reef_port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    compose = _make_native_compose(tmp_path, reef_port)
+    reef = _FakeReef({}, receipt="native-receipt-789")
+    compose = _make_native_compose(tmp_path, reef.port)
     binary = _make_native_launcher(tmp_path)
 
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
@@ -1038,7 +868,7 @@ def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp
         assert "install record" not in capsys.readouterr().err
 
         # The loop talked to reef through the proxy: the scenario header rode along and the rules were the system prompt.
-        (request,) = seen
+        (request,) = reef.posts("/v1/chat/completions")
         assert request["headers"].get("x-reef-scenario") == "native-scenario"
         assert request["body"]["messages"][0] == {"role": "system", "content": "Answer in one word."}
         # The session log outlived the temp copy, beside the installed tree.
@@ -1047,14 +877,14 @@ def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp
 
         (captures_file,) = tmp_path.glob("*.pending.json")
         data = json.loads(captures_file.read_text())
-        assert receipt_id in [t["receipt"] for t in data["turns"] if t.get("receipt")]
+        assert [t["receipt"] for t in data["turns"]] == ["native-receipt-789"]
 
         report("native-scenario", "native", 1.0, "answered")
+    reef.close()
 
-        assert len(reports) == 1 and receipt_id in reports[0]["references"]
-        assert not captures_file.exists()
-
-    server.shutdown()
+    (posted,) = reef.posts("/reef/report")
+    assert posted["body"]["references"] == ["native-receipt-789"]
+    assert not captures_file.exists()
 
 
 @pytest.mark.unit
@@ -1065,27 +895,19 @@ def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(t
     in every dialect the tree may be installed with (pi and dsh bind anthropic without the /v1 openai adds)."""
     from pathlib import PurePosixPath
 
-    from reef.harness.adapters import get_adapter
-    from reef.harness.client.wrapper import _create_temp_composition, _extract_reef_url
-    from reef.harness.rollouts.model_binding import ModelBinding
-    from reef.harness.tree.render import render_composition
-
     descriptor = get_adapter(adapter)
+    rules = (("rules", {"text": "Be brief."}),)
     for api in descriptor.model_binding:
-        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
-        files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
         root = tmp_path / api
-        for relative, text in files.items():
-            (root / relative).parent.mkdir(parents=True, exist_ok=True)
-            (root / relative).write_text(text, encoding="utf-8")
+        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
+        files = write_rendered_tree(root, adapter, reef, rules)
         _, subdir = descriptor.compose_relocation()
         compose = root / subdir
 
         assert _extract_reef_url(adapter, compose) == "http://127.0.0.1:8900"
         temp = Path(_create_temp_composition(adapter, str(compose), 41234))
         proxied = ModelBinding(base_url="http://127.0.0.1:41234", model="qwen3-8b", api_key="dummy", api=api)
-        nodes = [("rules", {"text": "Be brief."}), *proxied.compose_nodes(descriptor)]
-        for relative, text in render_composition(nodes, descriptor).items():
+        for relative, text in render_composition([*rules, *proxied.compose_nodes(descriptor)], descriptor).items():
             assert (temp / PurePosixPath(relative).relative_to(subdir)).read_text(encoding="utf-8") == text, api
         # The installed tree keeps Reef's address: only the temp copy was rewritten.
         for relative, text in files.items():
@@ -1113,8 +935,6 @@ def _opencode_tree(tmp_path: Path, config: dict) -> str:
 @pytest.mark.unit
 def test_wrapper_ignores_urls_that_are_not_the_binding(tmp_path) -> None:
     """opencode's own $schema key and an mcp server url sort before the provider; neither is Reef and neither is rewritten."""
-    from reef.harness.client.wrapper import _create_temp_composition, _extract_reef_url
-
     compose = _opencode_tree(
         tmp_path,
         {
@@ -1135,8 +955,6 @@ def test_wrapper_ignores_urls_that_are_not_the_binding(tmp_path) -> None:
 @pytest.mark.unit
 def test_wrapper_picks_the_reef_provider_among_several_by_the_parent_key(tmp_path) -> None:
     """A second pi provider that sorts first keeps its own endpoint; the entry under the template's parent key is Reef."""
-    from reef.harness.client.wrapper import WrapperError, _create_temp_composition, _extract_reef_url
-
     providers = {
         "anthropic": {"api": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "apiKey": "x"},
         "reef": {"api": "openai-completions", "baseUrl": "http://127.0.0.1:8900/v1", "apiKey": "dummy"},
@@ -1160,8 +978,6 @@ def test_wrapper_picks_the_reef_provider_among_several_by_the_parent_key(tmp_pat
 def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) -> None:
     """A bare origin in the tree still sends the agent to /v1 at the proxy, and a Reef behind a path prefix keeps it;
     an entry that speaks anthropic keeps the bare origin, as that dialect's template writes it."""
-    from reef.harness.client.wrapper import _create_temp_composition, _extract_reef_url
-
     compose = _pi_tree(tmp_path, {"providers": {"reef": {"baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}}})
     assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900"
     temp = Path(_create_temp_composition("pi", compose, 41234))
@@ -1206,8 +1022,6 @@ def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) 
 def test_wrapper_takes_the_token_from_the_binding_when_the_shell_has_none(tmp_path, monkeypatch) -> None:
     """The install wrote the token at the binding's key path; a later shell needs no REEF_TOKEN, one that sets it
     still wins, and a second provider's key in the same file is never Reef's, whatever the two are called."""
-    from reef.harness.client.wrapper import _reef_token
-
     reef = {"api": "openai-completions", "baseUrl": "http://127.0.0.1:8900/v1", "apiKey": "from-binding"}
     other = {"api": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "apiKey": "other"}
     compose = _pi_tree(tmp_path, {"providers": {"anthropic": other, "reef": reef}})
@@ -1233,21 +1047,13 @@ def test_wrapper_takes_the_token_from_the_binding_when_the_shell_has_none(tmp_pa
 def test_wrapper_reads_the_token_back_from_every_adapters_binding(tmp_path, adapter, monkeypatch) -> None:
     """Every adapter's binding file, in its own format (JSON, TOML, YAML, dotenv), yields the token the install
     rendered into it, byte for byte, characters a text search would cut at included."""
-    from reef.harness.adapters import get_adapter
-    from reef.harness.client.wrapper import _reef_token
-    from reef.harness.rollouts.model_binding import ModelBinding
-    from reef.harness.tree.render import render_composition
-
     descriptor = get_adapter(adapter)
     token = "sk-abc,def;g h\"i'j<k>l\\m"
     monkeypatch.delenv("REEF_TOKEN", raising=False)
     for api in descriptor.model_binding:
-        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key=token, api=api)
-        files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
         root = tmp_path / api
-        for relative, text in files.items():
-            (root / relative).parent.mkdir(parents=True, exist_ok=True)
-            (root / relative).write_text(text, encoding="utf-8")
+        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key=token, api=api)
+        write_rendered_tree(root, adapter, reef, (("rules", {"text": "Be brief."}),))
         _, subdir = descriptor.compose_relocation()
         assert _reef_token(adapter, str(root / subdir)) == token
 
@@ -1255,9 +1061,6 @@ def test_wrapper_reads_the_token_back_from_every_adapters_binding(tmp_path, adap
 @pytest.mark.unit
 def test_wrapper_refuses_a_binding_file_that_leaves_the_composition(tmp_path, monkeypatch) -> None:
     from dataclasses import replace
-
-    from reef.harness.adapters import get_adapter
-    from reef.harness.client.wrapper import WrapperError, _extract_reef_url
 
     base = get_adapter("native")
     for path, message in (
@@ -1275,36 +1078,12 @@ def test_wrapper_refuses_a_binding_file_that_leaves_the_composition(tmp_path, mo
 @pytest.mark.unit
 def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> None:
     """The proxy matches the request path with its query; the Anthropic SDK posts /v1/messages?beta=true."""
-    import http.server
-    import threading
-
-    receipt_id = "claude-receipt-1"
-
-    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(length)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("x-reef-agent-record-id", receipt_id)
-            self.end_headers()
-            self.wfile.write(json.dumps({"content": [{"type": "text", "text": "ok"}]}).encode())
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), FakeReefHandler)
-    reef_port = server.server_address[1]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    compose = tmp_path / "claude-tree" / "claude"
-    compose.mkdir(parents=True)
-    (compose / "settings.json").write_text(
-        json.dumps({"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{reef_port}", "ANTHROPIC_AUTH_TOKEN": "d"}})
-        + "\n"
-    )
+    reef = _FakeReef({}, receipt="claude-receipt-1")
+    env = {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{reef.port}", "ANTHROPIC_AUTH_TOKEN": "d"}
+    compose = make_claude_compose(tmp_path, {"env": env})
     binary = tmp_path / "fake-claude"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -1320,24 +1099,25 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
             )
             urllib.request.urlopen(req, timeout=5).read()
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     with patch.dict(os.environ, env):
         with contextlib.suppress(SystemExit):
             run_agent(str(binary), str(compose), "claude-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", "hi"])
         (captures_file,) = tmp_path.glob("*.pending.json")
         data = json.loads(captures_file.read_text())
-        assert [t["receipt"] for t in data["turns"]] == [receipt_id]
-    server.shutdown()
+        assert [t["receipt"] for t in data["turns"]] == ["claude-receipt-1"]
+    reef.close()
+    assert [call["path"] for call in reef.seen] == ["/v1/messages?beta=true"]
 
 
 def make_waiting_pi(tmp_path: Path) -> Path:
     """A fake pi that makes one call through the proxy, notes its agent directory, then waits for a signal and notes
     which one came."""
     binary = tmp_path / "fake-waiting-pi"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -1363,24 +1143,33 @@ def make_waiting_pi(tmp_path: Path) -> Path:
             while time.monotonic() < deadline:
                 time.sleep(0.05)
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     return binary
+
+
+def run_agent_command(binary: Path, compose: str, scenario: str, adapter: str, env_var: str, *args: str) -> list[str]:
+    """The command that runs ``run_agent`` in a Python process of its own, as ``reef-<adapter>`` runs it, with the
+    capture proxy checking for shutdown as often as ``tests/conftest.py`` makes it here."""
+    code = textwrap.dedent(
+        f"""\
+        import functools, sys
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r})
+        from reef.harness.client import wrapper
+        wrapper.CaptureProxyServer.serve_forever = functools.partialmethod(
+            wrapper.ThreadingHTTPServer.serve_forever, poll_interval={SHUTDOWN_POLL_SECONDS}
+        )
+        wrapper.run_agent(*sys.argv[1:6], sys.argv[6:])
+        """
+    )
+    return [sys.executable, "-c", code, str(binary), compose, scenario, adapter, env_var, *args]
 
 
 def start_wrapper(tmp_path: Path, binary: Path, compose: str, captures: Path, preexec_fn=None) -> subprocess.Popen:
     """``run_agent`` in a process of its own, as ``reef-pi`` runs it, once the agent is up and waiting."""
-    repo_root = str(Path(__file__).resolve().parents[2])
-    env = {
-        **os.environ,
-        "REEF_HARNESS_CAPTURES_DIR": str(captures),
-        "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
-    }
-    code = "import sys; from reef.harness.client.wrapper import run_agent; run_agent(*sys.argv[1:6], ['-p', 'hi'])"
     wrapper = subprocess.Popen(
-        [sys.executable, "-c", code, str(binary), compose, "sig-scenario", "pi", "PI_CODING_AGENT_DIR"],
-        env=env,
+        run_agent_command(binary, compose, "sig-scenario", "pi", "PI_CODING_AGENT_DIR", "-p", "hi"),
+        env={**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(captures)},
         preexec_fn=preexec_fn,
     )
     deadline = time.monotonic() + 30
@@ -1417,12 +1206,12 @@ def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cle
 def make_recording_pi(tmp_path: Path, body: str) -> Path:
     """A fake pi that runs ``body`` with ``agent``, its agent directory, and ``seen``, a file beside it, defined."""
     binary = tmp_path / "fake-pi"
-    binary.write_text(
+    write_executable(
+        binary,
         "#!/usr/bin/env python3\nimport json, os\nfrom pathlib import Path\n"
         f'agent = Path(os.environ["PI_CODING_AGENT_DIR"])\nseen = Path({str(tmp_path / "seen.json")!r})\n'
-        + textwrap.dedent(body)
+        + textwrap.dedent(body),
     )
-    binary.chmod(0o755)
     return binary
 
 
@@ -1509,11 +1298,13 @@ def test_a_hangup_the_caller_ignores_stays_ignored(tmp_path) -> None:
     temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
     os.kill(wrapper.pid, signal.SIGHUP)
     with pytest.raises(subprocess.TimeoutExpired):
-        wrapper.wait(timeout=1)
+        wrapper.wait(timeout=0.2)
     assert not (tmp_path / "signal").exists()
+    # The status and the agent's note name SIGTERM alone: a SIGHUP passed on would have ended the run first.
     os.kill(wrapper.pid, signal.SIGTERM)
     assert wrapper.wait(timeout=30) == 128 + signal.SIGTERM
     reef.close()
+    assert (tmp_path / "signal").read_text() == str(int(signal.SIGTERM))
     assert not temp.exists()
 
 
@@ -1532,25 +1323,23 @@ def _paged(rows: list[dict], scenario: str, keyed: bool) -> list[dict]:
 
 
 class _FakeReef:
-    """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
-    ``GET /reef/harness/releases`` with ``rows``, the request's progress route with ``progress`` (404 without
-    one; a list is answered in order, its last reading repeated) and the scenario's activate route with the release
-    it names."""
+    """A reef that records every call: inference on any ``/v1/`` path answers with ``receipt`` (a list is answered
+    in order, its last receipt repeated), the request route with ``answer``, ``GET /reef/harness/releases`` with
+    ``rows``, the request's progress route with ``progress`` (404 without one; a list is answered in order, its last
+    reading repeated), the scenario's activate route with the release it names, and any other POST with ``{}``."""
 
     def __init__(
         self,
         answer: dict,
         *,
         status: int = 200,
-        receipt: str = "ask-receipt",
+        receipt: str | list[str] = "ask-receipt",
         rows: list[dict] | None = None,
         progress: dict | list[dict] | None = None,
     ) -> None:
-        import http.server
-        import threading
-
         self.seen: list[dict] = []
         seen = self.seen
+        receipts = [receipt] if isinstance(receipt, str) else receipt
         readings = progress if isinstance(progress, list) else [] if progress is None else [progress]
         progress_path = "/reef/harness/requests/q-1/progress"
 
@@ -1582,10 +1371,11 @@ class _FakeReef:
                 seen.append(
                     {"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body}
                 )
-                if self.path.startswith("/v1/chat/completions"):
-                    self._answer(
-                        200, {"choices": [{"message": {"content": "ok"}}]}, {"x-reef-agent-record-id": receipt}
-                    )
+                if self.path.startswith("/v1/"):
+                    answered = len([call for call in seen if call["path"].startswith("/v1/")])
+                    message = {"role": "assistant", "content": "ok"}
+                    receipt_header = {"x-reef-agent-record-id": receipts[min(answered, len(receipts)) - 1]}
+                    self._answer(200, {"choices": [{"message": message}]}, receipt_header)
                 elif self.path == "/reef/train":
                     key = f"&key={PAGE_KEY}" if "Authorization" in self.headers else ""
                     page = f"/reef/harness/requests/{answer.get('agent_record_id')}/page?scenario=ask-scenario{key}"
@@ -1608,8 +1398,7 @@ class _FakeReef:
             def log_message(self, *args):
                 pass
 
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self._server = serve(Handler)
         self.port = self._server.server_address[1]
 
     def posts(self, path: str) -> list[dict]:
@@ -1617,6 +1406,7 @@ class _FakeReef:
 
     def close(self) -> None:
         self._server.shutdown()
+        self._server.server_close()
 
 
 def _ask_tree(tmp_path: Path, port: int, *, with_release_file: bool = True) -> tuple[str, Path]:
@@ -1649,7 +1439,7 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     """Manual training carries the session id without fabricating feedback."""
     reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
     compose, captures = _ask_tree(tmp_path, reef.port)
-    binary = _make_fake_pi(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path)
     with patch.dict(os.environ, _ask_env(captures, compose, REEF_TOKEN="tok"), clear=True):
         with contextlib.suppress(SystemExit):
             run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
@@ -1667,6 +1457,7 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     uuid.UUID(session)
     (call,) = [seen for seen in reef.seen if seen["path"].startswith("/v1/chat/completions")]
     assert call["headers"]["x-reef-tag-session"] == session  # the tag rode the model call the session made
+    assert call["headers"]["x-reef-tag-release"] == "rel-3"  # and so did the installed release the record keeps
     assert request["headers"]["x-reef-scenario"] == "ask-scenario"
     assert request["headers"]["authorization"] == "Bearer tok"
     assert request["headers"]["content-type"] == "application/json"
@@ -1704,7 +1495,7 @@ def test_run_agent_reaches_reef_with_the_bindings_token_when_the_shell_has_none(
     """The proxy and the agent's own extensions carry the token the install wrote, so a plain shell runs the tree."""
     reef = _FakeReef({"agent_record_id": "q-3", "scenario": "ask-scenario", "request_type": "train"})
     compose, captures = _ask_tree(tmp_path, reef.port)
-    binary = _make_fake_pi(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True), contextlib.suppress(SystemExit):
         run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
     reef.close()
@@ -1751,58 +1542,43 @@ def test_harness_names_the_session_the_spool_recorded(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_harness_auto_mode_refusal_keeps_the_spool(tmp_path) -> None:
-    reef = _FakeReef({"error": "training requests require training_mode='manual'"}, status=400)
+@pytest.mark.parametrize(
+    ("answer", "status", "message"),
+    [
+        (
+            {"error": "training requests require training_mode='manual'"},
+            400,
+            "training requests require training_mode='manual'",
+        ),
+        ({"error": "release_id must be a string"}, 400, r"request failed \(400\): .*release_id must be a string"),
+        (
+            {"scenario": "ask-scenario", "request_type": "train"},
+            200,
+            "answered 200 without an agent_record_id: .*ask-scenario",
+        ),
+    ],
+    ids=["auto-mode", "rejected-body", "no-record-id"],
+)
+def test_harness_refused_exits_with_the_detail_and_keeps_the_spool(tmp_path, answer, status, message) -> None:
+    """A refusal, a rejected body and a 200 without a record id each exit with what the service said, not a
+    traceback, and the spool stays for a later report."""
+    reef = _FakeReef(answer, status=status)
     compose, captures = _ask_tree(tmp_path, reef.port)
     pending = _write_spool_entry(captures, "ask-scenario", "pending")
     with (
         patch.dict(os.environ, _ask_env(captures, compose), clear=True),
-        pytest.raises(SystemExit, match="training requests require training_mode='manual'"),
-    ):
-        harness("ask-scenario", "pi", compose, "ignore the rules")
-    reef.close()
-
-    assert [call["path"] for call in reef.seen] == ["/reef/train"]
-    assert pending.exists()
-
-
-@pytest.mark.unit
-def test_harness_rejected_body_exits_with_the_status_and_the_detail(tmp_path) -> None:
-    reef = _FakeReef({"error": "release_id must be a string"}, status=400)
-    compose, captures = _ask_tree(tmp_path, reef.port)
-    pending = _write_spool_entry(captures, "ask-scenario", "pending")
-    with (
-        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
-        pytest.raises(SystemExit, match=r"request failed \(400\): .*release_id must be a string"),
+        pytest.raises(SystemExit, match=message),
     ):
         harness("ask-scenario", "pi", compose, "text me")
     reef.close()
 
     assert [call["path"] for call in reef.seen] == ["/reef/train"]
     assert pending.exists()
-
-
-@pytest.mark.unit
-def test_harness_200_without_a_record_id_exits_with_the_body_not_a_traceback(tmp_path) -> None:
-    reef = _FakeReef({"scenario": "ask-scenario", "request_type": "train"})
-    compose, captures = _ask_tree(tmp_path, reef.port)
-    with (
-        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
-        pytest.raises(SystemExit, match=r"answered 200 without an agent_record_id: .*ask-scenario"),
-    ):
-        harness("ask-scenario", "pi", compose, "text me")
-    reef.close()
-
-    assert [call["path"] for call in reef.seen] == ["/reef/train"]
 
 
 @pytest.mark.unit
 def test_harness_unreachable_exits_and_keeps_the_spool(tmp_path) -> None:
-    import socket
-
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     compose, captures = _ask_tree(tmp_path, port)
     pending = _write_spool_entry(captures, "ask-scenario", "pending")
     with (
@@ -2361,8 +2137,6 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
 def test_the_how_to_use_line_keeps_a_long_first_paragraph_whole_and_drops_backticks() -> None:
     """Entering and leaving a mode often share the first paragraph, so a long one is not cut at a few hundred
     characters; backticks go, so a model that quotes the line in inline code renders it whole."""
-    from reef.harness.client.wrapper import release_usage
-
     leave = "Type `$chat off` to leave, and every tool is back in the next turn."
     usage = "Type `$chat` in a Codex session to enter chat mode. " + "It answers from web search only. " * 12 + leave
     design = f"A chat skill.\n\nHow to use: {usage}\n\nA second paragraph stays on the page."
@@ -2435,21 +2209,15 @@ def test_main_dispatches_wait_with_the_request_and_the_timeout(tmp_path: Path) -
     with (
         patch.dict(os.environ, _main_env(tmp_path)),
         patch("reef.harness.client.wrapper.wait_request", lambda *args, **kwargs: waited.append((args, kwargs)) or 2),
-        patch("sys.argv", ["reef-pi", "wait", "q-1", "--timeout", "500"]),
-        pytest.raises(SystemExit) as exited,
     ):
-        main()
-    assert exited.value.code == 2
-    assert waited == [(("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 500.0, "poll": False})]
-    waited.clear()
-    with (
-        patch.dict(os.environ, _main_env(tmp_path)),
-        patch("reef.harness.client.wrapper.wait_request", lambda *args, **kwargs: waited.append((args, kwargs)) or 0),
-        patch("sys.argv", ["reef-pi", "wait", "q-1", "--timeout", "100", "--poll"]),
-        pytest.raises(SystemExit),
-    ):
-        main()
-    assert waited == [(("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 100.0, "poll": True})]
+        for flags in (["--timeout", "500"], ["--timeout", "100", "--poll"]):
+            with patch("sys.argv", ["reef-pi", "wait", "q-1", *flags]), pytest.raises(SystemExit) as exited:
+                main()
+            assert exited.value.code == 2
+    assert waited == [
+        (("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 500.0, "poll": False}),
+        (("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 100.0, "poll": True}),
+    ]
 
 
 @pytest.mark.unit
@@ -2503,8 +2271,6 @@ def test_a_clear_from_the_agent_empties_what_the_wrapper_would_spool() -> None:
     """DELETE /_captures after an in session report: publish_turn spools nothing, so no later report resends them."""
     from reef_client.serve import CapturedTurn
 
-    from reef.harness.client.wrapper import CaptureProxy
-
     proxy = CaptureProxy("http://127.0.0.1:9", "clear-scenario", None, tags={"release": "r"})
     proxy.start()
     try:
@@ -2539,12 +2305,16 @@ def _serve_newest(rows: list[dict]) -> list[dict]:
 class _ReleasesReef:
     """A reef whose GET /reef/harness/releases answers ``rows`` (see :func:`_serve_newest`), whose step pages are
     ``pages`` and whose install route serves ``install``; every request is recorded, and a step without a page
-    answers the route's 404 text."""
+    answers the route's 404 text. With a ``token`` every route answers 401 to a request without its bearer."""
 
-    def __init__(self, rows: list[dict], *, pages: dict[int, str] | None = None, install: str | None = None) -> None:
-        import http.server
-        import threading
-
+    def __init__(
+        self,
+        rows: list[dict],
+        *,
+        pages: dict[int, str] | None = None,
+        install: str | None = None,
+        token: str | None = None,
+    ) -> None:
         rows = _serve_newest(rows)
 
         self.seen: list[dict] = []
@@ -2554,7 +2324,9 @@ class _ReleasesReef:
             def do_GET(self):
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 step = re.fullmatch(r"/reef/harness/releases/(\d+)/page", self.path)
-                if self.path == "/reef/harness/releases":
+                if token is not None and self.headers.get("Authorization") != f"Bearer {token}":
+                    code, kind, raw = 401, "application/json", b'{"error": "invalid service token"}'
+                elif self.path == "/reef/harness/releases":
                     code, kind = 200, "application/json"
                     # The scenario the request names, as a real service answers for it.
                     scenario = self.headers.get("x-reef-scenario", "setup-scenario")
@@ -2579,12 +2351,12 @@ class _ReleasesReef:
             def log_message(self, *args):
                 pass
 
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self._server = serve(Handler)
         self.port = self._server.server_address[1]
 
     def close(self) -> None:
         self._server.shutdown()
+        self._server.server_close()
 
 
 def _row(release_id: str, requires: list[dict] | None = None, *, inactive: bool = False) -> dict:
@@ -2706,8 +2478,6 @@ def test_setup_asks_before_running_a_check_and_asks_for_an_unset_variables_value
 
 @pytest.mark.unit
 def test_setup_without_a_release_file_a_reef_or_any_item_says_so(tmp_path, capsys) -> None:
-    import socket
-
     reef = _ReleasesReef([_row("v1"), _row("v2", []), _row("v3", [{"name": "later", "kind": "env"}], inactive=True)])
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
@@ -2720,9 +2490,7 @@ def test_setup_without_a_release_file_a_reef_or_any_item_says_so(tmp_path, capsy
         pytest.raises(SystemExit, match=r"no \.reef-harness-release release file at .*no installed release to set up"),
     ):
         setup("setup-scenario", "pi", compose)
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     (tmp_path / "down").mkdir()
     compose, _ = _setup_tree(tmp_path / "down", port, {"release_id": "v1"})
     with (
@@ -2745,7 +2513,7 @@ def test_run_agent_refuses_unmet_requirements_and_shows_setup_without_running_ch
         "setup": [{"name": "TWILIO_SID", "checked_at": 1.0}],
     }
     compose, _ = _setup_tree(tmp_path, reef.port, release_info)
-    binary = _make_fake_pi(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path)
     captures = tmp_path / "captures"
     captures.mkdir()
     with (
@@ -2780,8 +2548,7 @@ def test_run_agent_requires_program_on_path_even_when_checked_off(
     ran = tmp_path / "check-ran"
     program = tmp_path / "reef-required-pdf-tool"
     if installed:
-        program.write_text("#!/bin/sh\nexit 0\n")
-        program.chmod(0o755)
+        write_executable(program, "#!/bin/sh\nexit 0\n")
     item = {"name": program.name, "kind": "binary", "prompt": "Install the PDF reader and add it to PATH"}
     if has_check:
         item["check"] = f"touch {ran}"
@@ -2791,7 +2558,7 @@ def test_run_agent_requires_program_on_path_even_when_checked_off(
         "setup": [{"name": program.name, "check": item.get("check")}] if checked_off else [],
     }
     compose, _ = _setup_tree(tmp_path, reef.port, release_info)
-    binary = _make_fake_pi(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path)
     captures = tmp_path / "captures"
     captures.mkdir()
     env = _ask_env(captures, compose, PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
@@ -2815,27 +2582,6 @@ def test_run_agent_requires_program_on_path_even_when_checked_off(
         if not installed:
             assert f"{program.name} is not on PATH; install it before starting the agent" in err
     assert not ran.exists()
-
-
-@pytest.mark.unit
-def test_main_dispatches_setup_with_yes_and_marks_and_exits_with_its_status(tmp_path) -> None:
-    called: list[tuple] = []
-    env = {
-        "REEF_HARNESS_BINARY": "fake-pi",
-        "REEF_HARNESS_COMPOSE": str(tmp_path),
-        "REEF_HARNESS_SCENARIO": "setup-scenario",
-        "REEF_HARNESS_ADAPTER": "pi",
-        "REEF_HARNESS_ENV_VAR": "PI_CODING_AGENT_DIR",
-    }
-    with (
-        patch.dict(os.environ, env),
-        patch("reef.harness.client.wrapper.setup", lambda *args, **kwargs: called.append((args, kwargs)) or 1),
-        patch("sys.argv", ["reef-pi", "setup", "--yes", "--mark", "a", "--mark", "b"]),
-        pytest.raises(SystemExit) as exited,
-    ):
-        main()
-    assert exited.value.code == 1
-    assert called == [(("setup-scenario", "pi", str(tmp_path)), {"yes": True, "marks": ("a", "b")})]
 
 
 def _chain_row(release_id: str, parent: str | None, requires: list[dict] | None = None, *, inactive: bool = False):
@@ -2909,8 +2655,6 @@ def test_setup_reads_the_chains_union_and_release_names_an_inactive_row(tmp_path
 def test_setup_runs_an_item_again_when_its_check_changed_since_the_check_off(tmp_path, capsys) -> None:
     """A check off records the check it stood for: an item whose check differs counts as unmet everywhere the
     check offs are read, setup runs it again, and the new record carries the new check."""
-    from reef.harness.client.wrapper import _met
-
     ran = tmp_path / "ran"
     item = {"name": "notify", "kind": "permission", "check": f"touch {ran}"}
     stale = {"name": "notify", "checked_at": 1.0, "check": "touch elsewhere"}
@@ -2939,27 +2683,6 @@ def test_setup_runs_an_item_again_when_its_check_changed_since_the_check_off(tmp
     (record,) = json.loads(release_file.read_text())["setup"]
     assert record["check"] == "exit 1"
     reef.close()
-
-
-@pytest.mark.unit
-def test_main_passes_release_to_setup_only_when_named(tmp_path) -> None:
-    called: list[tuple] = []
-    env = {
-        "REEF_HARNESS_BINARY": "fake-pi",
-        "REEF_HARNESS_COMPOSE": str(tmp_path),
-        "REEF_HARNESS_SCENARIO": "setup-scenario",
-        "REEF_HARNESS_ADAPTER": "pi",
-        "REEF_HARNESS_ENV_VAR": "PI_CODING_AGENT_DIR",
-    }
-    with (
-        patch.dict(os.environ, env),
-        patch("reef.harness.client.wrapper.setup", lambda *args, **kwargs: called.append((args, kwargs)) or 0),
-        patch("sys.argv", ["reef-pi", "setup", "--release", "v4"]),
-        pytest.raises(SystemExit) as exited,
-    ):
-        main()
-    assert exited.value.code == 0
-    assert called == [(("setup-scenario", "pi", str(tmp_path)), {"yes": False, "marks": (), "release": "v4"})]
 
 
 # -- setup --json, --set, --run, the env file, update -------------------------------------------
@@ -3226,37 +2949,17 @@ INSTALL_SCRIPT = textwrap.dedent(
 
 
 @pytest.mark.unit
-def test_update_names_how_to_use_the_release_it_installed(tmp_path, capsys) -> None:
-    """After the install, update prints the first paragraph of the release's How to use, as wait does."""
-    served = _row("v2")
-    served["metrics"] = {"proposal_notes": {"design": "A mode.\n\nHow to use: type /chat, then /chat off."}}
-    reef = _ReleasesReef([_row("v1"), served], install=INSTALL_SCRIPT)
-    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
-    env = _ask_env(
-        tmp_path / "captures",
-        compose,
-        REEF_TOKEN="tok",
-        REEF_HARNESS_DEST=str(Path(compose).resolve().parent),
-        REEF_SERVICE_URL=f"http://127.0.0.1:{reef.port}/",
-        REEF_SCENARIO="setup-scenario",
-    )
-    with patch.dict(os.environ, env, clear=True):
-        assert update("setup-scenario", "pi", compose) == 0
-    assert capsys.readouterr().out.splitlines()[-2:] == [
-        "reef-pi update: installed release v2",
-        "reef-pi update: how to use: Type /chat, then /chat off.",
-    ]
-
-
-@pytest.mark.unit
 def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses_unmet_items_first(
     tmp_path, capsys
 ) -> None:
     """The script comes from the install route with the token and the scenario header and runs with bash for the
     install root, the token in its environment; an unmet item is printed and nothing fetched, exit 3; an env item
-    the environment meets is checked off before the script runs, so its evaluation sees it; a failing script, an unknown
-    release and a route that has no script are exit 1."""
-    rows = [_row("v1"), _row("v2", [{"name": "SMTP", "kind": "env", "prompt": "The SMTP host"}])]
+    the environment meets is checked off before the script runs, so its evaluation sees it; after the install the
+    first paragraph of the release's How to use is printed, as wait does; a failing script, an unknown release and a
+    route that has no script are exit 1."""
+    served = _row("v2", [{"name": "SMTP", "kind": "env", "prompt": "The SMTP host"}])
+    served["metrics"]["proposal_notes"] = {"design": "A mode.\n\nHow to use: type /chat, then /chat off."}
+    rows = [_row("v1"), served]
     reef = _ReleasesReef(rows, install=INSTALL_SCRIPT)
     compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
     env = _ask_env(
@@ -3279,7 +2982,10 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
     assert [call["path"] for call in reef.seen] == ["/reef/harness/releases"] and not (tmp_path / "dest-seen").exists()
     with patch.dict(os.environ, {**env, "SMTP": "smtp.example"}, clear=True):
         assert update("setup-scenario", "pi", compose) == 0
-    assert capsys.readouterr().out.splitlines()[-1] == "reef-pi update: installed release v2"
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        "reef-pi update: installed release v2",
+        "reef-pi update: how to use: Type /chat, then /chat off.",
+    ]
     install_call = reef.seen[-1]
     assert install_call["path"] == "/reef/harness/install?adapter=pi"
     assert install_call["headers"]["x-reef-scenario"] == "setup-scenario"
@@ -3290,7 +2996,6 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
     assert (tmp_path / "python-seen").read_text().strip() == sys.executable
     assert [item["name"] for item in json.loads((tmp_path / "release-before").read_text())["setup"]] == ["SMTP"]
     assert json.loads(release_file.read_text())["release_id"] == "v2"
-    assert not list(Path(tempfile.gettempdir()).glob("reef-harness-install-*.sh"))
     with patch.dict(os.environ, {**env, "SMTP": "smtp.example"}, clear=True):
         assert update("setup-scenario", "pi", compose, release="v2") == 0
         assert update("setup-scenario", "pi", compose, release="nope") == 1
@@ -3359,17 +3064,22 @@ def test_update_installs_into_the_install_root_when_the_composition_directory_is
 
 
 @pytest.mark.unit
-def test_update_runs_the_install_script_from_bashs_standard_input_so_no_copy_of_it_is_written(tmp_path) -> None:
+def test_update_runs_the_install_script_from_bashs_standard_input_so_no_copy_of_it_is_written(
+    tmp_path, monkeypatch
+) -> None:
     """bash reads a script file while it runs, and a copy in TMPDIR is one a sandboxed command could rewrite
     first, so the fetched script reaches bash on its standard input and no file of it exists while it runs."""
-    tmpdir = tempfile.gettempdir()
-    reef = _ReleasesReef([_row("v1")], install=f'#!/bin/sh\nls "{tmpdir}" > "$1/tmpdir-seen"\n')
+    # A temp directory of the test's own: the system one can hold many thousand entries, and other tests write it.
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(tmpdir))
+    reef = _ReleasesReef([_row("v1")], install=f'#!/bin/sh\nls -A "{tmpdir}" > "$1/tmpdir-seen"\n')
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
-    with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok"), clear=True):
+    env = _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok", TMPDIR=str(tmpdir))
+    with patch.dict(os.environ, env, clear=True):
         assert update("setup-scenario", "pi", compose) == 0
     reef.close()
-    seen = (tmp_path / "tmpdir-seen").read_text().splitlines()
-    assert not [name for name in seen if name.startswith("reef-harness-install-")]
+    assert (tmp_path / "tmpdir-seen").read_text() == ""
 
 
 @pytest.mark.unit
@@ -3537,7 +3247,8 @@ def test_session_does_not_redirect_an_explicit_update_of_another_installation(tm
 def _make_env_dump_binary(tmp_path: Path) -> Path:
     """A fake agent that writes its environment to ``env.json`` and its arguments to ``argv.json`` beside itself."""
     binary = tmp_path / "fake-env-dump"
-    binary.write_text(
+    write_executable(
+        binary,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -3546,9 +3257,8 @@ def _make_env_dump_binary(tmp_path: Path) -> Path:
             Path(__file__).with_name("env.json").write_text(json.dumps(dict(os.environ)))
             Path(__file__).with_name("argv.json").write_text(json.dumps(sys.argv[1:]))
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     return binary
 
 
@@ -3596,17 +3306,9 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
 
 def dsh_install(tmp_path: Path) -> Path:
     """An installed dsh tree with one agent_command, bound to a Reef that is never called."""
-    from reef.harness.adapters import get_adapter
-    from reef.harness.rollouts.model_binding import ModelBinding
-    from reef.harness.tree.render import render_composition
-
-    descriptor = get_adapter("dsh")
-    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m1", api_key="dummy")
-    nodes = [("agent_command", {"name": "reefine", "text": "File the request."}), *binding.compose_nodes(descriptor)]
     root = tmp_path / "install"
-    for relative, text in render_composition(nodes, descriptor).items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m1", api_key="dummy")
+    write_rendered_tree(root, "dsh", binding, (("agent_command", {"name": "reefine", "text": "File the request."}),))
     return root
 
 
@@ -3641,13 +3343,10 @@ def test_run_agent_ends_quietly_on_ctrl_c(tmp_path, on_interrupt, status) -> Non
     """Ctrl-C reaches the wrapper and the agent at once, as a terminal sends it to both (reef-dsh web runs
     until then): the wrapper waits for the agent, prints no traceback, removes the temp copy, and exits with the
     agent's status, 130 when the signal ended the agent."""
-    import signal
-    import subprocess
-    import time
-
     compose = str(dsh_install(tmp_path) / "dsh")
     binary = tmp_path / "fake-dsh"
-    binary.write_text(
+    write_executable(
+        binary,
         f"#!{sys.executable}\n"
         + textwrap.dedent(
             """\
@@ -3660,17 +3359,13 @@ def test_run_agent_ends_quietly_on_ctrl_c(tmp_path, on_interrupt, status) -> Non
             Path(__file__).with_name("started.json").write_text(json.dumps({"home": os.environ["DSH_HOME"]}))
             time.sleep(60)
             """
-        )
+        ),
     )
-    binary.chmod(0o755)
     captures = tmp_path / "captures"
     captures.mkdir()
-    root = str(Path(__file__).resolve().parents[2])
-    code = f"import sys; sys.path.insert(0, {root!r}); from reef.harness.client.wrapper import run_agent; "
-    code += "run_agent(*sys.argv[1:6], sys.argv[6:])"
     # A session of its own, so the signal reaches the wrapper and its agent and not the test runner.
     wrapper = subprocess.Popen(
-        [sys.executable, "-c", code, str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", on_interrupt],
+        run_agent_command(binary, compose, "dsh-scenario", "dsh", "DSH_HOME", on_interrupt),
         env=_ask_env(captures, compose),
         stderr=subprocess.PIPE,
         text=True,
@@ -3711,57 +3406,53 @@ def test_a_start_on_a_tree_no_install_recorded_says_its_files_were_not_checked(t
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("switch", ["DISABLE_AUTOUPDATER", "DISABLE_UPDATES"])
-def test_claude_session_runs_with_the_updater_off_unless_the_shell_sets_it(tmp_path, switch: str) -> None:
+def test_claude_session_runs_with_the_updater_off_unless_the_shell_sets_it(tmp_path) -> None:
     """Claude Code's updater installs the latest release over the person's own claude: ``DISABLE_AUTOUPDATER`` stops
     the background one, ``DISABLE_UPDATES`` its ``update``, ``upgrade`` and ``install`` commands wherever they sit on
     the command line. A reef-claude session gets both set to ``1``; a value the shell sets reaches the agent
     unchanged."""
-    compose = tmp_path / "claude-tree" / "claude"
-    compose.mkdir(parents=True)
-    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
+    compose = make_claude_compose(tmp_path)
     binary = _make_env_dump_binary(tmp_path)
-    env = {key: value for key, value in os.environ.items() if key != switch}
+    switches = ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES")
+    env = {key: value for key, value in os.environ.items() if key not in switches}
     env["REEF_HARNESS_CAPTURES_DIR"] = str(tmp_path)
-    seen = []
-    for shell in ({}, {switch: "0"}):
+    for shell, expected in (
+        ({}, ["1", "1"]),
+        ({"DISABLE_AUTOUPDATER": "0"}, ["0", "1"]),
+        ({"DISABLE_UPDATES": "0"}, ["1", "0"]),
+    ):
         with patch.dict(os.environ, {**env, **shell}, clear=True), contextlib.suppress(SystemExit):
             run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", "hi"])
-        seen.append(json.loads((tmp_path / "env.json").read_text()).get(switch))
-    assert seen == ["1", "0"]
+        seen = json.loads((tmp_path / "env.json").read_text())
+        assert [seen.get(switch) for switch in switches] == expected, shell
 
 
 @pytest.mark.unit
 def test_claude_session_gets_the_link_handler_setting_ahead_of_the_persons_arguments(tmp_path) -> None:
     """The claude binary gets ``--settings`` with ``disableDeepLinkRegistration`` ahead of the person's arguments,
     whatever the tree's settings.json holds (here a value Claude Code rejects). A ``--settings`` the person gives comes
-    after it, and a version flag that is not the first argument keeps it."""
-    compose = tmp_path / "claude-tree" / "claude"
-    compose.mkdir(parents=True)
-    rejected = {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}, "cleanupPeriodDays": 0}
-    (compose / "settings.json").write_text(json.dumps(rejected) + "\n")
+    after it, and a version flag that is not the first argument keeps it. Claude Code prints its version early only
+    when nothing is ahead of the flag (``-V`` is an unknown option after ``--settings``), so a command line that
+    starts with a version flag gets no ``--settings``."""
+    compose = make_claude_compose(
+        tmp_path, {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}, "cleanupPeriodDays": 0}
+    )
     binary = _make_env_dump_binary(tmp_path)
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     ours = ["--settings", '{"disableDeepLinkRegistration":"disable"}']
-    for args in (["-p", "hi"], ["--settings", "mine.json", "-p", "hi"], ["mcp", "list"], ["-p", "hi", "-v"]):
+    for args, leading in (
+        (["-p", "hi"], ours),
+        (["--settings", "mine.json", "-p", "hi"], ours),
+        (["mcp", "list"], ours),
+        (["-p", "hi", "-v"], ours),
+        (["--version"], []),
+        (["-v"], []),
+        (["-V"], []),
+        (["-v", "--verbose"], []),
+    ):
         with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
             run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", args)
-        assert json.loads((tmp_path / "argv.json").read_text()) == [*ours, *args]
-
-
-@pytest.mark.unit
-def test_claude_version_flags_reach_the_binary_with_nothing_ahead(tmp_path) -> None:
-    """Claude Code prints its version early only when nothing is ahead of the flag (``-V`` is an unknown option
-    after ``--settings``), so a command line that starts with a version flag gets no ``--settings``."""
-    compose = tmp_path / "claude-tree" / "claude"
-    compose.mkdir(parents=True)
-    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
-    binary = _make_env_dump_binary(tmp_path)
-    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
-    for args in (["--version"], ["-v"], ["-V"], ["-v", "--verbose"]):
-        with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
-            run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", args)
-        assert json.loads((tmp_path / "argv.json").read_text()) == args
+        assert json.loads((tmp_path / "argv.json").read_text()) == [*leading, *args]
 
 
 @pytest.mark.unit
@@ -3807,35 +3498,42 @@ def test_claude_help_names_the_settings_ahead_of_the_arguments(tmp_path, capsys)
 
 @pytest.mark.unit
 def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
+    """Each form reaches its function with the flags it names (``--release`` only when named) and exits with its
+    status."""
     called: list[tuple[str, tuple, dict]] = []
 
     def record(name: str):
-        return lambda *args, **kwargs: called.append((name, args, kwargs)) or 0
+        return lambda *args, **kwargs: called.append((name, args, kwargs)) or (1 if name == "setup" else 0)
 
     argvs = [
-        ["reef-pi", "setup", "--json", "--release", "v4"],
-        ["reef-pi", "setup", "--set", "REEF_AWAY_PHONE=+1 555"],
-        ["reef-pi", "setup", "--run", "notify", "--release", "v4"],
-        ["reef-pi", "update"],
-        ["reef-pi", "update", "--release", "v4"],
+        (["reef-pi", "setup", "--yes", "--mark", "a", "--mark", "b"], 1),
+        (["reef-pi", "setup", "--release", "v4"], 1),
+        (["reef-pi", "setup", "--json", "--release", "v4"], 0),
+        (["reef-pi", "setup", "--set", "REEF_AWAY_PHONE=+1 555"], 0),
+        (["reef-pi", "setup", "--run", "notify", "--release", "v4"], 0),
+        (["reef-pi", "update"], 0),
+        (["reef-pi", "update", "--release", "v4"], 0),
     ]
     with (
         patch.dict(os.environ, _main_env(tmp_path, "setup-scenario")),
+        patch("reef.harness.client.wrapper.setup", record("setup")),
         patch("reef.harness.client.wrapper.setup_json", record("setup_json")),
         patch("reef.harness.client.wrapper.setup_set", record("setup_set")),
         patch("reef.harness.client.wrapper.setup_run", record("setup_run")),
         patch("reef.harness.client.wrapper.update", record("update")),
     ):
-        for argv in argvs:
+        for argv, status in argvs:
             with patch("sys.argv", argv), pytest.raises(SystemExit) as exited:
                 main()
-            assert exited.value.code == 0
+            assert exited.value.code == status, argv
         # The three forms exclude one another.
         with patch("sys.argv", ["reef-pi", "setup", "--json", "--run", "x"]), pytest.raises(SystemExit) as exited:
             main()
         assert exited.value.code == 2
     root = ("setup-scenario", "pi", str(tmp_path))
     assert called == [
+        ("setup", root, {"yes": True, "marks": ("a", "b")}),
+        ("setup", root, {"yes": False, "marks": (), "release": "v4"}),
         ("setup_json", root, {"release": "v4"}),
         ("setup_set", (*root, "REEF_AWAY_PHONE=+1 555"), {}),
         ("setup_run", (*root, "notify"), {"release": "v4"}),
@@ -3847,73 +3545,31 @@ def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
 # -- reef-<adapter> doctor: one report of what the install needs ---------------------------------
 
 
-class _DoctorReef:
-    """A reef that serves only the harness routes, checks the bearer on them, and names one active release."""
-
-    def __init__(self, token: str, head: str, rows: list[dict] | None = None) -> None:
-        import http.server
-        import threading
-
-        catalog = (
-            rows
-            if rows is not None
-            else [{"release_id": head, "artifact_id": head, "checkpoint": True, "active": True, "activated": True}]
-        )
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                # Only the harness routes, the ones the API platform exposes too; no service wide status.
-                if self.headers.get("Authorization") != f"Bearer {token}":
-                    code, payload = 401, {"error": "invalid service token"}
-                elif self.path == "/reef/harness/releases":
-                    code, payload = 200, {"releases": _paged(catalog, "doc-scenario", True)}
-                else:
-                    code, payload = 404, {}
-                raw = json.dumps(payload).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
-
-            def log_message(self, *args):
-                pass
-
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-        self.port = self._server.server_address[1]
-
-    def close(self) -> None:
-        self._server.shutdown()
-
-
 @pytest.mark.unit
 def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypatch) -> None:
-    """An inactive release is served to nobody until a person activates it; doctor says so
-    with the step page, and stops saying so once it is active."""
-    from reef.harness.client.wrapper import doctor
-
+    """An inactive release is served to nobody until a person activates it; doctor says so in its last row, with
+    the step page link the service lists (the scenario and the page key in its query, so it opens from a browser as
+    the wait's), and stops saying so once it is active."""
     passed = {"metrics": {"selected": True}, "checkpoint": True}
     held = [
         {"release_id": "rel-3", "artifact_id": "rel-3", "checkpoint": True, "active": True, "activated": True},
         {"release_id": "rel-4", "artifact_id": "rel-4", **passed, "active": False, "activated": False},
     ]
-    reef = _DoctorReef(token="dummy", head="rel-3", rows=held)
+    reef = _ReleasesReef(held, token="dummy")
     compose, _ = _ask_tree(tmp_path, reef.port)
     binary = tmp_path / "fake-pi"
-    binary.write_text("#!/bin/sh\necho 0.84.2\n")
-    binary.chmod(0o755)
+    write_executable(binary, "#!/bin/sh\necho 0.84.2\n")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
     assert any(line.startswith("ok  release") and "rel-3 installed, the active release" in line for line in out)
-    (review,) = [line for line in out if line.startswith("ok  review")]
-    assert f"rel-4 waits for your review: http://127.0.0.1:{reef.port}/reef/harness/releases/1/page" in review
+    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={PAGE_KEY}"
+    assert out[-1].startswith("ok  review") and out[-1].endswith(f"rel-4 waits for your review: {page}")
     reef.close()
 
     activated = [{**held[0], "active": False}, {**held[1], "active": True, "activated": True}]
-    reef = _DoctorReef(token="dummy", head="rel-3", rows=activated)
+    reef = _ReleasesReef(activated, token="dummy")
     (tmp_path / "activated").mkdir()
     compose, _ = _ask_tree(tmp_path / "activated", reef.port)
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
@@ -3923,13 +3579,19 @@ def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypa
 
 @pytest.mark.unit
 def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, capsys, monkeypatch) -> None:
-    from reef.harness.client.wrapper import doctor
-
-    reef = _DoctorReef(token="dummy", head="rel-3")
+    """Each row prints, and the status is the worst row's. The binary row runs --version with the descriptor's
+    directories on a scratch root, never the person's home."""
+    reef = _ReleasesReef([_row("rel-3")], token="dummy")
     compose, _ = _ask_tree(tmp_path, reef.port)  # models.json binds the token dummy; release file names rel-3
     binary = tmp_path / "fake-pi"
-    binary.write_text("#!/bin/sh\necho 0.84.2\n")
-    binary.chmod(0o755)
+    write_executable(
+        binary,
+        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n',
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(scratch))
     monkeypatch.delenv("REEF_TOKEN", raising=False)
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}" if command == "rg" else None)
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 1  # fd is missing
@@ -3940,6 +3602,8 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
     assert any(line.startswith("ok  tool") and "rg at /usr/bin/rg" in line for line in out)
     assert any(line.startswith("!!  tool") and "fd missing: install fd" in line for line in out)
     assert any(line.startswith("ok  release") and "rel-3 installed, the active release" in line for line in out)
+    assert not (tmp_path / "home" / ".pi").exists()
+    assert list(scratch.iterdir()) == []
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     # A wrong token in the shell wins over the binding's, and the service says so.
@@ -3950,58 +3614,11 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
     reef.close()
 
 
-@pytest.mark.unit
-def test_doctor_version_probe_writes_nothing_in_the_home_directory(tmp_path, capsys, monkeypatch) -> None:
-    """The binary row runs --version with the descriptor's directories on a scratch root, never the person's home."""
-    from reef.harness.client.wrapper import doctor
-
-    reef = _DoctorReef(token="dummy", head="rel-3")
-    compose, _ = _ask_tree(tmp_path, reef.port)
-    binary = tmp_path / "fake-pi"
-    binary.write_text(
-        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n'
-    )
-    binary.chmod(0o755)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    scratch = tmp_path / "tmp"
-    scratch.mkdir()
-    monkeypatch.setattr("tempfile.tempdir", str(scratch))
-    doctor("doc-scenario", "pi", compose, str(binary))
-    assert any(line.startswith("ok  binary") and "0.84.2" in line for line in capsys.readouterr().out.splitlines())
-    assert not (tmp_path / "home" / ".pi").exists()
-    assert list(scratch.iterdir()) == []
-    reef.close()
-
-
-@pytest.mark.unit
-def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, capsys, monkeypatch) -> None:
-    """The review row's page link is the one the service lists, with the scenario and the page key, so it opens
-    from a browser as the wait's."""
-    from reef.harness.client.wrapper import doctor
-
-    inactive = _step_row("rel-2222-inactive", {"selected": True}, inactive=True)
-    reef = _ReleasesReef([_row("rel-1"), inactive])
-    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "rel-1"})
-    binary = tmp_path / "fake-pi"
-    binary.write_text("#!/bin/sh\necho 0.84.2\n")
-    binary.chmod(0o755)
-    monkeypatch.delenv("REEF_TOKEN", raising=False)
-    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
-    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
-    out = capsys.readouterr().out.splitlines()
-    assert any(line.startswith("ok  release") and "rel-1 installed, the active release" in line for line in out)
-    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={PAGE_KEY}"
-    assert out[-1].startswith("ok  review") and out[-1].endswith(f"rel-2222 waits for your review: {page}")
-    reef.close()
-
-
 # -- reef-<adapter> page: a step's page as a file the desktop opens ------------------------------
 
 
 @pytest.mark.unit
 def test_page_writes_the_step_page_to_the_cache_prints_its_path_and_opens_it(tmp_path, capsys, monkeypatch) -> None:
-    from reef.harness.client.wrapper import page
-
     reef = _ReleasesReef([_row("rel-1"), _row("rel-2")], pages={1: "<html>step 1</html>"})
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "rel-1"})
     opened: list[Path] = []
@@ -4077,10 +3694,8 @@ def test_doctor_reports_a_required_program_and_runs_no_check_of_its_own(tmp_path
     """Each ``binary`` item of the installed release is a program row, ok when the program is on PATH and not
     when it is missing, with the item's prompt as the hint. The check an item names is a command the release
     wrote: it runs in setup, where the person confirms it, and never here."""
-    from reef.harness.client.wrapper import doctor
-
     ran = tmp_path / "ran"
-    reef = _DoctorReef(token="dummy", head="rel-3")
+    reef = _ReleasesReef([_row("rel-3")], token="dummy")
     compose, _ = _ask_tree(tmp_path, reef.port)
     (tmp_path / ".reef-harness-release").write_text(
         json.dumps(
@@ -4096,8 +3711,7 @@ def test_doctor_reports_a_required_program_and_runs_no_check_of_its_own(tmp_path
         encoding="utf-8",
     )
     binary = tmp_path / "fake-pi"
-    binary.write_text("#!/bin/sh\necho 0.84.2\n")
-    binary.chmod(0o755)
+    write_executable(binary, "#!/bin/sh\necho 0.84.2\n")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
     monkeypatch.setattr("shutil.which", lambda command: None if command == "pdftotext" else f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 1  # pdftotext is missing

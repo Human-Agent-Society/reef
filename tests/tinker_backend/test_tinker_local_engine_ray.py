@@ -21,7 +21,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import pytest
@@ -160,12 +160,18 @@ def training_item(version: str, index: int):
 
 
 def stop_process(process) -> None:
-    if process is not None and process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+    """Stop the component, then anything left in its process group.
+
+    The signal goes to the component alone: its ``ray.shutdown`` stops the Ray processes it started, which takes
+    about a second. A signal to the whole group kills those processes first, and the shutdown then waits for
+    them for several seconds."""
+    if process is None or process.poll() is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=60)
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
 
 
 @contextmanager
@@ -197,7 +203,7 @@ def inference_component(tmp_path):
             except RuntimeError:
                 pass  # not listening yet
             assert time.monotonic() < deadline, "component did not start:\n" + log_path.read_text()[-4000:]
-            time.sleep(0.5)
+            time.sleep(0.1)
         yield url, control
     finally:
         stop_process(component)
@@ -315,7 +321,7 @@ def train_one_step(dispatcher, inference) -> None:
         )
     deadline = time.monotonic() + (1500 if REAL else 300)
     while loop_state(scenario).finished_jobs < 1 and time.monotonic() < deadline:
-        time.sleep(1)
+        time.sleep(0.05)
     state = loop_state(scenario)
     assert state.finished_jobs == 1, json.dumps(dispatcher.build_training_status(), default=str)[:3000]
     assert state.last_job.event == "finished", state.last_job
