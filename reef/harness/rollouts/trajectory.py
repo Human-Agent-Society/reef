@@ -1,0 +1,451 @@
+"""Session-log readers: one per harness trajectory format.
+
+A reader is a pure function from the descriptor's trajectory directory to an
+ordered tuple of event objects; most harnesses keep plain files there, and
+opencode a SQLite database. A missing directory reads as an empty trajectory
+(a crashed rollout still yields a result); corruption raises, except for one
+torn final JSONL line per file, which a mid-write crash legitimately leaves
+behind (the same tolerance the commit history applies).
+
+Subclass :class:`TrajectoryReader`, set the class attribute ``format``, implement
+:meth:`TrajectoryReader.__call__`, and decorate with ``@register_trajectory_reader``::
+
+    @register_trajectory_reader
+    class MyReader(TrajectoryReader):
+        format = "my-format"
+
+        def __call__(self, path):
+            ...
+
+An external reader is named as a dotted ``"module:callable"`` reference that
+:func:`reader_for` resolves; a plain callable from a dotted reference is
+wrapped by :class:`_CallableTrajectoryReader`.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from reef.core.errors import ReefError
+
+
+class TrajectoryError(ReefError):
+    """A session log exists but cannot be decoded as its declared format."""
+
+
+class TrajectoryReader(ABC):
+    """Base class for harness trajectory readers.
+
+    Required (subclass must set):
+        ``format`` — canonical format name matched against the descriptor's
+        ``trajectory_format``.
+
+    Implement:
+        ``__call__`` — read the trajectory directory and return an ordered
+        tuple of event objects.
+    """
+
+    format: str
+
+    @abstractmethod
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        """Read the trajectory directory and return ordered event objects."""
+
+
+class _CallableTrajectoryReader(TrajectoryReader):
+    """Adapter wrapping a plain callable as a :class:`TrajectoryReader` instance.
+
+    Used when a dotted ``"module:callable"`` reference resolves to a function
+    rather than a ``TrajectoryReader`` subclass instance.
+    """
+
+    format = ""
+
+    def __init__(self, fn: Callable[[Path], tuple[dict[str, Any], ...]]) -> None:
+        self._fn = fn
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return self._fn(path)
+
+
+_readers: dict[str, TrajectoryReader] = {}
+"""Bundled trajectory readers registered at import time by
+:func:`register_trajectory_reader`.
+
+Read by :func:`reader_for`; an external reader is a dotted reference instead.
+"""
+
+
+def register_trajectory_reader(cls: type[TrajectoryReader]) -> type[TrajectoryReader]:
+    """Class decorator: instantiate and register a bundled trajectory reader."""
+    instance = cls()
+    fmt = instance.format
+    if fmt in _readers:
+        raise ValueError(f"trajectory reader {fmt!r} is already registered")
+    _readers[fmt] = instance
+    return cls
+
+
+def reader_for(format_: str) -> TrajectoryReader:
+    """Resolve a registered reader name or a dotted ``"module:callable"`` reference."""
+    reader = _readers.get(format_)
+    if reader is not None:
+        return reader
+    if ":" in format_:
+        return _resolve_dotted(format_)
+    available = ", ".join(sorted(_readers))
+    raise TrajectoryError(f"unknown trajectory format {format_!r}; known: {available}")
+
+
+def _resolve_dotted(reference: str) -> TrajectoryReader:
+    """Import a dotted reader reference, wrapping plain callables."""
+    module_name, separator, attribute = reference.partition(":")
+    if not separator or not module_name or not attribute:
+        available = ", ".join(sorted(_readers))
+        raise TrajectoryError(f"unknown trajectory format {reference!r}; known: {available}")
+    candidate = getattr(importlib.import_module(module_name), attribute)
+    if isinstance(candidate, TrajectoryReader):
+        return candidate
+    if callable(candidate):
+        return _CallableTrajectoryReader(candidate)
+    raise TrajectoryError(f"trajectory reader {reference!r} is not callable")
+
+
+def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
+    """Every ``*.jsonl`` under ``path`` in path order, one event object per line.
+
+    Each file tolerates one torn final line, the residue a crash mid-write
+    leaves behind; a corrupt line anywhere else is an error naming ``label``.
+    """
+    events: list[dict[str, Any]] = []
+    for file in sorted(Path(path).rglob("*.jsonl")):
+        lines = file.read_text(encoding="utf-8").removesuffix("\n").split("\n")
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if index == len(lines) - 1:
+                    break  # torn tail from a crash mid-write; the event never landed
+                raise TrajectoryError(f"{label} {file} has a corrupt event at line {index + 1}") from exc
+            if not isinstance(event, dict):
+                raise TrajectoryError(f"{label} {file} line {index + 1} is not an event object")
+            events.append(event)
+    return tuple(events)
+
+
+@register_trajectory_reader
+class PiSessionReader(TrajectoryReader):
+    """Read pi session JSONL trees: every ``*.jsonl`` under ``path``, in order."""
+
+    format = "pi-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return _read_jsonl_tree(path, "pi session")
+
+
+@register_trajectory_reader
+class ClaudeSessionReader(TrajectoryReader):
+    """Read Claude Code session JSONL trees: every ``*.jsonl`` under ``path``.
+
+    Claude Code writes one transcript per session under
+    ``CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl``, one event
+    object per line. Sorting by relative path orders sessions by their
+    project slug and id; the reader tolerates one torn final line per file,
+    the residue a crash mid-write leaves behind.
+    """
+
+    format = "claude-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return _read_jsonl_tree(path, "claude session")
+
+
+@register_trajectory_reader
+class CodexSessionReader(TrajectoryReader):
+    """Read Codex rollout JSONL trees: every ``*.jsonl`` under ``path``.
+
+    Codex writes rollouts below ``CODEX_HOME/sessions/YYYY/MM/DD``. Sorting
+    by relative path preserves the date hierarchy and rollout id order; the
+    common JSONL reader tolerates one torn final line per rollout.
+    """
+
+    format = "codex-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return _read_jsonl_tree(path, "codex session")
+
+
+@register_trajectory_reader
+class DeepseekSessionReader(TrajectoryReader):
+    """Read DeepSeek Harness session JSONL trees: every ``*.jsonl`` under ``path``.
+
+    dsh writes one log per session under
+    ``DSH_HOME/sessions/<cwd-slug>/session-<id>/session.jsonl``: a ``session``
+    header line, then one ``{type, seq, time, data}`` event object per line.
+    The adapter keeps the log uncompressed (dsh's default is zstd framed).
+    Each event's ``data`` fields are lifted beside ``type``, ``seq`` and
+    ``time``, so an ``assistant/message`` event carries its ``message`` at the
+    top, where the scorers that read pi's events find it.
+    """
+
+    format = "deepseek-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        events = []
+        for event in _read_jsonl_tree(path, "deepseek session"):
+            data = event.get("data")
+            if isinstance(data, dict):
+                event = {**{key: value for key, value in event.items() if key != "data"}, **data}
+            events.append(event)
+        return tuple(events)
+
+
+@register_trajectory_reader
+class HermesSessionReader(TrajectoryReader):
+    """Read Hermes Agent session snapshots: every ``*.json`` under ``path``, in path order.
+
+    With ``sessions.write_json_snapshots`` on, hermes rewrites
+    ``HERMES_HOME/sessions/session_<id>.json`` after every persistence point:
+    one object holding the session facts and a ``messages`` list. Each
+    snapshot becomes a ``session`` event carrying the facts, then one
+    ``message`` event per message (``role``, ``content``, and for the
+    assistant ``tool_calls`` and ``finish_reason``, for tool rows
+    ``tool_name`` and ``tool_call_id``).
+    """
+
+    format = "hermes-session-json"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        events: list[dict[str, Any]] = []
+        for file in sorted(Path(path).rglob("*.json")):
+            try:
+                snapshot = json.loads(file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise TrajectoryError(f"hermes session {file} is not valid JSON") from exc
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("messages"), list):
+                raise TrajectoryError(f"hermes session {file} is not a session snapshot with a messages list")
+            events.append({"type": "session", **{key: value for key, value in snapshot.items() if key != "messages"}})
+            for message in snapshot["messages"]:
+                if not isinstance(message, dict):
+                    raise TrajectoryError(f"hermes session {file} holds a message that is not an object")
+                events.append({"type": "message", **message})
+        return tuple(events)
+
+
+@register_trajectory_reader
+class TerminusAtifReader(TrajectoryReader):
+    """Read the terminus runner's ATIF trajectories: every ``*.json`` under ``path``.
+
+    The runner writes one file per trial: an ATIF trajectory whose ``steps``
+    carry the agent's turns, alongside the verifier's outcome. Each file
+    becomes a ``verifier`` event holding the reward and the task it scored,
+    then one ``step`` event per ATIF step, so a scorer reads the reward and a
+    method reads the turns from the same trajectory.
+    """
+
+    format = "terminus-atif-json"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        events: list[dict[str, Any]] = []
+        for file in sorted(Path(path).rglob("*.json")):
+            try:
+                trial = json.loads(file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise TrajectoryError(f"terminus trial {file} is not valid JSON") from exc
+            if not isinstance(trial, dict) or not isinstance(trial.get("steps"), list):
+                raise TrajectoryError(f"terminus trial {file} is not an ATIF trajectory with a steps list")
+            events.append({"type": "verifier", **{key: value for key, value in trial.items() if key != "steps"}})
+            events.extend({"type": "step", **step} for step in trial["steps"] if isinstance(step, dict))
+        return tuple(events)
+
+
+@register_trajectory_reader
+class OpencodeSessionReader(TrajectoryReader):
+    """Read opencode's session database: ``opencode.db`` under ``path``, one event per message.
+
+    opencode 1.18 keeps its sessions in SQLite in its data directory. A
+    ``message`` row holds a message's facts (``role`` among them) and each
+    ``part`` row one piece of a message (a text, a tool call, a step
+    boundary), both as a JSON object in the ``data`` column. Each message
+    becomes a ``message`` event with its ``id``, its ``sessionID`` and its
+    facts, and its parts in id order as ``content``, so the final assistant
+    text reads as a list of text parts, as in a pi session. opencode's ids
+    grow with time, so id order is the order the run created them in, across
+    every session of the run. The database opens read only, and a missing one
+    reads as an empty trajectory.
+    """
+
+    format = "opencode-session-sqlite"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        # Here, not at the top: importing reef loads this module, and the record contracts load no database module.
+        import sqlite3
+
+        database_path = Path(path).resolve() / "opencode.db"
+        if not database_path.is_file():
+            return ()
+
+        def decoded(table: str, row_id: str, data: str) -> dict[str, Any]:
+            try:
+                value = json.loads(data)
+            except json.JSONDecodeError as exc:
+                raise TrajectoryError(f"opencode {table} {row_id} in {database_path} is not valid JSON") from exc
+            if not isinstance(value, dict):
+                raise TrajectoryError(f"opencode {table} {row_id} in {database_path} is not an object")
+            return value
+
+        try:
+            connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True)
+            try:
+                messages = connection.execute("SELECT id, session_id, data FROM message ORDER BY id").fetchall()
+                parts = connection.execute("SELECT id, message_id, data FROM part ORDER BY id").fetchall()
+            finally:
+                connection.close()
+        except sqlite3.Error as exc:
+            raise TrajectoryError(f"opencode session database {database_path} cannot be read: {exc}") from exc
+        content: dict[str, list[dict[str, Any]]] = {}
+        for part_id, message_id, data in parts:
+            content.setdefault(message_id, []).append({"id": part_id, **decoded("part", part_id, data)})
+        return tuple(
+            {
+                "type": "message",
+                "id": message_id,
+                "sessionID": session_id,
+                **decoded("message", message_id, data),
+                "content": content.get(message_id, []),
+            }
+            for message_id, session_id, data in messages
+        )
+
+
+# The readers reef.harness exports as functions.
+read_pi_session = PiSessionReader()
+read_opencode_session = OpencodeSessionReader()
+
+
+@register_trajectory_reader
+class NativeSessionReader(TrajectoryReader):
+    """Read the native harness session tree: every ``*.jsonl`` under ``path``, in order, like a pi session."""
+
+    format = "native-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return PiSessionReader()(path)
+
+
+def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
+    """Read the final assistant text from flat, pi, or Codex session events.
+
+    Codex wraps Responses messages in ``response_item.payload`` with
+    ``output_text`` parts; pi wraps messages in ``message`` with ``text``
+    parts. A non-mapping ``message`` (a terminus ATIF step's text) is not a
+    wrapped message.
+    """
+    for event in reversed(trajectory):
+        nested = event.get("payload") if event.get("type") == "response_item" else event.get("message")
+        message = nested if isinstance(nested, Mapping) else event
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = [part["text"] for part in content if part.get("type") in ("text", "output_text")]
+            if texts:
+                return "\n".join(texts)
+    return None
+
+
+def failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
+    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
+    for event in trajectory:
+        if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
+            return str(event["error"])
+    return ""
+
+
+def root_header(trajectory: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The root's ``session`` line of a native-jsonl trajectory (the agents' files sort first); empty for other formats."""
+    for event in trajectory:
+        data = event.get("data") or {}
+        if event.get("type") == "session" and str(data.get("agent") or "root") == "root":
+            return data
+    return {}
+
+
+def stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The root's ``stage/exit`` stage names in order and its ``turn/end`` reason kind; empty for other formats."""
+    stages: list[str] = []
+    reason: str | None = None
+    errors: dict[str, Mapping[str, Any]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+        elif type_ == "turn/end" and agent is not None:
+            details = data.get("reason") or {}
+            kind = details.get("kind")
+            if kind == "error" and isinstance(details.get("error"), Mapping):
+                errors[agent] = details["error"]
+            if agent == "root":
+                reason = None if kind is None else str(kind)
+        elif agent != "root":
+            continue
+        elif type_ == "stage/exit":
+            stages.append(str(data.get("stage")))
+    path: dict[str, Any] = {"stages": stages, "reason": reason}
+    # The root's own error, else the error of an agent whose failure ended the run before the root wrote its end:
+    # a subagent's model error aborts the whole run with no root turn/end.
+    errored = "root" if "root" in errors else next((name for name in errors if reason is None), None)
+    if errored is not None:
+        path["error"] = dict(errors[errored])
+        if errored != "root":
+            path["errored_agent"] = errored
+    return path
+
+
+#: The counters a result carries per agent; the token pair is what the endpoint reported, zero when it reported none.
+AGENT_COUNTERS = ("turns", "steps", "tool_calls", "tool_errors", "input_tokens", "output_tokens")
+
+
+def agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """Turns, steps, tool calls, tool errors and reported tokens per agent of a
+    native-jsonl trajectory; empty for other formats."""
+    work: dict[str, dict[str, int]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+            work.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))["turns"] += 1
+        elif agent is None:
+            continue
+        elif type_ in ("assistant/message", "context/compacted") and isinstance(data.get("usage"), Mapping):
+            work[agent]["input_tokens"] += int(data["usage"].get("input_tokens", 0) or 0)
+            work[agent]["output_tokens"] += int(data["usage"].get("output_tokens", 0) or 0)
+        elif type_ == "step/start":
+            work[agent]["steps"] += 1
+        elif type_ == "tool/call":
+            work[agent]["tool_calls"] += 1
+        elif type_ == "tool/result" and data.get("is_error"):
+            work[agent]["tool_errors"] += 1
+    return work
+
+
+def sum_agents(runs: Iterable[Mapping[str, Mapping[str, int]]]) -> dict[str, dict[str, int]]:
+    """The per-agent counters of several rollouts, summed per agent and sorted by agent name."""
+    total: dict[str, dict[str, int]] = {}
+    for work in runs:
+        for agent, counts in work.items():
+            sums = total.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))
+            for key, value in counts.items():
+                sums[key] = sums.get(key, 0) + value
+    return {agent: total[agent] for agent in sorted(total)}

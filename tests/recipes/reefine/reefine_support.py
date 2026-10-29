@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from recipes.beta.reefine.proposer import EXTENSION_ADAPTER, answer_request
 from reef.core.job_data import TrajectorySample
 from reef.core.training_request import TrainingRequest
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.contract import TreeProposal
 

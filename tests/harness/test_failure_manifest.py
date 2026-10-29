@@ -90,8 +90,8 @@ def test_fingerprint_digest_is_pinned() -> None:
 
 
 def test_normalization_collapses_volatile_paths_and_numbers() -> None:
-    a = "pi session /tmp/reef-episode-pi-abc12/session.jsonl has a corrupt event at line 3"
-    b = "pi session /var/folders/xy/reef-episode-pi-zz9/session.jsonl has a corrupt event at line 41"
+    a = "pi session /tmp/reef-rollout-pi-abc12/session.jsonl has a corrupt event at line 3"
+    b = "pi session /var/folders/xy/reef-rollout-pi-zz9/session.jsonl has a corrupt event at line 41"
     assert normalize_cause(a) == "pi session <path> has a corrupt event at line <n>"
     assert normalize_cause(a) == normalize_cause(b)
     assert fingerprint("task one", "trajectory", a) == fingerprint("task one", "trajectory", b)
@@ -207,7 +207,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
     persisted = FailureManifest.from_state(second.state["failure_manifest"]).entries[0]
     assert (persisted.count, persisted.first_seen_step, persisted.last_seen_step) == (2, 1, 2)
 
-    # Step 3 with a working binary: no episode fails, so the entry is fixed.
+    # Step 3 with a working binary: no rollout fails, so the entry is fixed.
     third = failing_step(tmp_path, None, received, dict(second.state))
     assert received[2] == FailureManifest.from_state(second.state["failure_manifest"])
     assert third.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 1}

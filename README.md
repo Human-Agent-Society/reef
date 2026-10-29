@@ -208,7 +208,7 @@ API instead of GPUs.
 
 A harness deployment serves `reef.recipe.harness:HarnessEvolutionRecipe`. The
 recipe keeps the agent harness as a tree of text files. A proposer writes a
-patch to that tree, the evaluation runs real agent episodes on the candidate,
+patch to that tree, the evaluation runs real agent rollouts on the candidate,
 and a candidate that wins publishes as a release that any client can pull. The
 [harness evolution tutorial](tutorials/evolve-your-harness/README.md) runs the
 smallest full loop on pi. It needs an OpenAI-compatible endpoint, and Node.js

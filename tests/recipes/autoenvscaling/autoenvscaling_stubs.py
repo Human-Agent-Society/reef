@@ -35,11 +35,11 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway
 from reef.core.tasks import HarborTask
+from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sandbox.e2b import E2BExecutor, E2BSession
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, ProcessOutcome, SandboxProgram
 
 
 def stand_in_e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +95,7 @@ class ScriptedSession(E2BSession):
         if self.stop is not None:
             self.stop.set()
             self.is_closed.wait(10)
-            raise EpisodeLaunchError("the E2B sandbox could not run the process: it is gone")
+            raise RolloutLaunchError("the E2B sandbox could not run the process: it is gone")
         (root / "sessions").mkdir(parents=True, exist_ok=True)
         (root / "sessions" / "session.jsonl").write_text("".join(json.dumps(event) + "\n" for event in self.events))
         return ProcessOutcome(0, "", "")
@@ -113,12 +113,12 @@ class ScriptedExecutor(E2BExecutor):
 
     session: ScriptedSession | None = None
 
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
         return self, program.binary
 
     def open(self) -> E2BSession:
         if self.session is None:
-            raise EpisodeLaunchError("no scripted session")
+            raise RolloutLaunchError("no scripted session")
         return self.session
 
 

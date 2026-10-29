@@ -14,10 +14,10 @@ from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class RollbackInference(StubInferenceRuntime):
+class ImportingInference(StubInferenceRuntime):
     """Serve each release under the version that its materialized ``model.txt`` names; the initial one is ``w0``.
 
-    ``restore_order`` is shared with the training component, so a test sees which side a rollback restored first.
+    ``restore_order`` is shared with the training component, so a test sees which side an operation reached first.
     """
 
     def __init__(self, restore_order: list[str]) -> None:
@@ -32,8 +32,8 @@ class RollbackInference(StubInferenceRuntime):
         return super().activate_checkpoint(artifact, scenario=scenario)
 
 
-class RollbackComponent(StubTrainingComponent):
-    """A component whose ``n``-th job saves ``w<n>``; a rollback imports the release as the next job's start.
+class ImportingComponent(StubTrainingComponent):
+    """A component whose ``n``-th job saves ``w<n>``; ``train-from`` imports a release as the next job's start.
 
     ``inference`` is the runtime that serves its checkpoints. ``activated`` lists the versions that it served, and
     ``trained`` counts the submitted jobs.
@@ -42,7 +42,7 @@ class RollbackComponent(StubTrainingComponent):
     def __init__(self, checkpoint_dir) -> None:
         super().__init__(checkpoint_dir)
         self.restore_order: list[str] = []
-        self.inference = RollbackInference(self.restore_order)
+        self.inference = ImportingInference(self.restore_order)
 
     @property
     def activated(self) -> list[str]:
@@ -60,7 +60,7 @@ class RollbackComponent(StubTrainingComponent):
 class RecordingExperimentTracker(ExperimentTracker):
     def __init__(self) -> None:
         self.events = []
-        self.rollbacks = []
+        self.starts = []
 
     def bind_scenario(self, **kwargs):
         del kwargs
@@ -73,8 +73,8 @@ class RecordingExperimentTracker(ExperimentTracker):
     def record(self, event):
         self.events.append(event)
 
-    def record_rollback(self, event):
-        self.rollbacks.append(event)
+    def record_train_from(self, event):
+        self.starts.append(event)
 
     def close(self):
         pass
@@ -83,7 +83,7 @@ class RecordingExperimentTracker(ExperimentTracker):
 def inference(index: int, runtime_load_id: str | None = None) -> AgentRecord:
     """The inference record of job ``index``, served by the version that job ``index - 1`` published.
 
-    ``runtime_load_id`` names another serving version, such as one that a rollback restored.
+    ``runtime_load_id`` names another serving version, such as one that an activation served.
     """
     version = f"w{index - 1}" if runtime_load_id is None else runtime_load_id
     payload: dict[str, object] = {
@@ -114,7 +114,7 @@ def dispatcher(tmp_path, *, experiment_tracker=None):
     initial = tmp_path / "initial"
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("w0")
-    runtime = RollbackComponent(tmp_path / "exported")
+    runtime = ImportingComponent(tmp_path / "exported")
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     value = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),

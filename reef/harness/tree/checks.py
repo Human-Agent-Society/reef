@@ -129,7 +129,7 @@ def reject_inline_secret(data: Any, path: str) -> None:
 
     A tree persists verbatim in every git release that holds it. No render path needs a
     credential in the tree - the served model binds through
-    ``reef.upstream_api_key`` and is injected at episode render, method
+    ``reef.upstream_api_key`` and is injected at rollout render, method
     models declare ``evolution.models.<name>.api_key_env`` - so a secret
     field here has no consumer and only a leak to persist. The name match
     (singular, plural, string or string list value) detects common inline
@@ -605,7 +605,7 @@ def validate_native_loop(config: Any) -> Mapping[str, Any]:
     The loop is code, so admission checks what a static read can: the module
     compiles, carries no credential, and defines a top level ``run_turn``
     taking the context. Whether it runs is the evaluation's to find out, and a
-    person promotes it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
+    person activates it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
     options = require_mapping(config)
     require_name_field(options)
     extra = sorted(set(options) - {"name", "code", "max_steps"})

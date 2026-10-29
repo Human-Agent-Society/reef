@@ -22,7 +22,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.harness.tree import TreePatch
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
@@ -465,7 +464,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     trainer = _trainer(recipe, records)
     backend = trainer.candidate_backend
     # A recheck is due on every automatic step: the latest publish replaced the base.
-    state = HarnessState(rollback_release_id="base", rollback_context=backend.evaluation_context()).to_json()
+    state = HarnessState(recheck_release_id="base", recheck_context=backend.evaluation_context()).to_json()
     backend.proposals.submit(
         "pending-proposal",
         {"patch": changed_rules("marker\n"), "session": "unrelated", "release_id": "r", "reason": "unrelated"},
@@ -716,7 +715,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
         return TreeProposal(TreePatch(changed_rules("marker rules\n")), notes={"design": "one rules entry"})
 
     def score(task, result):
-        raise ValueError("the scorer could not read the episode")
+        raise ValueError("the scorer could not read the rollout")
 
     recipe = _asking(tmp_path, propose, score=score, training_mode="manual")
     dispatcher = harness_dispatcher(tmp_path, recipe)
@@ -726,7 +725,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
         assert _wait(lambda: _committed_skip(dispatcher, "broken scorer") == "instruction failed")
         row = _committed_row(dispatcher, "broken scorer")
         assert row["failed_stage"] == "evaluating"
-        assert row["error"] == "ValueError: the scorer could not read the episode"
+        assert row["error"] == "ValueError: the scorer could not read the rollout"
         assert row["proposal_notes"]["design"] == "one rules entry"
         assert row["patch"] == changed_rules("marker rules\n")
         assert failed_words(row).startswith("The step failed during its evaluation")
@@ -1017,7 +1016,6 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest()),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,

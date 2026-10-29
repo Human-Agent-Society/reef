@@ -12,18 +12,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import recorded_payload
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.scenario.scenario import Scenario
 
-#: What the scorer looks for in the rules an episode ran with.
+#: What the scorer looks for in the rules a rollout ran with.
 MARKER = "META-HARNESS-WINNER"
 #: The seed tree, and two improvements of it that carry the marker.
 SEED = HarnessTree({"rules.md": "Answer carefully.\n"})
@@ -67,8 +67,8 @@ def proposal_reply(parent: HarnessTree, tree: HarnessTree, *, hypothesis: str = 
     )
 
 
-def score_marker(task: str, result: EpisodeResult) -> float:
-    """1.0 when the episode's rendered rules carry ``MARKER``."""
+def score_marker(task: str, result: RolloutResult) -> float:
+    """1.0 when the rollout's rendered rules carry ``MARKER``."""
     last = result.trajectory[-1] if result.trajectory else {}
     return 1.0 if MARKER in str(last.get("rules", "")) else 0.0
 
@@ -90,7 +90,7 @@ def meta_harness_sections(
         "evolution": {
             "adapter": adapter,
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_episode_scorer(scorer),
+            "evaluate": resolve_rollout_scorer(scorer),
             "tasks": [TASK],
             "seed": str(seed),
             "meta_harness": dict(method),

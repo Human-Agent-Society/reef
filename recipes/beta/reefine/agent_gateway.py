@@ -33,7 +33,7 @@ from typing import Any
 
 from recipes.beta.reefine.multimodal import MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
-from reef.harness.episodes.model_binding import ModelBinding, usage_of
+from reef.harness.rollouts.model_binding import ModelBinding, usage_of
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
 from reef.train.harness_backend.contract import ProposerCalls
 

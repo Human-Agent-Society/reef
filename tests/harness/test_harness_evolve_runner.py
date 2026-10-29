@@ -1,4 +1,4 @@
-"""Guarantees of the ``tutorials/evolve-your-harness`` runner, hermetic: no service, no model, no episodes.
+"""Guarantees of the ``tutorials/evolve-your-harness`` runner, hermetic: no service, no model, no rollouts.
 
 The recipe batches valid scored reports -- passing ones included -- and ``evolution.batch_size: 1`` makes each
 report its own batch, so every report the runner submits triggers one evolve step whatever its score was. The number of

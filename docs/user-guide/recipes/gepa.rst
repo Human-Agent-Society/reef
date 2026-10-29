@@ -43,7 +43,7 @@ transcripts, together with a sentence about what went wrong in each one, are
 handed to the reflection model. That model rewrites one component of the
 tree, one evolvable file, and hands back a new version. The child is run on
 exactly the same problems as its parent, and only a child that scores
-strictly better survives. A child that fails costs only those few episodes,
+strictly better survives. A child that fails costs only those few rollouts,
 which is what makes the search affordable; a child that wins is then measured
 properly, on the full validation set.
 
@@ -90,7 +90,7 @@ described under Results.
 One detail is worth knowing because it affects cost. When the parent happens to
 be the tree currently being served, its minibatch is free: the engine has
 already collected that tree's real traffic, scores included, so there is nothing
-to re-run. Any other parent, and every child, runs as trial episodes on the
+to re-run. Any other parent, and every child, runs as trial rollouts on the
 evaluation's worker pool, because no traffic was ever served from it.
 
 Configuration
@@ -139,7 +139,7 @@ Run the example
 
 `recipes/gepa/examples/aime <../../../recipes/gepa/examples/aime/README.md>`__
 has the prerequisites and the full walkthrough. The driver embeds a Reef
-service and runs every minibatch problem as a real episode against the served
+service and runs every minibatch problem as a real rollout against the served
 tree, which means the method reflects on traffic the tree genuinely produced
 rather than on a simulation of it. At the end it seals two passes over a
 held-out split, one on the tree it started with and one on the tree it

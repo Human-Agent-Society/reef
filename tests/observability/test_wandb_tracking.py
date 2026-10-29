@@ -6,7 +6,7 @@ import time
 import pytest
 
 from reef.core.artifact_ref import ArtifactRef
-from reef.observability.base import RollbackExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
+from reef.observability.base import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.observability.operations import OperationMetrics
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -195,27 +195,25 @@ def test_run_identity_is_stable_across_restart_and_separate_per_scenario() -> No
 
 
 @pytest.mark.unit
-def test_rollback_finishes_one_curve_and_next_commit_starts_another_run() -> None:
+def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> None:
     client = _StubClient()
     tracker = _tracker(client)
     tracker.record(_event(step=7, run_segment=0, run_step=3))
     first_run = client.runs[0]
 
-    tracker.record_rollback(
-        RollbackExperimentEvent(
+    tracker.record_train_from(
+        TrainFromExperimentEvent(
             scenario="math",
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            source_artifact_ref=_event().produced_artifact_ref,
-            produced_artifact_ref=_context().source_artifact_ref,
-            target_release_id="artifact:6",
+            start_artifact_ref=_context().source_artifact_ref,
         )
     )
 
     assert first_run.finished is True
-    assert first_run.summary["reef/ended_by"] == "rollback"
-    assert first_run.summary["reef/rollback_step"] == 8
+    assert first_run.summary["reef/ended_by"] == "train_from"
+    assert first_run.summary["reef/train_from_step"] == 8
     tracker.record(_event(step=9, run_segment=8, run_step=0))
 
     assert len(client.runs) == 2
@@ -250,15 +248,13 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
     }
     assert recipe == {"recipe/event": 0, "recipe/temperature": pytest.approx(0.6)}
 
-    tracker.record_rollback(
-        RollbackExperimentEvent(
+    tracker.record_train_from(
+        TrainFromExperimentEvent(
             scenario="math",
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            source_artifact_ref=_event().produced_artifact_ref,
-            produced_artifact_ref=_context().source_artifact_ref,
-            target_release_id="artifact:6",
+            start_artifact_ref=_context().source_artifact_ref,
         )
     )
     logger.log({"accepted": 1}, namespace="processor")
@@ -425,15 +421,13 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
     assert all(before <= row["operations/time_seconds"] <= time.time() for row in rows)
     assert all("train/step" not in row and "reef/step" not in row for row in rows)
     assert (("operations/*",), {"step_metric": "operations/time_seconds"}) in run.defined
-    tracker.record_rollback(
-        RollbackExperimentEvent(
+    tracker.record_train_from(
+        TrainFromExperimentEvent(
             scenario=context.scenario,
             recipe=context.recipe,
             step=8,
             run_segment=0,
-            source_artifact_ref=_event().produced_artifact_ref,
-            produced_artifact_ref=context.source_artifact_ref,
-            target_release_id="artifact:6",
+            start_artifact_ref=context.source_artifact_ref,
         )
     )
     scenario_logger.log({"records/unread_count": 0}, namespace="operations")

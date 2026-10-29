@@ -34,6 +34,7 @@ class _InMemoryStorage:
             parent_release_id=None,
             content_id=f"content:{uuid.uuid4().hex}",
         )
+        self.base = self.head
 
     def copy_artifact(
         self,
@@ -59,6 +60,8 @@ class _InMemoryStorage:
 
 
 class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
+    """One scenario's releases in process memory, over a base artifact copied from ``bootstrap_path``."""
+
     def __init__(
         self,
         scenario: str,
@@ -80,13 +83,11 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
         *,
         root: Path | None = None,
     ) -> CachedRepositoryBackendFactory:
-        return _InMemoryRepositoryBackendFactory(
-            cls,
-            bootstrap_path,
-            root,
-        )
+        return _InMemoryRepositoryBackendFactory(cls, bootstrap_path, root)
 
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
+        if release_id == "base":
+            return self._storage.base
         if release_id is None or release_id == "head":
             return self._storage.head
         ref = self._storage.refs.get(release_id)
@@ -185,8 +186,4 @@ class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
         self._root = None if root is None else Path(root)
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return self._backend_type(
-            scenario,
-            self._bootstrap_path,
-            root=self._root,
-        )
+        return self._backend_type(scenario, self._bootstrap_path, root=self._root)

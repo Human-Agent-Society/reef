@@ -10,7 +10,7 @@ and what a step hands it (``ProposalContext``, ``TrialRunner``,
 ``reef.recipe.harness.HarnessEvolutionRecipe`` builds; methods never subclass
 it. ``state`` is the backend's algorithm state, ``tasks`` the evaluation
 tasks of each step, ``calls`` the step's model-call budget, ``trials`` the
-trial episodes, ``inbox`` the clients' pending patches, ``records`` the step
+trial rollouts, ``inbox`` the clients' pending patches, ``records`` the step
 record, ``manifest`` the failure manifest, and ``capabilities`` what the
 service routes may ask a backend. The tree itself is ``reef.harness.tree``,
 and the evaluation is ``reef.evaluation.harness``.

@@ -1,5 +1,5 @@
 """Guarantees of the recipes/skillclaw method package, hermetic: the
-night's LLM is stubbed, probe episodes run a fake pi binary, docker tasks are
+night's LLM is stubbed, probe rollouts run a fake pi binary, docker tasks are
 faked, and the driver's dry run replays traffic through the real embedded
 service so the recorded requests carry the served pool's catalog."""
 
@@ -22,7 +22,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.trajectories import recorded_payload
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
@@ -35,7 +35,7 @@ from reef.train.pipeline import PipelineConfig
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "recipes" / "skillclaw"
 
-# A pi stand-in for the probe episodes: it writes the session file the
+# A pi stand-in for the probe rollouts: it writes the session file the
 # runner reads back as the trajectory and answers nothing, so probes dead
 # tie at 0.0 and publishing is the selection policy's call alone.
 PI_FAKE = """\
@@ -60,7 +60,7 @@ FILES = {"skills/answer-style/SKILL.md": STARTER_TEXT}
 SEED = HarnessTree(FILES)
 
 #: The deployment's model binding, as reef passes it to propose and renders
-#: it into probe episodes. Tests stub the evolver's chat loop, so no call
+#: it into probe rollouts. Tests stub the evolver's chat loop, so no call
 #: ever reaches this endpoint.
 MODEL = ModelBindings(served=ModelBinding(base_url="http://127.0.0.1:9", model="demo-model", api_key="dummy"))
 
@@ -375,7 +375,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["skills"]
     # The pool reaches traffic through the proxy; no harness tree is installed, so no adapter is named.
     assert surface.harness is None and built.harness_adapter is None
-    # The backend reads its head from the committed releases, here the seed alone; no episodes run.
+    # The backend reads its head from the committed releases, here the seed alone; no rollouts run.
     trainer = built.build("demo", SQLiteRecordStore(), releases=ComponentReleases(TreeReleases(built.seed), "skills"))
     assert isinstance(trainer, Trainer) and trainer.job_samples == 60
 
@@ -712,7 +712,7 @@ def test_the_night_returns_a_tree_patch(skillclaw, example, monkeypatch) -> None
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:
     """The ported retry loop now drives reef's binding: temperature dropped
     on the provider's 400, stream-only fallback folded, model never named."""
-    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.harness.rollouts.model_binding import ModelBindingError
 
     evolver = example["evolver"]
     seen: list[dict[str, Any]] = []

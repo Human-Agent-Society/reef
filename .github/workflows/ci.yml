@@ -167,7 +167,7 @@ jobs:
       - name: Add uv to PATH
         run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       # huggingface_hub and harbor are declared core dependencies
-      # (pyproject.toml); reef.sandbox imports harbor's environment contract at
+      # (pyproject.toml); reef.execution.sandbox imports harbor's environment contract at
       # module load. The rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, ray for the slime bridge suites, and openai
       # for the CEO-Bench harness tests, the OpenTelemetry SDK for the
@@ -342,7 +342,7 @@ jobs:
               for requirement in requirements
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          # harbor and reef-eval are core: reef.sandbox implements Harbor's environment contract, and the
+          # harbor and reef-eval are core: reef.execution.sandbox implements Harbor's environment contract, and the
           # terminus runner, the task player and the generator play Harbor tasks.
           expected_core = {
               "aiohttp",

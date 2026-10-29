@@ -30,7 +30,7 @@ from reef.core.requirements import parse_requires
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.rollouts.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch, locate, validate_patch
 from reef.train.harness_backend.contract import ProposalContext, Proposer, TreeProposal
 

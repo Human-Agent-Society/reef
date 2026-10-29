@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
+from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
@@ -154,7 +155,7 @@ class ServiceConfig:
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
-    #: evaluation episodes from it. ``upstream_model`` is a provider model
+    #: evaluation rollouts from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
     upstream_url: str | None = config_option(
         None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."
@@ -212,6 +213,12 @@ class ServiceConfig:
     )
     artifact_cache_dir: str = config_option(
         ".reef/artifact-cache", public_path=("storage", "artifact_cache_dir"), help="Artifact cache directory."
+    )
+    #: ``ArtifactSourceReader`` plugins beside the built-in ``hf``, ``file`` and ``s3`` readers of artifact imports.
+    artifact_sources: tuple[str | Mapping[str, Any], ...] = config_option(
+        (),
+        public_path=("storage", "artifact_sources"),
+        help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
     )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
@@ -298,10 +305,10 @@ class ServiceConfig:
             "Training settings as a JSON/YAML object.", path=("training",), public_path=("training", "config")
         ),
     )
-    #: Optional pre-publication checkpoint evaluator and selection plugin.
-    evaluation_settings: Mapping[str, Any] | None = field(
+    #: The rule that activates the artifacts that training makes, for any recipe.
+    activation_settings: Mapping[str, Any] | None = field(
         default=None,
-        metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
+        metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
     )
     #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
@@ -364,6 +371,8 @@ class ServiceConfig:
                     "storage.artifact_repository requires storage.artifact_backend: git_lfs; "
                     "a plugin backend reads its own config"
                 )
+        for reader in self.artifact_sources:
+            ArtifactSourceReader.reference(reader, setting="storage.artifact_sources")
         if self.record_backend not in ("sqlite", "postgres"):
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
@@ -410,7 +419,7 @@ SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
     non_reef_fields = {
-        "evaluation_settings",
+        "activation_settings",
         "generator_settings",
         "pipeline_settings",
         "tracing_config",

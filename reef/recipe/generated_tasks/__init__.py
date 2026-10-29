@@ -22,7 +22,7 @@ generator's method:
 - ``recipe``: the objective and the report contract.
 
 The generator service (``reef.record2sample.generator``) writes and checks the tasks; the training component
-runs their training episodes.
+runs their training rollouts.
 """
 
 from reef.recipe.generated_tasks.generator import (

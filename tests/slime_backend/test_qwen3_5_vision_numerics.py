@@ -6,8 +6,9 @@ The tests that need transformers skip when it is missing or not 5.12 or 5.13. Th
 skip when SGLang is missing. They compare the replaced patch embedding, position embedding and attention with
 SGLang's own functions bit for bit. The patch and position embeddings use the widths of Qwen3.5-0.8B, because a
 smaller model can give the same bits with and without the change. On CPU, the eager and compiled RoPE apply give
-the same bits, and so do the bool and float attention masks. So these tests cannot show those two changes. The
-GPU checks in #749 show them.
+the same bits, and so do the bool and float attention masks. So these tests cannot show those two changes. In a GPU
+check in #749, the compiled RoPE apply gave SGLang's bits and the eager one did not. For the mask, that check
+compared only no mask with an all-True bool mask. No GPU run compared the bool mask with a float mask.
 
 Remove these tests with the module and the patch when the Slime pin has the change.
 """
@@ -206,6 +207,8 @@ def test_tower_calls_the_hf_forward_once_per_image_with_sglang_weights(monkeypat
         assert torch.equal(weights, expected)
     with pytest.raises(ValueError, match="pixel rows"):
         model(pixels, grid_thw=torch.tensor(GRIDS[:2]))
+    with pytest.raises(ValueError, match="pixel rows"):
+        model(pixels[:-8], grid_thw=torch.tensor(GRIDS))
 
 
 def test_default_rope_apply_is_sglang_function():

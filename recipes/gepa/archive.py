@@ -231,7 +231,7 @@ class Archive:
         self.pending_step = None
 
     def charge(self, calls: int) -> None:
-        """Spend ``calls`` of the metric-call budget: one per scored episode."""
+        """Spend ``calls`` of the metric-call budget: one per scored rollout."""
         self.metric_calls += calls
 
     # -- GEPA's two rules ----------------------------------------------------

@@ -108,7 +108,7 @@ with new record IDs.
 Train on whole conversations
 ----------------------------
 
-A complete conversation, such as an agent episode with tool calls, can train
+A complete conversation, such as an agent rollout with tool calls, can train
 every agent turn at once. Upload it as an ATIF trajectory
 (`Upload trajectories <../../reference/http-api.rst#upload-trajectories>`__).
 ``SFTSamples`` renders each uploaded trajectory into one sample:
@@ -140,6 +140,9 @@ upload with 400, naming the trajectory, when one cannot train:
 - it has no agent step that trains (all its agent steps are copied context),
   or its first trained agent step has no step before it;
 - ``is_copied_context`` is not a boolean;
+- a step's ``observation`` is not empty and is not an object; a content part
+  of a message or an observation result is not an object, a text part has a
+  ``text`` that is not a string, or an image part has no ``source.path``;
 - the chat template does not render each turn as a prefix of the whole
   conversation. A template that removes the reasoning of earlier turns, for
   example, does not; set ``chat_template_kwargs`` so that it keeps them, or
@@ -280,7 +283,7 @@ Limitations
 
 - A report must reference exactly one recorded request. A report that
   references more than one request raises an error. To train each turn of an
-  agent episode, report each request separately, or upload the episode as an
+  agent rollout, report each request separately, or upload the rollout as an
   ATIF trajectory (`Train on whole conversations`_).
 - An uploaded trajectory renders no tool definitions; only its messages and
   tool calls reach the chat template.

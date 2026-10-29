@@ -3,7 +3,7 @@
 The report reader ``report_score`` lives in ``reef.record2record.reports``.
 ``recorded_request`` and ``recorded_response`` read the messages, tools and
 answer text of a recorded inference; the sample builders turn one inference
-record — or an ordered multi-call episode — into a ``TrajectorySample`` with the
+record — or an ordered multi-call rollout — into a ``TrajectorySample`` with the
 tensors the training component requires.
 """
 
@@ -228,7 +228,7 @@ def make_multi_turn_policy_trajectory(
     realign_threshold: int = 1024,
     scaffold_tolerance: int = 0,
 ) -> TrajectorySample | None:
-    """Assemble one linear, terminally selected episode into one sample.
+    """Assemble one linear, terminally selected rollout into one sample.
 
     This follows slime's trajectory builder: exact prompt extension appends
     masked context, while short drift confined to the latest response is

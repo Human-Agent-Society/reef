@@ -30,13 +30,11 @@ recipe:
         preset: openrouter
         api_key: ${REEF_MULTIMODAL_API_KEY}
       evaluate: recipes.beta.reefine.scorer:AnswerScorer
-      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
-      review_kinds: [code_extension]
       # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
       # that the tree still works (the model binding, the tools, the extensions load), not that the requested
       # change does; the step page's design and review notes and the person judge the change itself.
       selection: floor
-      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
+      # Every step's proposer calls, parsed proposal and evaluation rollouts, so a row can be read back.
       step_record_dir: .reef/reefine/steps
       # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
       proposals_dir: .reef/reefine/proposals
@@ -50,6 +48,12 @@ recipe:
       # No seed: the first tree is the recipe's own (recipes/beta/reefine/seed), the starter skill.
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual
+
+# An evolved extension runs in pi's process with your privileges, so a person activates it.
+activation:
+  module: always
+  config:
+    review_kinds: [code_extension]
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

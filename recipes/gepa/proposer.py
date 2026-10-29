@@ -11,7 +11,7 @@ them into the archive (``Archive.settle``) from ``context.last_outcome``,
 before it samples the next parent, and ``selection.GEPASelection`` decides
 the step on the archive's stored means.
 
-The parent's minibatch costs no episodes when the parent is the served tree:
+The parent's minibatch costs no rollouts when the parent is the served tree:
 the step's job data already holds that tree's real recorded traffic, scores included.
 Any other parent and every child run through ``context.trials``. The
 archive's metric-call count follows GEPA's accounting regardless (the seed's
@@ -29,7 +29,7 @@ from typing import Any
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import TreeKind, TreePatch
 from reef.train.harness_backend.contract import ProposalContext, Proposer, StepOutcome, TreeProposal
 
@@ -79,11 +79,11 @@ def default_feedback(task: str, output: str, score: float) -> str:
 class Example:
     """One minibatch example as reflection sees it: input, output, grade.
 
-    Values: ``task`` is the prompt, ``output`` the final answer the episode
-    gave, and ``score`` its grade. ``error`` is set when the episode produced
+    Values: ``task`` is the prompt, ``output`` the final answer the rollout
+    gave, and ``score`` its grade. ``error`` is set when the rollout produced
     no score; it replaces the feedback hook, because the failure is the only
     feedback there is.
-    Purpose: the proposer makes one per minibatch episode and renders them
+    Purpose: the proposer makes one per minibatch rollout and renders them
     into the reflective record.
     """
 
@@ -151,7 +151,7 @@ def archive_for_step(
 
 
 def scores(values: Sequence[float | None]) -> list[float]:
-    """Per-task scores with failed episodes read as zero, never as missing."""
+    """Per-task scores with failed rollouts read as zero, never as missing."""
     return [0.0 if value is None else float(value) for value in values]
 
 
@@ -174,7 +174,7 @@ class GEPAProposer(Proposer):
 
     def propose(self, context: ProposalContext) -> TreeProposal:
         if context.trials is None:
-            raise ValueError("GEPA runs its minibatches as trial episodes; this step offers none")
+            raise ValueError("GEPA runs its minibatches as trial rollouts; this step offers none")
         settings = self.settings
         archive = archive_for_step(context.method_state, context.last_outcome, rng_seed=settings.rng_seed)
         valset_size = len(context.evaluation_tasks)
@@ -217,9 +217,9 @@ class GEPAProposer(Proposer):
             return keep(archive, row)
         child_texts = {**parent_texts, key: new_text}
         child = components.candidate_tree(context.tree, child_texts)
-        episodes = context.trials.run(child, [example.task for example in minibatch])
-        archive.charge(len(episodes))
-        child_scores = [0.0 if episode.score is None else float(episode.score) for episode in episodes]
+        rollouts = context.trials.run(child, [example.task for example in minibatch])
+        archive.charge(len(rollouts))
+        child_scores = [0.0 if rollout.score.value is None else rollout.score.value for rollout in rollouts]
         row["child_scores"] = child_scores
         if sum(child_scores) <= sum(example.score for example in minibatch):
             # The one case GEPA counts as a spent iteration: a child that lost the minibatch comparison.
@@ -243,23 +243,23 @@ class GEPAProposer(Proposer):
         """The parent's minibatch: free from the step's traffic, or run again on the parent's tree."""
         batch = traffic(context.samples)[: self.settings.minibatch_size]
         if parent == archive.served:
-            # Free of episodes, but not of budget: upstream evaluates the parent on the minibatch and counts it, so
+            # Free of rollouts, but not of budget: upstream evaluates the parent on the minibatch and counts it, so
             # the traffic that stands in for that evaluation counts the same.
             archive.charge(len(batch))
             return [Example(task, output, float(sample.metadata.get("reward"))) for sample, (task, output) in batch]
         if context.trials is None:
-            raise ValueError("GEPA runs its minibatches as trial episodes; this step offers none")
+            raise ValueError("GEPA runs its minibatches as trial rollouts; this step offers none")
         tasks = [task for _, (task, _) in batch]
-        episodes = context.trials.run(components.candidate_tree(context.tree, parent_texts), tasks)
-        archive.charge(len(episodes))
+        rollouts = context.trials.run(components.candidate_tree(context.tree, parent_texts), tasks)
+        archive.charge(len(rollouts))
         return [
             Example(
                 task,
-                episode.reply or "",
-                0.0 if episode.score is None else float(episode.score),
-                "" if episode.failure is None else episode.failure.cause,
+                rollout.reply or "",
+                0.0 if rollout.score.value is None else rollout.score.value,
+                "" if rollout.failure is None else rollout.failure.cause,
             )
-            for task, episode in zip(tasks, episodes, strict=True)
+            for task, rollout in zip(tasks, rollouts, strict=True)
         ]
 
     def records(self, minibatch: Sequence[Example]) -> list[dict[str, Any]]:

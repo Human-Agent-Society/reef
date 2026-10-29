@@ -7,7 +7,8 @@ beside this module. The floor runs the candidate alone on the serve config's
 health task and publishes it when every task scores at least
 ``evolution.floor_score``: it checks that the tree still works, not that the
 requested change does; the step's design and review notes and the person
-judge that. Extensions wait for a promote (``review_kinds``).
+judge that. By default, a person activates a tree that changes an extension
+(the ``activation`` rule's ``review_kinds``).
 """
 
 from __future__ import annotations
@@ -87,8 +88,8 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("reefine requires an 'evolution' config mapping")
         adapter = str(evolution.get("adapter", "pi"))
-        # The agent runs where the host can jail it; an extension runs in the harness's process, so it waits.
-        merged = {"proposer_agent": {}, "review_kinds": ["code_extension"], **evolution}
+        # The agent runs where the host can jail it.
+        merged = {"proposer_agent": {}, **evolution}
         try:
             descriptor = get_adapter(adapter)
         except DescriptorError as exc:
@@ -102,7 +103,10 @@ class ReefineRecipe(HarnessEvolutionRecipe):
             # The agent answers requests on pi alone; on another adapter the text proposer does, so no agent is
             # built, jailed or warned about.
             merged["proposer_agent"] = None
-        kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)
+        # An extension runs in the harness's process with the user's privileges, so by default a person activates a
+        # tree that changes one.
+        activation = settings.get("activation", {"module": "always", "config": {"review_kinds": ["code_extension"]}})
+        kwargs = super()._recipe_kwargs({**settings, "evolution": merged, "activation": activation}, values)
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(evolution.get("multimodal"), values)
         except ValueError as exc:

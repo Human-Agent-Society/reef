@@ -9,7 +9,7 @@ package::
     recipe.py       the HarnessEvolutionRecipe subclass: its name, its config
                     fields, and evolution_spec()
     proposer.py     its Proposer
-    scorer.py       its EpisodeScorer, when the method scores episodes its own way
+    scorer.py       its RolloutScorer, when the method scores rollouts its own way
     selection.py    its SelectionPlugin, when it selects its own way
     processor.py    its record stages, when it reads records its own way
 
@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.repository import BaseArtifactSource
 from reef.core.errors import ReefError
 from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginConfigError, PluginReference
@@ -35,18 +37,20 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
 from reef.evaluation.harness import (
-    EpisodeScorer,
     FloorPlugin,
-    HarnessEpisodeEvaluator,
+    HarnessRolloutEvaluator,
+    RolloutScorer,
     ScoreComparisonPlugin,
     evaluation_selection,
 )
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.delivery import create_harness_surface
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
-from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.harness.tree import HarnessTree, TreeKind, validate_tree
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -56,11 +60,9 @@ from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sample2job.traces import TraceJobData
-from reef.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor
-from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import Surface
+from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import AgentExecution, HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Promoter, Proposer
@@ -80,7 +82,7 @@ SELECTION_PLUGINS: dict[str, type[SelectionPlugin]] = {
 
 def proposer_agent_settings(
     section: Any, environ: Mapping[str, str], *, proposals_dir: Path = Path(".reef/proposals")
-) -> tuple[EpisodeExecutor | None, float, float]:
+) -> tuple[ProgramExecutor | None, float, float]:
     """``evolution.proposer_agent`` as the agent's executor and its two timeouts; no section runs no agent.
 
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
@@ -137,6 +139,26 @@ def proposer_agent_settings(
 
 
 @dataclass(frozen=True)
+class HarnessLayout(ArtifactLayout):
+    """The layout of a harness artifact for the adapter ``descriptor``, which an import must meet (RFC #980).
+
+    A directory meets it when its files, read as UTF-8 text, form a
+    ``HarnessTree`` that passes ``validate_tree`` for ``descriptor``: the
+    files a release of the harness component stores.
+    Purpose: ``HarnessEvolutionRecipe.build_surface`` binds it on the harness
+    component; the committer checks an imported harness with it.
+    """
+
+    descriptor: AdapterDescriptor
+
+    def check(self, files: ArtifactFiles) -> None:
+        tree = HarnessTree({relative: files.read_bytes(relative).decode("utf-8") for relative in files.paths()})
+        validation = validate_tree(tree, self.descriptor)
+        if not validation.passed:
+            raise ValueError(f"the harness tree fails validation: {validation.message()}")
+
+
+@dataclass(frozen=True)
 class ScenarioModels(ModelBindingsResolver):
     config: ModelConfig
     recipe: HarnessEvolutionRecipe
@@ -148,7 +170,7 @@ class ScenarioModels(ModelBindingsResolver):
         runtime = self.config.runtime
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
-        # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
+        # The scenario's own model is served by this Reef too, so a rollout reaches it through the same route.
         binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
@@ -188,7 +210,7 @@ class HarnessEvolutionSpec:
     """The parts a harness evolution method binds by default.
 
     Values: ``proposer`` and ``scorer`` reference the method's ``Proposer`` and
-    ``EpisodeScorer`` classes, or are ``None`` when the deployment must name
+    ``RolloutScorer`` classes, or are ``None`` when the deployment must name
     them in ``evolution.propose`` and ``evolution.evaluate``. ``selection``
     references the ``SelectionPlugin`` used when ``evolution.selection`` is
     absent. ``seed`` is the directory of the first tree when
@@ -214,11 +236,11 @@ class HarnessEvolutionRecipe(Recipe):
     evaluates (or ``task_manifest`` with ``tasks_root``, or
     ``eval_task_store``, whose eval split each step reads); ``propose``,
     ``evaluate``, ``selection`` and ``promote``, which replace the method's
-    ``evolution_spec()`` parts. The other keys tune the episodes
-    (``binary``, ``episode_timeout_s``, ``episode_repeats``,
-    ``forbid_residue``), the step limits and publication (``max_steps``,
+    ``evolution_spec()`` parts. The other keys tune the rollouts
+    (``binary``, ``rollout_timeout_s``, ``rollout_repeats``,
+    ``forbid_residue``), the step limits (``max_steps``,
     ``max_failure_streak``, ``max_model_calls_per_step``, ``recheck_every``,
-    ``max_rejected_history``, ``publish``, ``review_kinds``), the grown task
+    ``max_rejected_history``), the grown task
     set (``promote_failures``, ``max_promoted_tasks``,
     ``max_promoted_per_client``), the proposal inbox (``proposals_dir``,
     ``max_pending_proposals``), the step record (``step_record_dir``), an
@@ -228,26 +250,26 @@ class HarnessEvolutionRecipe(Recipe):
 
     The model under test is the recipe's inference runtime. It reaches the
     proposer as ``context.models.served``, and the adapter's
-    ``model_binding`` templates write it into each evaluation episode, so
+    ``model_binding`` templates write it into each evaluation rollout, so
     neither the seed nor a published tree ever carries a provider.
     """
 
     propose: Proposer
-    score_episode: EpisodeScorer
+    score_rollout: RolloutScorer
     tasks: tuple[str, ...]
     #: A task store whose eval split each step evaluates on, in place of ``tasks``.
     eval_task_store: str | None = None
     adapter: str = "pi"
     binary: str | None = None
-    episode_timeout_s: float = 600.0
-    episode_repeats: int = 1
+    rollout_timeout_s: float = 600.0
+    rollout_repeats: int = 1
     #: The default ``job_samples``: the fewest traces of one evolution step. The stage config can override it.
     batch_size: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
-    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
+    executor: ProgramExecutor = field(default_factory=lambda: build_executor(None))
     promote_failures: bool = False
     max_promoted_tasks: int = 50
     max_promoted_per_client: int = 5
@@ -256,8 +278,6 @@ class HarnessEvolutionRecipe(Recipe):
     max_rejected_history: int = 25
     min_win_margin: int = 0
     floor_score: float = 1.0
-    publish: str = "auto"
-    review_kinds: tuple[TreeKind, ...] = ()
     #: Models an installed client may switch to besides the served one, rendered into its config.
     client_models: tuple[str, ...] = ()
     #: The first tree of a new scenario: ``evolution.seed`` read as a directory.
@@ -265,7 +285,7 @@ class HarnessEvolutionRecipe(Recipe):
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation rollouts sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
     #: Default proposal inbox root, with one directory per scenario.
@@ -274,7 +294,7 @@ class HarnessEvolutionRecipe(Recipe):
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     #: The isolation an agent proposer runs under (``evolution.proposer_agent``); ``None`` runs no agent.
-    agent_executor: EpisodeExecutor | None = None
+    agent_executor: ProgramExecutor | None = None
     agent_timeout_s: float = 1800.0
     agent_trial_timeout_s: float = 300.0
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
@@ -308,15 +328,15 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(f"evolution.seed fails validation: {'; '.join(seed_problems)}")
         if not isinstance(self.propose, Proposer):
             raise ValueError("harness evolution requires a Proposer")
-        if not isinstance(self.score_episode, EpisodeScorer):
-            raise ValueError("harness evolution requires an EpisodeScorer")
+        if not isinstance(self.score_rollout, RolloutScorer):
+            raise ValueError("harness evolution requires a RolloutScorer")
         if not self.tasks and self.eval_task_store is None:
             raise ValueError("harness evolution requires tasks or an eval task store")
-        evaluation_selection(self.score_episode, self.worker_executor)
-        if self.episode_timeout_s <= 0:
-            raise ValueError("episode_timeout_s must be positive")
-        if self.episode_repeats < 1:
-            raise ValueError("episode_repeats must be at least 1")
+        evaluation_selection(self.score_rollout, self.worker_executor)
+        if self.rollout_timeout_s <= 0:
+            raise ValueError("rollout_timeout_s must be positive")
+        if self.rollout_repeats < 1:
+            raise ValueError("rollout_repeats must be at least 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         for label, value in (
@@ -331,8 +351,6 @@ class HarnessEvolutionRecipe(Recipe):
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
         if self.floor_score <= 0:
             raise ValueError("floor_score must be positive")
-        if self.publish not in ("auto", "review"):
-            raise ValueError("publish must be 'auto' or 'review'")
         if not isinstance(self.selection, PluginReference) or not issubclass(
             self.selection.plugin_class, SelectionPlugin
         ):
@@ -397,12 +415,12 @@ class HarnessEvolutionRecipe(Recipe):
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
             raise RecipeConfigError("evolution.binary must be a non-empty string when set")
-        timeout = evolution.get("episode_timeout_s", 600.0)
+        timeout = evolution.get("rollout_timeout_s", 600.0)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
-        repeats = evolution.get("episode_repeats", 1)
+            raise RecipeConfigError("evolution.rollout_timeout_s must be a positive number")
+        repeats = evolution.get("rollout_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
-            raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+            raise RecipeConfigError("evolution.rollout_repeats must be an integer of at least 1")
         batch_size = evolution.get("batch_size", 1)
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise RecipeConfigError("evolution.batch_size must be an integer of at least 1")
@@ -461,14 +479,12 @@ class HarnessEvolutionRecipe(Recipe):
         # A recheck compares two trees; the floor evaluates one.
         if issubclass(selection.plugin_class, FloorPlugin) and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
-        publish = evolution.get("publish", "auto")
-        if publish not in ("auto", "review"):
-            raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
-        review_kinds = evolution.get("review_kinds", ())
-        if isinstance(review_kinds, str) or not isinstance(review_kinds, Sequence):
-            raise RecipeConfigError("evolution.review_kinds must be a list of tree kind names")
-        if not all(kind in tuple(TreeKind) for kind in review_kinds):
-            raise RecipeConfigError(f"evolution.review_kinds must name tree kinds: {', '.join(TreeKind)}")
+        for moved in ("publish", "review_kinds"):
+            if moved in evolution:
+                raise RecipeConfigError(
+                    f"evolution.{moved} is gone: the activation section decides whether a kept tree serves "
+                    "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
+                )
         client_models = evolution.get("client_models", ())
         if isinstance(client_models, str) or not isinstance(client_models, Sequence):
             raise RecipeConfigError("evolution.client_models must be a list of model names")
@@ -514,7 +530,7 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         try:
             worker_executor = role_executor_settings(settings, "evolution")
-            scorer = EpisodeScorer.from_setting(
+            scorer = RolloutScorer.from_setting(
                 evolution.get("evaluate"), setting="evolution.evaluate", default=spec.scorer
             )
             propose = Proposer.from_setting(
@@ -539,14 +555,14 @@ class HarnessEvolutionRecipe(Recipe):
             "max_pending_proposals": max_pending,
             "propose": propose,
             "promote": promote,
-            "score_episode": scorer,
+            "score_rollout": scorer,
             "worker_executor": worker_executor,
             "tasks": tuple(str(task) for task in tasks),
             "eval_task_store": eval_task_store,
             "adapter": adapter,
             "binary": binary,
-            "episode_timeout_s": float(timeout),
-            "episode_repeats": repeats,
+            "rollout_timeout_s": float(timeout),
+            "rollout_repeats": repeats,
             "batch_size": batch_size,
             "forbid_residue": forbid_residue,
             **budgets,
@@ -555,8 +571,6 @@ class HarnessEvolutionRecipe(Recipe):
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
             "max_promoted_per_client": per_client,
-            "publish": publish,
-            "review_kinds": tuple(TreeKind(kind) for kind in review_kinds),
             "client_models": tuple(client_models),
             "seed": seed,
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
@@ -573,7 +587,7 @@ class HarnessEvolutionRecipe(Recipe):
         """The served model's endpoint.
 
         With the service known and a scenario named, this Reef's own
-        evaluation route for that scenario: an episode then samples the
+        evaluation route for that scenario: a rollout then samples the
         release the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
@@ -635,6 +649,7 @@ class HarnessEvolutionRecipe(Recipe):
             served_metadata = None
         return create_harness_surface(
             get_adapter(self.adapter),
+            layout=HarnessLayout(get_adapter(self.adapter)),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             model_metadata=self.model_metadata,
@@ -642,9 +657,14 @@ class HarnessEvolutionRecipe(Recipe):
             client_models=client_models,
         )
 
-    def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The seed tree's files: a new scenario's base release, which the first step builds on."""
-        return dict(self.seed.files) or None
+    def base_artifact_source(self) -> BaseArtifactSource:
+        """The seed tree as the base harness, which a new scenario serves and the first step builds on.
+
+        The files are the seed tree's files; the empty seed makes a base
+        harness with no files. The input is the seed tree's checksum, so a
+        scenario opens only on a base made from the same seed.
+        """
+        return BaseArtifactSource(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's proposal inbox and its step records: what a delete archives beside the record store."""
@@ -710,14 +730,14 @@ class HarnessEvolutionRecipe(Recipe):
         executor, binary = self.executor.for_program(program, binary=self.binary)
         executor.preflight()
         models = self.model_bindings(scenario)
-        selection, requirements = evaluation_selection(self.score_episode, self.worker_executor)
-        evaluator = HarnessEpisodeEvaluator(
+        selection, requirements = evaluation_selection(self.score_rollout, self.worker_executor)
+        evaluator = HarnessRolloutEvaluator(
             descriptor=descriptor,
-            scorer=self.score_episode,
+            scorer=self.score_rollout,
             models=models,
             binary=binary,
-            episode_timeout_s=self.episode_timeout_s,
-            episode_repeats=self.episode_repeats,
+            rollout_timeout_s=self.rollout_timeout_s,
+            rollout_repeats=self.rollout_repeats,
             executor=executor,
             forbid_residue=self.forbid_residue,
             worker_selection=selection,
@@ -761,8 +781,6 @@ class HarnessEvolutionRecipe(Recipe):
                 max_model_calls_per_step=self.max_model_calls_per_step,
                 recheck_every=self.recheck_every,
                 max_rejected_history=self.max_rejected_history,
-                publish=self.publish,
-                review_kinds=frozenset(self.review_kinds),
             ),
             records=StepRecord(None if record_root is None else record_root / scenario),
             inbox=ProposalInbox(self.proposals_path(scenario), self.max_pending_proposals),

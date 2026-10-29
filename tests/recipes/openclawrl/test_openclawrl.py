@@ -15,9 +15,9 @@ from recipes.openclawrl.prm import PRMJudge
 from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
-from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import TrainingMethod

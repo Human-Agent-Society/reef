@@ -49,6 +49,7 @@ from reef.storage.migrations import archive_imported_files, legacy_model_configs
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
@@ -169,6 +170,7 @@ class PostgresRecordDatabase:
         self.tables = _record_tables(metadata)
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.trajectory_table = trajectory_table(metadata, foreign_key="record_store.storage_id")
+        self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
             self._engine = create_engine(postgres_url(database_url), pool_pre_ping=True, hide_parameters=True)
@@ -184,21 +186,22 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8]):
+                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8], [9]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
                 # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
                 # generated_task with candidate_task and published_task, which keep each task by the digest
                 # of its directory, and no longer uses task_store. Version 8 adds task_trained and task_document, the
-                # trained marks and the stage documents of a task store. create_all adds them to an older schema.
+                # trained marks and the stage documents of a task store. Version 9 adds artifact_evaluation, the
+                # evaluations that clients ask for. create_all adds them to an older schema.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [8]:
-                    connection.execute(version.update().values(version=8))
+                if versions and versions != [9]:
+                    connection.execute(version.update().values(version=9))
                 elif not versions:
-                    connection.execute(version.insert().values(version=8))
+                    connection.execute(version.insert().values(version=9))
         except BaseException:
             self._engine.dispose()
             raise
@@ -374,6 +377,12 @@ class PostgresRecordStore(SQLRecordStore):
             self, ScopedTable(self._database.trajectory_table, scope={"storage_id": self.storage_id})
         )
 
+    def evaluation_store(self) -> SQLEvaluationStore:
+        """Open the artifact evaluations of this store generation."""
+        return SQLEvaluationStore(
+            self, ScopedTable(self._database.evaluation_table, scope={"storage_id": self.storage_id})
+        )
+
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history of this store generation."""
         return SQLCommitHistory(
@@ -451,6 +460,7 @@ class PostgresScenarioStorage(ScenarioStorage):
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
                     trajectories=records.trajectory_store(),
+                    evaluations=records.evaluation_store(),
                 )
             except BaseException:
                 records.close()
