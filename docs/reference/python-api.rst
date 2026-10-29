@@ -771,11 +771,17 @@ artifact of one component (`Import an artifact
 import accepts.
 
 A component's layout is the ``layout`` of its ``ComponentSurface``, an
-``reef.surface.ArtifactLayout``. ``check(directory)`` returns when the
-directory holds an artifact in the layout of the component's releases, and
-the remote weights that it names exist. Otherwise it raises ``ValueError``,
-and Reef answers HTTP 400. ``None``, the default, means that the component
-takes no import. The built-in recipes bind one:
+``reef.surface.ArtifactLayout``. ``check(files)`` returns when ``files`` are
+an artifact in the layout of the component's releases, and the remote weights
+that they name exist. Otherwise it raises ``ValueError``, and Reef answers
+HTTP 400. ``None``, the default, means that the component takes no import.
+
+``files`` is a ``reef.artifact.ArtifactFiles``: the copied directory
+(``DirectoryFiles``), or a Hugging Face revision that Reef keeps by reference
+(``HuggingFaceRevisionFiles``). It gives ``paths()``, and ``sha256(path)`` and
+``read_bytes(path)`` for each path. Read only the files that the check needs:
+on a revision, each read of a small file downloads it, and a read of a weight
+file downloads the weights. The built-in recipes bind one:
 
 - A weight recipe binds ``ReleaseLayout(training_component)``, which calls
   the component's ``check_release`` (see `Training jobs and components`_).
@@ -803,6 +809,18 @@ the version that it read, or ``""`` when the source has no version. Raise
 (``hf``), ``FileReader`` (``file``) and ``S3Reader`` (``s3``). A deployment adds
 readers in ``storage.artifact_sources``. A configured reader replaces the
 built-in reader of a scheme that it reads.
+
+A reader can also keep a URI by reference. ``keep_by_reference(uri,
+directory)`` returns ``None``, the default, when the reader copies ``uri``.
+Otherwise it writes the files that Reef stores into ``directory`` and returns
+a ``ReferencedContent`` with the referenced ``files`` and the ``version``.
+``HuggingFaceReader`` keeps ``hf://org/model@<commit>`` by reference when
+``<commit>`` is a full 40-digit commit SHA: Reef stores only
+``hf-reference.json``, ``{"uri": "hf://org/model", "version": "<commit>"}``.
+``reef.artifact.read_reference(directory)`` reads it back. The built-in
+serving runtimes load such a release from the revision's snapshot, which
+Hugging Face downloads once into its cache. A runtime that loads models from
+the Hub can read the reference and download nothing.
 
 Record storage and audit
 ------------------------

@@ -1,21 +1,30 @@
-"""The source readers of artifact imports and the content ID of an imported directory (RFC #980)."""
+"""The source readers of artifact imports and the content ID of what they import (RFC #980, RFC #995)."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import types
 from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.hugging_face_hub import COMMIT, MemoryHub
 
 from reef.artifact import (
+    REFERENCE_FILE,
     ArtifactSourceError,
     ArtifactSourceReader,
     ArtifactSources,
+    DirectoryFiles,
     FileReader,
+    HuggingFaceReader,
+    HuggingFaceRevision,
+    HuggingFaceRevisionFiles,
     S3Reader,
     directory_content_id,
+    read_reference,
 )
 
 
@@ -46,6 +55,14 @@ def test_the_content_id_names_the_files_and_their_paths_only(tmp_path: Path) -> 
     assert directory_content_id(write_tree(tmp_path / "b", files)) == first
     assert directory_content_id(write_tree(tmp_path / "c", {**files, "config.json": b"{ }"})) != first
     assert directory_content_id(write_tree(tmp_path / "d", {"config.json": b"{}", "weights.bin": b"w"})) != first
+    # Paths sort by their components, as pathlib sorts them, so an existing artifact keeps its content ID.
+    root = write_tree(tmp_path / "e", {"a-b": b"1", "a/b": b"2"})
+    listed = [
+        (path.relative_to(root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
+    assert directory_content_id(root) == f"content:{hashlib.sha256(json.dumps(listed).encode()).hexdigest()}"
 
 
 @pytest.mark.unit
@@ -53,7 +70,7 @@ def test_a_file_uri_copies_an_absolute_directory_without_a_version(tmp_path: Pat
     source = write_tree(tmp_path / "source", {"config.json": b"{}", "sub/weights.bin": b"w"})
     target = tmp_path / "target"
     target.mkdir()
-    assert ArtifactSources.from_setting(()).fetch(source.as_uri(), target) == ""
+    assert ArtifactSources.from_setting(()).reader(source.as_uri()).fetch(source.as_uri(), target) == ""
     assert directory_content_id(target) == directory_content_id(source)
     for uri in ("file://relative/path", (tmp_path / "missing").as_uri()):
         with pytest.raises(ValueError, match="absolute directory"):
@@ -69,11 +86,12 @@ def test_a_uri_goes_to_the_reader_of_its_scheme(tmp_path: Path) -> None:
         "HuggingFaceReader",
         "MemoryReader",
     ]
-    assert sources.fetch("s3://bucket/model", tmp_path) == "v1"
+    assert isinstance(sources.reader("s3://bucket/model"), MemoryReader)
+    assert sources.reader("s3://bucket/model").fetch("s3://bucket/model", tmp_path) == "v1"
     assert (tmp_path / "uri.txt").read_text() == "s3://bucket/model"
     for uri in ("/no/scheme", "ftp://host/model"):
         with pytest.raises(ValueError, match="no URI of a known scheme"):
-            sources.fetch(uri, tmp_path)
+            sources.reader(uri)
     with pytest.raises(ValueError, match="two artifact source readers read one scheme"):
         ArtifactSources((MemoryReader(), S3Reader()))
 
@@ -138,3 +156,67 @@ def test_an_s3_uri_reads_every_object_under_its_prefix(tmp_path: Path, monkeypat
     client.fail = True
     with pytest.raises(ArtifactSourceError, match="access denied"):
         reader.fetch("s3://bucket/models/a", tmp_path)
+
+
+@pytest.mark.unit
+def test_a_hugging_face_revision_is_a_repo_and_a_full_commit() -> None:
+    revision = HuggingFaceRevision("org/model", COMMIT)
+    assert revision.uri == f"hf://org/model@{COMMIT}"
+    assert HuggingFaceRevision.from_dict(revision.to_dict()) == revision
+    for repo, commit in (
+        ("model", COMMIT),
+        ("org/model/x", COMMIT),
+        ("org/model", "main"),
+        ("org/model", COMMIT.upper()),
+    ):
+        with pytest.raises(ValueError):
+            HuggingFaceRevision(repo, commit)
+    for value in ({"uri": "s3://org/model", "version": COMMIT}, {"uri": "hf://org/model"}, []):
+        with pytest.raises(ValueError, match=REFERENCE_FILE):
+            HuggingFaceRevision.from_dict(value)
+
+
+@pytest.mark.unit
+def test_revision_files_are_the_hub_listing_and_download_only_what_is_read(tmp_path: Path) -> None:
+    files = {"config.json": b"{}", "model.safetensors": b"weights-bytes", "sub/tokenizer.json": b"tokenizer-bytes"}
+    hub = MemoryHub(tmp_path / "cache", "org/model", files)
+    remote = HuggingFaceRevisionFiles(HuggingFaceRevision("org/model", COMMIT), hub)
+    local = write_tree(tmp_path / "local", files)
+    assert remote.paths() == DirectoryFiles(local).paths()
+    # The same bytes get the content ID of a copy; only the file below the LFS size is downloaded, to hash it.
+    assert remote.content_id() == directory_content_id(local)
+    assert hub.downloads == ["config.json"]
+    assert remote.read_bytes("sub/tokenizer.json") == b"tokenizer-bytes"
+    with pytest.raises(FileNotFoundError):
+        remote.read_bytes("missing.json")
+    with pytest.raises(ValueError, match="names no revision"):
+        HuggingFaceRevisionFiles(HuggingFaceRevision("org/other", COMMIT), hub)
+
+
+@pytest.mark.unit
+def test_the_hugging_face_reader_keeps_a_commit_by_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = MemoryHub(tmp_path / "cache", "org/model", {"config.json": b"{}", "model.safetensors": b"weights-bytes"})
+    monkeypatch.setattr("reef.artifact.sources.HfApi", lambda: hub)
+    reader = HuggingFaceReader()
+    branch = tmp_path / "branch"
+    branch.mkdir()
+    # A branch or a tag can move, so it is copied.
+    assert reader.keep_by_reference("hf://org/model@main", branch) is None
+    assert list(branch.iterdir()) == []
+
+    stored = tmp_path / "stored"
+    stored.mkdir()
+    kept = reader.keep_by_reference(f"hf://org/model@{COMMIT}", stored)
+    assert kept is not None and kept.version == COMMIT
+    assert kept.files.content_id() == directory_content_id(write_tree(tmp_path / "copy", hub.files))
+    assert [path.name for path in stored.iterdir()] == [REFERENCE_FILE]
+    assert read_reference(stored) == HuggingFaceRevision("org/model", COMMIT)
+    # The files a repository adds to a materialized release do not hide the reference.
+    (stored / "reef-artifact.json").write_text("{}")
+    assert read_reference(stored) == HuggingFaceRevision("org/model", COMMIT)
+    (stored / "config.json").write_text("{}")
+    assert read_reference(stored) is None
+    (stored / "config.json").unlink()
+    (stored / REFERENCE_FILE).write_text("not json")
+    with pytest.raises(ValueError, match="no JSON object"):
+        read_reference(stored)

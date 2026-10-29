@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.core.activation import ActivationRule
@@ -280,10 +281,10 @@ class Scenario:
         return self._committer.train_from(artifact_id, component)
 
     def import_artifact(
-        self, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self, directory: Path, files: ArtifactFiles, component: str | None, *, source: Mapping[str, str]
     ) -> ComponentArtifact:
         """Publish ``directory`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
-        return self._committer.import_artifact(directory, component, source=source)
+        return self._committer.import_artifact(directory, files, component, source=source)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""

@@ -16,6 +16,7 @@ import yaml
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
+from reef.artifact.files import DirectoryFiles
 from reef.cli import main
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
@@ -403,18 +404,18 @@ def test_the_base_artifact_is_the_untrained_adapter_and_imports_as_any_release(c
 def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(component, client, tmp_path):
     release = tmp_path / "release"
     with pytest.raises(ValueError, match=r"holds tinker-checkpoint\.json"):
-        component.check_release(release)
+        component.check_release(DirectoryFiles(release))
     UNTRAINED.write(release)
-    component.check_release(release)
+    component.check_release(DirectoryFiles(release))
     client.missing = {UNTRAINED.state_path}
     with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
-        component.check_release(release)
+        component.check_release(DirectoryFiles(release))
     TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
     with pytest.raises(ValueError, match="rank 8 LoRA"):
-        component.check_release(release)
+        component.check_release(DirectoryFiles(release))
     (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
     with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
-        component.check_release(release)
+        component.check_release(DirectoryFiles(release))
 
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):

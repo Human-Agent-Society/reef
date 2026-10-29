@@ -9,9 +9,10 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
+from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.runtime_stubs import runtime_bindings
 
-from reef.artifact import ArtifactSources, directory_content_id
+from reef.artifact import REFERENCE_FILE, ArtifactSources, DirectoryFiles, directory_content_id, read_reference
 from reef.core.errors import CommitPending
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
@@ -45,7 +46,9 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     status = value.build_training_status()["scenarios"]["math"]["artifacts"]
     served_before = len(runtime.activated)
     runtime.restore_order.clear()
-    imported = value.import_artifact("math", weights(tmp_path / "w9"), None, source=source(tmp_path / "w9"))
+    imported = value.import_artifact(
+        "math", weights(tmp_path / "w9"), DirectoryFiles(tmp_path / "w9"), None, source=source(tmp_path / "w9")
+    )
 
     # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
     assert scenario.current_artifact_ref() == served
@@ -74,7 +77,13 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     assert (row["source"], row["active"], row["activated"]) == (source(tmp_path / "w9"), False, False)
 
     # The same bytes again are another artifact with the same content id.
-    again = value.import_artifact("math", weights(tmp_path / "again"), None, source=source(tmp_path / "again"))
+    again = value.import_artifact(
+        "math",
+        weights(tmp_path / "again"),
+        DirectoryFiles(tmp_path / "again"),
+        None,
+        source=source(tmp_path / "again"),
+    )
     assert again.artifact_id != imported.artifact_id and again.content_id == imported.content_id
 
     # The artifact is then an ordinary row: it serves and trains as any other.
@@ -119,12 +128,22 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
     (missing_config / "config.json").unlink()
     try:
         with pytest.raises(ValueError, match=r"config\.json and weight files"):
-            value.import_artifact("math", missing_config, None, source=source(missing_config))
+            value.import_artifact(
+                "math", missing_config, DirectoryFiles(missing_config), None, source=source(missing_config)
+            )
         with pytest.raises(ValueError, match="has no component 'other'"):
-            value.import_artifact("math", weights(tmp_path / "good"), "other", source=source(tmp_path / "good"))
+            value.import_artifact(
+                "math",
+                weights(tmp_path / "good"),
+                DirectoryFiles(tmp_path / "good"),
+                "other",
+                source=source(tmp_path / "good"),
+            )
         monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
         with pytest.raises(CommitPending, match="cannot import an artifact"):
-            value.import_artifact("math", tmp_path / "good", None, source=source(tmp_path / "good"))
+            value.import_artifact(
+                "math", tmp_path / "good", DirectoryFiles(tmp_path / "good"), None, source=source(tmp_path / "good")
+            )
         assert len(scenario.store.history()) == steps
         assert value.list_artifacts("math") == rows
     finally:
@@ -175,6 +194,50 @@ def test_the_import_http_api_takes_a_uri(tmp_path) -> None:
             # An unknown scenario is refused before the source is read.
             unknown = await client.post("/reef/scenarios/other/artifacts", json={"source": "file:///missing"})
             assert unknown.status == 404
+        finally:
+            await client.close()
+            value.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_path, monkeypatch) -> None:
+    hub = MemoryHub(tmp_path / "cache", "org/model", {"config.json": b"{}", "model.safetensors": b"w9-weights"})
+    monkeypatch.setattr("reef.artifact.sources.HfApi", lambda: hub)
+
+    async def run() -> None:
+        value, _, _ = dispatcher(tmp_path)
+        value.get_or_create_scenario("math")
+        imports = ArtifactImports(ArtifactSources.from_setting(()), tmp_path / "imports")
+        client = TestClient(TestServer(create_app(value, artifact_imports=imports)))
+        await client.start_server()
+        try:
+            uri = f"hf://org/model@{COMMIT}"
+            imported = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
+            assert imported.status == 201
+            receipt = await imported.json()
+            # The content ID is the copy's; the layout check read no weights.
+            copy = tmp_path / "copy"
+            copy.mkdir()
+            for path, data in hub.files.items():
+                (copy / path).write_bytes(data)
+            assert receipt["content_id"] == directory_content_id(copy)
+            assert "model.safetensors" not in hub.downloads
+            listed = (await (await client.get("/reef/scenarios/math/artifacts")).json())["artifacts"]
+            assert listed[0]["source"] == {"uri": uri, "version": COMMIT}
+            # Reef stores the reference only.
+            _, artifact = value.get_or_create_scenario("math").resolve_artifact(receipt["artifact_id"])
+            stored = artifact.materialize().local_path
+            assert read_reference(stored) is not None and (stored / REFERENCE_FILE).is_file()
+            assert not (stored / "model.safetensors").exists()
+
+            # The revision must have the layout of the component's releases, and resolve.
+            del hub.files["config.json"]
+            refused = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
+            assert refused.status == 400 and "config.json and weight files" in await refused.text()
+            missing = await client.post("/reef/scenarios/math/artifacts", json={"source": f"hf://org/other@{COMMIT}"})
+            assert missing.status == 400 and "names no revision" in await missing.text()
         finally:
             await client.close()
             value.close()

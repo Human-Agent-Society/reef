@@ -18,8 +18,8 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
-from reef.artifact.sources import directory_content_id
 from reef.core.activation import MadeArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
@@ -416,15 +416,18 @@ class ScenarioCommitter:
             return selected
 
     def import_artifact(
-        self, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self, directory: Path, files: ArtifactFiles, component: str | None, *, source: Mapping[str, str]
     ) -> ComponentArtifact:
-        """Publish the files in ``directory`` as a new artifact of ``component``; return it (RFC #980).
+        """Publish the files in ``directory`` as a new artifact of ``component`` whose content is ``files``; return it.
 
+        ``directory`` holds what Reef stores: the imported files themselves
+        (RFC #980), or the ``REFERENCE_FILE`` of a revision that stays on the
+        Hub (RFC #995). ``files`` is the content in both cases.
         ``component`` may be left out when the scenario has one component.
-        The component's layout (``ComponentSurface.layout``) checks the
-        directory first, outside the locks, since it can ask a remote service.
-        Then the release's own admission check runs, as at a training
-        publication. The artifact's content id is ``directory_content_id``.
+        The component's layout (``ComponentSurface.layout``) checks ``files``
+        first, outside the locks, since it can ask a remote service.
+        Then the release's own admission check runs on ``directory``, as at a
+        training publication. The artifact's content id is ``files.content_id()``.
         The release binds the artifact as ``component`` and every other
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
@@ -447,8 +450,8 @@ class ScenarioCommitter:
         component_surface = surface.components.get(component)
         if component_surface is None or component_surface.layout is None:
             raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
-        component_surface.layout.check(directory)
-        imported = Artifact.local(directory, content_id=directory_content_id(directory))
+        component_surface.layout.check(files)
+        imported = Artifact.local(directory, content_id=files.content_id())
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1

@@ -14,6 +14,7 @@ from threading import Lock, Thread
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import ScenarioCapacityFull, UnknownScenario
@@ -348,11 +349,20 @@ class Dispatcher(ScenarioLifecycle):
             return self.registry.require(scenario).train_from(artifact_id, component)
 
     def import_artifact(
-        self, scenario: str, directory: Path, component: str | None, *, source: Mapping[str, str]
+        self,
+        scenario: str,
+        directory: Path,
+        files: ArtifactFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
     ) -> ComponentArtifact:
-        """Publish ``directory`` as a new artifact of ``component`` in ``scenario``; nothing serves or trains it yet."""
+        """Publish ``directory`` as a new artifact of ``component`` in ``scenario``, whose content is ``files``.
+
+        Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
+        """
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).import_artifact(directory, component, source=source)
+            return self.registry.require(scenario).import_artifact(directory, files, component, source=source)
 
     def current_artifact(
         self,

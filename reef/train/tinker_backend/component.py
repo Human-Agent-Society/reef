@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
@@ -176,12 +177,12 @@ class TinkerTrainingComponent(LocalJobComponent):
     def base_start(self) -> str:
         return str(self._base)
 
-    def check_release(self, directory: Path) -> None:
+    def check_release(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
-        if not (directory / MANIFEST).is_file():
+        if MANIFEST not in files.paths():
             raise ValueError(f"a Tinker release holds {MANIFEST}")
         try:
-            checkpoint = TinkerCheckpoint.read(directory)
+            checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
         except (TypeError, ValueError) as exc:
             # A manifest from outside Reef may have any shape; ``from_dict`` refuses unknown fields with TypeError.
             raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
