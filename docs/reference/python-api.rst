@@ -1473,7 +1473,7 @@ skipped or fails.
        a request step only), and raises ``ValueError`` before writing when
        ``notes`` or ``requires`` is not valid
    * - ``TreeLayout``
-     - the parts of an adapter's tree, from its ``tree.yaml``; a method gets
+     - the parts of an adapter's tree, from the ``parts`` of its ``adapter.yaml``; a method gets
        its adapter's as ``get_adapter(workspace.host()["adapter"]).layout``.
        ``parts`` maps each part name to a ``Part`` (``name``, ``path``,
        ``format``, a ``Format``, ``renders``, ``holds`` and ``review``);

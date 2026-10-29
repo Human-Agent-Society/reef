@@ -17,36 +17,56 @@
 # tasks. Declarative trees can use the default local runner with Docker.
 name: terminus
 binary: reef-terminus
-is_prompt_task_directory: true
-argv:
-  - --task
-  - "{prompt}"
-env:
-  # The episode root, not the terminus directory: terminus-commands is a
-  # sibling of terminus, so the runner reads the tree from one level up.
-  REEF_TERMINUS_DIR: "{root}"
-  REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
-  REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
-  HOME: "{root}/workspace"
-# Harbor drives the task container with the docker CLI, which finds its
-# endpoint and context through these variables, else through the current
-# context in its config directory (colima and Docker Desktop set one there),
-# where it also finds the compose plugin. HOME is relocated above, so the
-# episode keeps the service's own values; {home} is the service's home.
-host_env:
-  DOCKER_HOST: ""
-  DOCKER_CONTEXT: ""
-  DOCKER_CONFIG: "{home}/.docker"
-# Harbor bind-mounts each trial's directories under the root into the task
-# container, so the root must be on a path Docker shares with the host. On
-# macOS Docker runs in a VM: colima and Docker Desktop share the home
-# directory by default, colima does not share $TMPDIR (/var/folders), and
-# container writes there never reach the host. So on macOS a local episode
-# makes its root under ~/.reef/episodes. Linux Docker shares every path, and
-# the root stays in the temp directory there.
-is_root_bind_mounted: true
+renderer: reef.harness.adapters.terminus.render:TerminusAdapterRenderer
+execution_validator: reef.harness.adapters.terminus.execution:TerminusExecutionValidator
+# The harness tree Terminus 2 takes. A method writes each part at its path;
+# Reef checks the file as its format and renders it to its renders path,
+# inside the episode root the Reef-owned Harbor runner reads. A tree file that
+# no part takes is refused.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    renders: terminus/AGENTS.md
+    holds: the instructions Harbor appends to each task's instruction
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: terminus/skills/{name}/SKILL.md
+    holds: an Agent Skill, which Terminus 2 loads when its description fits the task
+  # Terminus 2 has no slash-command surface, so a command is a skill in a
+  # second root. Harbor loads both roots and keeps its progressive skill
+  # loading, so a command is discovered rather than pasted into the prompt.
+  command:
+    path: commands/{name}.md
+    format: command
+    renders: terminus-commands/{name}/SKILL.md
+    holds: a prompt template, rendered as a skill under a second root
+  # One module exporting Agent(Terminus2), imported only inside Reef's jail.
+  extension:
+    path: extensions/{name}.py
+    format: code
+    renders: terminus/context/{name}.py
+    holds: a Python module defining class Agent, a subclass of Harbor's Terminus2
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into terminus/config.json (primary), the Terminus 2 constructor arguments
+# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
+# command, and the variables that point the agent's configuration at that root.
+episode:
+  argv:
+    - --task
+    - "{prompt}"
+  env:
+    # The episode root, not the terminus directory: terminus-commands is a
+    # sibling of terminus, so the runner reads the tree from one level up.
+    REEF_TERMINUS_DIR: "{root}"
+    REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
+    REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
+    HOME: "{root}/workspace"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (tree.yaml) merges into one of them.
+# file must pass. A tree's config part (see parts) merges into one of them.
 config:
   primary:
     path: "terminus/config.json"
@@ -104,21 +124,6 @@ config:
       - key: llm_call_kwargs.extra_body
         match: Not(Contains(Key(IsIn(["model", "models"]))))
         reason: Reef's model binding chooses the endpoint, the credential and the model
-trajectory:
-  format: terminus-atif-json
-  path: "terminus/sessions"
-cleanup_whitelist:
-  - "terminus/sessions/**"
-  # Harbor writes its trial tree here: logs, the container's outputs, and the
-  # ATIF trajectory the runner reads back.
-  - "terminus/trials/**"
-writable_paths:
-  - "terminus/sessions"
-  - "terminus/trials"
-# The execution validator permits nesting only with remote task environments.
-self_isolating: true
-renderer: reef.harness.adapters.terminus.render:TerminusAdapterRenderer
-execution_validator: reef.harness.adapters.terminus.execution:TerminusExecutionValidator
 # Terminus 2 reaches the model through litellm, so the binding is the provider
 # base URL, key, and model name. The served tree never carries a provider.
 # litellm_proxy sends the model to api_base as it is named whatever vendor
@@ -143,3 +148,34 @@ model_binding:
         llm_kwargs:
           api_key: "{api_key}"
           custom_llm_provider: "litellm_proxy"
+trajectory:
+  format: terminus-atif-json
+  path: "terminus/sessions"
+writable_paths:
+  - "terminus/sessions"
+  - "terminus/trials"
+cleanup_whitelist:
+  - "terminus/sessions/**"
+  # Harbor writes its trial tree here: logs, the container's outputs, and the
+  # ATIF trajectory the runner reads back.
+  - "terminus/trials/**"
+is_prompt_task_directory: true
+# Harbor drives the task container with the docker CLI, which finds its
+# endpoint and context through these variables, else through the current
+# context in its config directory (colima and Docker Desktop set one there),
+# where it also finds the compose plugin. HOME is relocated above, so the
+# episode keeps the service's own values; {home} is the service's home.
+host_env:
+  DOCKER_HOST: ""
+  DOCKER_CONTEXT: ""
+  DOCKER_CONFIG: "{home}/.docker"
+# Harbor bind-mounts each trial's directories under the root into the task
+# container, so the root must be on a path Docker shares with the host. On
+# macOS Docker runs in a VM: colima and Docker Desktop share the home
+# directory by default, colima does not share $TMPDIR (/var/folders), and
+# container writes there never reach the host. So on macOS a local episode
+# makes its root under ~/.reef/episodes. Linux Docker shares every path, and
+# the root stays in the temp directory there.
+is_root_bind_mounted: true
+# The execution validator permits nesting only with remote task environments.
+self_isolating: true

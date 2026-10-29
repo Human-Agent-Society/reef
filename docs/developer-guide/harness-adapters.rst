@@ -1,15 +1,17 @@
 Harness adapters
 ================
 
-An adapter connects a harness tree to one agent. Its ``tree.yaml`` declares
-the parts of the tree: the tree paths a method writes, such as ``rules.md``
-and ``skills/<name>/SKILL.md`` (see `The harness tree
+An adapter connects a harness tree to one agent. One file,
+``reef/harness/adapters/<name>/adapter.yaml``, declares it. Its ``parts``
+section lists the parts of the tree: the tree paths a method writes, such as
+``rules.md`` and ``skills/<name>/SKILL.md`` (see `The harness tree
 <../user-guide/evolve-your-harness.rst#the-harness-tree>`__), and the agent's
-own path for each. Its ``descriptor.yaml`` declares the rest: the config
-targets, how to run the agent on the rendered files and the served model,
-and how to read its trajectory.
+own path for each. The other sections declare the rest: the config targets,
+how to run the agent on the rendered files and the served model, and how to
+read its trajectory. A ``render.py`` beside it holds the render steps that
+the file cannot state.
 
-This page is for developers. It describes the two files, the rendering rules
+This page is for developers. It describes the file, the rendering rules
 every adapter shares, what differs for each bundled agent, the contract of
 the native runner, and how to connect a new agent.
 
@@ -49,11 +51,11 @@ episodes, unless ``evolution.binary`` names one.
 Tree parts
 ~~~~~~~~~~
 
-The adapter decides which parts a harness tree may hold. Its ``tree.yaml``,
-beside ``descriptor.yaml``, declares them under one key, ``parts``.
+The adapter decides which parts a harness tree may hold. The ``parts``
+section of its ``adapter.yaml`` declares them.
 `reef/harness/adapters/parts.py <../../reef/harness/adapters/parts.py>`__
-checks it when ``load_descriptor`` loads the descriptor beside it. This is
-pi's ``tree.yaml``:
+checks it when ``load_descriptor`` loads the file. This is pi's ``parts``
+section:
 
 .. code-block:: yaml
 
@@ -120,7 +122,7 @@ Each entry under ``parts`` maps a part name to these fields:
        person's machine merge their text parts (rules, skills, commands,
        memory) by ``lines``.
 
-``load_descriptor`` refuses a ``tree.yaml`` that breaks one of these rules:
+``load_descriptor`` refuses a ``parts`` section that breaks one of these rules:
 
 - A part name is a lowercase letter, then lowercase letters, digits or
   ``_``.
@@ -260,14 +262,18 @@ and edit them.
 Descriptor fields
 ~~~~~~~~~~~~~~~~~
 
-``descriptor.yaml`` describes how Reef renders, starts, and reads an agent.
+The other sections of ``adapter.yaml`` describe how Reef renders, starts,
+and reads an agent.
 `reef/harness/adapters/descriptor.py
-<../../reef/harness/adapters/descriptor.py>`__ validates it at load. The
-fields are:
+<../../reef/harness/adapters/descriptor.py>`__ validates the file at load,
+and refuses a key it does not know. The fields are:
 
-- ``name`` identifies the adapter. ``binary`` is the executable, and
-  ``argv`` runs one headless prompt. Reef substitutes ``{prompt}`` in
-  ``argv``.
+- ``name`` identifies the adapter, and ``binary`` is the executable.
+- ``episode`` says how Reef runs the agent for one evaluation episode.
+  ``argv`` runs one headless prompt; Reef substitutes ``{prompt}`` in it.
+  ``env`` points the agent's state into the episode root, substituting
+  ``{root}``. It also turns off what would make an episode
+  non-deterministic, such as the binary's own updater.
 - ``config`` maps each config target's name to the file's root-relative
   ``path``, its ``defaults``, and its ``checks`` (see `Config checks`_). A
   ``primary`` target is required. A file of the tree's ``config`` part
@@ -276,12 +282,9 @@ fields are:
   files replaces ``{root}`` with the directory that holds the render roots:
   the episode root, or a client's install.
 - ``trajectory`` gives the session log's ``path`` and reader ``format``.
-- ``env`` points the agent's state into the episode root, substituting
-  ``{root}``. It also turns off what would make an episode
-  non-deterministic, such as the binary's own updater.
 - ``layer`` (optional) says how a person's machine runs the agent with a
   release over the person's own configuration, which stays as it is. It
-  has two fields, as ``argv`` and ``env`` do for an episode: ``args``, groups
+  has two fields, as ``episode`` does: ``args``, groups
   of arguments added to the binary's own, such as ``["--plugin-dir",
   "{root}/claude"]``, and ``env``, variables such as ``OPENCODE_CONFIG_DIR``.
   Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}``
@@ -827,7 +830,7 @@ Native runner
 
 ``reef-native`` is Reef's own agent loop. It reads ``native/`` from the
 rendered tree: ``RULES.md``, ``skills/``, ``models.json``, and the five
-native parts below. Native's ``tree.yaml`` has no ``command`` or
+native parts below. Native's ``parts`` section has no ``command`` or
 ``extension`` part, because the loop does not read them; validation refuses
 a file under ``commands/`` or ``extensions/`` as not a path of the native
 harness tree. Its binding fields in ``models.json`` (``api``, ``base_url``,
@@ -996,7 +999,7 @@ from ``run_turn`` (``SystemExit`` included), ends the turn with
 unable to run. Code that never calls ``ctx`` is bounded only by the
 episode wall clock.
 
-Loop code runs with the loop process's privileges. Native's ``tree.yaml``
+Loop code runs with the loop process's privileges. Native's ``parts`` section
 therefore marks the ``native_loop`` part ``review: true``: a change that
 creates, changes, or removes a loop always waits for review, whatever
 ``evolution.review_parts`` says, and ``harness_try`` refuses to mount it.
@@ -1083,19 +1086,21 @@ run one at a time:
 Connect a new agent
 ~~~~~~~~~~~~~~~~~~~
 
-To connect an agent that has no adapter yet, write a ``tree.yaml`` (see
-`Tree parts`_) and a ``descriptor.yaml`` (see `Descriptor fields`_):
+To connect an agent that has no adapter yet, write an ``adapter.yaml`` with
+its ``parts`` (see `Tree parts`_) and the other fields (see `Descriptor
+fields`_):
 
 .. steps::
 
    #. The files it reads rules, skills, commands and extensions from become
-      parts in ``tree.yaml``: each part's tree path, format, render path,
-      and what it holds.
-   #. The file it reads configuration from becomes a ``config`` target in
-      ``descriptor.yaml``, with defaults and checks that keep an episode
-      self-contained and the model on Reef.
+      ``parts``: each part's tree path, format, render path, and what it
+      holds.
+   #. The file it reads configuration from becomes a ``config`` target,
+      with defaults and checks that keep an episode self-contained and the
+      model on Reef.
    #. The command line that runs one prompt headless becomes ``binary`` and
-      ``argv``, and ``env`` relocates its state into the episode root.
+      ``episode.argv``, and ``episode.env`` relocates its state into the
+      episode root.
    #. The path and format of its session log become ``trajectory``. A new
       format subclasses ``TrajectoryReader``
       (`reef/harness/episodes/trajectory.py
@@ -1111,4 +1116,4 @@ bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. External adapters
 register through the ``reef.harness_adapters`` entry-point group, as an
 ``AdapterDescriptor`` or a function that returns one; ``load_descriptor``
-builds one from a ``descriptor.yaml`` and the ``tree.yaml`` beside it.
+builds one from an ``adapter.yaml``.

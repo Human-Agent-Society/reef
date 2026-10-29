@@ -987,7 +987,7 @@ Review before serving
 
 With ``evolution.publish: review``, or when a selected patch changes a file
 of a part listed in ``evolution.review_parts`` or of a part that the
-adapter's ``tree.yaml`` marks ``review: true`` (native's ``native_loop``), the
+adapter's ``parts`` mark ``review: true`` (native's ``native_loop``), the
 winning tree is committed to the catalog but not served: its row carries
 ``pending: true``, the manifest keeps serving the previous head, and
 ``?release_id=`` pulls the pending tree for a trial run.

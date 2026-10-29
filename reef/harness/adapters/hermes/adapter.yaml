@@ -22,11 +22,52 @@ install:
   repository: "https://github.com/NousResearch/hermes-agent"
   ref: "v2026.8.31"
   binary_path: "venv/bin/hermes"
-argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
-env:
-  HERMES_HOME: "{root}/hermes"
+renderer: reef.harness.adapters.hermes.render:HermesAdapterRenderer
+# The harness tree Hermes Agent takes. A method writes each part at its path;
+# Reef checks the file as its format and renders it to its renders path,
+# inside the hermes home of an episode or of an install. A tree file that no
+# part takes is refused.
+parts:
+  # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
+  # scoped and read from the working directory chain, never from the home.
+  rules:
+    path: rules.md
+    format: text
+    renders: hermes/SOUL.md
+    holds: the instructions hermes reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: hermes/skills/{name}/SKILL.md
+    holds: an Agent Skill, which hermes loads when its description fits the task
+  # Every skill is also a /name command in the interactive CLI, and hermes has
+  # no other command surface, so a command is a skill under a second root.
+  # The renderer adds that root to skills.external_dirs, beside the home
+  # for an episode and at the install root for a reef-hermes session.
+  command:
+    path: commands/{name}.md
+    format: command
+    renders: hermes-commands/{name}/SKILL.md
+    holds: a prompt template that a person runs as /name, rendered as a skill under a second root
+  # A hermes plugin: register(ctx) in the package init; the renderer adds
+  # the manifest and the config grants.
+  extension:
+    path: extensions/{name}.py
+    format: code
+    renders: hermes/plugins/{name}/__init__.py
+    holds: a Python plugin package that hermes loads in its process
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into hermes/config.yaml (primary) or hermes/.env (env)
+# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
+# command, and the variables that point the agent's configuration at that root.
+episode:
+  argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
+  env:
+    HERMES_HOME: "{root}/hermes"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (tree.yaml) merges into one of them.
+# file must pass. A tree's config part (see parts) merges into one of them.
 config:
   primary:
     path: "hermes/config.yaml"
@@ -131,6 +172,26 @@ config:
   env:
     path: "hermes/.env"
     defaults: {}
+# How to point hermes at a model endpoint: a custom provider with its key in
+# config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
+# hermes reads the key under model for a loopback or an unknown host, and
+# takes an OpenRouter host for its OpenRouter provider, where only the
+# environment or .env supplies the key; both are written so either kind of
+# endpoint answers. Reef renders this set into evaluation episodes; the
+# served tree never carries a provider or a key. Only the openai dialect is
+# bound; hermes's anthropic_messages api mode was not measured.
+model_binding:
+  openai:
+    - target: primary
+      data:
+        model:
+          provider: custom
+          default: "{model}"
+          base_url: "{base_url}/v1"
+          api_key: "{api_key}"
+    - target: env
+      data:
+        OPENAI_API_KEY: "{api_key}"
 trajectory:
   # One JSON snapshot per session under sessions/, rewritten after every
   # persistence point, read by the hermes-session-json reader.
@@ -177,24 +238,3 @@ cleanup_whitelist:
   - "hermes/terminal-sessions/**"
   - "hermes/bin/**"
   - "hermes/models_dev_cache.json*"
-renderer: reef.harness.adapters.hermes.render:HermesAdapterRenderer
-# How to point hermes at a model endpoint: a custom provider with its key in
-# config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
-# hermes reads the key under model for a loopback or an unknown host, and
-# takes an OpenRouter host for its OpenRouter provider, where only the
-# environment or .env supplies the key; both are written so either kind of
-# endpoint answers. Reef renders this set into evaluation episodes; the
-# served tree never carries a provider or a key. Only the openai dialect is
-# bound; hermes's anthropic_messages api mode was not measured.
-model_binding:
-  openai:
-    - target: primary
-      data:
-        model:
-          provider: custom
-          default: "{model}"
-          base_url: "{base_url}/v1"
-          api_key: "{api_key}"
-    - target: env
-      data:
-        OPENAI_API_KEY: "{api_key}"

@@ -63,8 +63,7 @@ class ValidationResult:
 def validate_tree(tree: HarnessTree, descriptor: AdapterDescriptor) -> ValidationResult:
     """Every problem ``tree`` has for ``descriptor``'s adapter.
 
-    Each file must be a path of one of the adapter's parts (its
-    ``tree.yaml``) and pass the checks of the part's format. The native
+    Each file must be a path of one of the adapter's parts and pass the checks of the part's format. The native
     files must reference only tools, skills, graphs and agents the tree
     holds, without delegation cycles, and a tree holds at most one native
     loop. A tree with none of those problems must also render. The result

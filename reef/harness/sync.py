@@ -1,9 +1,9 @@
 """Move a harness between a person's machine and Reef, with one adapter mapping in both directions.
 
-An adapter's ``tree.yaml`` says where each file of a tree lands when the tree
-renders, such as ``rules.md`` at ``claude/CLAUDE.md``, and how each part
-merges. Its ``descriptor.yaml`` says how a person's machine runs the agent
-with a release as a layer over the person's own configuration
+The ``parts`` of an adapter's ``adapter.yaml`` say where each file of a tree
+lands when the tree renders, such as ``rules.md`` at ``claude/CLAUDE.md``,
+and how each part merges. Its ``layer`` says how a person's machine runs the
+agent with a release as a layer over the person's own configuration
 (``AdapterLayer``). The client copies files and runs one command; it knows no
 adapter, and this module does the mapping on the server.
 

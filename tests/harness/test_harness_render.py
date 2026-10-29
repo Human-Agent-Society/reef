@@ -1152,7 +1152,7 @@ def test_an_adapter_renderer_step_must_be_a_static_method() -> None:
     ],
 )
 def test_a_renderer_must_name_an_adapter_renderer_class(tmp_path, reference: str, message: str) -> None:
-    target = write_descriptor(tmp_path, "native", {**descriptor_data("native"), "renderer": reference})
+    target = write_descriptor(tmp_path, {**descriptor_data("native"), "renderer": reference})
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
 
@@ -1167,7 +1167,7 @@ def test_a_renderer_must_name_an_adapter_renderer_class(tmp_path, reference: str
     ],
 )
 def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
-    target = write_descriptor(tmp_path, "pi", {**descriptor_data("pi"), field: value})
+    target = write_descriptor(tmp_path, {**descriptor_data("pi"), field: value})
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
 

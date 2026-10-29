@@ -13,20 +13,61 @@ install:
   package: "@openai/codex"
   version: "0.153.4"
   binary_path: "node_modules/.bin/codex"
-# An episode never waits for an approval and never searches the web: these
-# overrides win over config.toml.
-argv:
-  - exec
-  - --json
-  - --strict-config
-  - --config
-  - approval_policy="never"
-  - --config
-  - web_search="disabled"
-  - --sandbox
-  - workspace-write
-  - --skip-git-repo-check
-  - "{prompt}"
+renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
+# The harness tree Codex takes. A method writes each part at its path; Reef
+# checks the file as its format and renders it to its renders path, inside
+# the Codex home of an episode or of an install. A tree file that no part
+# takes is refused.
+# When a person and Reef both change a file, its part's merge decides: lines merges
+# the lines each changed, and file, the default, refuses.
+#
+# Codex can run lifecycle hooks, but hook processes do not share Codex's own
+# command sandbox, so Codex takes no code part until Reef can isolate them.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    merge: lines
+    renders: codex/AGENTS.md
+    holds: the instructions Codex reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    merge: lines
+    renders: codex/skills/{name}/SKILL.md
+    holds: an Agent Skill, which Codex loads when its description fits the task
+  # Codex 0.153.4 loads no custom prompts (its TUI refuses /name), so a
+  # command is a skill that a person runs as $name. A skill and a command of
+  # one name render to one path and are refused.
+  command:
+    path: commands/{name}.md
+    format: skill
+    merge: lines
+    renders: codex/skills/{name}/SKILL.md
+    holds: a prompt template that a person runs as $name, rendered as a skill
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into codex/config.toml (primary) or codex/models.json (models)
+# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
+# command, and the variables that point the agent's configuration at that root.
+episode:
+  # An episode never waits for an approval and never searches the web: these
+  # overrides win over config.toml.
+  argv:
+    - exec
+    - --json
+    - --strict-config
+    - --config
+    - approval_policy="never"
+    - --config
+    - web_search="disabled"
+    - --sandbox
+    - workspace-write
+    - --skip-git-repo-check
+    - "{prompt}"
+  env:
+    CODEX_HOME: "{root}/codex"
 # How a person's machine runs Codex on a release: the person's own ~/.codex stays, and -c
 # arguments win over its config.toml key by key. They bind the model, with the key in an
 # environment variable rather than on the command line, and add the rules as
@@ -40,10 +81,8 @@ layer:
     - ["-c", 'model="{model}"']
     - ["-c", 'model_providers.reef={name="Reef", base_url="{base_url}/v1", wire_api="responses", env_key="REEF_LAYER_TOKEN", supports_websockets=false}']
     - ["-c", "developer_instructions={file:codex/AGENTS.md}"]
-env:
-  CODEX_HOME: "{root}/codex"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (tree.yaml) merges into one of them.
+# file must pass. A tree's config part (see parts) merges into one of them.
 config:
   primary:
     path: "codex/config.toml"
@@ -130,6 +169,22 @@ config:
         match: Each(Key(Eq("models")))
       - key: models
         match: AnyOf(IsAbsent(), IsObject())
+model_binding:
+  responses:
+    - target: primary
+      data:
+        model: "{model}"
+        model_provider: reef
+        model_providers:
+          reef:
+            name: Reef
+            base_url: "{base_url}/v1"
+            wire_api: responses
+            supports_websockets: false
+            experimental_bearer_token: "{api_key}"
+    - target: models
+      data:
+        models: "{model_metadata}"
 trajectory:
   format: codex-session-jsonl
   path: "codex/sessions"
@@ -155,20 +210,3 @@ cleanup_whitelist:
   - "codex/state_5.sqlite*"
   - "codex/thread-writer-locks/**"
   - "codex/thread_history_1.sqlite*"
-renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
-model_binding:
-  responses:
-    - target: primary
-      data:
-        model: "{model}"
-        model_provider: reef
-        model_providers:
-          reef:
-            name: Reef
-            base_url: "{base_url}/v1"
-            wire_api: responses
-            supports_websockets: false
-            experimental_bearer_token: "{api_key}"
-    - target: models
-      data:
-        models: "{model_metadata}"

@@ -1,6 +1,6 @@
 """The parts of a harness tree: the paths a tree may hold for one adapter, and what each one is.
 
-An adapter declares its tree in ``tree.yaml`` beside its descriptor. Each
+An adapter declares its tree in the ``parts`` section of its ``adapter.yaml``. Each
 part names the tree path a method writes (``path``), what Reef checks the
 file as (``format``), where the adapter's harness reads it (``renders``),
 what the file holds (``holds``), whether a change to it always waits for
@@ -20,10 +20,8 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
-
-import yaml
 
 
 class Format(StrEnum):
@@ -55,8 +53,6 @@ class Format(StrEnum):
 NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 #: The names of parts.
 PART_NAME_PATTERN = r"[a-z][a-z0-9_]*"
-#: The file an adapter's parts are declared in, beside its ``descriptor.yaml``.
-TREE_FILE = "tree.yaml"
 PLACEHOLDER = "{name}"
 PART_KEYS = frozenset({"path", "format", "renders", "holds", "review", "merge"})
 #: How a file that a person and Reef both changed merges (``reef.harness.sync.merge_trees``): ``file`` refuses, and
@@ -65,7 +61,7 @@ MERGE_MODES = ("file", "lines")
 
 
 class TreeLayoutError(ValueError):
-    """An adapter's ``tree.yaml`` is missing, malformed, or declares parts that conflict."""
+    """An adapter's ``parts`` section is missing, malformed, or declares parts that conflict."""
 
 
 @dataclass(frozen=True)
@@ -82,7 +78,7 @@ class Part:
     people. ``review`` is True when a change to the part always waits for a
     person, whatever the deployment's ``evolution.review_parts`` says.
     ``merge`` is one of ``MERGE_MODES``.
-    Purpose: ``load_tree_layout`` makes one per entry of ``tree.yaml``;
+    Purpose: ``parse_tree_layout`` makes one per entry of an adapter's ``parts``;
     validation, rendering and the host facts a method reads use it.
     """
 
@@ -240,29 +236,25 @@ def template_pattern(template: str) -> re.Pattern[str]:
     return re.compile(re.escape(before) + f"(?P<name>{NAME_PATTERN})" + re.escape(after))
 
 
-def load_tree_layout(path: Path) -> TreeLayout:
-    """Read and check one ``tree.yaml``: a ``parts`` mapping of part names to their ``path``, ``format``,
-    ``renders`` (absent for a config part), ``holds``, and optional ``review`` and ``merge``."""
-    try:
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise TreeLayoutError(f"cannot load the harness tree layout {path}: {exc}") from exc
-    if not isinstance(data, Mapping) or set(data) != {"parts"} or not isinstance(data["parts"], Mapping):
-        raise TreeLayoutError(f"{path} must hold one key, parts: a mapping of part names to parts")
+def parse_tree_layout(raw: object) -> TreeLayout:
+    """Check one ``parts`` section: a mapping of part names to their ``path``, ``format``, ``renders`` (absent for
+    a config part), ``holds``, and optional ``review`` and ``merge``."""
+    if not isinstance(raw, Mapping) or not raw:
+        raise TreeLayoutError("parts must be a mapping of part names to parts")
     parts: dict[str, Part] = {}
-    for name, entry in data["parts"].items():
+    for name, entry in raw.items():
         if not isinstance(entry, Mapping) or not {"path", "format", "holds"} <= set(entry) <= PART_KEYS:
             raise TreeLayoutError(
-                f"{path}: part {name!r} needs path, format and holds, and takes renders, review and merge besides"
+                f"part {name!r} needs path, format and holds, and takes renders, review and merge besides"
             )
         try:
             format = Format(entry["format"])
         except ValueError as exc:
             known = ", ".join(item.value for item in Format)
-            raise TreeLayoutError(f"{path}: part {name!r} format must be one of {known}") from exc
+            raise TreeLayoutError(f"part {name!r} format must be one of {known}") from exc
         review = entry.get("review", False)
         if not isinstance(review, bool):
-            raise TreeLayoutError(f"{path}: part {name!r} review must be true or false")
+            raise TreeLayoutError(f"part {name!r} review must be true or false")
         parts[str(name)] = Part(
             str(name), entry["path"], format, entry.get("renders"), entry["holds"], review, entry.get("merge", "file")
         )
@@ -272,11 +264,10 @@ def load_tree_layout(path: Path) -> TreeLayout:
 __all__ = [
     "MERGE_MODES",
     "NAME_PATTERN",
-    "TREE_FILE",
     "Format",
     "Part",
     "TreeLayout",
     "TreeLayoutError",
     "TreeLocation",
-    "load_tree_layout",
+    "parse_tree_layout",
 ]

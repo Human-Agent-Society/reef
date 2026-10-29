@@ -3,7 +3,7 @@
 ``process_config`` turns the model metadata in ``models.json`` into
 Codex's model catalog. Codex skills require ``name`` and ``description``
 frontmatter. ``process_skill`` adds it when an evolved skill omits it. A
-command is a skill in the same root (``tree.yaml``), so it gets the same
+command is a skill in the same root (its ``parts``), so it gets the same
 frontmatter.
 """
 

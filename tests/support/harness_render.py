@@ -9,14 +9,13 @@ starter tree of the evolve-your-harness tutorial: its tools, its
 ``loop_guard`` hook, its ``main`` graph and a skill. ``write_rendered``
 renders a tree for one adapter and writes the files under a root, for a test
 that runs a loader or a binary on them. ``descriptor_data`` and
-``write_descriptor`` give a test a bundled adapter's descriptor to change and
-load from a directory of its own, beside the adapter's ``tree.yaml``.
+``write_descriptor`` give a test a bundled adapter's ``adapter.yaml`` to change
+and load from a directory of its own.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -24,8 +23,7 @@ from typing import Any
 import yaml
 
 import reef.harness.adapters
-from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.adapters.parts import TREE_FILE
+from reef.harness.adapters.descriptor import ADAPTER_FILE, AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 from reef.harness.tree.checks import NATIVE_LOOP_DEFAULT_MAX_STEPS
@@ -111,14 +109,12 @@ ADAPTERS = Path(reef.harness.adapters.__file__).parent
 
 
 def descriptor_data(adapter: str) -> dict[str, Any]:
-    """The bundled ``adapter``'s ``descriptor.yaml`` as data, for a test to change."""
-    return yaml.safe_load((ADAPTERS / adapter / "descriptor.yaml").read_text(encoding="utf-8"))
+    """The bundled ``adapter``'s ``adapter.yaml`` as data, for a test to change."""
+    return yaml.safe_load((ADAPTERS / adapter / ADAPTER_FILE).read_text(encoding="utf-8"))
 
 
-def write_descriptor(directory: Path, adapter: str, data: Mapping[str, Any]) -> Path:
-    """Write ``data`` as ``directory/descriptor.yaml`` beside a copy of the bundled ``adapter``'s ``tree.yaml``,
-    and return the descriptor's path for ``load_descriptor``."""
-    shutil.copyfile(ADAPTERS / adapter / TREE_FILE, directory / TREE_FILE)
-    path = directory / "descriptor.yaml"
+def write_descriptor(directory: Path, data: Mapping[str, Any]) -> Path:
+    """Write ``data`` as ``directory/adapter.yaml``, and return its path for ``load_descriptor``."""
+    path = directory / ADAPTER_FILE
     path.write_text(yaml.safe_dump(dict(data)), encoding="utf-8")
     return path

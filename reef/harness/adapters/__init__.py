@@ -1,17 +1,24 @@
 """Adapter registry: bundled descriptors plus entry-point discovery.
 
-Bundled adapters are directories beside this file, each holding a
-``descriptor.yaml`` and, when it names one, a ``render`` module; external distributions add
-theirs through the ``reef.harness_adapters`` entry point group (see
-``reef.harness.adapters.descriptor``). Descriptors load lazily and cache per process:
-loading imports the classes a descriptor names, and a registry import must stay cheap.
+Bundled adapters are directories beside this file, each holding an
+``adapter.yaml`` and, when it names one, a ``render`` module; external
+distributions add theirs through the ``reef.harness_adapters`` entry point
+group (see ``reef.harness.adapters.descriptor``). Descriptors load lazily and
+cache per process: loading imports the classes a descriptor names, and a
+registry import must stay cheap.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError, external_descriptors, load_descriptor
+from reef.harness.adapters.descriptor import (
+    ADAPTER_FILE,
+    AdapterDescriptor,
+    DescriptorError,
+    external_descriptors,
+    load_descriptor,
+)
 
 BUILTIN_ADAPTERS = ("claude", "codex", "dsh", "hermes", "native", "opencode", "pi", "terminus")
 
@@ -19,7 +26,7 @@ _cache: dict[str, AdapterDescriptor] = {}
 
 
 def builtin_descriptor_path(name: str) -> Path:
-    return Path(__file__).parent / name / "descriptor.yaml"
+    return Path(__file__).parent / name / ADAPTER_FILE
 
 
 def get_adapter(name: str) -> AdapterDescriptor:

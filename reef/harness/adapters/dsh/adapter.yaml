@@ -20,16 +20,55 @@ install:
   package: "@deepseek-ai/dsh"
   version: "0.1.2-alpha.5"
   binary_path: "node_modules/.bin/dsh"
-# Two commander layers parse the command line (the launcher, then the
-# headless app); each "--" ends one layer's options, so a task that starts
-# with a dash still reaches the app as its positional.
-argv: ["--profile", "headless", "--", "--", "{prompt}"]
-env:
-  DSH_HOME: "{root}/dsh"
-  DSH_AGENTS_HOME: "{root}/dsh-agents"
-  DSH_TELEMETRY_MODE: "DISABLED"
+renderer: reef.harness.adapters.dsh.render:DshAdapterRenderer
+# The harness tree DeepSeek Harness takes. A method writes each part at its
+# path; Reef checks the file as its format and renders it to its renders path,
+# inside the dsh home of an episode or of an install. A tree file that no part
+# takes is refused.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    renders: dsh/AGENTS.md
+    holds: the instructions dsh reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    renders: dsh/skills/{name}/SKILL.md
+    holds: an Agent Skill, which dsh loads when its description fits the task
+  # dsh's only command surface is a user invocable skill (/name) under its
+  # second skill root.
+  command:
+    path: commands/{name}.md
+    format: command
+    renders: dsh-agents/skills/{name}/SKILL.md
+    holds: a prompt template that a person runs as /name, rendered as a skill under a second root
+  # A cordis plugin module that the patch layers insert by relative path, the
+  # web patch from the headless profile's directory.
+  extension:
+    path: extensions/{name}.mjs
+    format: code
+    renders: dsh/profiles/headless/extensions/{name}.mjs
+    holds: a cordis plugin module that dsh loads in its process
+  config:
+    path: config/{name}.json
+    format: config
+    holds: >-
+      a JSON object merged into the headless patch layer (primary), dsh/.env (env), the web patch layer
+      (web) or the web profile's package.json (web_manifest)
+# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
+# command, and the variables that point the agent's configuration at that root.
+episode:
+  # Two commander layers parse the command line (the launcher, then the
+  # headless app); each "--" ends one layer's options, so a task that starts
+  # with a dash still reaches the app as its positional.
+  argv: ["--profile", "headless", "--", "--", "{prompt}"]
+  env:
+    DSH_HOME: "{root}/dsh"
+    DSH_AGENTS_HOME: "{root}/dsh-agents"
+    DSH_TELEMETRY_MODE: "DISABLED"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (tree.yaml) merges into one of them.
+# file must pass. A tree's config part (see parts) merges into one of them.
 config:
   primary:
     path: "dsh/profiles/headless/cordis.patch.yml"
@@ -150,29 +189,6 @@ config:
     checks:
       - key: dsh.profile.patchReload
         match: IsDefault()
-trajectory:
-  # One session per episode under sessions/<cwd slug>/session-<id>/session.jsonl,
-  # the {type, seq, time, data} envelope; the deepseek-session-jsonl reader lifts data beside the other three.
-  format: deepseek-session-jsonl
-  path: "dsh/sessions"
-cleanup_whitelist:
-  - "dsh/sessions/**"
-  - "dsh/storages/**"
-  # dsh's boot scaffolds each profile beside the rendered patch: the empty root
-  # entry list, node_modules symlinks into the installation, and the module
-  # fallback links, plus a package manifest and the pnpm workspace file for a
-  # profile without a manifest (the headless one; the web one is rendered).
-  # Episode state, not residue.
-  - "dsh/profiles/headless/package.json"
-  - "dsh/profiles/headless/cordis.yml"
-  - "dsh/profiles/headless/pnpm-workspace.yaml"
-  - "dsh/profiles/headless/node_modules/**"
-  - "dsh/profiles/headless/.dsh-module-fallback/**"
-  - "dsh/profiles/web/cordis.yml"
-  - "dsh/profiles/web/node_modules/**"
-  - "dsh/profiles/web/.dsh-module-fallback/**"
-  - "dsh/profiles/node_modules/**"
-renderer: reef.harness.adapters.dsh.render:DshAdapterRenderer
 # How to point dsh at a model endpoint, per API dialect: a hand declared
 # llm-pi-ai route selected by agent-default-model, its key named by
 # apiKeyEnv and supplied through the .env file. Each profile's patch carries
@@ -252,3 +268,25 @@ model_binding:
     - target: env
       data:
         REEF_API_KEY: "{api_key}"
+trajectory:
+  # One session per episode under sessions/<cwd slug>/session-<id>/session.jsonl,
+  # the {type, seq, time, data} envelope; the deepseek-session-jsonl reader lifts data beside the other three.
+  format: deepseek-session-jsonl
+  path: "dsh/sessions"
+cleanup_whitelist:
+  - "dsh/sessions/**"
+  - "dsh/storages/**"
+  # dsh's boot scaffolds each profile beside the rendered patch: the empty root
+  # entry list, node_modules symlinks into the installation, and the module
+  # fallback links, plus a package manifest and the pnpm workspace file for a
+  # profile without a manifest (the headless one; the web one is rendered).
+  # Episode state, not residue.
+  - "dsh/profiles/headless/package.json"
+  - "dsh/profiles/headless/cordis.yml"
+  - "dsh/profiles/headless/pnpm-workspace.yaml"
+  - "dsh/profiles/headless/node_modules/**"
+  - "dsh/profiles/headless/.dsh-module-fallback/**"
+  - "dsh/profiles/web/cordis.yml"
+  - "dsh/profiles/web/node_modules/**"
+  - "dsh/profiles/web/.dsh-module-fallback/**"
+  - "dsh/profiles/node_modules/**"

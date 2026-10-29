@@ -458,10 +458,10 @@ def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(t
 
 
 def descriptor_with(tmp_path: Path, adapter: str, change) -> Path:
-    """A copy of a bundled adapter's descriptor, changed by ``change``, beside its tree."""
+    """A copy of a bundled adapter's ``adapter.yaml``, changed by ``change``."""
     data = descriptor_data(adapter)
     change(data)
-    return write_descriptor(tmp_path, adapter, data)
+    return write_descriptor(tmp_path, data)
 
 
 @pytest.mark.unit

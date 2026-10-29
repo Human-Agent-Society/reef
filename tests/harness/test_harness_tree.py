@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import BUILTIN_ADAPTERS, get_adapter
-from reef.harness.adapters.parts import TREE_FILE, Format, Part, TreeLayout, TreeLayoutError, load_tree_layout
+from reef.harness.adapters.parts import Format, Part, TreeLayout, TreeLayoutError, parse_tree_layout
 from reef.harness.tree import HarnessTree, TreePatch, ValidationResult, validate_patch, validate_tree
 from reef.harness.tree.tree import normalized_path
 
@@ -172,10 +172,9 @@ def test_a_part_of_one_name_has_one_tree_path_on_every_bundled_adapter() -> None
         ),
     ],
 )
-def test_a_tree_yaml_refuses_a_malformed_part(tmp_path: Path, entry: dict, problem: str) -> None:
-    (tmp_path / TREE_FILE).write_text(json.dumps({"parts": {"notes": entry}}))
+def test_the_parts_section_refuses_a_malformed_part(entry: dict, problem: str) -> None:
     with pytest.raises(TreeLayoutError, match=re.escape(problem)):
-        load_tree_layout(tmp_path / TREE_FILE)
+        parse_tree_layout({"notes": entry})
 
 
 def test_a_layout_refuses_two_parts_that_take_one_path_and_a_second_config_part() -> None:

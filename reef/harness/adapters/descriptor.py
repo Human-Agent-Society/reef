@@ -1,11 +1,10 @@
 """Declarative adapter descriptors: how one harness renders, runs, and cleans.
 
-An ``AdapterDescriptor`` is loaded from a ``descriptor.yaml`` and the
-``tree.yaml`` beside it, and states everything the shared engines need to
-drive one harness binary:
+An ``AdapterDescriptor`` is loaded from an adapter's ``adapter.yaml``, and
+states everything the shared engines need to drive one harness binary:
 
-- ``layout``: the parts of the harness tree the adapter takes, from
-  ``tree.yaml`` (``reef.harness.adapters.parts``): each part's tree path, format
+- ``layout``: the parts of the harness tree the adapter takes, from the
+  ``parts`` section (``reef.harness.adapters.parts``): each part's tree path, format
   and render path. A tree file that no part takes is refused by validation
   and at render, never dropped.
 - ``config_targets``: named JSON config files (``config:``) with their
@@ -15,9 +14,10 @@ drive one harness binary:
   :mod:`reef.harness.adapters.matchers`). A default may name a path under the
   root as ``{root}/...``; the program that writes the rendered files puts the
   root there (``AdapterDescriptor.place_root``).
-- ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
-  episode) and the relocation environment (``{root}`` substituted per
-  episode) that points the binary's whole configuration at the episode root.
+- ``argv``/``env``, the ``episode`` section: the headless invocation
+  (``{prompt}`` substituted per episode) and the relocation environment
+  (``{root}`` substituted per episode) that points the binary's whole
+  configuration at the episode root.
 - ``trajectory``: which session-log reader applies and where it reads.
 - ``cleanup_whitelist``: root-relative patterns for files the harness
   legitimately creates (session storage, boot mutations); anything else
@@ -63,7 +63,7 @@ import yaml
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
-from reef.harness.adapters.parts import TREE_FILE, TreeLayout, TreeLayoutError, load_tree_layout
+from reef.harness.adapters.parts import TreeLayout, TreeLayoutError, parse_tree_layout
 from reef.sandbox.process import EpisodeExecutor
 
 
@@ -174,6 +174,30 @@ class AdapterRenderer(Plugin):
 
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
+#: The file a bundled adapter is declared in, in its directory.
+ADAPTER_FILE = "adapter.yaml"
+#: The top-level keys of an ``adapter.yaml``.
+ADAPTER_KEYS = frozenset(
+    {
+        "name",
+        "binary",
+        "install",
+        "renderer",
+        "execution_validator",
+        "parts",
+        "episode",
+        "layer",
+        "config",
+        "model_binding",
+        "trajectory",
+        "writable_paths",
+        "cleanup_whitelist",
+        "host_env",
+        "self_isolating",
+        "is_prompt_task_directory",
+        "is_root_bind_mounted",
+    }
+)
 
 
 class DescriptorError(ReefError):
@@ -347,7 +371,7 @@ def _relative_paths(value: Any, where: str) -> tuple[str, ...]:
 
 
 def load_descriptor(path: Path) -> AdapterDescriptor:
-    """Load and validate one ``descriptor.yaml`` and the ``tree.yaml`` beside it, importing the classes it names."""
+    """Load and validate one ``adapter.yaml``, importing the classes it names."""
     try:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
@@ -356,19 +380,25 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"adapter descriptor {path} must be a YAML object")
     name = _require_str(data, "name", "descriptor")
     where = f"descriptor {name!r}"
+    unknown = sorted(str(key) for key in data if key not in ADAPTER_KEYS)
+    if unknown:
+        raise DescriptorError(f"{where} has unknown keys: {', '.join(unknown)}")
     config_targets = _parse_config_targets(data.get("config"), where)
     try:
-        layout = load_tree_layout(Path(path).with_name(TREE_FILE))
+        layout = parse_tree_layout(data.get("parts"))
     except TreeLayoutError as exc:
         raise DescriptorError(f"{where}: {exc}") from exc
     trajectory = data.get("trajectory")
     if not isinstance(trajectory, Mapping):
         raise DescriptorError(f"{where} requires a 'trajectory' object")
-    env = data.get("env", {})
+    episode = data.get("episode")
+    if not isinstance(episode, Mapping) or not set(episode) <= {"argv", "env"}:
+        raise DescriptorError(f"{where} requires an 'episode' object of argv and env")
+    env = episode.get("env", {})
     if not isinstance(env, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in env.items()
     ):
-        raise DescriptorError(f"{where} 'env' must map strings to strings")
+        raise DescriptorError(f"{where} episode 'env' must map strings to strings")
     host_env = data.get("host_env", {})
     if not isinstance(host_env, Mapping) or not all(
         isinstance(key, str) and key.isidentifier() and isinstance(value, str) for key, value in host_env.items()
@@ -376,7 +406,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'host_env' must map variable names to default strings")
     overlap = sorted(set(host_env) & set(env))
     if overlap:
-        raise DescriptorError(f"{where} 'host_env' names variables 'env' already sets: {', '.join(overlap)}")
+        raise DescriptorError(
+            f"{where} 'host_env' names variables the episode 'env' already sets: {', '.join(overlap)}"
+        )
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
     writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
     self_isolating = data.get("self_isolating", False)
@@ -405,7 +437,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     return AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
-        argv=_str_list(data.get("argv"), f"{where} 'argv'"),
+        argv=_str_list(episode.get("argv"), f"{where} episode 'argv'"),
         env=dict(env),
         config_targets=config_targets,
         layout=layout,

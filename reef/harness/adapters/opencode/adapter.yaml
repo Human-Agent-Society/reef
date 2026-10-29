@@ -19,7 +19,52 @@ install:
   package: "opencode-ai"
   version: "1.18.18"
   binary_path: "node_modules/.bin/opencode"
-argv: ["run", "--format", "json", "--auto", "{prompt}"]
+renderer: reef.harness.adapters.opencode.render:OpencodeAdapterRenderer
+# The harness tree opencode takes. A method writes each part at its path;
+# Reef checks the file as its format and renders it to its renders path,
+# inside the opencode configuration directory of an episode or of an install.
+# A tree file that no part takes is refused.
+# When a person and Reef both change a file, its part's merge decides: lines merges
+# the lines each changed, and file, the default, refuses.
+parts:
+  rules:
+    path: rules.md
+    format: text
+    merge: lines
+    renders: opencode/AGENTS.md
+    holds: the instructions opencode reads at the start of every session
+  skill:
+    path: skills/{name}/SKILL.md
+    format: skill
+    merge: lines
+    renders: opencode/skill/{name}/SKILL.md
+    holds: an Agent Skill, which opencode loads when its description fits the task
+  command:
+    path: commands/{name}.md
+    format: command
+    merge: lines
+    renders: opencode/command/{name}.md
+    holds: a prompt template that a person runs as /name
+  extension:
+    path: extensions/{name}.ts
+    format: code
+    renders: opencode/plugin/{name}.ts
+    holds: a TypeScript plugin that opencode loads in its process
+  config:
+    path: config/{name}.json
+    format: config
+    holds: a JSON object merged into opencode/opencode.json (primary)
+# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
+# command, and the variables that point the agent's configuration at that root.
+episode:
+  argv: ["run", "--format", "json", "--auto", "{prompt}"]
+  env:
+    OPENCODE_CONFIG_DIR: "{root}/opencode"
+    XDG_CONFIG_HOME: "{root}/xdg-config"
+    XDG_DATA_HOME: "{root}/xdg-data"
+    XDG_CACHE_HOME: "{root}/xdg-cache"
+    XDG_STATE_HOME: "{root}/xdg-state"
+    npm_config_cache: "{root}/xdg-cache/npm"
 # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays,
 # and OPENCODE_CONFIG_DIR adds the install's config, skills, commands and plugins over it; on a
 # key or name both define, the release's wins. That directory's AGENTS.md takes the place of
@@ -28,15 +73,8 @@ layer:
   env:
     OPENCODE_CONFIG_DIR: "{root}/opencode"
     OPENCODE_CONFIG_CONTENT: '{"instructions": ["~/.config/opencode/AGENTS.md"]}'
-env:
-  OPENCODE_CONFIG_DIR: "{root}/opencode"
-  XDG_CONFIG_HOME: "{root}/xdg-config"
-  XDG_DATA_HOME: "{root}/xdg-data"
-  XDG_CACHE_HOME: "{root}/xdg-cache"
-  XDG_STATE_HOME: "{root}/xdg-state"
-  npm_config_cache: "{root}/xdg-cache/npm"
 # The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (tree.yaml) merges into one of them.
+# file must pass. A tree's config part (see parts) merges into one of them.
 config:
   primary:
     path: "opencode/opencode.json"
@@ -54,24 +92,6 @@ config:
       - key: [small_model, disabled_providers, agent.*.model, mode.*.model, command.*.model]
         match: IsAbsent()
         reason: Reef's model binding chooses the model
-# opencode keeps its sessions in opencode.db in its data directory.
-trajectory:
-  format: opencode-session-sqlite
-  path: "xdg-data/opencode"
-cleanup_whitelist:
-  - "xdg-data/**"
-  - "xdg-cache/**"
-  - "xdg-state/**"
-  - "xdg-config/**"
-  # opencode's boot writes a .gitignore and npm-installs @opencode-ai/plugin with a node_modules tree and
-  # lockfiles beside the rendered config. It also adds a $schema key to a config file that lacks one, an edit
-  # in place that the residue scan does not see. Episode state, not residue.
-  - "opencode/.gitignore"
-  - "opencode/package.json"
-  - "opencode/package-lock.json"
-  - "opencode/bun.lock"
-  - "opencode/node_modules/**"
-renderer: reef.harness.adapters.opencode.render:OpencodeAdapterRenderer
 # How to point opencode at a model endpoint, per API dialect (its
 # custom-provider config shape). Reef renders the set matching its model
 # binding's api into evaluation episodes; the served tree never carries a
@@ -101,3 +121,20 @@ model_binding:
             models:
               "{model}": {}
         model: "reef/{model}"
+# opencode keeps its sessions in opencode.db in its data directory.
+trajectory:
+  format: opencode-session-sqlite
+  path: "xdg-data/opencode"
+cleanup_whitelist:
+  - "xdg-data/**"
+  - "xdg-cache/**"
+  - "xdg-state/**"
+  - "xdg-config/**"
+  # opencode's boot writes a .gitignore and npm-installs @opencode-ai/plugin with a node_modules tree and
+  # lockfiles beside the rendered config. It also adds a $schema key to a config file that lacks one, an edit
+  # in place that the residue scan does not see. Episode state, not residue.
+  - "opencode/.gitignore"
+  - "opencode/package.json"
+  - "opencode/package-lock.json"
+  - "opencode/bun.lock"
+  - "opencode/node_modules/**"

@@ -7,7 +7,7 @@ Each config target merges, in order, the descriptor's enforced defaults, the
 tree's ``config/<target>.json`` and the overlays, so an overlay wins every
 key it writes. ``ModelBinding.config_overlays`` makes the overlays that point
 the harness at a model. Every other file lands at the render path of its part
-(the adapter's ``tree.yaml``). The shared checks then refuse a config that
+(the adapter's ``parts``). The shared checks then refuse a config that
 fails a check its target declares, and the descriptor's ``renderer``
 processes the config files and the files of the ``skill`` and ``command``
 formats, checks the model route, writes each config file in its harness's

@@ -12,7 +12,13 @@ from tests.support.harness_render import descriptor_data, write_descriptor
 
 import reef.harness.adapters
 from reef.harness.adapters import BUILTIN_ADAPTERS, builtin_descriptor_path, get_adapter
-from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
+from reef.harness.adapters.descriptor import (
+    ADAPTER_FILE,
+    AdapterDescriptor,
+    AdapterRenderer,
+    DescriptorError,
+    load_descriptor,
+)
 from reef.harness.adapters.matchers import ABSENT, parse_matcher
 from reef.harness.tree import HarnessTree, RenderError, render_tree
 
@@ -28,7 +34,7 @@ def test_every_bundled_descriptor_loads(adapter: str) -> None:
 
 def test_every_descriptor_file_is_a_bundled_adapter() -> None:
     adapters_dir = Path(reef.harness.adapters.__file__).parent
-    assert {path.parent.name for path in adapters_dir.glob("*/descriptor.yaml")} == set(BUILTIN_ADAPTERS)
+    assert {path.parent.name for path in adapters_dir.glob(f"*/{ADAPTER_FILE}")} == set(BUILTIN_ADAPTERS)
 
 
 @pytest.mark.parametrize(
@@ -129,7 +135,7 @@ def checked(
     primary["checks"] = checks
     if defaults is not None:
         primary["defaults"] = defaults
-    descriptor = load_descriptor(write_descriptor(tmp_path, "opencode", data))
+    descriptor = load_descriptor(write_descriptor(tmp_path, data))
     return descriptor if renderer else replace(descriptor, renderer=AdapterRenderer)
 
 

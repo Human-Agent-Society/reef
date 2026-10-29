@@ -78,7 +78,7 @@ class EpisodeScore(EpisodeScorer):
 | --- | --- | --- |
 | `mode` | `full_history` | `full_history` lets the proposer branch from any candidate; `incumbent_only`, the greedy control, from the served one only |
 | `model` | `proposer` | the `evolution.models` binding that proposes; `served` is refused |
-| `components` | every part of the adapter's tree | the parts of the adapter's tree (its `tree.yaml`) whose files a proposal may change; the method refuses a name the tree does not have |
+| `components` | every part of the adapter's tree | the parts of the adapter's tree (the `parts` of its `adapter.yaml`) whose files a proposal may change; the method refuses a name the tree does not have |
 | `max_candidates` | `0` (no limit) | the candidates the method proposes |
 | `max_target_episodes` | `0` (no limit) | the evaluation episodes after which the method proposes nothing |
 | `max_files` | `32` | the files of one proposed tree |

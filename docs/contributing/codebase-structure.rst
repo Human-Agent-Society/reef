@@ -364,9 +364,9 @@ The extension points those packages expose are in `Python API
     none. The scenario committer publishes it.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
     machine, in both directions: the release as a layer over the person's
-    own configuration (the ``layer`` of the adapter's ``descriptor.yaml``),
+    own configuration (the ``layer`` of the adapter's ``adapter.yaml``),
     and the person's changes merged back (the ``merge`` of each part in its
-    ``tree.yaml``). The client half is ``reef_client.harness``.
+    ``parts``). The client half is ``reef_client.harness``.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into samples? Put the
   shared contract in ``reef/record2sample/``. Does it shape samples into job data?
@@ -421,10 +421,10 @@ The harness method contract is in the ``reef/train/harness_backend/``
 package docstring, and `Write a harness method
 <../developer-guide/write-a-harness-method.rst>`__ explains it.
 ``reef/harness/adapters/parts.py`` defines the parts a harness tree may hold,
-and each adapter declares its own parts in a ``tree.yaml``, such as
-``reef/harness/adapters/pi/tree.yaml``. `Harness adapters
-<../developer-guide/harness-adapters.rst>`__ explains ``tree.yaml`` and
-``descriptor.yaml``.
+and each adapter declares its own parts in the ``parts`` section of its
+``adapter.yaml``, such as ``reef/harness/adapters/pi/adapter.yaml``.
+`Harness adapters <../developer-guide/harness-adapters.rst>`__ explains the
+file.
 
 Adding a new subpackage under ``reef/`` or a new method under ``recipes/``
 requires an RFC that states which layer owns the behavior.
