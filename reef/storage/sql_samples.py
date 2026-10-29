@@ -28,12 +28,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    or_,
     select,
 )
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
-from reef.core.job_data import TaskSample, TrajectorySample
+from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.storage.samples import SampleConflict, SampleKind, SampleStore, StoredSample
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 from reef.storage.tasks import SPLIT_NAMES, SplitName, TaskFileStore
@@ -45,7 +46,12 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
     ``kind`` is the kind of the sample, ``trajectory`` or ``task``, and
     ``split`` is ``train`` or ``eval``; a trajectory is always ``train``.
     ``content_json`` holds the sample as canonical JSON (``sample_content``),
-    and ``content_sha256`` its SHA-256. If ``foreign_key`` names a column, the
+    and ``content_sha256`` its SHA-256. ``component`` is the trainer that made
+    the sample from records (the component its commits name, or ``""`` for the
+    only trainer of a scenario), or NULL for a sample that every trainer reads,
+    such as an upload. ``group_key`` is the group that trains together, or
+    NULL. ``record_ids_json`` is the JSON list of the records that the sample's
+    unit consumed. If ``foreign_key`` names a column, the
     table also has the column ``storage_id``, which refers to it. The adapter
     then gives ``storage_id`` in ``ScopedTable.scope``. Sample IDs are unique in
     each namespace.
@@ -56,6 +62,9 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
         Column("split", String(8), nullable=False),
         Column("content_json", Text, nullable=False),
         Column("content_sha256", String(64), nullable=False),
+        Column("component", Text, nullable=True),
+        Column("group_key", Text, nullable=True),
+        Column("record_ids_json", Text, nullable=False, server_default="[]"),
     )
     if foreign_key is None:
         return Table(
@@ -112,6 +121,17 @@ def sample_content(sample: TrajectorySample) -> str:
     return canonical_json(content)
 
 
+def record_task_content(task: TaskSample) -> str:
+    """The canonical JSON of a task that a trainer made from records: its path, records and metadata."""
+    return canonical_json(
+        {
+            "task_path": str(task.task_path),
+            "source_agent_record_ids": list(task.source_agent_record_ids),
+            "metadata": dict(task.metadata),
+        }
+    )
+
+
 def task_content(files_digest: str) -> str:
     """The canonical JSON of a task that the sample table stores: the digest of its directory's files."""
     return canonical_json({"files_digest": files_digest})
@@ -119,6 +139,11 @@ def task_content(files_digest: str) -> str:
 
 def canonical_json(content: Mapping[str, object]) -> str:
     return json.dumps(content, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def canonical_json_list(values: tuple[str, ...]) -> str:
+    """The canonical JSON of a list of strings, in sorted order without repeats."""
+    return json.dumps(sorted(set(values)), ensure_ascii=False, separators=(",", ":"))
 
 
 class SQLSampleStore(SampleStore):
@@ -156,6 +181,52 @@ class SQLSampleStore(SampleStore):
             ]
         return any(inserted)
 
+    def add_record_samples(
+        self,
+        trainer: str,
+        group: str | None,
+        record_ids: tuple[str, ...],
+        samples: tuple[tuple[str, Sample], ...],
+    ) -> bool:
+        if not isinstance(trainer, str):
+            raise TypeError("trainer must be a string")
+        if group is not None and (not isinstance(group, str) or not group):
+            raise ValueError("a sample group must be a non-empty string or None")
+        if not samples or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
+            raise ValueError("record samples need one or more samples and non-empty record IDs")
+        rows: list[tuple[str, SampleKind, str]] = [
+            (
+                (sample_id, "trajectory", sample_content(sample))
+                if isinstance(sample, TrajectorySample)
+                else (sample_id, "task", record_task_content(sample))
+            )
+            for sample_id, sample in samples
+        ]
+        consumed = canonical_json_list(record_ids)
+        with self.records._transaction(write=True) as connection:
+            inserted = [
+                self.insert(
+                    connection,
+                    sample_id,
+                    kind,
+                    "train",
+                    content,
+                    component=trainer,
+                    group_key=group,
+                    record_ids_json=consumed,
+                )
+                for sample_id, kind, content in rows
+            ]
+        return any(inserted)
+
+    def consumed_record_ids(self, trainer: str) -> frozenset[str]:
+        table = self.table.table
+        with self.records._transaction(write=False) as connection:
+            rows = connection.execute(
+                select(table.c.record_ids_json).where(self.table.condition(), table.c.component == trainer)
+            ).scalars()
+            return frozenset(record_id for encoded in rows for record_id in json.loads(encoded))
+
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         if split not in SPLIT_NAMES:
             raise ValueError("split must be 'train' or 'eval'")
@@ -165,8 +236,22 @@ class SQLSampleStore(SampleStore):
                 self.insert(connection, sample_id, "task", split, content)
             return self.read(connection, self.table.table.c.sample_id.in_([sample_id for sample_id, _ in rows]))
 
-    def insert(self, connection: Connection, sample_id: str, kind: SampleKind, split: SplitName, content: str) -> bool:
-        """Store one sample unless it is stored as it is; return whether it is new. ``SampleConflict`` otherwise."""
+    def insert(
+        self,
+        connection: Connection,
+        sample_id: str,
+        kind: SampleKind,
+        split: SplitName,
+        content: str,
+        *,
+        component: str | None = None,
+        group_key: str | None = None,
+        record_ids_json: str = "[]",
+    ) -> bool:
+        """Store one sample unless it is stored as it is; return whether it is new. ``SampleConflict`` otherwise.
+
+        ``component``, ``group_key`` and ``record_ids_json`` are the columns of ``sample_table``.
+        """
         table = self.table.table
         content_sha256 = hashlib.sha256(content.encode()).hexdigest()
         stored = connection.execute(
@@ -183,6 +268,9 @@ class SQLSampleStore(SampleStore):
                     split=split,
                     content_json=content,
                     content_sha256=content_sha256,
+                    component=component,
+                    group_key=group_key,
+                    record_ids_json=record_ids_json,
                 )
             )
             return True
@@ -195,28 +283,40 @@ class SQLSampleStore(SampleStore):
         return False
 
     def page(
-        self, *, after_sequence: int = 0, limit: int = 256, kind: SampleKind | None = None
+        self,
+        *,
+        after_sequence: int = 0,
+        limit: int = 256,
+        kind: SampleKind | None = None,
+        trainer: str | None = None,
     ) -> tuple[StoredSample, ...]:
         if after_sequence < 0 or limit <= 0:
             raise ValueError("after_sequence must be non-negative and limit positive")
         with self.records._transaction(write=False) as connection:
-            return self.read(connection, *self.conditions(after_sequence, kind), limit=limit)
+            return self.read(connection, *self.conditions(after_sequence, kind, trainer), limit=limit)
 
-    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None) -> int:
+    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
         table = self.table.table
         with self.records._transaction(write=False) as connection:
             statement = (
                 select(func.count())
                 .select_from(table)
-                .where(self.table.condition(), *self.conditions(after_sequence, kind))
+                .where(self.table.condition(), *self.conditions(after_sequence, kind, trainer))
             )
             return int(connection.execute(statement).scalar_one())
 
-    def conditions(self, after_sequence: int, kind: SampleKind | None) -> tuple[ColumnElement[bool], ...]:
-        """The conditions of the samples after ``after_sequence``, only ``kind``'s if given; ``read`` adds the scope."""
+    def conditions(
+        self, after_sequence: int, kind: SampleKind | None, trainer: str | None
+    ) -> tuple[ColumnElement[bool], ...]:
+        """The conditions of the samples after ``after_sequence``, only ``kind``'s, and only those that ``trainer``
+        reads, if given; ``read`` adds the scope."""
         table = self.table.table
-        after = table.c.sequence > after_sequence
-        return (after,) if kind is None else (after, table.c.kind == kind)
+        conditions: list[ColumnElement[bool]] = [table.c.sequence > after_sequence]
+        if kind is not None:
+            conditions.append(table.c.kind == kind)
+        if trainer is not None:
+            conditions.append(or_(table.c.component.is_(None), table.c.component == trainer))
+        return tuple(conditions)
 
     def read(
         self, connection: Connection, *conditions: ColumnElement[bool], limit: int | None = None
@@ -240,6 +340,21 @@ class SQLSampleStore(SampleStore):
         """Return the stored sample of one table row, with its train counts by component."""
         content = json.loads(row["content_json"])
         split = row["split"]
+        if row["kind"] == "task" and row["component"] is not None:
+            made = TaskSample(
+                Path(content["task_path"]), tuple(content["source_agent_record_ids"]), content["metadata"]
+            )
+            return StoredSample(
+                int(row["sequence"]),
+                row["sample_id"],
+                split,
+                made,
+                None,
+                train_counts,
+                component=row["component"],
+                group=row["group_key"],
+                record_ids=tuple(json.loads(row["record_ids_json"])),
+            )
         if row["kind"] == "task":
             digest = content["files_digest"]
             task = TaskSample(
@@ -252,4 +367,14 @@ class SQLSampleStore(SampleStore):
             group_id=content["group_id"],
             source_agent_record_ids=tuple(content["source_agent_record_ids"]),
         )
-        return StoredSample(int(row["sequence"]), row["sample_id"], split, trajectory, None, train_counts)
+        return StoredSample(
+            int(row["sequence"]),
+            row["sample_id"],
+            split,
+            trajectory,
+            None,
+            train_counts,
+            component=row["component"],
+            group=row["group_key"],
+            record_ids=tuple(json.loads(row["record_ids_json"])),
+        )

@@ -22,7 +22,7 @@ from reef.recipe.sft_then_rl import SFTThenRLJobData, SFTThenRLJobSettings, SFTT
 from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import SampleStore
+from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext
@@ -80,7 +80,9 @@ def commit(session: ScenarioStore, consumed: frozenset[str]) -> None:
 def pipeline_for(
     samples: SampleStore, *, tasks_per_job: int = 2, job_samples: int = 2, training_mode: str = "auto"
 ) -> TrainingPipeline:
-    context = PipelineContext("support", TeacherContextReport, samples=samples, training_mode=training_mode)
+    context = PipelineContext(
+        "support", TeacherContextReport, samples=TrainerSamples(samples), training_mode=training_mode
+    )
     settings = SFTThenRLJobSettings(job_samples=job_samples, tasks_per_job=tasks_per_job)
     return TrainingPipeline(
         context,
@@ -100,13 +102,14 @@ def test_held_trajectories_train_before_the_imported_train_tasks_and_each_task_t
     import_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     import_tasks(samples, tmp_path / "tasks", "eval", "held-out")
     pipeline = pipeline_for(samples)
-    pipeline.push_trajectory("t1", atif("t1"))
-    pipeline.push_trajectory("t2", atif("t2"))
+    samples.add_trajectories((("t1", atif("t1")), ("t2", atif("t2"))))
 
     # Two uploads make SFT data ready, so they go first although tasks wait.
     sft = pipeline.build_job_data(2)
     assert [type(item) for item in sft.samples] == [TrajectorySample, TrajectorySample]
-    assert pipeline.acknowledge(sft.data_id) == {"sample:t1", "sample:t2"}
+    consumed = pipeline.acknowledge(sft.data_id)
+    assert consumed == {"sample:t1", "sample:t2"}
+    commit(session, consumed)
 
     first = pipeline.build_job_data(2)
     assert task_names(first) == ["task-a", "task-b"]
@@ -172,7 +175,7 @@ def test_a_task_job_gets_the_rl_parameters_and_any_other_job_the_sft_parameters(
     built = recipe(task_job_parameters={"rollout": ROLLOUT})
     samples = SQLiteScenarioStorage(None).open("support").samples
     context = PipelineContext(
-        "support", TeacherContextReport, samples=samples, job_parameters=built.parameters_by_kind()
+        "support", TeacherContextReport, samples=TrainerSamples(samples), job_parameters=built.parameters_by_kind()
     )
     stage = SFTThenRLJobData(context, SFTThenRLJobSettings(job_samples=2))
     sft, rl = built.parameters_by_kind()["trajectory"], built.parameters_by_kind()["task"]

@@ -8,19 +8,20 @@ pipeline that trains nothing.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Self
 
 from reef.core.config import config_option
+from reef.core.job_data import Sample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.selection import SelectionPolicy
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
-from reef.record2record.staleness import ServedVersions, stale_units
+from reef.record2record.staleness import ServedVersions, is_stale, producing_runtime_load_ids
 from reef.runtime.interfaces import inference_aborted
 
 
@@ -90,16 +91,17 @@ class Record2Record(ABC, Plugin):
     exposing a set, ``form`` rejects it if any inference response reports an
     engine abort. Rejection ends the whole set through the stage's lifecycle,
     including reports that reference an aborted inference. The stage
-    holds the sets that have samples in record set units in its ``pool`` until the
-    pipeline reserves them for job data; the pipeline reserves and consumes
-    through the pool, and the stage ends the consumed units (``consume``). The
-    pool applies the stage's selection policy. The stage never calls the pipeline.
+    holds the sets that have samples in record set units, and puts each ready
+    unit in its ``pool``. The pipeline saves the samples of each unit in the
+    pool to the sample store, removes the unit from the pool, and the stage
+    ends it (``consume``). The stage never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how
     far the training data lags behind the weights. The pipeline gives the stage
     each version that the scenario serves (``observe_serving_runtime_load_id``).
-    Then it tells the stage to drop the held units that are more than
-    ``max_staleness`` versions behind (``drop_stale_units``). ``max_staleness``
+    Then the pipeline asks the stage whether the data of a stored sample is
+    more than ``max_staleness`` versions behind (``is_stale``) before job data
+    takes it. ``max_staleness``
     is a non-negative int, from ``Record2RecordSettings``; the constructor
     refuses other values.
 
@@ -127,9 +129,9 @@ class Record2Record(ABC, Plugin):
 
     def __init__(self, selection: SelectionPolicy | None = None, *, max_staleness: int = 0) -> None:
         require_max_staleness(max_staleness)
-        #: How many versions the training data of a held unit may lag behind the served version and still train.
+        #: How many versions the training data of a stored sample may lag behind the served version and still train.
         self.max_staleness = max_staleness
-        #: The held record set units. The pipeline reserves job data from it and consumes the reservation.
+        #: The ready record set units. The pipeline stores the samples of each one and removes it.
         self.pool = RecordSetUnitPool(selection)
         #: Record sets that ended after the sample stage saw them. The pipeline forgets their samples.
         self.ended_set_ids: set[Hashable] = set()
@@ -225,17 +227,15 @@ class Record2Record(ABC, Plugin):
         """Add the version that the scenario serves now, if the version changed (``ServedVersions.observe``)."""
         self.served_versions.observe(runtime_load_id)
 
-    def drop_stale_units(self) -> None:
-        """End the held units whose training data is more than ``max_staleness`` versions behind.
+    def is_stale(self, samples: Sequence[Sample]) -> bool:
+        """Whether the training data of ``samples`` is more than ``max_staleness`` versions behind the served one.
 
-        The check does not run while job data is reserved, because the job data refers to held units.
+        ``is_stale`` of the versions that produced the samples (``producing_runtime_load_ids``) and the versions
+        that the scenario served since its engine started. The pipeline asks it for each sample that the record
+        stages made before job data takes it. A stage whose samples do not depend on the version that produced
+        them, such as fixed SFT targets, returns False.
         """
-        if self.pool.reserved is not None:
-            return
-        for unit in stale_units(
-            self.pool.units(), self.producing_runtime_load_ids, self.served_versions.versions, self.max_staleness
-        ):
-            self.drop_held_unit(unit, reason=UnitDropReason.STALE)
+        return is_stale(producing_runtime_load_ids(samples), self.served_versions.versions, self.max_staleness)
 
     def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
         """End an unreserved unit without training for the given reason.

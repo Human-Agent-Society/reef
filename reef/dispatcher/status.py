@@ -35,7 +35,9 @@ class TrainingStatus:
         failed = False
         for scenario_name in self.registry.training_status_scenario_names:
             try:
-                block = self.scenario_status(scenario_name)
+                # Recovery must not replace and close the instance during its storage reads.
+                with self.registry.lock_for(scenario_name):
+                    block = self.scenario_status(scenario_name)
             except Exception as exc:
                 failed = True
                 if self.errors.set_status_build_error(f"{scenario_name}: {error_text(exc)}"):

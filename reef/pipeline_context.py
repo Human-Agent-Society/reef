@@ -14,7 +14,7 @@ from typing import Any
 
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
 
 
@@ -40,9 +40,10 @@ class PipelineContext:
     admitted_report_type: type[ReportBase] | None = None
     #: Opens the generated task stores of the scenario. ``None`` if the trainer has no scenario session.
     task_storage: TaskStorage | None = None
-    #: The training samples of the scenario, such as its imported tasks. ``None`` if the trainer has no scenario
-    #: session.
-    samples: SampleStore | None = None
+    #: The training samples of the scenario as this trainer reads them, such as its uploads, its imported tasks and
+    #: the samples that its record stages make. ``None`` if the trainer has no scenario session: the pipeline then
+    #: keeps its samples in memory.
+    samples: TrainerSamples | None = None
     #: The fewest samples of one job when the sample-to-job stage sets no ``job_samples``:
     #: ``evolution.batch_size`` for harness evolution. None otherwise: a weight trainer's stage sets its own
     #: ``job_samples``, and a trainer that trains nothing keeps every sample.

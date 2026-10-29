@@ -28,6 +28,7 @@ from reef.storage.migrations import (
     legacy_model_configs,
     migrate_imported_tasks,
     migrate_record_storage,
+    migrate_sample_columns,
     migrate_uploaded_trajectories,
 )
 from reef.storage.records import RecordRetention
@@ -192,6 +193,7 @@ class SQLiteRecordStore(SQLRecordStore):
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
                 migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
+                migrate_sample_columns(self._connection, SAMPLE_TABLE.table)
                 migrate_uploaded_trajectories(
                     self._connection, SAMPLE_TABLE.table, SAMPLE_TRAIN_COUNT_TABLE.table, COMMIT_TABLE.table
                 )

@@ -373,11 +373,12 @@ renders each upload with every agent turn trained, except the steps marked
 <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
 
 Each uploaded trajectory counts as one sample toward the pipeline's
-``job_samples``. It does not count toward the pipeline's ``buffer_size``, so Reef never
-releases it to make room. Job data takes uploaded trajectories first, in
-upload order, and then the units of recorded traffic. Thus a large upload can delay the
-training of live traffic. The delay continues until the jobs use all of
-the upload. Archiving the scenario retires its uploaded trajectories with its
+``job_samples`` and ``buffer_size``. Reef keeps it in the scenario's sample
+store with the samples that it makes from recorded traffic, and job data takes
+the samples in store order. Thus an upload trains after the samples stored
+before it, and before the samples stored after it. A large upload delays the
+training of the traffic that arrives after it, until the jobs use all of the
+upload. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
 
 Upload Harbor tasks
@@ -573,14 +574,17 @@ the setup list instead of the update while an item is unmet.
 The two modes differ in what starts a step. ``auto``, the default,
 trains on traffic when ``job_samples`` samples are held, and refuses an
 instruction with HTTP 400. ``manual`` starts a step only for an instruction,
-oldest first, one per step. The instruction's data takes the units that
-automatic job data would take next, up to ``job_samples``:
+oldest first, one per step. The instruction's data takes the samples that
+automatic job data would take next: up to
+``pipeline.sample2job.config.buffer_size`` samples, beside the rest of a
+group:
 
 - A weight recipe waits until ``job_samples`` samples are held, then trains
   them. The instruction is the request to train; its ``text`` goes into the
   commit's ``training_request`` metrics.
-- Harness evolution runs the instruction at once, with up to ``job_samples``
-  traces (by default ``evolution.batch_size``) and possibly none. The traces
+- Harness evolution runs the instruction at once, with up to ``buffer_size``
+  traces (by default ``job_samples``, which defaults to
+  ``evolution.batch_size``) and possibly none. The traces
   are scored traces, or unscored records when the ``pipeline`` section names
   the inference stages. The proposer reads the request next to them.
 
@@ -1772,10 +1776,11 @@ failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 active artifact and its trainer's training start. A value is ``null`` when
 Reef does not know it. Both values start at the creation artifact.
 
-``processor`` includes ``ready_samples``, the samples of the held record sets
-and uploaded trajectories; ``job_samples``, the samples that automatic job
-data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
-the most samples the held record sets keep.
+``processor`` includes ``ready_samples``, the untrained samples that the next
+job takes (the buffer), from recorded traffic and uploaded trajectories;
+``job_samples``, the samples that automatic job data needs
+(``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most
+samples that one job takes from the buffer, beside the rest of a group.
 
 A scenario that trains weights also reports its training job.
 ``training_job`` is the job that the scenario's training component runs. It

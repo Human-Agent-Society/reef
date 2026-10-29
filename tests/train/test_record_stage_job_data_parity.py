@@ -337,7 +337,7 @@ class SlotGroupRecord2Record(ReportRecord2Record):
 
 
 class OrderedMixRecord2Record(ReportRecord2Record):
-    """Reports with a ``metadata.group`` form groups that batch in key order after singletons."""
+    """Reports with a ``metadata.group`` form groups; job data takes their samples in store order, not key order."""
 
     @classmethod
     def from_config(
