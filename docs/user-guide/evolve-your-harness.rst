@@ -318,7 +318,7 @@ with the better result is selected to become the next harness tree.
 Running rollouts
 ^^^^^^^^^^^^^^^^
 
-Execution uses the shared ``reef.sandbox`` package and Harbor's environment
+Execution uses the shared ``reef.execution.sandbox`` package and Harbor's environment
 interface. Developers can use its command, transfer and lifecycle operations;
 see `Sandbox environments <../developer-guide/sandboxes.rst>`__.
 

@@ -1,4 +1,4 @@
-"""Build the executor a deployment selected; the only place that names a sandbox kind."""
+"""Build the executor a deployment selected; the only place that names an executor kind."""
 
 from __future__ import annotations
 
@@ -8,10 +8,16 @@ from dataclasses import replace
 from pathlib import Path
 
 from reef.core.errors import ReefError
-from reef.sandbox.e2b import E2BExecutor
-from reef.sandbox.modal import ModalExecutor
-from reef.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxLimits, SandboxUnavailable
-from reef.sandbox.remote import RemoteExecutor, deployment_owner
+from reef.execution.sandbox.e2b import E2BExecutor
+from reef.execution.sandbox.modal import ModalExecutor
+from reef.execution.sandbox.process import (
+    LocalExecutor,
+    ProgramExecutor,
+    SandboxExecutor,
+    SandboxLimits,
+    SandboxUnavailable,
+)
+from reef.execution.sandbox.remote import RemoteExecutor, deployment_owner
 
 #: The cloud sandbox providers, by the name a deployment selects.
 REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {"e2b": E2BExecutor, "modal": ModalExecutor}

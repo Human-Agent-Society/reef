@@ -12,12 +12,12 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate
+from reef.execution.jobs import SupportsReceipt
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe

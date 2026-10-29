@@ -1,4 +1,4 @@
-"""Run rollout processes in a Modal Sandbox (:mod:`reef.sandbox.remote`).
+"""Run rollout processes in a Modal Sandbox (:mod:`reef.execution.sandbox.remote`).
 
 A Modal Sandbox is a gVisor container that Modal runs; nested bubblewrap jails work in it. :class:`ModalExecutor` is
 the deployment's setting (the Modal app the sandboxes belong to, the image, the resources, how long a sandbox may
@@ -21,8 +21,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
-from reef.sandbox.process import ProcessOutcome, RolloutLaunchError, RolloutTimeout, SandboxProgram, SandboxUnavailable
-from reef.sandbox.remote import (
+from reef.execution.sandbox.process import (
+    ProcessOutcome,
+    RolloutLaunchError,
+    RolloutTimeout,
+    SandboxProgram,
+    SandboxUnavailable,
+)
+from reef.execution.sandbox.remote import (
     SANDBOX_MARGIN_S,
     TUNNEL_PORT_BASE,
     RemoteExecutor,
