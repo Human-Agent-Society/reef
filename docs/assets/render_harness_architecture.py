@@ -18,7 +18,7 @@ from pathlib import Path
 from render_architecture import arrow, cap, font_files, text
 
 ROOT = Path(__file__).resolve().parent
-W, H = 1372, 1280
+W, H = 1372, 1240
 
 THEMES = {
     "light": {
@@ -58,8 +58,8 @@ A1, A2, B1, B2, B3, B4, B5 = ROWS.values()
 MACHINE_TOP, MACHINE_BOTTOM = 84, 336
 REEF_TOP, REEF_BOTTOM = 406, 1084
 BAND_TOP, BAND_BOTTOM = 706, 966
-# The two ways a step gets its traces, under Reef, with recipes for each.
-MODES_TOP, MODE_H = 1136, 116
+# The two ways a step gets its traces, under Reef; the guide's table below the figure says the rest.
+MODES_TOP = 1136
 MODE_W = (X[4] + COL_W - X[0] - GAP) // 2
 
 TITLE, BODY, MONO = 18, 14, 13
@@ -128,17 +128,14 @@ def card(p, x, y, w, kind, title, line, number=None, dashed=False):
     return "".join(out)
 
 
-def mode(p, x, kind, title, lines):
-    """One way a step gets its traces: a title and its lines, the last one naming recipes."""
-    out = [
-        f'<rect x="{x}" y="{MODES_TOP}" width="{MODE_W}" height="{MODE_H}" rx="9" fill="{p["card"]}" '
-        f'stroke="{p[kind]}" stroke-width="1.4"/>',
-        write(x + 18, MODES_TOP + 31, title, TITLE, p[kind], 600),
-    ]
-    for index, line in enumerate(lines):
-        last = index == len(lines) - 1
-        out.append(write(x + 18, MODES_TOP + 57 + 22 * index, line, BODY, p["ink"] if last else p["muted"]))
-    return "".join(out)
+def mode(p, x, kind, title, line):
+    """One way a step gets its traces: a title in the mode's color, and where the traces come from."""
+    return (
+        f'<rect x="{x}" y="{MODES_TOP}" width="{MODE_W}" height="{BOX_H}" rx="9" fill="{p["card"]}" '
+        f'stroke="{p[kind]}" stroke-width="1.4"/>'
+        + write(x + 18, MODES_TOP + 33, title, TITLE, p[kind], 600)
+        + write(x + 18, MODES_TOP + 57, line, BODY, p["muted"])
+    )
 
 
 def path(p, points, color=None, width=1.3):
@@ -182,7 +179,7 @@ def render(theme: str, fonts) -> str:
         write(
             40,
             68,
-            "Numbers 1 to 8 follow one session into one training step. Offline, uploaded tasks give the traces.",
+            "Numbers 1 to 8 follow one session into one training step.",
             15,
             p["muted"],
         ),
@@ -280,32 +277,16 @@ def render(theme: str, fonts) -> str:
     o.append(path(p, [(commit_x, B4), (commit_x, B2 + BOX_H)], p["reef"], width=1.8))
     o.append(write(commit_x - 10, elbow_y - 7, "published", MONO, p["reef"], anchor="end", mono=True))
 
-    # The two ways a step gets its traces, and recipes for each.
+    # The two ways a step gets its traces.
     o.append(cap(56, MODES_TOP - 18, "two ways to evolve", p["muted"]))
-    o.append(
-        mode(
-            p,
-            X[0],
-            "machine",
-            "Online: learn from sessions",
-            [
-                "Steps 1 to 4: the person's sessions, scored by reports, are the traces.",
-                "Agents with a plugin: claude, pi, opencode, codex.",
-                "Recipes: ACE, ReasoningBank (policy: none); GEPA (compare on eval prompts).",
-            ],
-        )
-    )
+    o.append(mode(p, X[0], "machine", "Online: learn from sessions", "the scored sessions are the traces"))
     o.append(
         mode(
             p,
             X[0] + MODE_W + GAP,
             "reef",
             "Offline: learn from uploaded tasks",
-            [
-                "Train tasks run on the head; eval tasks score each candidate.",
-                "Agents: any with an npm install, each in its task's own container.",
-                "Recipes: GEPA with TrainTaskRollouts; Meta-Harness (compare).",
-            ],
+            "the train tasks' episodes are the traces",
         )
     )
 
