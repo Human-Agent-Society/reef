@@ -852,8 +852,6 @@ It has two values:
   default ``job_samples``, which defaults to ``evolution.batch_size``),
   possibly none. The traces are scored traces, or
   unscored records when the ``pipeline`` section names the inference stages.
-  An RL task job of ``sft-then-rl``'s imported tasks also starts only for an
-  instruction.
 
 Records arrive and the buffer fills in both modes, so a switch from ``manual``
 to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
@@ -891,7 +889,7 @@ reads it: for example ``scheduling`` (`Step scheduling
 refuses a parameter that it does not take, and the job is not submitted. The
 recipe refuses a ``method`` key, because the recipe's objective is the
 method. A recipe that overrides ``parameters_by_kind`` decides where the setting
-goes; SFT-then-RL sends it with its SFT jobs.
+goes.
 
 .. code:: yaml
 
@@ -1460,58 +1458,6 @@ A source session is a report, without a training arm, whose inference
 records all carry ``source_tag``. The generator service accepts at most
 512 KiB of records and files in one request, so keep
 ``source_records_per_round`` small when the sessions are long.
-
-SFT then RL
-~~~~~~~~~~~
-
-The built-in SFT-then-RL recipe, ``reef.recipe.sft_then_rl:SFTThenRLRecipe``,
-trains one scenario in two ways:
-
-- SFT jobs, as the SFT recipe trains them, on demonstration reports and on
-  uploaded ATIF trajectories (`Upload trajectories
-  <http-api.rst#upload-trajectories>`__). They use ``SftObjective`` and
-  ``recipe.config.job_parameters``.
-- RL task jobs on the scenario's imported train tasks, which `Upload Harbor
-  tasks <http-api.rst#upload-harbor-tasks>`__ or the ``task-import`` section
-  add. A task trains in one task job, whichever component's trainer runs it. They use the ``task_group`` objective and
-  ``recipe.config.task_job_parameters``. The training component rolls each
-  job's tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
-
-Held SFT samples train first: while ``job_samples`` of them wait, the next job
-is an SFT job. Each job starts from the last checkpoint of the job before it,
-so the RL jobs start from the SFT weights. Each train task trains in one task
-job; eval tasks never train. The training component must run task jobs, so the
-recipe requires the ``tinker`` training backend with a sampler.
-
-The eval tasks never train. The recipe does not evaluate the artifacts that
-its trainer publishes: a client asks Reef to evaluate one on the eval tasks
-(`Evaluate an artifact <http-api.rst#evaluate-an-artifact>`__). The
-``evaluation`` section decides which release serves.
-
-.. code:: yaml
-
-   recipe:
-     implementation: reef.recipe.sft_then_rl:SFTThenRLRecipe
-     config:
-       task_job_parameters:
-         rollout:
-           rollouts_per_task: 4
-           environment: e2b
-   pipeline:
-     record2sample:
-       config:
-         tokenizer_path: Qwen/Qwen3-8B
-     sample2job:
-       config:
-         job_samples: 64
-         tasks_per_job: 8
-
-.. config::
-
-   recipe.config.job_parameters | none | parameters of every SFT job beside ``method``, such as ``save_interval``
-   recipe.config.task_job_parameters | required | parameters of every RL task job beside ``method``: ``rollout``, as for the generated-task recipe above, and the component's own parameters, such as ``learning_rate``
-   pipeline.sample2job.config.job_samples | required | the fewest SFT samples of one SFT job
-   pipeline.sample2job.config.tasks_per_job | 8 | the most imported train tasks of one RL task job
 
 The ``generator`` section
 -------------------------
