@@ -57,8 +57,8 @@ from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent_gateway import AgentGateway, refuse
 from reef.record2sample.generator.designer import SYSTEM_PROMPT
-from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
+from reef.execution.sandbox.environment import download_directory, execute
+from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
 
 logger = logging.getLogger(__name__)
 
