@@ -1,9 +1,9 @@
 """Storage contract for the training samples of one scenario.
 
 The sample store keeps the samples of one scenario in the order they arrived:
-the ATIF trajectories that clients upload to train on directly, and the Harbor
+the ATIF trajectories that clients upload to train on directly, the Harbor
 tasks that clients or the deployment import, each in the ``train`` or the
-``eval`` split. Each sample has the number of committed jobs of each trainer
+``eval`` split, and the samples that a trainer's stages make. Each sample has the number of committed jobs of each trainer
 that trained it. A commit lists the samples that its job data consumed, by
 :func:`consumed_sample_id`, and the commit history counts them for the commit's
 trainer in the same transaction as the commit (``SQLCommitHistory``). A rebuilt
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -78,15 +78,14 @@ class StoredSample:
       stage made from no record set (``Record2Sample.made_samples``).
 
     Operations: ``kind`` is ``trajectory`` for a ``TrajectorySample`` and
-    ``task`` for a ``TaskSample``. ``train_count(component)`` is
-    ``train_counts`` of the key of ``component`` (``""`` for ``None``), or 0
-    when it is not a key.
+    ``task`` for a ``TaskSample``. ``train_count(trainer)`` is
+    ``train_counts[trainer]``, or 0 when ``trainer`` is not a key.
 
-    Purpose: ``SampleStore`` makes it. The trainer reads the trajectories:
-    ``sequence`` moves its cursor, and ``train_count`` of its own component
-    tells whether one of its committed jobs trained the sample. A recipe's
-    stage reads the untrained ``train`` tasks, an evaluation the ``eval``
-    tasks, and the task listing every task.
+    Purpose: ``SampleStore`` makes it. A trainer's pipeline reads the samples
+    in arrival order: ``sequence`` moves its cursor, and ``train_count`` of its
+    own key tells whether one of its committed jobs trained the sample. An
+    evaluation reads the imported ``eval`` tasks, and the listings read every
+    sample.
     """
 
     sequence: int
@@ -143,30 +142,34 @@ class StoredSample:
     def kind(self) -> SampleKind:
         return "trajectory" if isinstance(self.sample, TrajectorySample) else "task"
 
-    def train_count(self, component: str | None) -> int:
-        """The number of committed jobs of the trainer ``component`` (``None`` for a scenario's only one) that held it."""
-        return self.train_counts.get(component or "", 0)
+    def train_count(self, trainer: str) -> int:
+        """The number of committed jobs of ``trainer`` (a ``train_counts`` key) that held the sample."""
+        return self.train_counts.get(trainer, 0)
 
 
 class SampleStore(ABC):
     """The training samples of one scenario.
 
-    Values: the state of a store is a finite sequence of stored samples, in
-    increasing ``sequence``. No two of them have the same ``sample_id``, also
-    across kinds. A stored sample's ``sample``, ``split`` and ``files_digest``
-    do not change, and record retention does not remove it. Only a commit
-    changes ``train_counts``: the commit history adds one, for the commit's
-    trainer, for each consumed sample ID that the commit lists. Archiving the
-    scenario retires the whole store.
+    Values: the state of a store is a pair ``(S, B)``. ``S`` is a finite
+    sequence of stored samples, in increasing ``sequence``. No two of them have
+    the same ``sample_id``, also across kinds. A stored sample's ``sample``,
+    ``split`` and ``files_digest`` do not change, and record retention does not
+    remove it. ``B`` maps each trainer (a ``train_counts`` key) to its manual
+    buffer, a set of sample IDs. ``insert_into_buffer`` and
+    ``remove_from_buffer`` change ``B``. Only a commit changes
+    ``train_counts``: the commit history adds one, for the commit's trainer,
+    for each consumed sample ID that the commit lists, and removes those IDs
+    from that trainer's manual buffer. Archiving the scenario retires the whole
+    store.
 
     Purpose: the dispatcher adds the trajectories of each upload
     (``add_trajectories``) and the tasks of each task upload or deployment
-    import (``add_tasks``). A trainer's pipeline adds the samples of each unit
-    that its record stages make (``add_record_samples``), and a rebuilt trainer
-    skips the records they consumed (``consumed_record_ids``). The trainer reads the trajectories in arrival order,
-    after its cursor (``page`` and ``count`` with ``kind="trajectory"``). A
-    recipe's stage, an evaluation and the task listing read the tasks
-    (``page`` with ``kind="task"``).
+    import (``add_tasks``). A trainer's pipeline adds the samples that its
+    stages make (``add_record_samples``), and a rebuilt trainer skips the
+    records they consumed (``consumed_record_ids``). The pipeline reads the
+    samples in arrival order, after its cursor (``page``), and the samples of
+    its manual buffer (``manual_buffer``, ``get``). An evaluation and the task
+    listing read the imported tasks (``imported_tasks``).
     """
 
     @abstractmethod
@@ -232,10 +235,6 @@ class SampleStore(ABC):
         """
 
     @abstractmethod
-    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
-        """Return the number of stored samples after ``after_sequence`` that ``page`` would read with the filters."""
-
-    @abstractmethod
     def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
         """The stored samples of ``sample_ids`` that the store holds, in arrival order."""
 
@@ -255,12 +254,14 @@ class SampleStore(ABC):
     def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
         """Remove ``sample_ids`` from the manual buffer of ``trainer``, in one transaction; an absent ID is skipped."""
 
-    def tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
-        """Every stored task, in arrival order; only ``split``'s if given."""
+    def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
+        """Every imported task (a task of no component), in arrival order; only ``split``'s if given."""
         found: list[StoredSample] = []
         after_sequence = 0
         while page := self.page(after_sequence=after_sequence, kind="task"):
-            found.extend(stored for stored in page if split is None or stored.split == split)
+            found.extend(
+                stored for stored in page if stored.component is None and (split is None or stored.split == split)
+            )
             after_sequence = page[-1].sequence
         return tuple(found)
 
@@ -268,25 +269,21 @@ class SampleStore(ABC):
 class MemorySampleStore(SampleStore):
     """A sample store in process memory, for a trainer without a scenario session, such as a test's pipeline.
 
-    Values: ``rows`` holds the stored samples in arrival order. No commit counts their training, so every
-    ``train_counts`` stays empty; the pipeline keeps the samples that it trained in this process itself. Task
-    samples need a task file store, so ``add_tasks`` raises ``ValueError``. Purpose: ``TrainingPipeline`` makes
-    one when its context has no sample store.
+    Values: ``rows`` holds ``S`` and ``buffers`` holds ``B``. There is no commit history, so every
+    ``train_counts`` stays empty and nothing removes trained samples from a manual buffer; the pipeline keeps the
+    samples that it trained in this process itself. Imported tasks need a task file store, so ``add_tasks`` raises
+    ``ValueError``. Purpose: ``TrainingPipeline`` makes one when its context has no sample store.
     """
 
     def __init__(self) -> None:
         self.rows: list[StoredSample] = []
-        #: The manual buffer of each trainer. No commit removes trained samples from it: the pipeline leaves out
-        #: the samples that it trained in this process.
         self.buffers: dict[str, set[str]] = {}
 
     def stored(self, sample_id: str) -> StoredSample | None:
         return next((row for row in self.rows if row.sample_id == sample_id), None)
 
     def add_trajectories(self, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
-        return self.add_rows(
-            tuple(StoredSample(len(self.rows) + 1, sample_id, "train", sample) for sample_id, sample in trajectories)
-        )
+        return self.add_rows(trajectories, component=None, group=None, record_ids=())
 
     def add_record_samples(
         self,
@@ -295,25 +292,32 @@ class MemorySampleStore(SampleStore):
         record_ids: tuple[str, ...],
         samples: tuple[tuple[str, Sample], ...],
     ) -> bool:
-        if not samples:
+        if not samples or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
             raise ValueError("record samples need one or more samples and non-empty record IDs")
-        consumed = tuple(sorted(set(record_ids)))
-        return self.add_rows(
-            tuple(
-                StoredSample(len(self.rows) + 1, sample_id, "train", sample, None, {}, trainer, group, consumed)
-                for sample_id, sample in samples
-            )
-        )
+        return self.add_rows(samples, component=trainer, group=group, record_ids=tuple(sorted(set(record_ids))))
 
-    def add_rows(self, rows: tuple[StoredSample, ...]) -> bool:
-        new: list[StoredSample] = []
-        for row in rows:
-            stored = self.stored(row.sample_id)
+    def add_rows(
+        self,
+        samples: tuple[tuple[str, Sample], ...],
+        *,
+        component: str | None,
+        group: str | None,
+        record_ids: tuple[str, ...],
+    ) -> bool:
+        """Store each new ``(sample_id, sample)`` pair after the stored samples, as ``add_trajectories`` does."""
+        new: dict[str, StoredSample] = {}
+        for sample_id, sample in samples:
+            if not isinstance(sample_id, str) or not sample_id.strip():
+                raise ValueError("a sample ID must be a non-empty string")
+            stored = new.get(sample_id) or self.stored(sample_id)
             if stored is None:
-                new.append(replace(row, sequence=len(self.rows) + len(new) + 1))
-            elif stored.sample != row.sample:
-                raise SampleConflict(f"sample {row.sample_id!r} is already stored with other content")
-        self.rows.extend(new)
+                sequence = len(self.rows) + len(new) + 1
+                new[sample_id] = StoredSample(
+                    sequence, sample_id, "train", sample, None, {}, component, group, record_ids
+                )
+            elif stored.sample != sample:
+                raise SampleConflict(f"sample {sample_id!r} is already stored with other content")
+        self.rows.extend(new.values())
         return bool(new)
 
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
@@ -340,9 +344,6 @@ class MemorySampleStore(SampleStore):
             and (trainer is None or row.component in (None, trainer))
         )[:limit]
 
-    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
-        return len(self.page(after_sequence=after_sequence, limit=len(self.rows) + 1, kind=kind, trainer=trainer))
-
     def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
         return tuple(row for row in self.rows if row.sample_id in sample_ids)
 
@@ -363,9 +364,9 @@ class TrainerSamples:
 
     Values: ``store`` is the scenario's ``SampleStore``; ``trainer`` is the trainer's ``train_counts`` key, the
     component that its commits name or ``""`` for the only trainer of a scenario. Operations pass ``trainer``
-    to the store: ``page`` and ``count`` read the samples that the trainer reads (its own and those of no
-    component), ``add_record_samples`` saves its own, ``consumed_record_ids`` reads the records that its samples
-    consumed, ``tasks`` reads every task, and ``manual_buffer``, ``insert_into_buffer`` and ``remove_from_buffer``
+    to the store: ``page`` reads the samples that the trainer reads (its own and those of no component),
+    ``add_record_samples`` saves its own, ``consumed_record_ids`` reads the records that its samples consumed,
+    ``imported_tasks`` reads the imported tasks, and ``manual_buffer``, ``insert_into_buffer`` and ``remove_from_buffer``
     read and change its manual buffer. Purpose: ``Recipe.build_trainers`` makes one for each trainer; the
     trainer's pipeline (``PipelineContext.samples``) and its stages read it.
     """
@@ -384,9 +385,6 @@ class TrainerSamples:
     ) -> tuple[StoredSample, ...]:
         return self.store.page(after_sequence=after_sequence, limit=limit, kind=kind, trainer=self.trainer)
 
-    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None) -> int:
-        return self.store.count(after_sequence=after_sequence, kind=kind, trainer=self.trainer)
-
     def add_record_samples(
         self, group: str | None, record_ids: tuple[str, ...], samples: tuple[tuple[str, Sample], ...]
     ) -> bool:
@@ -395,8 +393,8 @@ class TrainerSamples:
     def consumed_record_ids(self) -> frozenset[str]:
         return self.store.consumed_record_ids(self.trainer)
 
-    def tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
-        return self.store.tasks(split)
+    def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
+        return self.store.imported_tasks(split)
 
     def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
         return self.store.get(sample_ids)

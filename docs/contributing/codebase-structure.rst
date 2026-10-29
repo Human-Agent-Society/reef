@@ -86,7 +86,7 @@ import a concrete integration.
 | ``reef/train/``         | the trainer, the training job loop, the training         | HTTP endpoints, deployment                 |
 |                         | pipeline, job data types, training components            | configuration parsing                      |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/record2record/`` | which records Reef uses and in what order: report        | sample and job data assembly, record       |
+| ``reef/record2record/`` | which records Reef uses and which train together: report | sample and job data assembly, record       |
 |                         | grouping, judging, eligibility checks, staleness check   | storage, task generation                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2sample/`` | turning a record set into samples (``Record2Sample``,    | which records train, job data shape,       |
@@ -295,13 +295,14 @@ The extension points those packages expose are in `Python API
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state
-  and opens the scenario's task stores (``reef/storage/tasks.py``);
+  and opens the scenario's task stores (``reef/storage/tasks.py``) and its
+  sample store (``reef/storage/samples.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or run them with an agent? Put it in ``reef/record2sample/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
-  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which runs generated tasks
+  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which generates tasks
   through that service and trains on them, is in
   ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
   (``generator.py``). The request, ``TaskGenerationRequest``, is in

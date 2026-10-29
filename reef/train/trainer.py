@@ -597,7 +597,7 @@ class Trainer:
             raise
 
     def _skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
-        """Consume the instruction alone; the units beside it go back to the pipeline for job data that a proposer reads."""
+        """Consume the instruction alone; the samples of its job data stay in the buffer."""
         with self._lock:
             pending = self._pending
             if pending is None or pending.data_id != data.data_id:
@@ -618,7 +618,7 @@ class Trainer:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
 
         ``serving_runtime_load_id`` is the version that serves the scenario now.
-        The staleness check of the pipeline measures the lag of each held set against it.
+        The staleness check of the pipeline measures the lag of each buffered record sample against it.
         """
         if self._pending is not None:
             return self._pending.data

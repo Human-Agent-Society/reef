@@ -173,47 +173,6 @@ def test_a_task_name_is_published_once(session, tmp_path):
     assert store.tasks() == (first,)
 
 
-def binary_task(root: Path, name: str, content: bytes = bytes(range(256))) -> Path:
-    directory = root / name
-    (directory / "environment").mkdir(parents=True)
-    (directory / "environment" / "image.png").write_bytes(content)
-    (directory / "instruction.md").write_text("Describe the image.\n")
-    return directory
-
-
-def test_an_added_task_keeps_its_binary_files_and_publication_order(session, tmp_path):
-    store = session.tasks.open("tasks")
-    store.begin_generation(generation=0, source_record_ids=("record-1",))
-    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
-    store.publish_task(generation=0, index=1, split="train")
-    source = binary_task(tmp_path, "image-task")
-
-    added = store.add_task(directory=source, split="eval")
-    store.publish_task(generation=0, index=0, split="train")
-
-    assert added == StoredTask(name="image-task", split="eval", files_digest=files_digest(source))
-    assert (store.path(added.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
-    assert store.add_task(directory=source, split="eval") == added
-    assert [task.name for task in store.tasks()] == ["beta", "image-task", "alpha"]
-    assert store.tasks(split="eval") == (added,)
-
-
-def test_an_added_task_conflicts_with_a_published_name(session, tmp_path):
-    store = session.tasks.open("tasks")
-    store.add_task(directory=binary_task(tmp_path / "first", "image-task"), split="eval")
-    with pytest.raises(TaskConflict, match="published to eval, not train"):
-        store.add_task(directory=binary_task(tmp_path / "second", "image-task"), split="train")
-    with pytest.raises(TaskConflict, match="other files"):
-        store.add_task(directory=binary_task(tmp_path / "third", "image-task", b"other"), split="eval")
-    store.begin_generation(generation=0, source_record_ids=("record-1",))
-    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("image-task")))
-    with pytest.raises(TaskConflict, match="other files"):
-        store.publish_task(generation=0, index=0, split="eval")
-    with pytest.raises(ValueError, match="split"):
-        store.add_task(directory=binary_task(tmp_path / "fourth", "other-task"), split="test")
-    assert [task.name for task in store.tasks()] == ["image-task"]
-
-
 def test_documents_are_written_once_and_trained_marks_name_published_train_tasks(session, tmp_path):
     store = session.tasks.open("tasks")
     store.begin_generation(generation=0, source_record_ids=("record-1",))
@@ -267,7 +226,6 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
         store.begin_generation(generation=0, source_record_ids=("record-1",))
         store.save_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
         store.publish_task(generation=0, index=0, split="train")
-        added = store.add_task(directory=binary_task(sources, "image-task"), split="eval")
         store.write_document(key="rollout/alpha", document="saved")
 
     with closing(open_durable_storage()) as storage:
@@ -276,10 +234,8 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             state = store.generation(0)
             assert state is not None and state.pending_indices == (1,)
             assert read_harbor_task(store.path(state.candidates[1].files_digest)) == generated("beta")
-            published, restored = store.tasks()
+            (published,) = store.tasks()
             assert read_harbor_task(store.path(published.files_digest)) == generated("alpha")
-            assert restored == added
-            assert (store.path(restored.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
             assert store.documents() == {"rollout/alpha": "saved"}
         storage.archive("math")
         with closing(storage.open("math")) as session:

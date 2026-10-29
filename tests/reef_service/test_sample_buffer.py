@@ -125,6 +125,8 @@ def test_a_reload_in_manual_mode_keeps_the_manual_buffer_as_the_client_left_it(t
         dispatcher.close()
     dispatcher = dispatcher_for(tmp_path, recipe)
     try:
+        # The in-memory repository keeps no registration, so the scenario loads as the next upload would load it.
+        dispatcher.get_or_create_scenario("s")
         buffer = asyncio.run(read(dispatcher))
     finally:
         dispatcher.close()

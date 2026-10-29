@@ -27,7 +27,6 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
-    func,
     or_,
     select,
 )
@@ -45,7 +44,7 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
 
     ``kind`` is the kind of the sample, ``trajectory`` or ``task``, and
     ``split`` is ``train`` or ``eval``; a trajectory is always ``train``.
-    ``content_json`` holds the sample as canonical JSON (``sample_content``),
+    ``content_json`` holds the sample as canonical JSON (``trajectory_content``, ``made_task_content``, ``imported_task_content``),
     and ``content_sha256`` its SHA-256. ``component`` is the trainer that made
     the sample from records (the component its commits name, or ``""`` for the
     only trainer of a scenario), or NULL for a sample that every trainer reads,
@@ -128,7 +127,7 @@ def manual_buffer_table(metadata: MetaData, *, foreign_key: str | None = None) -
     )
 
 
-def sample_content(sample: TrajectorySample) -> str:
+def trajectory_content(sample: TrajectorySample) -> str:
     """The canonical JSON of a trajectory that the sample table stores; ``stored_sample`` reads it back."""
     content = {
         "trajectory": dict(sample.trajectory),
@@ -138,8 +137,8 @@ def sample_content(sample: TrajectorySample) -> str:
     return canonical_json(content)
 
 
-def record_task_content(task: TaskSample) -> str:
-    """The canonical JSON of a task that a trainer made from records: its path, records and metadata."""
+def made_task_content(task: TaskSample) -> str:
+    """The canonical JSON of a task that a trainer's stage made: its path, records and metadata."""
     return canonical_json(
         {
             "task_path": str(task.task_path),
@@ -149,8 +148,8 @@ def record_task_content(task: TaskSample) -> str:
     )
 
 
-def task_content(files_digest: str) -> str:
-    """The canonical JSON of a task that the sample table stores: the digest of its directory's files."""
+def imported_task_content(files_digest: str) -> str:
+    """The canonical JSON of an imported task that the sample table stores: the digest of its directory's files."""
     return canonical_json({"files_digest": files_digest})
 
 
@@ -194,7 +193,7 @@ class SQLSampleStore(SampleStore):
         for sample_id, trajectory in trajectories:
             if not isinstance(sample_id, str) or not sample_id.strip():
                 raise ValueError("a sample ID must be a non-empty string")
-            rows.append((sample_id, sample_content(trajectory)))
+            rows.append((sample_id, trajectory_content(trajectory)))
         with self.records._transaction(write=True) as connection:
             inserted = [
                 self.insert(connection, sample_id, "trajectory", "train", content) for sample_id, content in rows
@@ -216,9 +215,9 @@ class SQLSampleStore(SampleStore):
             raise ValueError("record samples need one or more samples and non-empty record IDs")
         rows: list[tuple[str, SampleKind, str]] = [
             (
-                (sample_id, "trajectory", sample_content(sample))
+                (sample_id, "trajectory", trajectory_content(sample))
                 if isinstance(sample, TrajectorySample)
-                else (sample_id, "task", record_task_content(sample))
+                else (sample_id, "task", made_task_content(sample))
             )
             for sample_id, sample in samples
         ]
@@ -253,20 +252,15 @@ class SQLSampleStore(SampleStore):
 
     def manual_buffer(self, trainer: str) -> tuple[str, ...]:
         table, buffer = self.table.table, self.buffer.table
+        held = select(buffer.c.sample_id).where(self.buffer.condition(), buffer.c.trainer == trainer)
         with self.records._transaction(write=False) as connection:
-            held = set(
+            return tuple(
                 connection.execute(
-                    select(buffer.c.sample_id).where(self.buffer.condition(), buffer.c.trainer == trainer)
+                    select(table.c.sample_id)
+                    .where(self.table.condition(), table.c.sample_id.in_(held))
+                    .order_by(table.c.sequence)
                 ).scalars()
             )
-            if not held:
-                return ()
-            ordered = connection.execute(
-                select(table.c.sample_id)
-                .where(self.table.condition(), table.c.sample_id.in_(list(held)))
-                .order_by(table.c.sequence)
-            ).scalars()
-            return tuple(ordered)
 
     def insert_into_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
         if not sample_ids:
@@ -290,7 +284,10 @@ class SQLSampleStore(SampleStore):
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         if split not in SPLIT_NAMES:
             raise ValueError("split must be 'train' or 'eval'")
-        rows = [(directory.name, task_content(self.files.put(self.scenario, directory))) for directory in directories]
+        rows = [
+            (directory.name, imported_task_content(self.files.put(self.scenario, directory)))
+            for directory in directories
+        ]
         with self.records._transaction(write=True) as connection:
             for sample_id, content in rows:
                 self.insert(connection, sample_id, "task", split, content)
@@ -355,16 +352,6 @@ class SQLSampleStore(SampleStore):
         with self.records._transaction(write=False) as connection:
             return self.read(connection, *self.conditions(after_sequence, kind, trainer), limit=limit)
 
-    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
-        table = self.table.table
-        with self.records._transaction(write=False) as connection:
-            statement = (
-                select(func.count())
-                .select_from(table)
-                .where(self.table.condition(), *self.conditions(after_sequence, kind, trainer))
-            )
-            return int(connection.execute(statement).scalar_one())
-
     def conditions(
         self, after_sequence: int, kind: SampleKind | None, trainer: str | None
     ) -> tuple[ColumnElement[bool], ...]:
@@ -399,39 +386,30 @@ class SQLSampleStore(SampleStore):
     def stored_sample(self, row: RowMapping, train_counts: Mapping[str, int]) -> StoredSample:
         """Return the stored sample of one table row, with its train counts by component."""
         content = json.loads(row["content_json"])
-        split = row["split"]
-        if row["kind"] == "task" and row["component"] is not None:
-            made = TaskSample(
+        sequence, sample_id, split = int(row["sequence"]), row["sample_id"], row["split"]
+        if row["kind"] == "task" and row["component"] is None:
+            digest = content["files_digest"]
+            imported = TaskSample(
+                self.files.path(self.scenario, digest),
+                metadata={"task": {"name": sample_id, "files_digest": digest, "split": split}},
+            )
+            return StoredSample(sequence, sample_id, split, imported, digest, train_counts)
+        sample: Sample
+        if row["kind"] == "task":
+            sample = TaskSample(
                 Path(content["task_path"]), tuple(content["source_agent_record_ids"]), content["metadata"]
             )
-            return StoredSample(
-                int(row["sequence"]),
-                row["sample_id"],
-                split,
-                made,
-                None,
-                train_counts,
-                component=row["component"],
-                group=row["group_key"],
-                record_ids=tuple(json.loads(row["record_ids_json"])),
+        else:
+            sample = TrajectorySample(
+                content["trajectory"],
+                group_id=content["group_id"],
+                source_agent_record_ids=tuple(content["source_agent_record_ids"]),
             )
-        if row["kind"] == "task":
-            digest = content["files_digest"]
-            task = TaskSample(
-                self.files.path(self.scenario, digest),
-                metadata={"task": {"name": row["sample_id"], "files_digest": digest, "split": split}},
-            )
-            return StoredSample(int(row["sequence"]), row["sample_id"], split, task, digest, train_counts)
-        trajectory = TrajectorySample(
-            content["trajectory"],
-            group_id=content["group_id"],
-            source_agent_record_ids=tuple(content["source_agent_record_ids"]),
-        )
         return StoredSample(
-            int(row["sequence"]),
-            row["sample_id"],
+            sequence,
+            sample_id,
             split,
-            trajectory,
+            sample,
             None,
             train_counts,
             component=row["component"],

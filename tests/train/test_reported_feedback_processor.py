@@ -190,7 +190,6 @@ def test_operational_backlog_counts_the_reports_that_wait_in_the_record_stage() 
     processor.push(report("r2", "i2"))
     assert processor.operational_metrics()["waiting_reports"] == 0
     batch = processor.build_job_data(1)
-    assert "reserved_reports" not in processor.operational_metrics()
     processor.acknowledge(batch.data_id)
     assert processor.operational_metrics()["waiting_reports"] == 0
 
