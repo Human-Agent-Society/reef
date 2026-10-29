@@ -6,8 +6,10 @@ Write a harness method
    :needs: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
    :outcome: a method that runs in Reef's steps, the scorer it needs, and a deployment that names it
 
-A harness method decides how the harness tree changes. It is one class with
-one operation:
+A harness method decides how the harness tree changes. The harness recipes
+in ``recipes/``, such as GEPA, ACE and Meta-Harness, are methods: each is a
+subclass of ``Method`` that a deployment names in ``evolution.method``. A
+method is one class with one operation:
 
 .. code:: python
 
@@ -17,20 +19,34 @@ one operation:
    class MyMethod(Method):
        def step(self, context: StepContext) -> None: ...
 
-At each step, Reef calls ``step`` with a ``StepContext`` of two parts:
+Reef calls ``step`` once per training step. ``context.workspace`` is the
+step's directory: a copy of the head tree in ``harness/``, the step's
+material, and the method's own files. ``context.services`` are what Reef does
+for the method: model calls, the tree check, episodes of a tree on tasks, and
+a run of a coding agent. The tree that the method leaves in ``harness/`` is
+the candidate. Reef then checks it, evaluates it and applies the release
+rule; the method does none of these itself.
 
-- ``context.workspace``: the step's directory. It holds a copy of the head
-  tree, the step's material, and the method's own files.
-- ``context.services``: the services that Reef runs for the method: model calls,
-  the tree check, the evaluation of a tree on tasks, and a run of the
-  deployment's coding agent.
+.. diagram::
+   :caption: Reef writes the workspace, calls step(context) once, and reads back the tree, the state and the output that the method left. Then Reef checks the candidate, evaluates it, and the release rule publishes, holds or drops it.
 
-The method edits ``workspace.harness``. The tree there when ``step`` returns
-is the step's candidate. What the method says about the step it writes to
-``workspace.output`` (see `What the method says`_). Reef then validates it, evaluates it, records the
-result in the history, and publishes a selected candidate (see `The loop
-<../user-guide/evolve-your-harness.rst#the-loop>`__). A method never
-subclasses the backend.
+   <img class="fig-light" src="../assets/harness-method-step-light.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the release rule">
+   <img class="fig-dark" src="../assets/harness-method-step-dark.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the release rule">
+
+To write a method:
+
+.. steps::
+
+   #. Subclass ``Method`` and implement ``step`` (`A small method`_). Read the
+      workspace (`The workspace`_), call the services (`The services`_), and
+      write the new tree with ``workspace.write_tree``.
+   #. Say what the step did in ``output/`` (`What the method says`_), and
+      keep what the next step needs in ``state/`` (`Keep state between
+      steps`_).
+   #. When the evaluation compares trees, write a scorer (`Score an
+      episode`_).
+   #. Name the class in the deployment, with its settings (`Configure a
+      deployment`_).
 
 A small method
 --------------

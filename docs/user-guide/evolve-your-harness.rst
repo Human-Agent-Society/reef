@@ -23,18 +23,265 @@ prompt that mishandles a task family, a missing skill, or a config default
 that is wrong for the deployment. It also fits a closed model endpoint with no
 weight access. It does not fit when the model itself cannot do the task.
 
+This page explains how harness evolution works, then runs it. Two developer
+guides cover the rest: `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ says how a step changes
+the tree, and `Harness adapters <../developer-guide/harness-adapters.rst>`__
+says how to connect another agent.
+
+How it works
+------------
+
 The figure shows what runs on a person's machine, what runs in Reef, and the
 routes between them. The numbers follow one session into one training step.
-A step gets its traces in one of two ways. Online, they are the sessions that
-people run and score. Offline, they are the episodes of uploaded train tasks
-(`Offline runs on uploaded tasks <#offline-runs-on-uploaded-tasks>`__). The
-bottom row names recipes for each way.
+The bottom row shows the two ways a step gets its traces.
 
 .. diagram::
    :caption: The client installs the head as a layer over the person's own configuration and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports or of uploaded train tasks, and publishes a selected candidate as the new head.
 
    <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
    <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
+
+One session, step by step
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Once per machine, ``reef-client harness connect`` installs the head, installs
+the agent when the machine lacks it, and makes the agent's own command run
+through Reef (see `Use a published tree`_). Then each session goes like
+this:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 90
+
+   * - Step
+     - What happens
+   * - before
+     - The agent's command runs ``reef-client harness run``. It installs the
+       head, rendered as a layer for this machine (``GET
+       /reef/harness?form=client``).
+   * - 1
+     - The agent starts with the person's own configuration, then the layer.
+   * - 2
+     - Its model calls go to ``/reef/scenarios/<scenario-name>/v1/*``. Reef
+       forwards each call to the provider as sent, and records it with its
+       reply. The answer names the record in ``x-reef-agent-record-id``.
+   * - after
+     - When the agent exits, a background process sends the layer's files
+       that the session changed (``POST /reef/harness/import``). Reef merges
+       them onto the newest head.
+   * - 3
+     - The person, or a program that checks the work, scores the session
+       with ``POST /reef/report``. The report and the calls it names are one
+       raw trace.
+   * - 4
+     - When ``evolution.batch_size`` traces wait, a training step starts. Its
+       workspace gets a copy of the head and the batch.
+   * - 5
+     - The method edits the copy (``step(context)``).
+   * - 6
+     - Reef checks the new tree. An unchanged or invalid tree skips the step.
+   * - 7
+     - The candidate and the head run the same tasks as episodes, and the
+       policy compares their scores.
+   * - 8
+     - The release rule publishes a selected candidate as the new head, or
+       holds it until a person promotes it.
+   * - next
+     - The next session's sync installs the new head.
+
+Reef never reads, syncs or evolves the person's own configuration. `Use a
+published tree`_ lists what that configuration holds for each agent.
+
+Two ways to evolve
+~~~~~~~~~~~~~~~~~~
+
+A step gets its traces in one of two ways. Both ways go into the same
+training step (4 to 8 above).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 42 42
+
+   * - What
+     - Online: learn from sessions
+     - Offline: learn from uploaded tasks
+   * - Traces
+     - The sessions that people run and score (1 to 3).
+     - The episodes of the next train tasks, run on the head.
+   * - Evaluation tasks
+     - Prompts in ``evolution.evaluation.tasks``, or none with
+       ``policy: none``.
+     - The eval split of the uploaded tasks.
+   * - Agents
+     - The adapters with a layer: ``claude``, ``pi``, ``opencode``,
+       ``codex``.
+     - Every adapter with an npm ``install``, and ``terminus``.
+   * - Data comes from
+     - ``reef-client harness`` and ``POST /reef/report``.
+     - ``POST /reef/scenarios/<scenario-name>/tasks``, with Harbor task
+       directories.
+   * - Recipes
+     - ACE and ReasoningBank (``policy: none``); GEPA (``compare`` on eval
+       prompts, as in its AIME example).
+     - GEPA with ``TrainTaskRollouts``; Meta-Harness (``compare`` on task
+       directories, as in its Terminal-Bench example).
+
+`Choose or write a method`_ describes each recipe. A deployment can also mix
+the two ways: recorded traffic still starts steps in an offline run, and it
+goes first.
+
+Quickstart
+----------
+
+Before you start
+~~~~~~~~~~~~~~~~
+
+- A Reef checkout (`Laptop, no GPU
+  <../getting-started/installation.rst#laptop-no-gpu>`__) and
+  ``pip install reef-client``.
+- An endpoint that serves a model that can call tools, hosted or local.
+- Node and ``npm``. At startup, the deployment installs the adapter's pinned
+  agent under ``~/.local/share/reef-harness/<adapter>``.
+  ``REEF_HARNESS_PREFIX`` moves that root, and ``evolution.binary`` names a
+  binary of your own instead. A missing ``npm`` or a failed install refuses
+  startup.
+- For the offline way: Docker. Docker Desktop and colima both work.
+
+The tutorial's deployment listens on ``127.0.0.1:8901`` without a token. When
+a deployment has one, add ``-H "Authorization: Bearer $REEF_TOKEN"`` to each
+``curl`` below.
+
+Online: learn from your sessions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Start the tutorial's deployment, which evolves pi's rules:
+
+.. code:: bash
+
+   export REEF_UPSTREAM_URL=https://api.moonshot.ai   # without /v1
+   export REEF_UPSTREAM_MODEL=kimi-k2.6
+   export REEF_UPSTREAM_API_KEY=sk-...
+   reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
+
+Connect your machine, open a new terminal, and use pi as you always do:
+
+.. code:: bash
+
+   reef-client harness connect <scenario-name> --reef http://127.0.0.1:8901
+   pi
+
+Score the session with one report over its model calls, ``0`` for a failure
+and ``1`` for a success:
+
+.. code:: bash
+
+   CALLS=$(curl -s "http://127.0.0.1:8901/reef/scenarios/<scenario-name>/records?request_type=inference&limit=100" \
+     | jq -c '[.records[].agent_record_id]')
+   curl -s -X POST http://127.0.0.1:8901/reef/report \
+     -H "x-reef-scenario: <scenario-name>" -H "Content-Type: application/json" \
+     -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
+
+This deployment runs a step for each report. List the steps and their
+results:
+
+.. code:: bash
+
+   curl -s -H "x-reef-scenario: <scenario-name>" http://127.0.0.1:8901/reef/harness/releases
+
+A row with ``selected: true`` is a new head, and your next ``pi`` session
+starts on it. `Tutorial: evolve your agent's harness
+<../getting-started/harness-tutorial.rst>`__ walks through the same steps in
+detail.
+
+Offline: learn from uploaded tasks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Copy ``tutorials/evolve-your-harness/configs/deployment.yaml`` and give it
+tasks instead of users. In ``evolution.evaluation``, replace ``tasks`` and
+``scorer``, and add the ``pipeline`` section:
+
+.. code:: yaml
+
+   recipe:
+     config:
+       evolution:
+         evaluation:
+           task_store: imported-tasks
+           scorer: reef.evaluation.harness:VerifierRewardScorer
+           policy: compare
+   pipeline:
+     sample2job:
+       module: reef.sample2job.traces:TrainTaskRollouts
+       config: {tasks_per_step: 4}
+
+Start Reef with the new file. Then upload Harbor task directories, each with
+its instruction, environment and tests. The train tasks are what the method
+learns from, and the eval tasks decide each release:
+
+.. code:: bash
+
+   tar -czf train.tar.gz -C <tasks-directory> <task-a> <task-b>
+   curl -f "http://127.0.0.1:8901/reef/scenarios/<scenario-name>/tasks?split=train" \
+     -H "Content-Type: application/gzip" --data-binary @train.tar.gz
+   tar -czf eval.tar.gz -C <tasks-directory> <task-c>
+   curl -f "http://127.0.0.1:8901/reef/scenarios/<scenario-name>/tasks?split=eval" \
+     -H "Content-Type: application/gzip" --data-binary @eval.tar.gz
+
+The first train task starts the run. Each step runs the next train tasks on
+the head in their own containers, and the method reads those episodes as its
+traces. Watch the steps with the same ``GET /reef/harness/releases``. `Offline
+runs on uploaded tasks`_ explains the settings and the network between a
+task's container and Reef.
+
+Run the example
+~~~~~~~~~~~~~~~
+
+The example's driver runs the online way without a person. From a Reef
+checkout:
+
+.. code:: bash
+
+   export REEF_UPSTREAM_API_KEY=sk-...    # only if your endpoint needs one
+   cd tutorials/evolve-your-harness
+   ./run.sh
+
+``configs/serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, with no
+``/v1`` suffix), the model (``qwen3-8b``), and the service token. Edit them
+to point at your own. The method, the episodes and the served traffic all use
+that one model. `evolve-your-harness.ipynb
+<../../tutorials/evolve-your-harness/evolve-your-harness.ipynb>`__ runs the
+same pass as a notebook.
+
+``run.sh`` starts the service on port 8900 and runs ``run.py``. Three
+exact-answer coding tasks go through Reef, and ``run.py`` grades each reply
+and reports it. ``evolution.batch_size: 1`` makes each report its own step.
+The example's method, in ``tutorials/evolve-your-harness/harness/plugins.py``,
+makes one model call that reads the step's failing traces and rewrites
+``rules.md``. When the loop finishes, ``run.sh`` prints the published release,
+its evaluation metrics, and the changed files, then stops the service. The
+scenario is ``harness-evolve-demo``. ``configs/serve-native.yaml`` runs the
+same loop on the native harness.
+
+To follow it from a second terminal while ``run.sh`` runs:
+
+.. code:: bash
+
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
+     http://127.0.0.1:8900/reef/harness            # the seed tree until a step publishes
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
+     http://127.0.0.1:8900/reef/harness/releases
+
+The demo service listens on loopback only and runs without a token. On a
+shared machine, export ``REEF_TOKEN`` before ``run.sh`` starts it.
+
+The run has succeeded when a step's row shows ``selected: true`` and
+``GET /reef/harness`` serves a release other than the seed. A step that runs
+but does not win leaves the seed in place; that is a normal result. If no step
+publishes after a few minutes, read the step's row. Both sides scoring
+nothing usually means the episodes could not run: vLLM, for example, needs
+``--enable-auto-tool-choice --tool-call-parser hermes``.
+`Troubleshooting <troubleshooting.rst>`__ lists the other causes.
 
 The harness tree
 ----------------
@@ -121,17 +368,7 @@ The loop
 
 Harness evolution has five parts. Data and sync happen between steps, and
 each step runs evolve, evaluation and release. Data, evaluation and release
-work as they do for weight training; evolve and sync are the harness's own:
-
-.. flow::
-   :loop: the agent runs the new head, and its model calls are the next data
-
-   Data :: the agent's model calls and reports, uploaded tasks
-   Evolve :: the method edits a copy of the head tree into a candidate
-   Evaluation* :: scores the candidate against the head
-   Release :: a selected candidate becomes the new head
-   Sync :: each client run installs the head and sends back what the session changed
-
+work as they do for weight training; evolve and sync are the harness's own.
 Each part is one relation between a few values. ``T`` is a harness tree
 (`The harness tree`_), and ``A`` is the deployment's adapter.
 
@@ -210,7 +447,7 @@ stops. The eval split stays the evaluation's task source.
    recipe:
      config:
        evolution:
-         adapter: terminus
+         adapter: pi
          method: recipes.gepa:GEPA
          evaluation:
            task_store: imported-tasks
@@ -226,11 +463,14 @@ Upload the tasks while the service runs, with
 ``POST /reef/scenarios/{scenario}/tasks?split=train`` and ``?split=eval`` (see
 `Upload Harbor tasks <../reference/http-api.rst#upload-harbor-tasks>`__), or
 import them with the deployment's ``task-import`` section. The first train
-task starts the run. The stage needs an adapter that runs task directories
-(``terminus``) and a scorer, and startup refuses it without them. Recorded
-traffic still starts steps, and it goes first. After a
-restart, the run continues after the last committed step. A task uploaded
-during an epoch joins the next epoch.
+task starts the run. Recorded traffic still starts steps, and it goes first.
+After a restart, the run continues after the last committed step. A task
+uploaded during an epoch joins the next epoch.
+
+The stage needs a scorer. With an adapter other than ``terminus``, the
+evaluation tasks must be directories too: a ``task_store`` or a
+``task_manifest``. Each task runs in its own container (see `Task
+directories`_).
 
 The method
 ~~~~~~~~~~
@@ -258,10 +498,10 @@ The tasks come from one source:
 - ``task_store``: the eval split of a task store, such as ``imported-tasks``.
   Upload eval tasks with ``POST /reef/scenarios/{scenario}/tasks?split=eval``.
 
-Task directories need an adapter that runs them, such as ``terminus``. An
-episode runs in a fresh, empty root with only the rendered tree: no
+A prompt episode runs in a fresh, empty root with only the rendered tree: no
 repository and no files from your machine. A prompt task must therefore state
-the whole problem.
+the whole problem. A task directory brings its own environment and tests
+(see `Task directories`_).
 
 ``scorer`` names the ``EpisodeScorer`` that scores each episode. ``policy``
 is one of three:
@@ -324,6 +564,9 @@ Running episodes
        # Only for a model that listens on the evaluation worker's localhost:
        forward_ports: [8000]
 
+A task directory with an adapter other than ``terminus`` runs in its own
+container instead, under the ``local`` executor (see `Task directories`_).
+
 ``evolution.sandbox.env_from`` lists the environment variables to pass into
 an episode; a missing variable fails configuration. No other variable
 reaches the agent, and Reef keeps the E2B key and the Modal token to itself.
@@ -337,13 +580,55 @@ describes the shared execution layer. A method that runs a coding agent,
 such as ``AgentMethod`` or the beta Reefine recipe, sets where the agent runs
 with ``evolution.agent.sandbox``, apart from ``evolution.executor``.
 
+Task directories
+^^^^^^^^^^^^^^^^
+
+A Harbor task directory holds an instruction, an environment and the tests
+that score the work. Tasks from a ``task_store``, from a ``task_manifest``,
+and the train tasks of an offline run are directories. ``terminus``'s runner
+takes the directory itself. For any other adapter, Reef runs each task in its
+own container:
+
+#. Harbor starts the task's container with Docker.
+#. Reef installs the adapter's pinned agent there with npm, copies in the
+   rendered tree, and runs the agent with the task's instruction as its
+   prompt, in the task's working directory.
+#. The task's tests run after the agent. With
+   ``scorer: reef.evaluation.harness:VerifierRewardScorer``, their reward is
+   the episode's score.
+
+The adapter needs nothing more than an npm ``install`` for this (see `How
+Reef runs an agent
+<../developer-guide/harness-adapters.rst#how-reef-runs-an-agent>`__). The
+task's image needs glibc, because Node comes from nvm. When the image has no
+``curl``, Reef installs it with ``apt-get``.
+
+The agent in the container calls the served model's route on Reef. When that
+route's address is a loopback one, such as ``127.0.0.1``, the container
+cannot reach it, so Reef puts ``evolution.evaluation.agent_host`` (default
+``host.docker.internal``) in its place and keeps the port and the path.
+Another address stays as it is. Docker Desktop and colima resolve
+``host.docker.internal`` and reach a Reef that listens on ``127.0.0.1``. On
+Linux, set ``agent_host`` to an address of the host that the container
+reaches, such as the Docker bridge gateway (often ``172.17.0.1``), and make
+Reef listen on it with ``reef.host``.
+
+Startup refuses task directories when:
+
+- the adapter has no npm ``install`` and is not ``terminus``;
+- ``evolution.executor`` is not ``local`` and the adapter is not
+  ``terminus``: the task's container is the boundary;
+- ``collect_failures`` is on, because it adds prompts;
+- an offline run's evaluation tasks are prompts in ``tasks``, with an
+  adapter other than ``terminus``.
+
 Collection: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 With ``evolution.evaluation.collect_failures: true``, the prompts of each
 step's traces become permanent evaluation tasks, so a later candidate cannot
 win while it brings an earlier failure back. The scorer must then score any
-prompt, and the adapter's task must be a prompt.
+prompt, and the evaluation tasks must be prompts, not task directories.
 
 A collected prompt is client traffic, so Reef screens it first. It never
 collects a prompt that holds a credential-shaped literal or an instruction
@@ -377,76 +662,6 @@ Reef keeps the full record under
 Nothing prunes these directories. They hold the method's raw model traffic,
 the clients' traces, and every episode's full log, so protect
 ``evolution.state_dir`` as you protect the commit history.
-
-Before you start
-----------------
-
-- ``pip install reef-client``: the example's driver imports it.
-- An OpenAI-compatible endpoint that serves the model, hosted or local. It
-  must accept tool calls.
-- Node and ``npm``. At startup, the deployment installs the adapter's pinned
-  ``pi`` under ``~/.local/share/reef-harness/pi``. ``REEF_HARNESS_PREFIX``
-  moves that root, and ``evolution.binary`` names a binary of your own
-  instead. A missing ``npm`` or a failed install refuses startup.
-
-Run the example
----------------
-
-From a Reef checkout:
-
-.. code:: bash
-
-   export REEF_UPSTREAM_API_KEY=sk-...    # only if your endpoint needs one
-   cd tutorials/evolve-your-harness
-   ./run.sh
-
-``configs/serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, with no
-``/v1`` suffix), the model (``qwen3-8b``), and the service token. Edit them
-to point at your own. The method, the episodes and the served traffic all use
-that one model. `evolve-your-harness.ipynb
-<../../tutorials/evolve-your-harness/evolve-your-harness.ipynb>`__ runs the
-same pass as a notebook.
-
-``run.sh`` starts the service on port 8900 and runs ``run.py``. Three
-exact-answer coding tasks go through Reef, and ``run.py`` grades each reply
-and reports it. ``evolution.batch_size: 1`` makes each report its own step.
-The example's method, in ``tutorials/evolve-your-harness/harness/plugins.py``,
-makes one model call that reads the step's failing traces and rewrites
-``rules.md``. When the loop finishes, ``run.sh`` prints the published release,
-its evaluation metrics, and the changed files, then stops the service. The
-scenario is ``harness-evolve-demo``. ``configs/serve-native.yaml`` runs the
-same loop on the native harness.
-
-To follow it from a second terminal while ``run.sh`` runs:
-
-.. code:: bash
-
-   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
-     http://127.0.0.1:8900/reef/harness            # the seed tree until a step publishes
-   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
-     http://127.0.0.1:8900/reef/harness/releases
-
-The demo service listens on loopback only and runs without a token. On a
-shared machine, export ``REEF_TOKEN`` before ``run.sh`` starts it. Every
-``curl`` on this page then needs ``-H "Authorization: Bearer $REEF_TOKEN"``.
-
-The run has succeeded when a step's row shows ``selected: true`` and
-``GET /reef/harness`` serves a release other than the seed. A step that runs
-but does not win leaves the seed in place; that is a normal result. If no step
-publishes after a few minutes, read the step's row. Both sides scoring
-nothing usually means the episodes could not run: vLLM, for example, needs
-``--enable-auto-tool-choice --tool-call-parser hermes``.
-`Troubleshooting <troubleshooting.rst>`__ lists the other causes.
-
-To run a long-lived deployment without the example's driver, start
-``configs/deployment.yaml`` from the repository root. It listens on
-``127.0.0.1:8901`` and keeps state under
-``tutorials/evolve-your-harness/work/deployment/``:
-
-.. code:: bash
-
-   export REEF_UPSTREAM_URL=http://127.0.0.1:11434 REEF_UPSTREAM_MODEL=gemma4:26b
-   reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 
 Use a published tree
 --------------------

@@ -1,25 +1,177 @@
 Harness adapters
 ================
 
-An adapter connects a harness tree to one agent. One file,
-``reef/harness/adapters/<name>/adapter.yaml``, declares four things:
+.. page::
+   :for: developers who connect a new agent to Reef
+   :needs: the harness tree and the loop from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
+   :outcome: an adapter that Reef can render, run in episodes and Harbor tasks, and install on a person's machine
 
-- ``evolve``: what Reef may evolve, each kind of file at the path where the
-  agent reads it, such as ``rules`` at ``claude/CLAUDE.md`` (see `Tree
-  parts`_).
+An adapter connects a harness tree to one agent. It is one file,
+``reef/harness/adapters/<name>/adapter.yaml``, and an optional ``render.py``
+beside it for the render steps that the file cannot state. The file says:
+
+- ``evolve``: which files of the agent Reef may evolve, and where the agent
+  reads each one (see `Tree parts`_).
+- ``install``: the agent's package and its pinned version.
 - ``dirs`` and ``sessions``: the agent's directories, the variables that move
-  them, and where it writes its session log.
+  them, and where the agent writes its session log.
 - ``model``: how Reef points the agent at a model.
-- ``run``: how the agent runs for an evaluation episode, and as a layer on a
-  person's machine.
+- ``run``: how the agent runs one prompt without a terminal
+  (``run.episode``), and how it runs on a person's machine (``run.layer``).
+- ``config`` (optional): the defaults and checks of the agent's config files.
 
-An optional ``config`` section adds the defaults and checks of the agent's
-config files. A ``render.py`` beside the file holds the render steps that it
-cannot state.
+Reef renders the same tree with the adapter in three places:
 
-This page is for developers. It describes the file, the rendering rules
-every adapter shares, what differs for each bundled agent, the contract of
-the native runner, and how to connect a new agent.
+.. diagram::
+   :caption: The adapter renders one harness tree three ways: as the whole configuration of an evaluation episode, inside the container of a Harbor task, and as a layer over a person's own configuration.
+
+   <img class="fig-light" src="../assets/harness-adapter-modes-light.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation episode in Reef, a Harbor task in its container, and a layer on a person's machine">
+   <img class="fig-dark" src="../assets/harness-adapter-modes-dark.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation episode in Reef, a Harbor task in its container, and a layer on a person's machine">
+
+How Reef runs an agent
+~~~~~~~~~~~~~~~~~~~~~~
+
+**Evaluation episode.** Reef renders the tree, with the model binding, into
+a new episode root. The variables of ``dirs`` move the agent's whole
+configuration there, so the rendered tree is all that the agent reads. The
+binary runs ``run.episode``, with the task's prompt in ``{prompt}``, in an
+empty ``workspace/`` directory, under the deployment's executor. When it
+exits, the ``sessions`` reader turns the session log into the episode's
+trajectory, and Reef removes the root.
+
+**Harbor task.** A task directory runs in its own container. The task can be
+an uploaded one, one from a task manifest, or a train task of an offline run.
+Reef starts the container with Harbor and Docker, and installs the adapter's
+pinned agent there: Node through nvm, then ``npm install -g
+<package>@<version>``. It copies in the rendered tree and runs
+``run.episode`` with the task's instruction as ``{prompt}``, in the task's
+working directory. The agent reaches Reef's model route through
+``evolution.evaluation.agent_host`` (see `Task directories
+<../user-guide/evolve-your-harness.rst#task-directories>`__). When the agent
+exits, Harbor runs the task's tests;
+``reef.evaluation.harness:VerifierRewardScorer`` takes their reward as the
+episode's score. The session log comes back, and the ``sessions`` reader
+turns it into the trajectory. An adapter needs no extra section for this: an
+npm ``install`` is enough. ``terminus`` is the exception: its runner takes the
+task directory itself (``is_prompt_task_directory``).
+
+**A person's machine.** With ``run.layer``, ``reef-client harness`` installs
+the rendered tree as a layer over the person's own configuration, starts the
+binary with the layer's arguments and variables, and sends the files that a
+session changed back to Reef (see `Use a published tree
+<../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
+
+Connect a new agent
+~~~~~~~~~~~~~~~~~~~
+
+Write the agent's ``adapter.yaml`` in this order (see `Tree parts`_ and
+`Descriptor fields`_):
+
+.. steps::
+
+   #. ``evolve``: the files it reads rules, skills, commands and extensions
+      from, each under its kind.
+   #. ``install``: the npm package (or the git repository) and the version
+      that ``--version`` reports.
+   #. ``dirs``: its configuration and state directories, and the variables
+      that move them into the episode root.
+   #. ``sessions``: the path and format of its session log. A new format
+      subclasses ``TrajectoryReader`` (`reef/harness/episodes/trajectory.py
+      <../../reef/harness/episodes/trajectory.py>`__) and registers with
+      ``@register_trajectory_reader``.
+   #. ``model``: the endpoint, model and credential it reads, for each API
+      dialect it supports.
+   #. ``run``: the command line that runs one prompt (``run.episode``), and,
+      for a person's machine, the arguments that add a release to the
+      person's own configuration (``run.layer``).
+   #. ``config``: the files it reads configuration from, with the paths
+      alone at first. Add defaults and checks that keep an episode
+      self-contained and the model on Reef as you learn which keys matter.
+
+Add a ``renderer`` only for what the file cannot state (see `Adapter
+steps`_). The bundled adapters under `reef/harness/adapters/
+<../../reef/harness/adapters>`__ are complete examples.
+
+Checklist
+^^^^^^^^^
+
+Add these files:
+
+- ``reef/harness/adapters/<name>/__init__.py`` (a one-line docstring),
+  ``adapter.yaml``, and ``render.py`` when the file names a ``renderer``.
+- The name in ``BUILTIN_ADAPTERS`` (`reef/harness/adapters/__init__.py
+  <../../reef/harness/adapters/__init__.py>`__). An adapter in another
+  package registers through the ``reef.harness_adapters`` entry-point group
+  instead, as an ``AdapterDescriptor`` or a function that returns one;
+  ``load_descriptor`` builds one from an ``adapter.yaml``.
+- A ``TrajectoryReader`` when the session log has a new format.
+- The tests below.
+- On this page: the agent in `Bundled adapters`_ and `Render paths`_, and a
+  section for the agent. In `Evolve your harness
+  <../user-guide/evolve-your-harness.rst#the-harness-tree>`__: the agent in
+  the table of bundled adapters.
+
+Then check each of these, in order. Each one catches a different kind of
+mistake:
+
+#. **It loads.** ``python -c "from reef.harness.adapters import get_adapter;
+   print(get_adapter('<name>'))"``. ``load_descriptor`` refuses an unknown
+   key, a bad template, and two parts at one path.
+#. **It renders what the agent reads.** Add the agent to ``SOURCES`` in
+   ``tests/harness/test_harness_render.py``, save the render of that tree
+   under ``tests/harness/data/harness_goldens/<name>/``, and read every file
+   there: it is what the agent will load. Then run ``pytest
+   tests/harness/test_harness_render.py``.
+#. **No tree can move the model.** Add the keys that choose an endpoint, a
+   model or a credential to ``tests/harness/test_harness_model_route.py``,
+   and check that the render refuses each one (see `Model binding checks`_).
+#. **The session log reads.** Save a real session under
+   ``tests/harness/data/`` and read it in
+   ``tests/harness/test_harness_episode.py``, as
+   ``test_pi_reader_parses_a_captured_real_session`` does.
+#. **One real episode runs.** Install the pinned binary and run one prompt
+   against a real model. Check that the exit code is 0, that ``residue`` is
+   empty, that the trajectory holds the reply, and that the reply follows a
+   rule you put in ``rules.md``:
+
+   .. code:: python
+
+      from reef.harness.adapters import get_adapter
+      from reef.harness.episodes.model_binding import ModelBinding
+      from reef.harness.episodes.run import run_episode
+      from reef.harness.tree import HarnessTree, render_tree
+
+      descriptor = get_adapter("<name>")
+      binding = ModelBinding(base_url="https://api.example.com", model="<model>", api_key="<key>", api="openai")
+      tree = HarnessTree({"rules.md": "End every reply with the word REEF.\n"})
+      files = render_tree(tree, descriptor, binding.config_overlays(descriptor))
+      result = run_episode(descriptor, files, "Say hello.", binary="/path/to/<binary>")
+      print(result.exit_code, result.residue, result.trajectory[-1])
+
+   ``base_url`` has no ``/v1``, and ``api`` is a dialect of the adapter's
+   ``model`` section.
+#. **A Harbor task runs** (with an npm ``install``). Start a deployment with
+   ``evolution.adapter: <name>``, ``evolution.evaluation.task_store:
+   imported-tasks``, ``scorer: reef.evaluation.harness:VerifierRewardScorer``
+   and ``TrainTaskRollouts`` (see `Offline runs on uploaded tasks
+   <../user-guide/evolve-your-harness.rst#offline-runs-on-uploaded-tasks>`__).
+   Upload one train task and one eval task. Check that the first step's row
+   in ``GET /reef/harness/releases`` has scores, and that its page shows the
+   agent's trajectory and the verifier's reward.
+#. **The layer works** (with ``run.layer``). Add the agent to ``BINDINGS``
+   in ``tests/harness/test_harness_sync.py``, with the arguments you expect,
+   and run the file: a tree must read back from its render. Then try it by
+   hand: start a deployment with the new adapter, run ``reef-client harness
+   connect``, and start the agent. Check that your own configuration still
+   loads, that the agent's model calls appear in ``GET
+   /reef/scenarios/<scenario-name>/records``, and that a skill you change in
+   the install comes back to Reef after the session (``reef-client harness
+   status``).
+#. **Nothing else broke.** ``pytest tests/harness -n 8 --dist loadfile``
+   and ``pre-commit run --files`` on your files.
+
+Bundled adapters
+~~~~~~~~~~~~~~~~
 
 Reef bundles six adapters for third-party coding-agent CLIs. It also bundles
 ``native``, Reef's own agent, and ``terminus``, which runs the Harbor
@@ -332,7 +484,9 @@ does, may also set:
   the root under ``~/.reef/episodes``, which Docker's VM shares, instead of
   the temp directory.
 - ``is_prompt_task_directory``: ``true`` when ``{prompt}`` names a Harbor task
-  directory instead of text the model reads.
+  directory instead of text the model reads, so the binary runs the task
+  itself. Without it, Reef runs a task directory in the task's own container
+  (see `How Reef runs an agent`_).
 
 Config checks
 ^^^^^^^^^^^^^
@@ -1084,35 +1238,3 @@ run one at a time:
 - ``{"control": "mount", "release_id": str}`` returns ``control/result``
   with ``mounted``, ``release_id``, and ``error``.
 - Malformed input returns an ``error`` object with ``message``.
-
-Connect a new agent
-~~~~~~~~~~~~~~~~~~~
-
-To connect an agent that has no adapter yet, write its ``adapter.yaml`` in
-this order (see `Tree parts`_ and `Descriptor fields`_):
-
-.. steps::
-
-   #. ``evolve``: the files it reads rules, skills, commands and extensions
-      from, each under its kind.
-   #. ``dirs``: its configuration and state directories, and the variables
-      that move them into the episode root.
-   #. ``sessions``: the path and format of its session log. A new format
-      subclasses ``TrajectoryReader`` (`reef/harness/episodes/trajectory.py
-      <../../reef/harness/episodes/trajectory.py>`__) and registers with
-      ``@register_trajectory_reader``.
-   #. ``model``: the endpoint, model, and credential it reads, for each
-      dialect it supports.
-   #. ``run``: the command line that runs one prompt headless
-      (``run.episode``), and, for a person's machine, the arguments that add
-      a release to the person's own configuration (``run.layer``).
-   #. ``config``: the file it reads configuration from, with the paths
-      alone at first. Add defaults and checks that keep an episode
-      self-contained and the model on Reef as you learn which keys matter.
-
-Add a ``renderer`` only for what the declaration cannot state. The
-bundled adapters under `reef/harness/adapters/
-<../../reef/harness/adapters>`__ are complete references. External adapters
-register through the ``reef.harness_adapters`` entry-point group, as an
-``AdapterDescriptor`` or a function that returns one; ``load_descriptor``
-builds one from an ``adapter.yaml``.

@@ -13,8 +13,8 @@ stays as it is.
 
 In this tutorial you start Reef, connect the pi agent to it, use the agent,
 tell Reef how a session went, and see what Reef does with it.
-The last two sections show how to write your own method and how to add
-another agent.
+The last two sections point to the guides for writing your own method and
+for adding another agent.
 
 .. flow::
    :loop: your next session starts on the new version
@@ -194,58 +194,25 @@ both sides changed is a conflict.
 Write your own method
 ---------------------
 
-The method decides how the harness changes. It is a class with one
-operation, ``step``, which Reef calls once per training step:
-
-.. code:: python
-
-   from reef.harness.tree import TreePatch
-   from reef.train.harness_backend import Method, StepContext
-
-
-   class Reflect(Method):
-       def step(self, context: StepContext) -> None:
-           workspace, services = context.workspace, context.services
-           failing = [trace for trace in workspace.traces() if trace.score is not None and trace.score < 1]
-           if not failing:
-               return  # the tree stays the same, so the step is skipped
-           tree = workspace.tree()
-           prompt = prompt_for(tree, failing)  # your own prompt from the rules and the failures
-           reply = services.models.served.chat([{"role": "user", "content": prompt}])
-           workspace.write_tree(tree.apply(TreePatch({"rules.md": reply})))
-
-``context.workspace`` holds a copy of the head and the step's material: the
-calls with their scores and feedback. ``context.services`` are what Reef does
-for the method: model calls, a check of a tree, and runs of the evaluation
-tasks. The tree that the method leaves in the workspace is the candidate.
-
-The method writes the text of ``rules.md``, not its path. ``rules.md`` is
-where every adapter keeps the agent's rules in the tree, and pi's adapter
-renders it to ``pi-agent/AGENTS.md``, where pi reads them. The first head
-takes its ``rules.md`` from the deployment's seed,
-``tutorials/evolve-your-harness/seeds/pi/rules.md``. Each release and each
-merged edit of yours changes it after that. The method above replaces the
-whole file with the model's reply.
-
-Name the class in the deployment file as ``evolution.method``. `Write a
-harness method <../developer-guide/write-a-harness-method.rst>`__ covers the
-workspace, the services, and how to keep state between steps.
+The method decides how the harness changes: a class with one operation,
+``step``, which Reef calls once per training step. This deployment names the
+tutorial's method, ``RulesMethod`` in
+``tutorials/evolve-your-harness/harness/plugins.py``, as
+``evolution.method``. It rewrites ``rules.md``, the tree path where every
+adapter keeps the agent's rules; pi's adapter renders it to
+``pi-agent/AGENTS.md``. The first head takes its ``rules.md`` from the seed,
+``tutorials/evolve-your-harness/seeds/pi/rules.md``. `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ shows how to write your
+own.
 
 Add another agent
 -----------------
 
-Reef connects pi, Claude Code, opencode and codex. Each agent has an
-*adapter*, one file that tells Reef three things:
-
-- which files of the agent Reef may evolve: rules, skills, commands, memory,
-  extensions;
-- where the agent keeps them, and which variable or argument moves that
-  directory;
-- how the agent reaches a model, so that Reef can point it at itself.
-
-To connect another agent, write its adapter. `Harness adapters
-<../developer-guide/harness-adapters.rst>`__ describes the file and the four
-bundled ones.
+Reef connects pi, Claude Code, opencode and codex. Each has an adapter: one
+``adapter.yaml`` that says which of the agent's files Reef may evolve, where
+the agent keeps them, and how it reaches a model. `Harness adapters
+<../developer-guide/harness-adapters.rst>`__ shows how to write one, with a
+checklist of what to test.
 
 Next steps
 ----------
