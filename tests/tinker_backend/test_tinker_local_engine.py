@@ -41,7 +41,7 @@ ENGINE_ADAPTERS = ReleaseFormat("adapter", 16, ("all",))
 class RemoteClient:
     """The Tinker SDK boundary as an offline double: trains, and saves nothing but manifests."""
 
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         self.calls = []
         self.closed = False
 

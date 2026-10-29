@@ -319,6 +319,77 @@ plane, and checks that the component serves the committed adapter again. With
 ``REEF_TEST_TINKER_REAL=1`` and ``TINKER_API_KEY`` set, it trains, downloads
 and converts a real checkpoint.
 
+Train all the parameters on Spindle
+-----------------------------------
+
+The ``spindle_full`` backend trains all the parameters of a model on a
+`Spindle <https://github.com/modal-projects/spindle>`__ deployment's
+full-parameter engine, through the same job loop as ``tinker``. Use it to keep
+training a checkpoint whose weights are on Hugging Face, such as one that was
+trained outside Reef.
+
+Prerequisites:
+
+- The checkpoint is a Hugging Face revision, ``hf://<repo>@<commit>``, with a
+  full 40-digit commit SHA.
+- The Spindle deployment has a full-parameter engine whose ``model`` is
+  ``<repo>`` and whose weights are that commit. Reef does not start engines;
+  deploy the engine with Spindle first.
+- The service environment has the Spindle API key, in ``TINKER_API_KEY`` or
+  the variable that ``training.options.api-key-env`` names, and a Hugging Face
+  token that can read the repo, such as ``HF_TOKEN``.
+- The service has Modal credentials (``uv pip install 'reef-infra[modal]'``,
+  then ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` or a profile). In the
+  Spindle deployment's Modal environment, the Secret ``hf-secret`` names
+  (default ``huggingface-secret``) holds an ``HF_TOKEN`` that can write
+  ``release-repo`` and read the base.
+
+.. code:: yaml
+
+   inference:
+     model-path: org/model                 # the base's repo
+   training:
+     backend: spindle_full
+     options:
+       state-dir: /var/lib/reef/spindle-full
+       base-url: https://<workspace>--spindle-server.modal.run
+       base: hf://org/model@0123456789abcdef0123456789abcdef01234567
+       release-repo: org/model-releases     # one commit per saved checkpoint
+       modal-environment: spindle            # where the deployment runs
+       learning-rate: 1.0e-6
+
+The base artifact is a reference to the base revision (`Import an artifact
+<operate.rst#import-an-artifact>`__); a job from it starts a new model with
+the base's own weights.
+
+Every release refers to its weights on Hugging Face. When Spindle saves a
+checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint
+Volume (``checkpoint-volume``, default ``spindle-checkpoints``). A Modal
+function then commits those weights, with the base's tokenizer, chat template
+and processor files, to ``release-repo``. Each saved checkpoint is one commit,
+which holds exactly that checkpoint's files. The release holds two files:
+
+- ``hf-reference.json``, the commit with the weights. Any serving runtime can
+  load it: Reef's engines (``inference.serving: engines``) download it, and a
+  runtime that loads from the Hub reads the reference.
+- ``tinker-checkpoint.json``, a manifest with ``lora_rank: null``. A later job
+  restores its weights and optimizer state, and Spindle's sampler, the default
+  serving (``inference.serving: trainer``), serves its sampler path.
+
+An import into a ``spindle_full`` scenario must be a full-parameter manifest of
+the base model on the same service beside a reference to full weights, or the
+base's own files, by reference or as a copy. The engine trains only its base, so other full weights are refused
+with HTTP 400. To train another checkpoint, deploy a Spindle engine for it and
+a scenario with it as ``base``. A component trains one base.
+
+A full-parameter run is single tenant: each job holds the engine's training
+GPUs while it runs, for example 8 H200 GPUs to train and 4 to sample for a
+27B model. Each job also starts a new model on the engine, so it pays the
+engine's start time, and unloads the model when it ends, so the next job gets
+the engine. For a 4B model on a scoped Spindle run, the first job took about
+6 minutes and a job from a saved checkpoint about 4. The export of the 4B
+weights (9 GB) took about a minute.
+
 Verification scope
 -------------------
 
@@ -330,3 +401,13 @@ component topology is tested with stub engines only; real SGLang engines have
 not been run with it. A live Tinker run is additionally needed
 to verify account model availability, remote persistence, and training quality.
 No live training or performance result is claimed by this implementation.
+``spindle_full`` ran live once, on a scoped Spindle run of Qwen3.5-4B's
+full-parameter engine:
+
+- two jobs: one from the base, one from the first saved checkpoint;
+- the import check of the second checkpoint;
+- activation and sampling of it;
+- the export of its weights to a private Hugging Face repo, run separately on
+  that checkpoint.
+
+The training-quality effect was not measured.
