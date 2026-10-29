@@ -85,6 +85,7 @@ def ace_step(
         descriptor=PI,
         tasks=(),
         repeats=0,
+        task_directories=False,
         samples=samples,
         state_files=state,
     )

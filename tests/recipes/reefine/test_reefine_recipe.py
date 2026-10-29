@@ -170,7 +170,7 @@ def test_each_scenarios_backend_runs_the_agent_on_the_bound_binary_with_the_gate
     assert isinstance(built, ReefineRecipe) and isinstance(built.method, ReefineMethod)
     assert built.method.agent is None
     backend = built.build_backend("demo", ComponentReleases(TreeReleases(built.seed), COMPONENT), None)
-    method = backend.evolution.method
+    method = backend.method
     assert isinstance(method, ReefineMethod) and method.agent is not None
     execution = method.agent.execution
     assert isinstance(execution.executor, LocalExecutor) and execution.binary == str(binary)

@@ -20,26 +20,12 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.harness.tree.checks import clip_record_text, redact_secret_shaped
+from reef.harness.tree.checks import redact_secret_shaped
 
 CALLS_FILE = "calls.json"
-
-
-def bounded(value: Any) -> Any:
-    """A copy of ``value`` that JSON can write, with every string redacted and clipped at the record cap."""
-    if isinstance(value, str):
-        return clip_record_text(value)
-    if isinstance(value, Mapping):
-        return {str(key): bounded(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, bytes):
-        return [bounded(item) for item in value]
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return clip_record_text(str(value))
 
 
 class StepRecord:

@@ -347,13 +347,15 @@ The extension points those packages expose are in `Python API
   - Data: the training pipeline below turns the agent's recorded calls,
     their reports and the uploaded tasks into a step's job data. The harness
     backend only reads job data.
-  - Evolve: ``reef/train/harness_backend/evolve.py`` makes the step's
-    candidate. It runs the method in the step's workspace
-    (``workspace.py``) and reads back the tree.
-    ``contract.py`` is the method contract. ``agent/`` runs the deployment's
-    coding agent for a method (``evolution.agent``, ``AgentMethod``,
-    ``protocol.md``), and ``reef/harness/gateway.py`` is the loopback
-    gateway the agent reaches its model and tools through.
+  - Evolve: ``HarnessBackend.propose`` in ``backend.py`` makes the step's
+    candidate. The backend holds the deployment's ``Method``; ``propose``
+    calls ``Method.step`` once in the step's workspace (``workspace.py``)
+    and reads back the tree. ``contract.py`` is the method contract.
+    ``agent/`` runs the deployment's coding agent for a method
+    (``evolution.agent``, ``AgentMethod``, ``protocol.md``). It starts the
+    agent with ``launch_agent`` in ``reef/harness/episodes/run.py``, as an
+    evaluation episode does, and ``reef/harness/gateway.py`` is the
+    loopback gateway the agent reaches its model and tools through.
   - Evaluation: ``reef/evaluation/`` holds the contract that every
     candidate passes, weights and trees alike (``evaluate``, then
     ``decide``). ``reef/evaluation/harness/evaluator.py`` scores trees as

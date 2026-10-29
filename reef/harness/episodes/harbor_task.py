@@ -25,7 +25,7 @@ import tempfile
 import urllib.parse
 import uuid
 from collections.abc import Mapping, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, override
 
 from harbor.agents.installed.base import BaseInstalledAgent
@@ -35,10 +35,11 @@ from harbor.models.agent.context import AgentContext
 
 from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, headless_env
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, headless_env, write_rendered
 from reef.harness.episodes.tasks import ReefEvalLab, TaskEpisodeError, TaskLab
 from reef.harness.episodes.trajectory import reader_for
 from reef.sandbox.environment import run_sync
+from reef.sandbox.process import EpisodeLaunchError
 
 #: Where the rendered tree goes in the task's container: the episode root of ``run.episode``.
 CONTAINER_ROOT = "/reef-episode"
@@ -210,13 +211,10 @@ def run_task_episode(
     work = Path(tempfile.mkdtemp(prefix=f"reef-task-episode-{descriptor.name}-", dir=parent))
     try:
         tree_dir = work / "tree"
-        for relative, text in descriptor.place_root(files, CONTAINER_ROOT).items():
-            relative_path = PurePosixPath(relative)
-            if relative_path.is_absolute() or ".." in relative_path.parts:
-                raise EpisodeError(f"render path {relative!r} escapes the episode root")
-            target = tree_dir / relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
+        try:
+            write_rendered(descriptor, files, tree_dir, CONTAINER_ROOT)
+        except EpisodeLaunchError as exc:
+            raise EpisodeError(str(exc)) from exc
         tree_dir.mkdir(exist_ok=True)
         agent = {
             "import_path": f"{__name__}:{AdapterAgent.__name__}",

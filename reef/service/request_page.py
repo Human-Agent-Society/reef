@@ -38,7 +38,7 @@ from reef.service.release_page import (
     step_href,
     unscored_failures,
 )
-from reef.train.harness_backend.capabilities import StepProgress
+from reef.train.harness_backend.backend import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
 REFRESH_SECONDS = 5

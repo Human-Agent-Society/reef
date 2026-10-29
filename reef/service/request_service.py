@@ -25,6 +25,7 @@ from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.sync import import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
+from reef.harness.tree.checks import clip_record_value
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
@@ -36,8 +37,6 @@ from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, pa
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.harness_backend.capabilities import StepProgressReader, StepRecords
-from reef.train.harness_backend.records import bounded
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -743,7 +742,7 @@ class RequestService:
                         "ignored": list(imported.ignored),
                         "base_release_id": base,
                     },
-                    "patch": bounded(patch.to_json()),
+                    "patch": clip_record_value(patch.to_json()),
                     "patch_parts": backend.descriptor.layout.part_names(patch.changes),
                 },
             )
@@ -938,12 +937,12 @@ class RequestService:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
         backend = self.files_trainer(scenario).candidate_backend
-        if not directory or not isinstance(backend, StepRecords):
+        if not directory or not isinstance(backend, HarnessBackend):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
             raise ValueError("invalid step record directory")
         try:
-            return backend.read_step_records(directory, relative)
+            return backend.records.read(directory, relative)
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
@@ -992,7 +991,7 @@ class RequestService:
         if reserved is not None and reserved.request is not None:
             return str(reserved.request.id)
         backend = trainer.candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
         return None if progress is None or progress.request_id is None else str(progress.request_id)
 
     def harness_request_page(
@@ -1017,7 +1016,7 @@ class RequestService:
         # The step a request settled as counts the catalog rows, the ones the release page opens.
         rows = list(reversed(self.harness_rows(scenario)))
         backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(
@@ -1054,7 +1053,7 @@ class RequestService:
                 "activity": [],
             }
         backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)

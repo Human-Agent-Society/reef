@@ -1,14 +1,24 @@
 """The harness backend: one evolution step, from the head tree to a release.
 
-One step runs in the trainer's three phases, and each phase hands its work to
-the module that owns it:
+One step runs in the trainer's three phases:
 
 ``prepare_step``
     Read the head tree from git through ``ComponentReleases`` and the step's
     evaluation tasks. The step's job data is its material: the traces of
     traffic, and on an offline step the train tasks, which the step rolls
-    out on the head tree first. Then the method's candidate
-    (``evolve.Evolution.propose``) in a fresh ``Workspace``.
+    out on the head tree first. Write them to a fresh ``Workspace``, then
+    ``propose`` runs the method in it:
+
+    1. Call ``Method.step`` once with the step's services, and keep its
+       model calls with the step record, even when it raises.
+    2. Read what the method says about its step from ``output/``, clipped
+       and redacted as the record keeps it, and its files from ``state/``.
+    3. Read the tree it left in ``harness/``. An unchanged tree, or one that
+       fails validation for the adapter, skips the step.
+    4. Add the tree to the history with its parent and the method's
+       summary, and make it a ``HarnessCandidate`` against the head. On an
+       instruction step the method's ``requires`` join the request's, after
+       the screens a person's items pass.
 ``evaluate``
     Score the sides that the publication policy names with
     ``HarnessEpisodeEvaluator`` (``reef.evaluation.harness``), which reuses
@@ -24,6 +34,7 @@ and the head stays the committed release.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -34,6 +45,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.core.job_data import TaskSample, TrajectorySample
+from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
     DecisionRecord,
@@ -46,16 +58,59 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
-from reef.harness.tree import HarnessTree, TreePatch
+from reef.harness.tree import HarnessTree, TreePatch, validate_tree
+from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
-from reef.train.harness_backend.calls import StepCalls
-from reef.train.harness_backend.capabilities import StepProgress, StepProgressReader, StepRecords
-from reef.train.harness_backend.evolve import Evolution, skipped
-from reef.train.harness_backend.records import StepRecord, bounded
+from reef.train.harness_backend.agent.run import AgentExecution
+from reef.train.harness_backend.calls import StepCalls, call_tokens
+from reef.train.harness_backend.contract import Method, StepContext
+from reef.train.harness_backend.records import CALLS_FILE, StepRecord
+from reef.train.harness_backend.services import StepServices
 from reef.train.harness_backend.state import HarnessState
-from reef.train.harness_backend.workspace import Workspace
+from reef.train.harness_backend.workspace import StepOutput, Workspace
 from reef.train.release import ReleaseRules
 from reef.train.types import JobData, TrainStepResult
+
+#: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
+STEP_PHASES = ("rolling out", "proposing", "evaluating")
+
+
+@dataclass(frozen=True)
+class StepProgress:
+    """Where the running step stands, for a page a person watches.
+
+    Values: ``request_id`` names the instruction the step answers, ``None``
+    for an automatic step. ``phase`` is one of
+    ``STEP_PHASES``: ``"rolling out"`` while an offline step runs the head
+    tree on its train tasks, ``"evaluating"`` while the evaluation's
+    episodes run, and ``"proposing"`` at any other time from the moment the
+    step claims its record directory until a candidate exists.
+    ``started_at`` is the step's start in seconds since the epoch.
+    ``step_record`` is the step's record directory, which the step claims
+    before it reports any progress.
+    ``episodes_total`` ≥ 0 is the episode count of the rollouts or of the
+    evaluation once its episodes are laid out, else ``None``. ``activity``
+    is what the method did so far, oldest first, each ``{at, kind, text}``
+    with ``failed`` on a line that went wrong.
+    Purpose: the backend replaces it at each phase change; the request page
+    reads it from another thread through ``HarnessBackend.step_progress``.
+    """
+
+    request_id: str | None
+    phase: str
+    started_at: float
+    step_record: str
+    episodes_total: int | None = None
+    activity: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.phase not in STEP_PHASES:
+            raise ValueError(f"StepProgress.phase must be one of {', '.join(STEP_PHASES)}")
+        if not isinstance(self.step_record, str) or not self.step_record:
+            raise ValueError("StepProgress.step_record must name the step's record directory")
+        total = self.episodes_total
+        if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
+            raise ValueError("StepProgress.episodes_total must be an integer of at least 0 or None")
 
 
 @dataclass(frozen=True)
@@ -65,8 +120,9 @@ class StepLimits:
     Values: every count is an integer ≥ 0, where 0 turns its limit off.
     ``max_steps`` caps automatic steps; ``max_failure_streak`` skips
     automatic steps after that many rejections in a row;
-    ``max_model_calls_per_step`` caps one step's model calls. The episodes a
-    method runs are capped in ``evolve.Evolution``.
+    ``max_model_calls_per_step`` caps one step's model calls;
+    ``max_episodes_per_step`` caps the episodes the method's
+    ``services.evaluate`` runs in one step.
     Purpose: ``HarnessEvolutionRecipe`` builds it from ``evolution``; the
     backend reads it in every step.
     """
@@ -74,26 +130,33 @@ class StepLimits:
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
+    max_episodes_per_step: int = 0
 
     def __post_init__(self) -> None:
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
+            ("max_episodes_per_step", self.max_episodes_per_step),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 turns the limit off)")
 
 
-class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, StepProgressReader):
+class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
     """Evolve one harness component: one candidate per step, evaluated against the head tree.
 
-    Methods never subclass it. A method's behavior arrives in ``evolution``,
-    and the scorer and the publication policy arrive in the evaluator and the
-    trainer's evaluation plugin. ``evaluator`` is ``None`` when the
-    deployment configured no scorer; then no episode runs. ``rules`` make
-    each decision a release, and ``review_parts`` name the parts whose change
-    waits for a person besides the parts the adapter always reviews.
+    Values: ``method`` is the deployment's ``Method``, the one part of a step
+    that is not Reef's; methods never subclass the backend. ``agent`` is the
+    deployment's coding agent, ``None`` when it configured none or the method
+    does not run it. ``evaluator`` is ``None`` when the deployment configured
+    no scorer; then no episode runs. ``rules`` make each decision a release,
+    and ``review_parts`` name the parts whose change waits for a person
+    besides the parts the adapter always reviews. ``task_directories`` says
+    that the tasks are Harbor task directories.
+    Purpose: ``HarnessEvolutionRecipe.build_backend`` makes one per scenario
+    component; the trainer runs its steps, and the service reads its step
+    records and its ``step_progress``.
     """
 
     def __init__(
@@ -101,7 +164,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         *,
         descriptor: AdapterDescriptor,
         releases: ComponentReleases,
-        evolution: Evolution,
+        method: Method,
+        agent: AgentExecution | None,
         evaluator: HarnessEpisodeEvaluator | None,
         tasks: EvaluationTasks,
         history: History,
@@ -111,11 +175,12 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         rules: ReleaseRules,
         review_parts: frozenset[str] = frozenset(),
         records: StepRecord,
-        task_directories: bool = False,
+        task_directories: bool,
     ) -> None:
         self.descriptor = descriptor
         self.releases = releases
-        self.evolution = evolution
+        self.method = method
+        self.agent = agent
         self.evaluator = evaluator
         self.tasks = tasks
         self.history = history
@@ -125,8 +190,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         self.rules = rules
         self.review_parts = review_parts
         self.records = records
-        # An adapter whose command takes a task directory plays nothing else.
-        self.task_directories = task_directories or descriptor.is_prompt_task_directory
+        self.task_directories = task_directories
         # The selected tree of the step in flight, until the committer stored it.
         self.pending_artifact: Artifact | None = None
         #: Written by the training thread, read by the request page: each write is one assignment of a frozen value.
@@ -213,17 +277,102 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             request=data.request,
             state_files=state.method_files,
         )
-        return self.evolution.propose(
+        return self.propose(
             workspace,
             head=head_tree,
             evaluation_tasks=step_tasks.tasks,
             data=data,
             state=state,
-            evaluator=self.evaluator,
-            models=self.models,
             calls=calls,
             metrics=metrics,
         )
+
+    def propose(
+        self,
+        workspace: Workspace,
+        *,
+        head: HarnessTree,
+        evaluation_tasks: tuple[str, ...],
+        data: JobData,
+        state: HarnessState,
+        calls: StepCalls,
+        metrics: dict[str, Any],
+    ) -> PreparedStep:
+        """Run the method in ``workspace`` on ``head``: the step's candidate, or the skip and its reason.
+
+        The candidate is evaluated on ``evaluation_tasks``. ``state`` is the step's state, and the returned step's
+        state carries the method's files from ``state/``. ``calls`` is the step's call record, and ``metrics``
+        gains the method's calls, episodes and words.
+        """
+        services = StepServices(
+            workspace=workspace,
+            descriptor=self.descriptor,
+            evaluator=self.evaluator,
+            history=self.history,
+            head=head.checksum(),
+            models=self.models,
+            step_calls=calls,
+            max_episodes=self.limits.max_episodes_per_step,
+            agent=self.agent,
+        )
+        try:
+            self.method.step(StepContext(workspace, services))
+        finally:
+            # Written even when the step raised: the calls before the failure are the step's record.
+            self.records.write(workspace.root, CALLS_FILE, calls.entries)
+            shutil.rmtree(workspace.scratch, ignore_errors=True)
+            metrics["model_calls"] = len(calls.entries)
+            metrics["model_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in calls.entries), 3)
+            metrics["model_input_tokens"], metrics["model_output_tokens"] = call_tokens(calls.entries)
+            metrics["method_episodes"] = services.episodes_run
+        output = self.read_output(workspace, metrics)
+        try:
+            state = replace(state, method_files=workspace.state_files())
+            candidate_tree = workspace.tree()
+        except ValueError as exc:
+            return skipped(state, metrics, str(exc))
+        if candidate_tree == head:
+            return skipped(state, metrics, "the method left the head tree unchanged")
+        validation = validate_tree(candidate_tree, self.descriptor)
+        if not validation.passed:
+            return skipped(state, metrics, validation.message())
+        self.history.add_candidate(
+            candidate_tree,
+            step=workspace.step,
+            origin="method",
+            parent=head.checksum(),
+            summary=output.summary,
+            notes=output.notes,
+        )
+        if data.request is not None:
+            added, refused = screened_requires(data.request.requires, output.requires)
+            requires = merge_requires(data.request.requires, added)
+            if len(requires) > MAX_REQUIRES:
+                return skipped(state, metrics, f"the step requires {len(requires)} items; at most {MAX_REQUIRES}")
+            metrics["training_request"] = {"id": data.request.id, **data.request.to_dict(), "requires": requires}
+            if refused:
+                metrics["training_request"]["refused_requires"] = refused
+        candidate = HarnessCandidate(
+            candidate_id=f"{data.data_id}:candidate",
+            candidate_tree=candidate_tree,
+            current_tree=head,
+            evaluation_tasks=evaluation_tasks,
+            step=workspace.step,
+        )
+        return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
+
+    @staticmethod
+    def read_output(workspace: Workspace, metrics: dict[str, Any]) -> StepOutput:
+        """What the method wrote to ``output/``, rewritten as the record keeps it: redacted and clipped."""
+        output = workspace.read_output()
+        workspace.write_output(clip_record_text(output.summary), clip_record_value(output.notes), output.requires)
+        if output.summary:
+            metrics["method_summary"] = clip_record_text(output.summary)
+        if output.notes:
+            metrics["method_notes"] = clip_record_value(output.notes)
+        if output.refused:
+            metrics["method_output_refused"] = dict(output.refused)
+        return output
 
     def roll_out(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[EpisodeRecord, ...]:
         """One episode record of ``head`` on each of an offline step's train ``tasks``, in task order.
@@ -280,7 +429,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             **evaluation,
             **decision.metrics,
             "evaluation_context": None if self.evaluator is None else self.evaluator.context().key(),
-            "patch": bounded(candidate.patch.to_json()),
+            "patch": clip_record_value(candidate.patch.to_json()),
             "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
         }
         artifact = None
@@ -309,7 +458,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         # record directory, and says where it stopped.
         self.failed_step = {
             "failed_stage": "evaluating",
-            "patch": bounded(candidate.patch.to_json()),
+            "patch": clip_record_value(candidate.patch.to_json()),
             "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
             **{
                 key: prepared.metrics[key]
@@ -327,19 +476,13 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
     def failed_step_metrics(self) -> Mapping[str, Any]:
         return dict(self.failed_step)
 
-    # -- the service capabilities ------------------------------------------------------------------------------------
-
-    def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]:
-        return self.records.read(directory, relative)
-
     @property
     def step_progress(self) -> StepProgress | None:
+        """Where the running step stands, with the method's activity so far; ``None`` when no step runs."""
         progress, calls = self.progress, self.step_calls
         if progress is None or calls is None:
             return progress
         return replace(progress, activity=calls.activity())
-
-    # -- helpers -------------------------------------------------------------------------------------------------------
 
     def reviewed(self, patch: TreePatch) -> bool:
         """Whether ``patch`` changes a part that waits for a person: one the adapter reviews, or one that
@@ -351,10 +494,40 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         return False
 
 
+def screened_requires(
+    base: Sequence[Mapping[str, Any]], added: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The items a method added that pass the screens a person's items pass, and the ones they refuse.
+
+    An added item whose name a person's item in ``base`` already has is dropped: the person's copy wins. An item
+    whose name, check or prompt carries a credential-shaped literal or an instruction override is refused, each
+    refusal as ``{item, reason}``, so the step records it; the others are kept in order.
+    """
+    names = {str(item.get("name")) for item in base}
+    kept: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    for item in added:
+        if str(item.get("name")) in names:
+            continue
+        texts = (str(item.get("name") or ""), str(item.get("check") or ""), str(item.get("prompt") or ""))
+        if any(secret_shaped(text) for text in texts):
+            refused.append({"item": clip_record_value(dict(item)), "reason": "carries a credential shaped literal"})
+        elif any(directive_shaped(text) for text in texts):
+            refused.append({"item": clip_record_value(dict(item)), "reason": "carries an instruction override phrasing"})
+        else:
+            kept.append(dict(item))
+    return kept, refused
+
+
+def skipped(state: HarnessState, metrics: Mapping[str, Any], reason: str) -> PreparedStep:
+    """A step that ends without a candidate, keeping ``state`` and saying why."""
+    return PreparedStep.skipped(state=state.to_json(), metrics={**metrics, "skipped": reason})
+
+
 def require_harness_candidate(candidate: UpdateCandidate | None) -> HarnessCandidate:
     if not isinstance(candidate, HarnessCandidate):
         raise TypeError(f"harness evolution requires a HarnessCandidate, got {type(candidate).__name__}")
     return candidate
 
 
-__all__ = ["HarnessBackend", "StepLimits"]
+__all__ = ["STEP_PHASES", "HarnessBackend", "StepLimits", "StepProgress", "screened_requires"]

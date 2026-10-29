@@ -35,7 +35,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import TrajectoryKeepError
 from reef.harness.episodes.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
-from reef.harness.tree.checks import redact_secret_shaped
+from reef.harness.tree.checks import clip_record_text
 from reef.runtime.executor import WorkerSpec
 from reef.runtime.executor.config import ExecutorSelection
 from reef.runtime.executor.requirements import ExecutionRequirements
@@ -125,12 +125,6 @@ class HarnessCandidate(UpdateCandidate):
         return self.current_tree.diff(self.candidate_tree)
 
 
-def clip_redacted(text: str, limit: int) -> str:
-    """``text`` redacted as the record is, cut at ``limit`` characters with an ellipsis marker."""
-    text = redact_secret_shaped(text).strip()
-    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
-
-
 class HarnessCandidateEvaluator(CandidateEvaluator, ABC):
     """Score a harness candidate on one or both sides.
 
@@ -190,14 +184,13 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         worker_selection: ExecutorSelection,
         worker_requirements: ExecutionRequirements,
         history: History,
-        task_directories: bool = False,
+        task_directories: bool,
         agent_host: str = "host.docker.internal",
     ) -> None:
         if episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
-        # An adapter whose command takes a task directory plays nothing else.
-        self.task_directories = task_directories or descriptor.is_prompt_task_directory
-        self.task_containers = self.task_directories and not descriptor.is_prompt_task_directory
+        self.task_directories = task_directories
+        self.task_containers = task_directories and not descriptor.is_prompt_task_directory
         if self.task_containers and not can_run_in_task_container(descriptor):
             raise ValueError(
                 f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm install"
@@ -389,12 +382,12 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
             # What the first candidate episodes were graded on, so a rejected step names the task, the reply and why.
             metrics["candidate_episodes"] = [
                 {
-                    "task": clip_redacted(record.task, EPISODE_SUMMARY_CHARS),
+                    "task": clip_record_text(record.task, EPISODE_SUMMARY_CHARS),
                     "score": record.score,
                     "failure": (
-                        None if record.failure is None else clip_redacted(record.failure.cause, EPISODE_SUMMARY_CHARS)
+                        None if record.failure is None else clip_record_text(record.failure.cause, EPISODE_SUMMARY_CHARS)
                     ),
-                    "reply": None if record.reply is None else clip_redacted(record.reply, EPISODE_SUMMARY_CHARS),
+                    "reply": None if record.reply is None else clip_record_text(record.reply, EPISODE_SUMMARY_CHARS),
                     "episode": record.episode,
                     # Only when missing, so a summary of an ordinary episode keeps its shape.
                     **({} if record.transcript_read else {"transcript_read": False}),

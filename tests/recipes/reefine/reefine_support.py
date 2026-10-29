@@ -201,6 +201,7 @@ def step_workspace(
         descriptor=get_adapter(adapter),
         tasks=("[health] reply reef-ok",),
         repeats=0,
+        task_directories=False,
         samples=samples,
         request=request,
     )

@@ -60,14 +60,14 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import headless_argv
+from reef.harness.episodes.run import headless_argv, launch_agent, read_session
 from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.gateway import AgentTool
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.sandbox.environment import download_directory
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
 from reef.train.harness_backend import Services, Workspace
-from reef.train.harness_backend.agent.run import AgentExecution, agent_env, launch_agent, read_session
+from reef.train.harness_backend.agent.run import AgentExecution, agent_env
 
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
 AGENT_TOOLS = Path(__file__).with_name("agent_tools.ts")

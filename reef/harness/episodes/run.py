@@ -9,6 +9,11 @@ whole configuration at process start and accept environment variables that
 relocate their config and session roots, so the inverse of an episode is
 exactly "delete the root" - no shared state survives.
 
+``launch_agent`` is the launch itself: write the rendered files, prepare the
+writable directories and run the process. An episode runs it in a throwaway
+root; harness evolution runs the deployment's coding agent with it in a
+step's workspace. ``read_session`` reads back the agent's session log.
+
 Cleanup is audited, not assumed: every file found under the root that the
 episode did not write, is not under ``workspace/`` (the task's own output
 area), and does not match the descriptor's cleanup whitelist is reported as
@@ -25,7 +30,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -34,7 +39,7 @@ from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.trajectory import reader_for
 from reef.sandbox.environment import execute
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor, ProcessOutcome
 
 
 class EpisodeError(ReefError):
@@ -127,6 +132,72 @@ def headless_argv(descriptor: AdapterDescriptor, binary: str, prompt: str) -> li
     return [binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
 
 
+def write_rendered(descriptor: AdapterDescriptor, files: Mapping[str, str], directory: Path, root: str) -> None:
+    """Write the rendered ``files`` under ``directory``, with ``{root}`` in each config file as ``root``.
+
+    ``EpisodeLaunchError`` for a path that leaves ``directory`` or a file that cannot be written.
+    """
+    for relative, text in descriptor.place_root(files, root).items():
+        relative_path = PurePosixPath(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise EpisodeLaunchError(f"render path {relative!r} escapes the episode root")
+        target = directory / relative_path
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except (OSError, UnicodeEncodeError) as exc:
+            raise EpisodeLaunchError(f"cannot write render path {relative!r}: {exc}") from exc
+
+
+def launch_agent(
+    descriptor: AdapterDescriptor,
+    executor: EpisodeExecutor,
+    argv: Sequence[str],
+    files: Mapping[str, str],
+    env: Mapping[str, str],
+    *,
+    root: Path,
+    home: Path,
+    cwd: Path,
+    timeout: float,
+    writable: Sequence[Path] = (),
+    readonly: Sequence[Path] = (),
+) -> ProcessOutcome:
+    """Run ``argv`` as ``descriptor``'s agent over the rendered ``files``, and wait for it.
+
+    ``root`` holds everything the process may see, and ``cwd``, its working
+    directory, is writable. ``files`` are written under ``home``, with
+    ``{root}`` as ``home``, and stay read-only; the descriptor's state
+    directories under ``home`` (``writable_paths``) and ``writable`` stay
+    writable, and ``readonly`` names more paths the process only reads.
+    Raises ``EpisodeTimeout`` as the executor does, and ``EpisodeLaunchError``
+    when a file cannot be written or the process cannot start.
+    """
+    write_rendered(descriptor, files, home, str(home))
+    state = tuple(home / PurePosixPath(relative) for relative in descriptor.writable_paths)
+    try:
+        cwd.mkdir(parents=True, exist_ok=True)
+        for path in state:
+            path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise EpisodeLaunchError(f"cannot prepare writable episode state: {exc}") from exc
+    return execute(
+        executor,
+        list(argv),
+        root=root,
+        workspace=cwd,
+        env=dict(env),
+        timeout=timeout,
+        writable_paths=(*state, *writable),
+        readonly_paths=(*(home / PurePosixPath(relative) for relative in files), *readonly),
+    )
+
+
+def read_session(descriptor: AdapterDescriptor, home: Path) -> list[Mapping[str, Any]]:
+    """The session log of the agent whose home is ``home``, read by the descriptor's trajectory reader."""
+    return list(reader_for(descriptor.trajectory_format)(home / descriptor.trajectory_path))
+
+
 def run_episode(
     descriptor: AdapterDescriptor,
     files: Mapping[str, str],
@@ -180,26 +251,6 @@ def run_episode(
         parent = None
     root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-", dir=parent))
     try:
-        written = set()
-        for relative, text in descriptor.place_root(files, str(root)).items():
-            relative_path = PurePosixPath(relative)
-            if relative_path.is_absolute() or ".." in relative_path.parts:
-                raise EpisodeError(f"render path {relative!r} escapes the episode root")
-            target = root / relative_path
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(text, encoding="utf-8")
-            except (OSError, UnicodeEncodeError) as exc:
-                raise EpisodeError(f"cannot write render path {relative!r}: {exc}") from exc
-            written.add(str(relative_path))
-        workspace = root / "workspace"
-        workspace.mkdir()
-        writable_paths = tuple(root / PurePosixPath(relative) for relative in descriptor.writable_paths)
-        try:
-            for path in writable_paths:
-                path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise EpisodeError(f"cannot prepare writable episode state: {exc}") from exc
         env = headless_env(descriptor, root)
         if executor.runs_on_host:
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
@@ -210,21 +261,13 @@ def run_episode(
                     env[key] = value
         argv = headless_argv(descriptor, binary or descriptor.binary, prompt)
         try:
-            outcome = execute(
-                executor,
-                argv,
-                root=root,
-                workspace=workspace,
-                env=env,
-                timeout=timeout,
-                writable_paths=writable_paths,
-                readonly_paths=tuple(root / PurePosixPath(relative) for relative in written),
+            outcome = launch_agent(
+                descriptor, executor, argv, files, env, root=root, home=root, cwd=root / "workspace", timeout=timeout
             )
-        except EpisodeLaunchError as exc:
-            raise EpisodeError(str(exc)) from exc
-        except EpisodeTimeout as exc:
+        except (EpisodeLaunchError, EpisodeTimeout) as exc:
             raise EpisodeError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
+        written = {str(PurePosixPath(relative)) for relative in files}
         residue = tuple(
             sorted(
                 relative

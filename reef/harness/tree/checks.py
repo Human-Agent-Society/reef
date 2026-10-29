@@ -165,15 +165,29 @@ def redact_secret_shaped(text: str) -> str:
 RECORD_TEXT_CAP = 20_000
 
 
-def clip_record_text(text: str) -> str:
-    """``text`` with credential-shaped literals redacted, cut at the record cap with a marker naming how much was dropped.
+def clip_record_text(text: str, cap: int = RECORD_TEXT_CAP) -> str:
+    """``text`` with credential-shaped literals redacted, cut at ``cap`` characters with a marker naming how much was
+    dropped.
 
     The record holds model traffic and proposals before the tree boundary
     saw them, so the boundary's credential tripwire runs here too."""
     text = redact_secret_shaped(text)
-    if len(text) <= RECORD_TEXT_CAP:
+    if len(text) <= cap:
         return text
-    return f"{text[:RECORD_TEXT_CAP]}... [clipped {len(text) - RECORD_TEXT_CAP} chars]"
+    return f"{text[:cap]}... [clipped {len(text) - cap} chars]"
+
+
+def clip_record_value(value: Any) -> Any:
+    """A copy of ``value`` that JSON can write, with every string clipped by ``clip_record_text``."""
+    if isinstance(value, str):
+        return clip_record_text(value)
+    if isinstance(value, Mapping):
+        return {str(key): clip_record_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, bytes):
+        return [clip_record_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return clip_record_text(str(value))
 
 
 def directive_shaped(text: str) -> bool:

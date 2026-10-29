@@ -36,7 +36,7 @@ from reef.service.request_page import (
     build_request_page,
     settled_step,
 )
-from reef.train.harness_backend.capabilities import StepProgress
+from reef.train.harness_backend.backend import StepProgress
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
 REFRESH = f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'

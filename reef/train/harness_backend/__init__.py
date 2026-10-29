@@ -4,15 +4,12 @@ A method imports this package's root and nothing below it::
 
     from reef.train.harness_backend import Method, StepContext
 
-One step goes from the head tree to a release in two modules of this package:
-
-``backend``
-    ``HarnessBackend``, the step as the trainer runs it: prepare, evaluate,
-    settle. The recipe ``reef.recipe.harness.HarnessEvolutionRecipe`` builds
-    it; methods never subclass it.
-``evolve``
-    The step's candidate: the tree the method leaves in the step's
-    workspace.
+One step goes from the head tree to a release in ``backend``:
+``HarnessBackend`` is the step as the trainer runs it (prepare, evaluate,
+settle). It holds the deployment's ``Method`` and calls ``Method.step`` once
+per step in ``propose``; the tree the method leaves in the step's workspace is
+the candidate. The recipe ``reef.recipe.harness.HarnessEvolutionRecipe``
+builds the backend; methods never subclass it.
 
 The evaluation and the release are Reef's, shared with weight training:
 ``reef.evaluation`` decides whether a candidate is served, and
@@ -27,15 +24,15 @@ the ``Services``); ``workspace`` is the step's directory (``Workspace``,
 prompts.
 
 The rest supports a step: ``services`` implements the services of a step, ``calls``
-its model budget, ``state`` the committed algorithm state, ``records`` the
-step records, and ``capabilities`` what the service routes may ask a backend.
+its model budget, ``state`` the committed algorithm state, and ``records`` the
+step records.
 The tree itself is ``reef.harness.tree``; the evaluation, the history and the
 publication policies are ``reef.evaluation.harness``.
 """
 
 from reef.harness.gateway import ModelCalls
 from reef.train.harness_backend.agent.method import AgentMethod
-from reef.train.harness_backend.contract import AgentOutcome, Method, StepContext, Services
+from reef.train.harness_backend.contract import AgentOutcome, Method, Services, StepContext
 from reef.train.harness_backend.workspace import Trace, Workspace
 
 __all__ = [

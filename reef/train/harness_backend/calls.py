@@ -17,8 +17,7 @@ from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.gateway import ModelCalls
-from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend.records import bounded
+from reef.harness.tree.checks import clip_record_value, redact_secret_shaped
 
 #: The most activity lines a step keeps; the oldest go first.
 MAX_ACTIVITY = 300
@@ -30,9 +29,10 @@ class StepCalls(ModelCalls):
     Values: ``cap`` ≥ 0 is the step's call budget, 0 for none, and ``spent``
     ≤ ``cap`` when ``cap`` > 0 counts the calls so far. ``entries`` is the
     list the step writes to ``calls.json``, one mapping per call in call
-    order, each redacted and clipped as ``bounded`` makes it. ``lines`` holds
-    the latest ``MAX_ACTIVITY`` activity lines, each ``{at, kind, text}``
-    with ``failed`` on a line that went wrong, its text redacted.
+    order, each redacted and clipped as ``clip_record_value`` makes it.
+    ``lines`` holds the latest ``MAX_ACTIVITY`` activity lines, each
+    ``{at, kind, text}`` with ``failed`` on a line that went wrong, its text
+    redacted.
     Purpose: the backend makes one per step and hands it out as
     ``Services.calls``; the budgeted bindings and an agent's gateway spend and
     record through it, and the request page reads :meth:`activity` from
@@ -55,7 +55,7 @@ class StepCalls(ModelCalls):
 
     def record(self, entry: Mapping[str, Any]) -> None:
         # Every caller's entry, a gateway's too, is redacted and clipped before the record keeps it.
-        self.entries.append(bounded(entry))
+        self.entries.append(clip_record_value(entry))
 
     def note(self, kind: str, text: str, *, failed: bool = False) -> None:
         # A line can quote an error or a reply, which the request page shows: it is redacted as the record is.

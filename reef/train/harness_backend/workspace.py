@@ -210,7 +210,7 @@ class Workspace:
         descriptor: AdapterDescriptor,
         tasks: Sequence[str],
         repeats: int,
-        task_directories: bool = False,
+        task_directories: bool,
         samples: Sequence[TrajectorySample] = (),
         rollouts: Sequence[EpisodeRecord] = (),
         request: TrainingRequest | None = None,
@@ -231,8 +231,6 @@ class Workspace:
         tree.write(workspace.harness)
         HarnessTree(dict(state_files or {})).write(workspace.state)
         material = workspace.material
-        # An adapter whose command takes a task directory plays nothing else.
-        task_directories = task_directories or descriptor.is_prompt_task_directory
         for index, sample in enumerate(samples):
             write_traffic_trace(material / TRACES_DIR / str(index), sample)
         for index, record in enumerate(rollouts, start=len(samples)):

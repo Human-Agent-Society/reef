@@ -70,7 +70,6 @@ from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.contract import Method
-from reef.train.harness_backend.evolve import Evolution
 from reef.train.harness_backend.records import StepRecord
 from reef.train.pipeline import PipelineSpec
 from reef.train.release import PUBLISH_MODES, ReleaseRules
@@ -513,15 +512,9 @@ class HarnessEvolutionRecipe(Recipe):
         return HarnessBackend(
             descriptor=descriptor,
             releases=releases,
-            evolution=Evolution(
-                method=self.method,
-                descriptor=descriptor,
-                history=history,
-                records=records,
-                # Only a method that runs the agent through its tools gets it bound here.
-                agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
-                max_episodes=self.evolution.max_episodes_per_step,
-            ),
+            method=self.method,
+            # Only a method that runs the agent through its tools gets it bound here.
+            agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
@@ -540,6 +533,7 @@ class HarnessEvolutionRecipe(Recipe):
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,
                 max_model_calls_per_step=self.evolution.max_model_calls_per_step,
+                max_episodes_per_step=self.evolution.max_episodes_per_step,
             ),
             rules=ReleaseRules(publish=self.evolution.publish),
             review_parts=frozenset(self.evolution.review_parts),

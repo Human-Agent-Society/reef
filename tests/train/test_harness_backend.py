@@ -234,9 +234,9 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
     assert not (step_dir / "scratch").exists() and (step_dir / "output" / "report.md").read_text() == "kept"
     assert json.loads((step_dir / "calls.json").read_text()) == []
     # The records route serves no credential that a method or a client left in the record.
-    leak = backend.read_step_records(str(step_dir), "output/leak.json")["text"]
+    leak = backend.records.read(str(step_dir), "output/leak.json")["text"]
     assert "sk-abcdef" not in leak and "[redacted credential]" in leak
-    listed = {entry["path"] for entry in backend.read_step_records(str(step_dir), None)["files"]}
+    listed = {entry["path"] for entry in backend.records.read(str(step_dir), None)["files"]}
     assert {"calls.json", "material/evaluation.json", "material/request.json"} <= listed
 
 

@@ -1,10 +1,7 @@
 """Run the deployment's coding agent in one step's workspace.
 
 ``AgentExecution`` is the agent bound for one scenario: its adapter, the
-executor that isolates it, its binary and its time limit.
-``launch_agent`` runs one process of an adapter's harness over rendered
-files in directories the caller owns, as ``run_episode`` does in a
-throwaway root, and ``read_session`` reads back its session log. ``run_agent``
+executor that isolates it, its binary and its time limit. ``run_agent``
 implements ``Services.run_agent``: it starts the gateway with the workspace's
 tools (``check`` and ``evaluate``), renders the agent's tree after Reef's
 protocol rules (``protocol.md``), runs the agent in the workspace, and keeps
@@ -22,21 +19,20 @@ import json
 import os
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
 from reef.evaluation.harness.history import EPISODES_DIR
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import headless_argv, headless_env
-from reef.harness.episodes.trajectory import reader_for
+from reef.harness.episodes.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.gateway import AgentGateway, AgentTool
 from reef.harness.tree import HarnessTree, render_tree
-from reef.sandbox.environment import download_directory, execute
-from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, ProcessOutcome
+from reef.sandbox.environment import download_directory
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
 from reef.train.harness_backend.contract import AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
@@ -79,54 +75,6 @@ def agent_env(descriptor: AdapterDescriptor, binary: str, home: Path) -> dict[st
     env = headless_env(descriptor, home)
     env["PATH"] = os.pathsep.join([str(Path(binary).absolute().parent), os.environ.get("PATH", "")])
     return env
-
-
-def launch_agent(
-    descriptor: AdapterDescriptor,
-    executor: EpisodeExecutor,
-    argv: Sequence[str],
-    files: Mapping[str, str],
-    env: Mapping[str, str],
-    *,
-    root: Path,
-    home: Path,
-    cwd: Path,
-    timeout: float,
-    writable: Sequence[Path] = (),
-    readonly: Sequence[Path] = (),
-) -> ProcessOutcome:
-    """Run ``argv`` as ``descriptor``'s harness over ``files``, and wait for it.
-
-    ``root`` holds everything the process may see, and ``cwd``, its working
-    directory, is writable. ``files`` are written under ``home`` and stay
-    read-only; the descriptor's state directories under ``home``
-    (``writable_paths``) and ``writable`` stay writable, and ``readonly``
-    names more paths the process only reads. Raises ``EpisodeTimeout`` and
-    ``EpisodeLaunchError`` as the executor does.
-    """
-    for relative, text in descriptor.place_root(files, str(home)).items():
-        target = home / PurePosixPath(relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    cwd.mkdir(parents=True, exist_ok=True)
-    state = tuple(home / PurePosixPath(relative) for relative in descriptor.writable_paths)
-    for path in state:
-        path.mkdir(parents=True, exist_ok=True)
-    return execute(
-        executor,
-        list(argv),
-        root=root,
-        workspace=cwd,
-        env=dict(env),
-        timeout=timeout,
-        writable_paths=(*state, *writable),
-        readonly_paths=(*(home / PurePosixPath(relative) for relative in files), *readonly),
-    )
-
-
-def read_session(descriptor: AdapterDescriptor, home: Path) -> list[Mapping[str, Any]]:
-    """The session log of the agent whose home is ``home``, read by the descriptor's trajectory reader."""
-    return list(reader_for(descriptor.trajectory_format)(home / descriptor.trajectory_path))
 
 
 def fill(text: str, workspace: Workspace) -> str:
@@ -333,7 +281,5 @@ __all__ = [
     "agent_env",
     "fill",
     "keep_session",
-    "launch_agent",
-    "read_session",
     "run_agent",
 ]
