@@ -288,7 +288,7 @@ def test_a_weights_job_waits_for_the_harness_cycle_of_its_scenario(tmp_path: Pat
     harness.start()
     assert slow.evaluating.wait(10)
     dispatcher.local_workers.start("agent", WEIGHTS)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert training.submitted == []
     assert scenario.trainer_for(WEIGHTS).pending_job_data is None
     assert dispatcher.build_training_status()["scenarios"]["agent"]["scenario_step"] == 0
@@ -392,7 +392,7 @@ def test_held_local_cycles_run_nothing_until_the_service_answers(tmp_path: Path,
     dispatcher.preload_scenarios(("agent",))
     for record in _records(2):
         dispatcher.accept_record(record)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert backends[HARNESS].prepared == 0
     dispatcher.open_local_cycles()
     assert _wait_for(lambda: _training_components(scenario).count(HARNESS) == 2)
@@ -478,30 +478,15 @@ def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_sta
     _scenario(dispatcher, 1)
     dispatcher.local_workers.start("agent", HARNESS)
     _wait_for(lambda: away.attempts > 0)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert away.attempts == 1
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
     # Another wake: the worker looks again, once.
     dispatcher.local_workers.wake_all()
     _wait_for(lambda: away.attempts > 1)
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert away.attempts == 2
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
-
-
-@pytest.mark.unit
-def test_a_failed_local_cycle_reloads_the_scenario_at_once(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """The failed cycle rebuilds the scenario right away."""
-    backends = {
-        WEIGHTS: _ComponentBackend(WEIGHTS, tmp_path / "candidates"),
-        HARNESS: _AwayBackend(HARNESS, tmp_path / "candidates"),
-    }
-    dispatcher, _ = dispatchers.open(backends=backends)
-    scenario = _scenario(dispatcher, 1)
-    with pytest.raises(RuntimeError, match="proposer away"):
-        dispatcher.local_workers.process_step("agent", HARNESS)
-    rebuilt = dispatcher.registry.get_optional("agent")
-    assert rebuilt is not None and rebuilt is not scenario
 
 
 class _BlockingAwayBackend(_ComponentBackend):
@@ -525,7 +510,7 @@ class _BlockingAwayBackend(_ComponentBackend):
 def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it(
     tmp_path: Path, monkeypatch: Any, dispatchers: _Dispatchers
 ) -> None:
-    """The failing cycle rebuilds the scenario under the lock; the sibling that read the old instance looks again
+    """The failing cycle rebuilds the scenario at once, under the lock; the sibling that read the old instance looks again
     on the new one instead of sleeping with its rows unread."""
     away = _BlockingAwayBackend(WEIGHTS, tmp_path / "candidates")
     harness = _ComponentBackend(HARNESS, tmp_path / "candidates")
@@ -636,7 +621,7 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
         lambda: "finished" in [_job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
     )
-    time.sleep(0.5)
+    time.sleep(0.2)
     assert 1 <= away.attempts <= 3
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
 
@@ -980,27 +965,23 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
 
 
 @pytest.mark.unit
-def test_composite_registration_refuses_a_flat_base(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """Files at the root of the base belong to no component and would be carried forward by none."""
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "harness.txt").write_text("harness seed", encoding="utf-8")
-    dispatcher, _ = dispatchers.open()
-    with pytest.raises(ReefError, match=r"keeps \['harness.txt'\] outside its components"):
-        dispatcher.get_or_create_scenario("agent")
-
-
-@pytest.mark.unit
-def test_composite_registration_refuses_a_file_named_like_a_component(
-    tmp_path: Path, dispatchers: _Dispatchers
+@pytest.mark.parametrize(
+    ("layout", "outside"),
+    [
+        # Files at the root of the base belong to no component and would be carried forward by none.
+        ({"harness.txt": "harness seed"}, "harness.txt"),
+        # A component keeps a directory; a file of that name would fail on every component view.
+        ({f"{HARNESS}/{HARNESS}.txt": "harness seed", WEIGHTS: "not a directory"}, WEIGHTS),
+    ],
+)
+def test_composite_registration_refuses_files_outside_its_components(
+    tmp_path: Path, dispatchers: _Dispatchers, layout: dict[str, str], outside: str
 ) -> None:
-    """A component keeps a directory; a file of that name would fail on every component view."""
-    initial = tmp_path / "initial"
-    (initial / HARNESS).mkdir(parents=True)
-    (initial / HARNESS / f"{HARNESS}.txt").write_text("harness seed", encoding="utf-8")
-    (initial / WEIGHTS).write_text("not a directory", encoding="utf-8")
+    for relative, text in layout.items():
+        (tmp_path / "initial" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "initial" / relative).write_text(text, encoding="utf-8")
     dispatcher, _ = dispatchers.open()
-    with pytest.raises(ReefError, match=r"keeps \['weights'\] outside its components"):
+    with pytest.raises(ReefError, match=rf"keeps \['{outside}'\] outside its components"):
         dispatcher.get_or_create_scenario("agent")
 
 

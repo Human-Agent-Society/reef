@@ -34,7 +34,7 @@ from reef.harness.rollouts.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
-from reef.storage.commit_history import RECORD_KIND, CommitHistoryError, CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_artifact_ref
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import Surface
@@ -89,11 +89,12 @@ def open_history(tmp_path):
 def test_commit_record_round_trips_through_the_history(open_history) -> None:
     log = open_history()
     log.append(sample_record(step=1))
-    log.append(sample_record(step=2, runtime_load_id="w2"))
+    metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
+    log.append(sample_record(step=2, runtime_load_id="w2", metrics=metrics, training_job_id="job-1"))
 
     records = log.records()
     assert [record.step for record in records] == [1, 2]
-    first = records[0]
+    first, second = records
     assert first.scenario == "math"
     assert first.artifact_ref == ArtifactRef("content:1", "release:w1:1", "base")
     assert first.checkpoint is False
@@ -102,20 +103,13 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     assert first.high_water_offset == 2
     assert first.consumed_ids == frozenset({"i1"})
     assert first.recorded_at == 1001.0
+    assert first.metrics is None  # pre-metrics records stay readable
+    assert first.training_job_id is None
+    assert second.metrics == metrics
+    assert second.training_job_id == "job-1"
+    assert second.to_dict()["training_job_id"] == "job-1"
     # A fresh reader over the same database sees the same history.
     assert open_history().records() == records
-
-
-@pytest.mark.unit
-def test_commit_record_round_trips_gate_metrics(open_history) -> None:
-    log = open_history()
-    log.append(sample_record(step=1))
-    metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
-    log.append(sample_record(step=2, runtime_load_id="w2", metrics=metrics))
-
-    first, second = open_history().records()
-    assert first.metrics is None  # pre-metrics records stay readable
-    assert second.metrics == metrics
 
 
 @pytest.mark.unit
@@ -128,16 +122,6 @@ def test_commit_record_detaches_nested_metrics() -> None:
     encoded["metrics"]["selection"]["selected"] = False
 
     assert record.metrics == {"selection": {"selected": True}}
-
-
-@pytest.mark.unit
-def test_commit_record_round_trips_training_job_identity(open_history) -> None:
-    log = open_history()
-    log.append(sample_record(training_job_id="job-1"))
-
-    [record] = log.records()
-    assert record.training_job_id == "job-1"
-    assert record.to_dict()["training_job_id"] == "job-1"
 
 
 @pytest.mark.unit
@@ -332,45 +316,15 @@ def test_commit_record_holds_json_values() -> None:
 @pytest.mark.unit
 def test_commit_record_validates_its_schema() -> None:
     with pytest.raises(CommitHistoryError, match="step"):
-        CommitRecord(
-            scenario="math",
-            step=0,
-            artifact_ref=ArtifactRef(content_id="a", release_id="r", parent_release_id=None),
-            checkpoint=False,
-            algorithm_state=None,
-            high_water_sequence=0,
-            high_water_offset=0,
-        )
+        replace(sample_record(), step=0)
     with pytest.raises(CommitHistoryError, match="high_water_sequence"):
-        CommitRecord(
-            scenario="math",
-            step=1,
-            artifact_ref=ArtifactRef(content_id="a", release_id="r", parent_release_id=None),
-            checkpoint=False,
-            algorithm_state=None,
-            high_water_sequence=-1,
-            high_water_offset=0,
-        )
+        replace(sample_record(), high_water_sequence=-1)
     with pytest.raises(CommitHistoryError, match="record kind"):
         CommitRecord.from_dict({"record": "something-else"})
+    encoded = sample_record().to_dict()
+    encoded["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "compacted_ids": [1]}
     with pytest.raises(CommitHistoryError, match="compacted_ids"):
-        CommitRecord.from_dict(
-            {
-                "record": RECORD_KIND,
-                "scenario": "math",
-                "step": 1,
-                "artifact_ref": {
-                    "kind": "artifact",
-                    "content_id": "a",
-                    "release_id": "r",
-                    "parent_release_id": None,
-                },
-                "checkpoint": False,
-                "algorithm_state": None,
-                "record_progress": {"high_water_sequence": 0, "high_water_offset": 0, "compacted_ids": [1]},
-                "recorded_at": 1.0,
-            }
-        )
+        CommitRecord.from_dict(encoded)
 
 
 class RecordingComponent(StubTrainingComponent):
@@ -447,22 +401,45 @@ def delete_commits(agent_record_dir, *steps: int) -> None:
         assert deleted.rowcount == len(steps)
 
 
-def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") -> None:
-    for _ in range(1000):
-        if dispatcher.get_or_create_scenario(scenario).scenario_step >= step:
-            return
+def repository_factory(tmp_path, *, skill: bool = False):
+    """The in-memory repository factory over the test's base: empty, or one ``skills/SKILL.md`` when ``skill``."""
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    if skill:
+        (initial / "skills").mkdir()
+        (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
+    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+
+
+def wait_until(condition, message: str) -> None:
+    deadline = time.monotonic() + 10
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError(message)
         time.sleep(0.001)
-    raise AssertionError("async training did not commit")
+
+
+def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") -> None:
+    wait_until(
+        lambda: dispatcher.get_or_create_scenario(scenario).scenario_step >= step, "async training did not commit"
+    )
 
 
 def wait_for_jobs(dispatcher: Dispatcher, count: int, *, scenario: str = "math") -> None:
     """Wait until the scenario's trainer committed the end of ``count`` training jobs."""
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if dispatcher.get_or_create_scenario(scenario).trainer.state["finished_jobs"] >= count:
-            return
-        time.sleep(0.001)
-    raise AssertionError("the training job did not finish")
+    wait_until(
+        lambda: dispatcher.get_or_create_scenario(scenario).trainer.state["finished_jobs"] >= count,
+        "the training job did not finish",
+    )
+
+
+def train_pair(dispatcher: Dispatcher, index: int, runtime_load_id: str | None = None) -> None:
+    """Send inference ``i<index>`` (served by ``runtime_load_id``, else by the served version) and its report
+    ``r<index>``, then wait until ``index`` training jobs ended."""
+    version = served_version(dispatcher) if runtime_load_id is None else runtime_load_id
+    dispatcher.accept_record(sft_inference(f"i{index}", version))
+    dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
+    wait_for_jobs(dispatcher, index)
 
 
 class _SavedArtifactBackend(CandidateBackend):
@@ -510,15 +487,13 @@ class _SavedArtifactRecipe(Recipe):
 
 
 def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
-    initial = tmp_path / "initial"
-    initial.mkdir()
     artifact_path = tmp_path / "candidate"
     artifact_path.mkdir()
     (artifact_path / "model.txt").write_text("trained")
     backend = _SavedArtifactBackend(artifact_path)
     dispatcher = Dispatcher(
         _SavedArtifactRecipe(backend=backend),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        repository_factory(tmp_path),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         # The tests drive the steps themselves; a local cycle would race them for the batch.
@@ -528,24 +503,14 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
 
 
 @pytest.mark.unit
-def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
+def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_from_the_log(tmp_path) -> None:
     agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
     component = RecordingComponent(tmp_path / "exported")
-    dispatcher = build_training_dispatcher(
-        component,
-        tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=agent_record_dir,
-    )
-    dispatcher.accept_record(sft_inference("i1", served_version(dispatcher)))
-    dispatcher.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(dispatcher, 1)
+    dispatcher = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    train_pair(dispatcher, 1)
     # The staleness check trains only data of the served version, so the second record comes from w1.
-    dispatcher.accept_record(sft_inference("i2", "w1"))
-    dispatcher.accept_record(sft_report("r2", "i2"))
-    wait_for_jobs(dispatcher, 2)
+    train_pair(dispatcher, 2, "w1")
 
     # Each job commits its submission, its checkpoint decision and its end, one record each.
     records = committed_records(agent_record_dir)
@@ -564,48 +529,16 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     assert records[3].high_water_sequence == 4
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
-    assert scenario.repository.require_current_artifact() == records[4].artifact_ref == records[5].artifact_ref
-
-
-@pytest.mark.unit
-def test_training_commit_proves_its_training_job_identity(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    agent_record_dir = tmp_path / "agent-record"
-    component = RecordingComponent(tmp_path / "exported")
-    dispatcher = build_training_dispatcher(
-        component,
-        tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=agent_record_dir,
-    )
-    dispatcher.accept_record(sft_inference("i1", served_version(dispatcher)))
-    dispatcher.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(dispatcher, 1)
-
-    [job] = component.submitted
-    records = committed_records(agent_record_dir)
-    assert [record.training_job_id for record in records] == [job.job_id] * 3
-    assert dispatcher.get_or_create_scenario("math").trainer.state["last_job"]["job_id"] == job.job_id
-
-
-@pytest.mark.unit
-def test_recovery_restores_the_head_step_and_state_from_the_log(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first = build_training_dispatcher(
-        RecordingComponent(tmp_path / "exported"), tmp_path, backend_factory, agent_record_dir=agent_record_dir
-    )
-    first.accept_record(sft_inference("i1", served_version(first)))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(first, 1)
-    first.accept_record(sft_inference("i2", "w1"))
-    first.accept_record(sft_report("r2", "i2"))
-    wait_for_jobs(first, 2)
-    committed_head = first.get_or_create_scenario("math").repository.require_current_artifact()
-    committed_state = first.get_or_create_scenario("math").trainer.state
+    committed_head = scenario.repository.require_current_artifact()
+    assert committed_head == records[4].artifact_ref == records[5].artifact_ref
+    committed_state = scenario.trainer.state
+    assert committed_state["last_job"]["job_id"] == second_job
+    # The checkpoint's metadata carries its commit record; the checkpoint commit consumes nothing.
+    metadata = scenario.repository.backend.metadata()["scenario_commit_record"]
+    assert metadata["scenario_step"] == 5
+    assert metadata["algorithm_state"] == records[4].algorithm_state
+    assert metadata["training_job_id"] == second_job
+    assert metadata["record_progress"] == {"high_water_sequence": 4, "high_water_offset": 4, "consumed_ids": []}
 
     # A fresh dispatcher over the same dirs is a process restart: nothing is
     # durable except the release chain, the record store, and the commit history.
@@ -668,10 +601,8 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     without the history's high-water mark would page from sequence 0, push again
     the consumed pair, and train it again.
     """
-    initial = tmp_path / "initial"
-    initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
 
     def build(component):
         return Dispatcher(
@@ -683,9 +614,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
     first_component = RecordingComponent(tmp_path / "first")
     first = build(first_component)
-    first.accept_record(sft_inference("i1", served_version(first)))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(first, 1)
+    train_pair(first, 1)
     assert first_component.trained_data == [["i1"]]
     # Nothing was compacted: the consumed pair is still visible to training reads.
     assert first.get_or_create_scenario("math").records.get("math", "i1") is not None
@@ -695,9 +624,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     recovered = second.get_or_create_scenario("math")
     assert recovered.trainer.data_offset == 2  # resumed at the committed watermark
 
-    second.accept_record(sft_inference("i2", served_version(second)))
-    second.accept_record(sft_report("r2", "i2"))
-    wait_for_jobs(second, 2)
+    train_pair(second, 2)
     # The only newly trained batch is the genuinely new pair; i1 never retrains.
     assert second_component.trained_data == [["i2"]]
     assert recovered.scenario_step == 6
@@ -714,10 +641,8 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     can never be pushed again and training stalls silently. The consumed
     first pair, compacted and so absent from replay, still never trains twice.
     """
-    initial = tmp_path / "initial"
-    initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
     # The components save no checkpoint, so the base release serves both inferences and neither is stale.
     first_component = RecordingComponent()
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
@@ -747,10 +672,8 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
 @pytest.mark.unit
 def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, monkeypatch) -> None:
     """A committed batch cannot train twice even if processor cleanup fails."""
-    initial = tmp_path / "initial"
-    initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
     first_component = RecordingComponent(tmp_path / "first")
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
@@ -767,9 +690,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     monkeypatch.setattr(scenario.trainer.pipeline, "release_records", exploding_release)
     # The failed cycle does not wake its worker again; the worker polls the recovered running job.
     monkeypatch.setattr(local_workers, "POLL_SECONDS", 0.01)
-    first.accept_record(sft_inference("i1", served_version(first)))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(first, 1)
+    train_pair(first, 1)
     assert first_component.trained_data == [["i1"]]
     assert crash["armed"] is False
 
@@ -780,9 +701,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     assert recovered.records.get("math", "i1") is not None
     assert recovered.scenario_step == 3
 
-    second.accept_record(sft_inference("i2", served_version(second)))
-    second.accept_record(sft_report("r2", "i2"))
-    wait_for_jobs(second, 2)
+    train_pair(second, 2)
     assert second_component.trained_data == [["i2"]]
     assert recovered.scenario_step == 6
 
@@ -794,15 +713,11 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     The checkpoint head is then ahead of the commit history. Its metadata carries
     the same record fields, so recovery adopts it and heals the history.
     """
-    initial = tmp_path / "initial"
-    initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
     component = RecordingComponent(tmp_path / "exported")
     first = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    first.accept_record(sft_inference("i1", served_version(first)))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(first, 1)
+    train_pair(first, 1)
     submitted, checkpoint, _ = committed_records(agent_record_dir)
     assert checkpoint.checkpoint is True
     assert checkpoint.activated is True
@@ -844,49 +759,16 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    agent_record_dir = tmp_path / "agent-record"
-    dispatcher = build_training_dispatcher(
-        RecordingComponent(tmp_path / "exported"),
-        tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=agent_record_dir,
-    )
-    dispatcher.accept_record(sft_inference("i1", served_version(dispatcher)))
-    dispatcher.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(dispatcher, 1)
-
-    checkpoint = committed_records(agent_record_dir)[1]
-    backend = dispatcher.get_or_create_scenario("math").repository.backend
-    metadata = backend.metadata()["scenario_commit_record"]
-    assert metadata["scenario_step"] == 2
-    assert metadata["algorithm_state"] == checkpoint.algorithm_state
-    assert metadata["training_job_id"] == checkpoint.training_job_id
-    # The job's submission consumed the pair; the checkpoint commit consumes nothing.
-    assert metadata["record_progress"] == {
-        "high_water_sequence": 2,
-        "high_water_offset": 2,
-        "consumed_ids": [],
-    }
-
-
-@pytest.mark.unit
 def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
     # The component saves no checkpoint, so every commit lies after the checkpointed step 0.
     first = build_training_dispatcher(
         RecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     base_version = served_version(first)
     for index in (1, 2, 3):
-        first.accept_record(sft_inference(f"i{index}", base_version))
-        first.accept_record(sft_report(f"r{index}", f"i{index}"))
-        wait_for_jobs(first, index)
+        train_pair(first, index, base_version)
     assert [record.step for record in committed_records(agent_record_dir)] == [1, 2, 3, 4, 5, 6]
 
     delete_commits(agent_record_dir, 3)
@@ -901,14 +783,10 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
 @pytest.mark.unit
 def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     """In-memory deployments keep pre-log semantics: version-chain-only recovery."""
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
     component = RecordingComponent()
     first = build_training_dispatcher(component, tmp_path, backend_factory)
-    first.accept_record(sft_inference("i1", served_version(first)))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(first, 1)
+    train_pair(first, 1)
 
     store = first.get_or_create_scenario("math").store
     assert not store.durable
@@ -931,13 +809,9 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path)
     first = build_training_dispatcher(RecordingComponent(tmp_path / "exported"), tmp_path, backend_factory)
-    first.accept_record(sft_inference("i1", served_version(first)))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_jobs(first, 1)
+    train_pair(first, 1)
     checkpoint = first.get_or_create_scenario("math").store.history()[1]
     assert checkpoint.checkpoint is True
 
@@ -1059,15 +933,12 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         if source_record_id(samples[0]) != "a-i1":
             return
         started.set()
-        assert release.wait(1)
+        assert release.wait(10)
 
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     dispatcher = build_harness_evolve_dispatcher(
         None,
         tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        repository_factory(tmp_path, skill=True),
         propose=blocking_proposer,
     )
     dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
@@ -1102,8 +973,9 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
     status_request = Thread(target=read_status)
     status_request.start()
     try:
-        assert returned.wait(0.1), "report acceptance waited for harness growth"
-        assert status_returned.wait(0.5), "status waited for harness growth"
+        # The proposer holds until ``release``, which only this block's end sets.
+        assert returned.wait(5), "report acceptance waited for harness growth"
+        assert status_returned.wait(5), "status waited for harness growth"
         status = status_values[0]["scenarios"]["skills-a"]
         assert status["scenario_step"] == 0
         assert status["last_committed_step"] is None
@@ -1136,22 +1008,16 @@ def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_p
         if should_fail:
             raise RuntimeError("proposal failed")
 
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     dispatcher = build_harness_evolve_dispatcher(
         None,
         tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        repository_factory(tmp_path, skill=True),
         propose=proposer,
     )
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
-    for _ in range(1000):
-        if dispatcher.build_training_status()["error"] is not None:
-            break
-        time.sleep(0.001)
+    wait_until(lambda: dispatcher.build_training_status()["error"] is not None, "the failure did not reach the status")
     assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: proposal failed"
 
     failed_attempts = calls
@@ -1279,14 +1145,12 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
 
 @pytest.mark.unit
 def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     agent_record_dir = tmp_path / "records"
     component = RecordingComponent(tmp_path / "exported")
     dispatcher = build_training_dispatcher(
         component,
         tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        repository_factory(tmp_path),
         agent_record_dir=agent_record_dir,
         hold_local_cycles=True,
     )
@@ -1336,11 +1200,8 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 
 @pytest.mark.unit
 def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path, skill=True)
     dispatcher = build_harness_evolve_dispatcher(
         None,
         tmp_path,
@@ -1425,58 +1286,33 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
 
 
 @pytest.mark.unit
-def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> None:
+def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) -> None:
     """A step that publishes no artifact must still enter the commit history.
 
     Harness evolution frequently proposes nothing (or a losing candidate);
     the trainer still consumed records and advanced its algorithm state.
     Recording that progress keeps the commit history the single durable commit point: a
     crash loses neither the batch nor the record watermark, and recovery
-    resumes without re-training compacted rows.
+    restores the step, the state, and the record progress without re-training compacted rows.
     """
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-
-    dispatcher.accept_record(trace_inference("i1"))
-    dispatcher.accept_record(trace_report("r1", "i1"))
-
-    scenario = dispatcher.get_or_create_scenario("skills")
-    wait_for_step(dispatcher, 1, scenario="skills")
-    assert scenario.scenario_step == 1
-    head = scenario.repository.require_current_artifact()
-
-    records = committed_records(agent_record_dir, scenario="skills")
-    assert len(records) == 1
-    record = records[0]
-    assert record.step == 1
-    assert record.checkpoint is False
-    assert record.artifact_ref == head  # head unchanged: no new artifact published
-    assert record.algorithm_state == {"steps": 1, "entries": []}
-    assert record.high_water_sequence == 2
-    assert record.consumed_ids == frozenset({"i1", "r1"})
-    dispatcher.close()
-
-
-@pytest.mark.unit
-def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
-    """A no-artifact step must restore step, state, and record progress."""
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
-    agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = repository_factory(tmp_path, skill=True)
     first = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(trace_inference("i1"))
     first.accept_record(trace_report("r1", "i1"))
     wait_for_step(first, 1, scenario="skills")
-    assert first.get_or_create_scenario("skills").scenario_step == 1
+    scenario = first.get_or_create_scenario("skills")
+    assert scenario.scenario_step == 1
     committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["skipped"] == "no proposal"
+    [record] = committed_records(agent_record_dir, scenario="skills")
+    assert record.step == 1
+    assert record.checkpoint is False
+    assert record.artifact_ref == scenario.repository.require_current_artifact()  # no new artifact published
+    assert record.algorithm_state == {"steps": 1, "entries": []}
+    assert record.high_water_sequence == 2
+    assert record.consumed_ids == frozenset({"i1", "r1"})
 
     second = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")

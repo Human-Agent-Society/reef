@@ -16,12 +16,15 @@ from tests.recipes.meta_harness.test_meta_harness import (
     runtime,
     sections,
 )
+from tests.support.git_lfs import fake_git_lfs
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+
+__all__ = ["fake_git_lfs"]
 
 
 @pytest.fixture(params=["memory", "git"])
@@ -34,6 +37,10 @@ def publication_case(tmp_path, request):
     initial = tmp_path / "initial"
     initial.mkdir()
     memory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "memory")
+
+    if request.param == "git":
+        # The commit protocol, not Git LFS, is under test here; tests/artifact covers real LFS.
+        request.getfixturevalue("fake_git_lfs")
 
     def factory():
         if request.param == "memory":

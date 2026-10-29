@@ -204,13 +204,14 @@ jobs:
       # Coverage is measured on every leg: Reef requires Python 3.12, whose
       # sys.settrace no longer has the process-global reentrancy guard that
       # killed bootstrapping worker threads under coverage on 3.10 and 3.11.
-      # Source tests share eight workers and keep each file together. The two
-      # sandbox tests run serially, avoiding unnecessary worker startup.
+      # Source tests share eight workers; worksteal balances single tests, so
+      # one slow file cannot hold the run. The two sandbox tests run serially,
+      # avoiding unnecessary worker startup.
       - name: Run tests with coverage
         run: >
           python -m pytest tests
           -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
-          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist loadfile
+          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist worksteal
           --cov --cov-report= --cov-fail-under=0
         env:
           GIT_CONFIG_GLOBAL: /dev/null
@@ -486,7 +487,7 @@ jobs:
         run: |
           mapfile -t wheel_tests < "$GITHUB_WORKSPACE/tests/packaging/wheel-tests.txt"
           python -m pytest "${wheel_tests[@]/#/$GITHUB_WORKSPACE/}" \
-            -n 4 --dist loadfile -p no:cacheprovider
+            -n 4 --dist worksteal -p no:cacheprovider
         working-directory: ${{ runner.temp }}
         env:
           GIT_CONFIG_GLOBAL: /dev/null
