@@ -61,10 +61,10 @@ def _listed(catalog: dict) -> dict:
 
 
 # One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command,
-# tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch, and prints what the
-# extension registered and every call it made. TEST_ARGS_2 is what a second TEST_REPEAT run passes instead of
-# TEST_ARGS. TEST_SELECT and TEST_INPUT script the dialogs, one answer per
-# call; TEST_CONFIRM is 1 (yes to every confirm), 0 or unset (no), or a JSON list consumed in order, the last one
+# tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch (less when TEST_UNTIL_KIND
+# names an event kind: the wait ends once one is recorded), and prints what the extension registered and every
+# call it made. TEST_ARGS_2 is what a second TEST_REPEAT run passes instead of TEST_ARGS. TEST_SELECT and
+# TEST_INPUT script the dialogs, one answer per call; TEST_CONFIRM is 1 (yes to every confirm), 0 or unset (no), or a JSON list consumed in order, the last one
 # repeating; TEST_EXEC maps a joined argv of a pi.exec call, or a prefix of it, to the {stdout, stderr, code} the
 # stub answers (no key: exit 0, nothing printed); TEST_SHUTDOWN_AFTER_MS fires session_shutdown mid run;
 # TEST_CLOCK_SKEW_AFTER_MS moves the clock forward by TEST_CLOCK_SKEW_MS, past the watch's 30 minute cap by
@@ -193,7 +193,11 @@ for (const at of JSON.parse(process.env.TEST_SHORTCUT_AT_MS || "[]")) {
     await shortcuts[Object.keys(shortcuts)[0]].handler(ctx);
   }, Number(at));
 }
-await sleep(Number(process.env.TEST_WAIT_MS || 0));
+const waitDeadline = realNow() + Number(process.env.TEST_WAIT_MS || 0);
+const waitUntilKind = process.env.TEST_UNTIL_KIND;
+while (realNow() < waitDeadline && !(waitUntilKind && events.some((event) => event.kind === waitUntilKind))) {
+  await sleep(Math.min(5, waitDeadline - realNow()));
+}
 console.log(JSON.stringify(out));
 // A live watch would keep node running: the shutdown handler clears it, as pi's does.
 if (handlers.session_shutdown) await shutdown();
@@ -225,6 +229,7 @@ KNOBS = (
     "TEST_SELECT",
     "TEST_INPUT",
     "TEST_WAIT_MS",
+    "TEST_UNTIL_KIND",
     "TEST_SHUTDOWN_AFTER_MS",
     "TEST_CLOCK_SKEW_AFTER_MS",
     "TEST_CLOCK_SKEW_MS",
@@ -342,19 +347,16 @@ def test_the_extension_imports_node_only_and_the_ask_path_confirms_nothing() -> 
     assert "ui.confirm" in helpers and "ui.confirm" in versions
 
 
-def test_offline_registers_nothing(tmp_path: Path) -> None:
-    out = _run(tmp_path, _install_root(tmp_path), PI_OFFLINE="1")
+@pytest.mark.parametrize(
+    "env",
+    [{"PI_OFFLINE": "1"}, {"REEF_SERVICE_URL": ""}, {"REEF_SCENARIO": ""}],
+    ids=["offline", "no-service-url", "no-scenario"],
+)
+def test_offline_or_without_a_service_or_scenario_the_extension_registers_nothing(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    out = _run(tmp_path, _install_root(tmp_path), **env)
     assert out["tools"] == [] and out["commands"] == [] and out["handlers"] == [] and out["events"] == []
-
-
-def test_a_missing_service_url_registers_nothing(tmp_path: Path) -> None:
-    out = _run(tmp_path, _install_root(tmp_path), REEF_SERVICE_URL="")
-    assert out["tools"] == [] and out["commands"] == []
-
-
-def test_a_missing_scenario_registers_nothing(tmp_path: Path) -> None:
-    out = _run(tmp_path, _install_root(tmp_path), REEF_SCENARIO="")
-    assert out["tools"] == [] and out["commands"] == []
 
 
 def test_registers_the_two_tools_the_commands_and_the_session_events(tmp_path: Path) -> None:
@@ -409,26 +411,17 @@ def test_the_command_needs_no_capture_proxy_or_models_file(tmp_path: Path) -> No
     assert _notices(out)[0]["message"] == ACCEPTED_NOTICE
 
 
-def test_the_command_surfaces_auto_mode_refusal(tmp_path: Path) -> None:
-    answers = {
-        "POST /reef/train": {"status": 400, "body": {"error": "training requests require training_mode='manual'"}}
-    }
-    out = _ask(tmp_path, _install_root(tmp_path), answers)
+@pytest.mark.parametrize(
+    "error",
+    ["training requests require training_mode='manual'", "release_id must be a string"],
+    ids=["auto-mode", "rejected-body"],
+)
+def test_the_command_reports_a_refused_request_as_a_notice(tmp_path: Path, error: str) -> None:
+    out = _ask(tmp_path, _install_root(tmp_path), {"POST /reef/train": {"status": 400, "body": {"error": error}}})
     assert out["error"] is None
     assert len(_fetches(out)) == 1
     (notice,) = _notices(out)
-    assert "training_mode='manual'" in notice["message"]
-    assert notice["type"] == "error"
-
-
-def test_the_command_reports_a_rejected_body_as_a_notice(tmp_path: Path) -> None:
-    answers = {"POST /reef/train": {"status": 400, "body": {"error": "release_id must be a string"}}}
-    out = _ask(tmp_path, _install_root(tmp_path), answers)
-    assert out["error"] is None
-    assert len(_fetches(out)) == 1
-    (notice,) = _notices(out)
-    assert notice["message"].startswith("reef refused the request (HTTP 400): ")
-    assert "release_id must be a string" in notice["message"]
+    assert notice["message"].startswith("reef refused the request (HTTP 400): ") and error in notice["message"]
     assert notice["type"] == "error"
 
 
@@ -716,7 +709,9 @@ def test_versions_refuses_a_missing_step_and_bad_arguments_with_a_notice(tmp_pat
     agent_dir = _install_root(tmp_path)
     missing = _versions(tmp_path, agent_dir, CATALOG, args="9")
     assert _notices(missing) == [{"kind": "notify", "message": "no v9: the catalog holds v0 to v4", "type": "warning"}]
-    for args in ("three", "-1", "3 publish", "3 activate", "install", "3 install now"):
+    # Only a run of digits, with an optional v, is a step, and install is the one word after it.
+    arguments = ("three", "-1", "3 publish", "3 activate", "install", "3 install now", "1 install extra")
+    for args in (*arguments, "1e0", "0x1", "1.0", "+1", "vv1", "V1"):
         out = _versions(tmp_path, agent_dir, CATALOG, args=args)
         assert _fetches(out) == []
         assert _notices(out) == [
@@ -729,6 +724,9 @@ def test_versions_refuses_a_missing_step_and_bad_arguments_with_a_notice(tmp_pat
     )
     (notice,) = _notices(refused)
     assert notice["type"] == "error" and notice["message"].startswith("reef refused the catalog read (HTTP 404)")
+    for args in ("01", "v1"):
+        named = _versions(tmp_path, agent_dir, CATALOG, args=args)
+        assert _dialogs(named)[0]["message"] == "rel-1111-selected (selected, active)"
 
 
 # The catalog as the service reports it: the active flag sits on the release that serves, here not the newest win.
@@ -859,19 +857,6 @@ def test_versions_distinguishes_an_installed_older_release_from_the_active_one(t
     assert _dialogs(shown)[0]["message"] == "rel-4444-win (selected, active)"
 
 
-def test_versions_takes_only_a_run_of_digits_as_the_step(tmp_path: Path) -> None:
-    agent_dir = _install_root(tmp_path)
-    for args in ("1e0", "0x1", "1.0", "+1", "vv1", "V1", "1 install extra"):
-        out = _versions(tmp_path, agent_dir, CATALOG, args=args)
-        assert _fetches(out) == []
-        assert _notices(out) == [
-            {"kind": "notify", "message": "Usage: /versions [version] [install]", "type": "warning"}
-        ]
-    for args in ("01", "v1"):
-        named = _versions(tmp_path, agent_dir, CATALOG, args=args)
-        assert _dialogs(named)[0]["message"] == "rel-1111-selected (selected, active)"
-
-
 # -- the clarify path, the two tools and the watch ---------------------------------------------------------------
 
 CLARIFY_HEAD = (
@@ -908,6 +893,8 @@ BRANCH = [
 
 
 def _clarify(tmp_path: Path, replies: list[dict[str, Any]], **env: str) -> dict[str, Any]:
+    # The clarification ends with its chat entry, so the wait ends there; a case that writes none waits the cap.
+    settings = {"TEST_WAIT_MS": "300", "TEST_UNTIL_KIND": "entry", **env}
     return _ask(
         tmp_path,
         _install_root(tmp_path),
@@ -915,9 +902,12 @@ def _clarify(tmp_path: Path, replies: list[dict[str, Any]], **env: str) -> dict[
         direct=False,
         TEST_REPLIES=json.dumps(replies),
         TEST_BRANCH=json.dumps(BRANCH),
-        TEST_WAIT_MS="300",
-        **env,
+        **settings,
     )
+
+
+#: The wait of a clarification that never ends: what it shows is written while the command runs.
+UNENDING_WAIT_MS = "50"
 
 
 def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(tmp_path: Path) -> None:
@@ -983,7 +973,7 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
 def test_the_command_without_an_argument_says_what_is_running(tmp_path: Path) -> None:
     """The way in that needs no key the terminal may swallow and no click it may not offer: the command itself
     names the phase and the clarification's steps so far; with nothing running it prints the usage."""
-    out = _clarify(tmp_path, [{"hang": True}], TEST_REPEAT="2", TEST_ARGS_2="")
+    out = _clarify(tmp_path, [{"hang": True}], TEST_REPEAT="2", TEST_ARGS_2="", TEST_WAIT_MS=UNENDING_WAIT_MS)
     (notice,) = _notices(out)
     assert notice["type"] == "info"
     assert notice["message"].startswith("reef: clarifying 'text me when you are blocked' - thinking it through")
@@ -1033,7 +1023,7 @@ def test_a_bad_tool_call_goes_back_to_the_model_as_an_error(tmp_path: Path) -> N
 
 
 def test_the_command_without_a_model_or_while_clarifying_starts_nothing(tmp_path: Path) -> None:
-    out = _clarify(tmp_path, [], TEST_NO_MODEL="1")
+    out = _clarify(tmp_path, [], TEST_NO_MODEL="1", TEST_WAIT_MS=UNENDING_WAIT_MS)
     assert _of_kind(out, "model_call") == [] and _of_kind(out, "entry") == []
     assert _notices(out) == [
         {
@@ -1043,7 +1033,7 @@ def test_the_command_without_a_model_or_while_clarifying_starts_nothing(tmp_path
         }
     ]
     # A second ask while the first is still running is refused; the first goes on.
-    out = _clarify(tmp_path / "twice", [{"hang": True}], TEST_REPEAT="2")
+    out = _clarify(tmp_path / "twice", [{"hang": True}], TEST_REPEAT="2", TEST_WAIT_MS=UNENDING_WAIT_MS)
     assert len(_of_kind(out, "model_call")) == 1
     assert _notices(out)[0] == {
         "kind": "notify",

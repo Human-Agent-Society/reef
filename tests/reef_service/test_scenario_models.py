@@ -59,7 +59,8 @@ def platform():
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     state["url"] = f"http://127.0.0.1:{server.server_port}"
-    thread = Thread(target=server.serve_forever, daemon=True)
+    # A short poll interval lets shutdown() return at once instead of after half a second.
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         yield state
@@ -128,8 +129,8 @@ def make_recipe(platform, tmp_path):
     )
 
 
-@pytest.mark.parametrize("api", ["openai", "anthropic"])
-@pytest.mark.parametrize("executor", ["uni", "mp"])
+# Each API and each executor runs once: the API decides the headers, the executor where the rollouts run.
+@pytest.mark.parametrize("executor, api", [("uni", "anthropic"), ("mp", "openai")])
 def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch, api, executor):
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-rollouts")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-rollouts")
