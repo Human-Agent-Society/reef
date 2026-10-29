@@ -385,7 +385,9 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
                     "task": clip_record_text(record.task, EPISODE_SUMMARY_CHARS),
                     "score": record.score,
                     "failure": (
-                        None if record.failure is None else clip_record_text(record.failure.cause, EPISODE_SUMMARY_CHARS)
+                        None
+                        if record.failure is None
+                        else clip_record_text(record.failure.cause, EPISODE_SUMMARY_CHARS)
                     ),
                     "reply": None if record.reply is None else clip_record_text(record.reply, EPISODE_SUMMARY_CHARS),
                     "episode": record.episode,

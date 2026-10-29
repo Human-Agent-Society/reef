@@ -36,7 +36,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend import Method, StepContext, Services, Workspace
+from reef.train.harness_backend import Method, Services, StepContext, Workspace
 
 #: ``full_history`` branches from any candidate; ``incumbent_only``, the greedy control, from the served one.
 MODES = ("full_history", "incumbent_only")
@@ -271,7 +271,12 @@ class MetaHarness(Method):
         return None
 
     def checked_tree(
-        self, files: Mapping[str, Any], parent: HarnessTree, layout: TreeLayout, parts: Sequence[str], services: Services
+        self,
+        files: Mapping[str, Any],
+        parent: HarnessTree,
+        layout: TreeLayout,
+        parts: Sequence[str],
+        services: Services,
     ) -> HarnessTree:
         """The proposed tree when it passes the adapter's validation and changes only files of ``parts`` of
         ``parent``; ``ValueError`` otherwise."""

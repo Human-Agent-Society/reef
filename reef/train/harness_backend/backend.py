@@ -513,7 +513,9 @@ def screened_requires(
         if any(secret_shaped(text) for text in texts):
             refused.append({"item": clip_record_value(dict(item)), "reason": "carries a credential shaped literal"})
         elif any(directive_shaped(text) for text in texts):
-            refused.append({"item": clip_record_value(dict(item)), "reason": "carries an instruction override phrasing"})
+            refused.append(
+                {"item": clip_record_value(dict(item)), "reason": "carries an instruction override phrasing"}
+            )
         else:
             kept.append(dict(item))
     return kept, refused

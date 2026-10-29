@@ -39,7 +39,7 @@ from reef.core.plugins import ConfiguredPlugin, PluginSettings
 from reef.evaluation.harness import History
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree
-from reef.train.harness_backend import Method, StepContext, Services, Trace, Workspace
+from reef.train.harness_backend import Method, Services, StepContext, Trace, Workspace
 
 from .archive import Archive
 from .components import candidate_tree, texts_of

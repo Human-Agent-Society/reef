@@ -187,7 +187,9 @@ def test_the_record_keeps_every_model_call_through_the_binding_seam(tmp_path: Pa
 
     def method(workspace, services):
         services.models.served.chat([{"role": "user", "content": "first"}], timeout_s=5.0, max_tokens=8)
-        services.models.served.chat([{"role": "system", "content": long_prompt}, {"role": "user", "content": "second"}])
+        services.models.served.chat(
+            [{"role": "system", "content": long_prompt}, {"role": "user", "content": "second"}]
+        )
         return MARKER
 
     backend, _ = harness_backend(tmp_path, method)
