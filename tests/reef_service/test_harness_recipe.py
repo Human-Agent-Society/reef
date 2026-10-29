@@ -388,7 +388,9 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
 ) -> None:
     store_settings = {"tasks": [], "imported_tasks": True}
     built = from_config(
-        evolution_config(evaluation=store_settings, state_dir=str(tmp_path / "state")),
+        evolution_config(
+            evaluation=store_settings, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
+        ),
         runtime=runtime(),
     )
     assert built.configured_tasks() == ()
