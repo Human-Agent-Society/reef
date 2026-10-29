@@ -79,13 +79,17 @@ def to_json_value(value: Any) -> Any:
         raise CommitHistoryError(f"commit record values must be JSON values: {exc}") from exc
 
 
-#: What a commit record does: a training step, the activation of an artifact, or a trainer's new training start.
-CommitOperation = Literal["training", "activate", "train_from", "import"]
+#: What a commit record does: a training step, the activation of an artifact, a trainer's new training start, an
+#: import, or the start or the end of serving an artifact beside the active release.
+CommitOperation = Literal["training", "activate", "train_from", "import", "serve", "stop_serving"]
+#: The operations of ``CommitOperation`` that carry no trainer state.
+NON_TRAINING_OPERATIONS = ("activate", "train_from", "import", "serve", "stop_serving")
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
-    """One committed step of a scenario: a training step, an activation, a new training start, or an import.
+    """One committed step of a scenario: a training step, an activation, a new training start, an import, or a
+    change of the artifacts served beside the active release.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
     ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
@@ -125,9 +129,20 @@ class CommitRecord:
       release's manifest. ``metrics`` is ``{"source": {"uri", "version"}}``,
       where the content was read from; it is no part of the artifact's
       identity.
+    - ``"serve"``: Reef serves one artifact beside the active release from
+      now on. ``artifact_ref`` is the release that serves it: in a scenario
+      of one component the release that made it, and ``component`` and
+      ``components`` are ``None``; in a scenario of several a release that
+      the serve published, and ``component`` and ``components`` are as for
+      an ``"activate"`` record. The served artifact is the one that
+      ``artifact_ref`` binds as ``component``.
+    - ``"stop_serving"``: Reef no longer serves the artifact of the
+      ``"serve"`` record with the same ``artifact_ref``, ``component`` and
+      ``components``.
 
-    An ``"activate"``, ``"train_from"`` or ``"import"`` record carries no
-    trainer state and is not ``activated``: ``algorithm_state`` and
+    An ``"activate"``, ``"train_from"``, ``"import"``, ``"serve"`` or
+    ``"stop_serving"`` record carries no trainer state and is not
+    ``activated``: ``algorithm_state`` and
     ``training_job_id`` are ``None``, ``metrics`` is ``None`` except for an
     import's source, both high-water values are 0 and
     ``consumed_ids`` is empty. Only an ``"import"`` record among them has
@@ -186,10 +201,8 @@ class CommitRecord:
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise CommitHistoryError(f"commit record {name} must be a non-negative integer")
-        if self.operation not in ("training", "activate", "train_from", "import"):
-            raise CommitHistoryError(
-                "commit record operation must be 'training', 'activate', 'train_from' or 'import'"
-            )
+        if self.operation != "training" and self.operation not in NON_TRAINING_OPERATIONS:
+            raise CommitHistoryError(f"commit record operation must be 'training' or one of {NON_TRAINING_OPERATIONS}")
         if not isinstance(self.operation_verified, bool):
             raise CommitHistoryError("commit record operation_verified must be a boolean")
         if not isinstance(self.checkpoint, bool) or not isinstance(self.activated, bool):
@@ -236,12 +249,13 @@ class CommitRecord:
                 raise CommitHistoryError('an import commit\'s metrics are {"source": {"uri", "version"}}')
         if self.operation == "train_from" and self.components is not None:
             raise CommitHistoryError("a train_from commit publishes no release and carries no components")
-        if self.operation in ("activate", "import") and (
+        if self.operation in ("activate", "import", "serve", "stop_serving") and (
             (self.component is None) != (self.components is None)
             or (self.components is not None and self.component not in self.components)
         ):
             raise CommitHistoryError(
-                f"an {self.operation} commit names a component exactly when it carries the manifest that binds it"
+                f"a commit of operation {self.operation!r} names a component exactly when it carries the manifest "
+                "that binds it"
             )
         # Hold state and metrics as a stored record reads them back, so a record
         # equals itself after storage, and a caller mutating its values

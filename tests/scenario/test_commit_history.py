@@ -194,7 +194,7 @@ def operation_record(operation: str, step: int, release_id: str, **changes) -> C
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("operation", ["activate", "train_from"])
+@pytest.mark.parametrize("operation", ["activate", "train_from", "serve", "stop_serving"])
 @pytest.mark.parametrize(
     "changes",
     [
@@ -217,16 +217,18 @@ def test_activations_and_training_starts_carry_no_trainer_state(operation, chang
 def test_each_operation_names_its_artifact_exactly() -> None:
     # A one-component activation names the release that made the artifact; a composed one names the release it
     # published, with the component and the manifest.
-    operation_record("activate", 1, "r1")
-    operation_record("activate", 1, "r1", component="harness", components={"harness": "c", "weights": "w"})
-    for changes in (
-        {"component": "harness"},
-        {"components": {"harness": "c"}},
-        {"component": "config", "components": {"harness": "c"}},
-    ):
-        with pytest.raises(CommitHistoryError, match="an activate commit names a component"):
-            operation_record("activate", 1, "r1", **changes)
-    for operation in ("activate", "train_from"):
+    # A serve and its stop name the release that serves the artifact in the same way.
+    for operation in ("activate", "serve", "stop_serving"):
+        operation_record(operation, 1, "r1")
+        operation_record(operation, 1, "r1", component="harness", components={"harness": "c", "weights": "w"})
+        for changes in (
+            {"component": "harness"},
+            {"components": {"harness": "c"}},
+            {"component": "config", "components": {"harness": "c"}},
+        ):
+            with pytest.raises(CommitHistoryError, match=f"operation '{operation}' names a component"):
+                operation_record(operation, 1, "r1", **changes)
+    for operation in ("activate", "train_from", "serve", "stop_serving"):
         with pytest.raises(CommitHistoryError, match="makes no artifact"):
             operation_record(operation, 1, "r1", checkpoint=True)
     # A new start names a trainer's component and publishes nothing.

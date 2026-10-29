@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.core.activation import ActivationRule
@@ -21,6 +21,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
+from reef.scenario.releases import ServedArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -274,6 +275,32 @@ class Scenario:
     def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` serve as ``component``; see :meth:`ScenarioCommitter.activate`."""
         return self._committer.activate(artifact_id, component)
+
+    def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""
+        return self._committer.serve(artifact_id, component)
+
+    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+        """Stop serving ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.stop_serving`."""
+        return self._committer.stop_serving(artifact_id)
+
+    def served_release(self, artifact_id: str) -> ArtifactRef:
+        """The release that answers a call to the URL of ``artifact_id``.
+
+        It is the release that serves the artifact beside the active release
+        when the scenario serves it so, else the active release when that
+        binds it. Raise ``ArtifactNotFound`` when neither serves it.
+        """
+        with self.release_queries.publication_lock:
+            step = self._committer.step
+            names = self._committer.component_names()
+            served = self.release_queries.served_beside(step, names).get(artifact_id)
+            if served is not None:
+                return served.release
+            current = self._artifact_chain.current
+            if artifact_id in self.release_queries.bound_artifact_ids(current.release_id, names, step).values():
+                return current
+        raise ArtifactNotFound(f"scenario {self._name!r} serves no artifact {artifact_id!r}")
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
