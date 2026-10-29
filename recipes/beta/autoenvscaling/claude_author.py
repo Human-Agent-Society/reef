@@ -54,7 +54,6 @@ from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent_gateway import AgentGateway, refuse
-from reef.record2sample.generator.designer import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
