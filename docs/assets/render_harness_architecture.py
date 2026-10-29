@@ -17,7 +17,7 @@ from pathlib import Path
 from render_architecture import arrow, cap, font_files, text
 
 ROOT = Path(__file__).resolve().parent
-W, H = 1556, 1482
+W, H = 1372, 1110
 
 THEMES = {
     "light": {
@@ -44,121 +44,47 @@ THEMES = {
     },
 }
 
-# Five columns. A box takes one column or two.
-COL_W, GAP = 260, 36
+# Five columns. A box takes one column or two, and every box is one row high.
+COL_W, GAP, BOX_H = 220, 40, 76
 X = [56 + k * (COL_W + GAP) for k in range(5)]
 WIDE = 2 * COL_W + GAP
 
-# Each row's top and height: A on the person's machine, B in Reef.
-ROWS = {
-    "A1": (132, 118),
-    "A2": (298, 140),
-    "B1": (574, 118),
-    "B2": (748, 96),
-    "B3": (932, 140),
-    "B4": (1128, 140),
-    "B5": (1312, 122),
-}
-A1, A1_H = ROWS["A1"]
-A2, A2_H = ROWS["A2"]
-B1, B1_H = ROWS["B1"]
-B2, B2_H = ROWS["B2"]
-B3, B3_H = ROWS["B3"]
-B4, B4_H = ROWS["B4"]
-B5, B5_H = ROWS["B5"]
-MACHINE_TOP, MACHINE_BOTTOM = 92, 454
-REEF_TOP, REEF_BOTTOM = 534, 1452
-BAND_TOP, BAND_BOTTOM = 900, 1288
+# Each row's top: A on the person's machine, B in Reef.
+ROWS = {"A1": 124, "A2": 244, "B1": 446, "B2": 574, "B3": 738, "B4": 870, "B5": 990}
+A1, A2, B1, B2, B3, B4, B5 = ROWS.values()
+MACHINE_TOP, MACHINE_BOTTOM = 84, 336
+REEF_TOP, REEF_BOTTOM = 406, 1084
+BAND_TOP, BAND_BOTTOM = 706, 966
 
 TITLE, BODY, MONO = 18, 14, 13
 
-# The boxes: (column, row, columns spanned, kind, step number or None, title, lines).
+# The boxes: (column, row, columns spanned, kind, step number or None, title, line or "").
 # A line that starts with a backquote is code, in the mono face.
 BOXES = [
-    (0, "A1", 1, "machine", None, "Agent command", ["a claude or pi command, first", "on PATH, that runs", "`reef-client harness run"]),
-    (2, "A1", 1, "machine", None, "Layer install", ["`~/.local/share/reef-client/", "`harness/<scenario-name>", "the head, rendered for the agent"]),
-    (3, "A1", 1, "machine", None, "Your own config", ["`~/.claude, ~/.pi, ~/.codex", "the agent reads it as always;", "Reef never reads or writes it"]),
-    (0, "A2", 2, "machine", None, "reef-client harness", []),
-    (
-        2, "A2", 2, "machine", 1, "Your agent",
-        [
-            "`claude · pi · opencode · codex",
-            "loads your own config first, then Reef's layer over it",
-            "you work with it as always; its model calls go to Reef",
-            "you score a session with a report",
-        ],
-    ),
-    (4, "A2", 1, "store", None, "Model provider", ["`REEF_UPSTREAM_URL", "an OpenAI or Anthropic API,", "or a compatible one"]),
-    (0, "B1", 1, "reef", None, "Client install", ["`GET /reef/harness", "layer_install: the head as", "files, args and env of the layer"]),
-    (1, "B1", 1, "reef", None, "Client import", ["`POST /reef/harness/import", "merge_trees merges the changes", "onto the head, file by file"]),
-    (2, "B1", 1, "reef", 3, "Feedback", ["`POST /reef/report", "a score and feedback for", "the calls of one session"]),
-    (3, "B1", 1, "reef", 2, "Model proxy", ["`/reef/scenarios/<s>/v1/*", "forwards each call as sent,", "records it with its reply"]),
-    (
-        0, "B2", 2, "store", None, "Releases",
-        [
-            "every published tree, in a Git repository per scenario;",
-            "ScenarioCommitter writes them, and the newest is the head",
-        ],
-    ),
-    (
-        2, "B2", 2, "store", None, "Records",
-        ["the raw traces: each call with its reply, and each report;", "a report names its calls by agent_record_id, per scenario"],
-    ),
-    (3, "B3", 2, "reef", None, "Workspace", []),
-    (2, "B3", 1, "reef", 5, "Method", ["`step(context)", "edits the copy; its services:", "models, calls, check, evaluate"]),
-    (1, "B3", 1, "reef", 6, "Check", ["`validate_tree", "refuses a file that no part", "takes, or that its format refuses"]),
-    (
-        2, "B4", 2, "reef", 7, "Evaluation",
-        [
-            "`HarnessEpisodeEvaluator",
-            "renders the candidate and the head with the served model,",
-            "runs each task as an episode, scores it with the EpisodeScorer;",
-            "the history keeps each score, so an episode runs once",
-        ],
-    ),
-    (
-        4, "B4", 1, "reef", None, "Episodes",
-        ["`run.episode", "the pinned agent in a root of", "its own; its model calls use", "the scenario's evaluation route"],
-    ),
-    (1, "B4", 1, "reef", None, "Policy", ["`ComparePolicy, FloorPolicy", "turns the scores into a", "SelectionDecision"]),
-    (
-        0, "B4", 1, "reef", 8, "Release rule",
-        ["`ReleaseRules", "selected: published", "needs review: held", "rejected: not published"],
-    ),
-]  # fmt: skip
-
-# Rows of a key and its description; a continued description has no key. reef-client's commands:
-CLIENT_COMMANDS = [
-    ("connect", "installs the agent at Reef's version, adds its command"),
-    ("run", "installs the newest release and starts the agent on it;"),
-    ("", "sends back what the session changed, in the background"),
-    ("sync", "sends changes and installs the head, without the agent"),
-]
-
-# The workspace's directories.
-WORKSPACE_DIRS = [
-    ("harness/", "a copy of the head; the method edits it"),
-    ("material/traces/", "the raw traces from Records, one per report:"),
-    ("", "its calls in order, its score and its feedback"),
-    ("state/", "the method's own files, kept between steps"),
-]
-
-# The adapter's sections, one per column: the key, then what it declares.
-ADAPTER_SECTIONS = [
-    ("evolve", "the kinds of file Reef may", "change, at the agent's paths"),
-    ("dirs, sessions", "the agent's directories", "and its session files"),
-    ("model", "how the agent reaches a", "model; episodes bind it"),
-    ("run.episode", "one evaluation episode:", "its command and env"),
-    ("run.layer, install", "the layer, and the agent's", "version, for the client"),
+    (0, "A1", 1, "machine", None, "Agent command", "runs reef-client"),
+    (2, "A1", 1, "machine", None, "Layer install", "the head, rendered"),
+    (3, "A1", 1, "machine", None, "Your own config", "Reef never reads it"),
+    (0, "A2", 2, "machine", None, "reef-client", "`connect · run · sync"),
+    (2, "A2", 2, "machine", 1, "Your agent", "`claude · pi · opencode · codex"),
+    (4, "A2", 1, "store", None, "Model provider", "OpenAI or Anthropic API"),
+    (0, "B1", 1, "reef", None, "Client install", "the head as a layer"),
+    (1, "B1", 1, "reef", None, "Client import", "merges onto the head"),
+    (2, "B1", 1, "reef", 3, "Feedback", "a score per session"),
+    (3, "B1", 1, "reef", 2, "Model proxy", "forwards and records"),
+    (0, "B2", 2, "store", None, "Releases", "every tree, in Git; the newest is the head"),
+    (2, "B2", 2, "store", None, "Records", "raw traces: model calls and reports"),
+    (3, "B3", 2, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),
+    (2, "B3", 1, "reef", 5, "Method", "`step(context)"),
+    (1, "B3", 1, "reef", 6, "Check", "`validate_tree"),
+    (2, "B4", 2, "reef", 7, "Evaluation", "runs each task as an episode, scores it"),
+    (4, "B4", 1, "reef", None, "Episodes", "`run.episode"),
+    (1, "B4", 1, "reef", None, "Policy", "compare or floor"),
+    (0, "B4", 1, "reef", 8, "Release rule", "publish, hold or drop"),
 ]
 
 
 def write(x, y, s, size, fill, weight=500, anchor="start", mono=False):
     return text(x, y, escape(s), size, 400 if mono else weight, fill, anchor, mono=mono)
-
-
-def note(p, x, y, s, anchor="start", mono=False, color=None):
-    return write(x, y, s, MONO, color or p["muted"], anchor=anchor, mono=mono)
 
 
 def zone(p, x0, y0, x1, y1, kind, opacity, dashed=False):
@@ -169,24 +95,29 @@ def zone(p, x0, y0, x1, y1, kind, opacity, dashed=False):
     )
 
 
-def card(p, x, y, w, h, kind, title, lines, badge=None, dashed=False):
-    """A box: an optional step number, a title, then its lines."""
+def badge(p, x, y, number, kind):
+    """A step number in a filled circle centered at (x, y)."""
+    return f'<circle cx="{x}" cy="{y}" r="12" fill="{p[kind]}"/>' + write(
+        x, y + 5, str(number), 14, p["card"], 600, "middle"
+    )
+
+
+def card(p, x, y, w, kind, title, line, number=None, dashed=False):
+    """A box: an optional step number, a title, and one line."""
     dash = ' stroke-dasharray="6 4"' if dashed else ""
     out = [
-        f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="9" fill="{p["card"]}" '
+        f'<rect x="{x}" y="{y}" width="{w}" height="{BOX_H}" rx="9" fill="{p["card"]}" '
         f'stroke="{p[kind]}" stroke-width="1.4"{dash}/>'
     ]
     title_x = x + 18
-    if badge is not None:
-        out.append(f'<circle cx="{x + 29}" cy="{y + 28}" r="12" fill="{p[kind]}"/>')
-        out.append(write(x + 29, y + 33, str(badge), 14, p["card"], 600, "middle"))
+    if number is not None:
+        out.append(badge(p, x + 29, y + 27, number, kind))
         title_x = x + 50
-    out.append(write(title_x, y + 34, title, TITLE, p["ink"], 600))
-    for k, line in enumerate(lines):
-        if line.startswith("`"):
-            out.append(write(x + 18, y + 58 + k * 21, line[1:], MONO, p["ink"], mono=True))
-        else:
-            out.append(write(x + 18, y + 58 + k * 21, line, BODY, p["muted"]))
+    out.append(write(title_x, y + 33, title, TITLE, p["ink"], 600))
+    if line.startswith("`"):
+        out.append(write(x + 18, y + 57, line[1:], MONO, p["ink"], mono=True))
+    else:
+        out.append(write(x + 18, y + 57, line, BODY, p["muted"]))
     return "".join(out)
 
 
@@ -199,6 +130,11 @@ def path(p, points, color=None, width=1.3):
         f'<path d="M{" L".join(f"{x} {y}" for x, y in points)}" fill="none" stroke="{color}" '
         f'stroke-width="{width}" stroke-linejoin="round" stroke-linecap="round"/>'
     ) + arrow(x1, y1, direction, color)
+
+
+def pair(p, x, y0, y1):
+    """A request from y0 to y1 at x, and its answer back beside it."""
+    return path(p, [(x, y0), (x, y1)]) + path(p, [(x + 12, y1), (x + 12, y0)], p["muted"])
 
 
 def render(theme: str, fonts) -> str:
@@ -214,130 +150,94 @@ def render(theme: str, fonts) -> str:
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
             f"aria-label=\"Harness evolution in Reef. On the person's machine, reef-client installs the head as a "
             f"layer over the person's own configuration and starts the agent. The agent's model calls go through "
-            f"Reef's model proxy, which records them, and a report scores a session. In Reef, the pipeline batches "
-            f"the reports, a method edits a copy of the head, the check and the evaluation test the candidate, and "
-            f"the release rule publishes a selected candidate as the new head. After a session, the client sends "
-            f'the changed files back, and Reef merges them onto the head.">'
+            f"Reef's model proxy, which records them, and a report scores a session. In a training step, the "
+            f"workspace gets the head and a batch of raw traces, a method edits the copy, the check and the "
+            f"evaluation test the candidate, and the release rule publishes a selected candidate as the new head. "
+            f'After a session, the client sends the changed files back, and Reef merges them onto the head.">'
         ),
         f"<style>\n{faces}</style>",
-        write(40, 46, "Harness evolution: what runs where", 24, p["ink"], 600),
-        write(40, 72, "Numbers 1 to 8 follow one session into one training step.", 15, p["muted"]),
+        write(40, 44, "Harness evolution: what runs where", 24, p["ink"], 600),
+        write(40, 68, "Numbers 1 to 8 follow one session into one training step.", 15, p["muted"]),
     ]
     legend_x = W - 40
     for label, kind in reversed([("your machine", "machine"), ("Reef", "reef"), ("storage and outside", "store")]):
         legend_x -= len(label) * 7.2
-        o.append(write(legend_x, 46, label, 14, p["muted"]))
+        o.append(write(legend_x, 44, label, 14, p["muted"]))
         o.append(
-            f'<rect x="{legend_x - 22}" y="35" width="14" height="14" rx="3" fill="{p[kind]}" '
+            f'<rect x="{legend_x - 22}" y="33" width="14" height="14" rx="3" fill="{p[kind]}" '
             f'fill-opacity="0.18" stroke="{p[kind]}" stroke-width="1.2"/>'
         )
         legend_x -= 46
 
     # The zones, under the boxes: the person's machine, the provider outside it, Reef, and one training step.
     o.append(zone(p, 40, MACHINE_TOP, X[3] + COL_W + 14, MACHINE_BOTTOM, "machine", p["tint"]))
-    o.append(cap(56, 118, "your machine", p["machine"]))
+    o.append(cap(56, MACHINE_TOP + 24, "your machine", p["machine"]))
     o.append(zone(p, X[4] - 14, MACHINE_TOP, W - 40, MACHINE_BOTTOM, "store", p["tint"], dashed=True))
-    o.append(cap(X[4], 118, "outside", p["store"]))
+    o.append(cap(X[4], MACHINE_TOP + 24, "outside", p["store"]))
     o.append(zone(p, 40, REEF_TOP, W - 40, REEF_BOTTOM, "reef", p["tint"]))
-    o.append(cap(56, REEF_TOP + 26, "reef service", p["reef"]))
+    o.append(cap(56, REEF_TOP + 24, "reef service", p["reef"]))
     o.append(zone(p, 48, BAND_TOP, W - 48, BAND_BOTTOM, "reef", p["band"]))
-    o.append(cap(72, B3 + 30, "one training step", p["reef"]))
-    o.append(note(p, 72, B3 + 54, "the trainer runs it"))
-    o.append(note(p, 72, B3 + 72, "through HarnessBackend"))
+    o.append(cap(72, B3 + 44, "one training step", p["reef"]))
 
-    for column, row, span, kind, badge, title, lines in BOXES:
-        top, height = ROWS[row]
-        o.append(card(p, X[column], top, WIDE if span == 2 else COL_W, height, kind, title, lines, badge))
-    for x, y, indent, rows in [(X[0], A2, 86, CLIENT_COMMANDS), (X[3], B3, 142, WORKSPACE_DIRS)]:
-        for k, (key, description) in enumerate(rows):
-            o.append(write(x + 18, y + 60 + k * 21, key, MONO, p["ink"], mono=True))
-            o.append(write(x + 18 + indent, y + 60 + k * 21, description, BODY, p["muted"]))
-    o.append(card(p, X[0], B5, X[4] + COL_W - X[0], B5_H, "reef", "Adapter", [], dashed=True))
-    o.append(write(X[0] + 104, B5 + 34, "reef/harness/adapters/<agent>/adapter.yaml", MONO, p["ink"], mono=True))
+    for column, row, span, kind, number, title, line in BOXES:
+        o.append(card(p, X[column], ROWS[row], WIDE if span == 2 else COL_W, kind, title, line, number))
+    o.append(card(p, X[0], B5, X[4] + COL_W - X[0], "reef", "Adapter", "", dashed=True))
+    o.append(write(X[0] + 104, B5 + 33, "reef/harness/adapters/<agent>/adapter.yaml", MONO, p["ink"], mono=True))
     o.append(
         write(
-            X[2] + 120, B5 + 34,
-            "Reef reads it. The client gets run.layer and install in the head's client form.", BODY, p["muted"],
+            X[0] + 18,
+            B5 + 57,
+            "evolve · dirs · sessions · model · run.episode · run.layer",
+            MONO,
+            p["muted"],
+            mono=True,
         )
-    )  # fmt: skip
-    for k, (key, line1, line2) in enumerate(ADAPTER_SECTIONS):
-        o.append(write(X[k] + 18, B5 + 66, key, MONO, p["ink"], mono=True))
-        o.append(write(X[k] + 18, B5 + 87, line1, BODY, p["muted"]))
-        o.append(write(X[k] + 18, B5 + 108, line2, BODY, p["muted"]))
+    )
 
     # On the machine: the command runs the client; the client writes the install and starts the agent.
-    shim_x, install_x, layer_x, config_x = X[0] + 130, X[1] + 130, X[2] + 130, X[3] + 130
-    o.append(path(p, [(shim_x, A1 + A1_H), (shim_x, A2)]))
-    o.append(note(p, shim_x + 10, A1 + A1_H + 29, "runs"))
-    o.append(path(p, [(install_x, A2), (install_x, A1 + 59), (X[2], A1 + 59)]))
-    o.append(note(p, install_x + 12, A1 + 33, "writes the files"))
-    o.append(note(p, install_x + 12, A1 + 50, "that differ"))
-    o.append(path(p, [(X[0] + WIDE, A2 + 40), (X[2], A2 + 40)]))
-    o.append(path(p, [(layer_x, A1 + A1_H), (layer_x, A2)]))
-    o.append(path(p, [(layer_x + 12, A2), (layer_x + 12, A1 + A1_H)], p["muted"]))
-    o.append(note(p, layer_x + 26, A1 + A1_H + 20, "loads it as a layer"))
-    o.append(note(p, layer_x + 26, A1 + A1_H + 38, "the session's edits"))
-    o.append(path(p, [(config_x, A1 + A1_H), (config_x, A2)]))
-    o.append(note(p, config_x + 10, A1 + A1_H + 29, "loads first"))
+    middle_a1, middle_a2 = A1 + BOX_H // 2, A2 + BOX_H // 2
+    o.append(path(p, [(X[0] + 110, A1 + BOX_H), (X[0] + 110, A2)]))
+    o.append(path(p, [(X[1] + 110, A2), (X[1] + 110, middle_a1), (X[2], middle_a1)]))
+    o.append(path(p, [(X[1] + COL_W, middle_a2), (X[2], middle_a2)]))
+    o.append(path(p, [(X[2] + 110, A1 + BOX_H), (X[2] + 110, A2)]))
+    o.append(path(p, [(X[2] + 122, A2), (X[2] + 122, A1 + BOX_H)], p["muted"]))
+    o.append(path(p, [(X[3] + 110, A1 + BOX_H), (X[3] + 110, A2)]))
 
     # The routes between the machine and Reef: each request down, with its answer up beside it.
-    top, bottom = A2 + A2_H, B1
-    request_y, answer_y = MACHINE_BOTTOM + 24, REEF_TOP - 14
-    get_x = X[0] + COL_W - 30
-    o.append(path(p, [(get_x, top), (get_x, bottom)]))
-    o.append(path(p, [(get_x + 12, bottom), (get_x + 12, top)], p["muted"]))
-    o.append(note(p, get_x - 10, request_y, "GET /reef/harness?form=client", "end", mono=True, color=p["ink"]))
-    o.append(note(p, get_x - 10, answer_y, "files, args, env, install", "end", mono=True))
-    for x, request, answer in [
-        (X[1] + 36, "POST /reef/harness/import", "merged head, or conflicts"),
-        (X[3] + 36, "POST /reef/scenarios/<s>/v1/*", "reply, x-reef-agent-record-id"),
-    ]:
-        o.append(path(p, [(x, top), (x, bottom)]))
-        o.append(path(p, [(x + 12, bottom), (x + 12, top)], p["muted"]))
-        o.append(note(p, x + 26, request_y, request, mono=True, color=p["ink"]))
-        o.append(note(p, x + 26, answer_y, answer, mono=True))
-    report_x = X[2] + 36
-    o.append(path(p, [(report_x, top), (report_x, bottom)]))
-    o.append(note(p, report_x + 14, request_y, "POST /reef/report", mono=True, color=p["ink"]))
-    o.append(note(p, report_x + 14, answer_y, "references, score, feedback", mono=True))
-    provider_x = X[4] + 130
-    o.append(path(p, [(X[3] + COL_W, B1 + 40), (provider_x, B1 + 40), (provider_x, A2 + A2_H)]))
-    o.append(note(p, provider_x + 10, MACHINE_BOTTOM + 30, "forwards each call"))
-    o.append(note(p, provider_x + 10, MACHINE_BOTTOM + 48, "and returns its reply"))
+    top, bottom, route_y = A2 + BOX_H, B1, MACHINE_BOTTOM + 34
+    o.append(pair(p, X[0] + COL_W - 24, top, bottom))
+    o.append(write(X[0] + COL_W - 34, route_y, "GET /reef/harness", MONO, p["ink"], anchor="end", mono=True))
+    o.append(pair(p, X[1] + 30, top, bottom))
+    o.append(write(X[1] + 56, route_y, "POST /reef/harness/import", MONO, p["ink"], mono=True))
+    o.append(path(p, [(X[2] + 30, top), (X[2] + 30, bottom)]))
+    o.append(write(X[2] + 44, route_y, "POST /reef/report", MONO, p["ink"], mono=True))
+    o.append(pair(p, X[3] + 30, top, bottom))
+    o.append(write(X[3] + 56, route_y, "POST /reef/scenarios/<s>/v1/*", MONO, p["ink"], mono=True))
+    o.append(path(p, [(X[3] + COL_W, B1 + 38), (X[4] + 110, B1 + 38), (X[4] + 110, A2 + BOX_H)]))
 
     # In Reef: the routes read and write the storage.
-    for x, s, up in [
-        (X[0] + 130, "the head", True),
-        (X[1] + 130, "commit: import", False),
-        (X[2] + 130, "reports", False),
-        (X[3] + 130, "calls", False),
-    ]:
-        o.append(path(p, [(x, B2), (x, B1 + B1_H)] if up else [(x, B1 + B1_H), (x, B2)]))
-        o.append(note(p, x + 10, B1 + B1_H + 32, s))
+    o.append(path(p, [(X[0] + 110, B2), (X[0] + 110, B1 + BOX_H)]))
+    o.extend(path(p, [(x, B1 + BOX_H), (x, B2)]) for x in (X[1] + 110, X[2] + 110, X[3] + 110))
 
-    # One training step: the workspace gets the head and a batch of raw traces; then method, check, evaluation,
-    # policy, release rule.
-    head_route = [(X[1] + 200, B2 + B2_H), (X[1] + 200, B2 + B2_H + 32), (X[3] + 60, B2 + B2_H + 32), (X[3] + 60, B3)]
-    o.append(path(p, head_route))
-    o.append(note(p, X[1] + 214, B2 + B2_H + 25, "the head, into harness/"))
-    traces_x = X[3] + 220
-    o.append(path(p, [(traces_x, B2 + B2_H), (traces_x, B3)]))
-    o.append(f'<circle cx="{traces_x + 24}" cy="{B2 + B2_H + 23}" r="11" fill="{p["reef"]}"/>')
-    o.append(write(traces_x + 24, B2 + B2_H + 28, "4", 13, p["card"], 600, "middle"))
-    o.append(write(traces_x + 42, B2 + B2_H + 28, "batch: the raw traces, into material/", BODY, p["ink"]))
-    o.append(note(p, traces_x + 42, B2 + B2_H + 47, "evolution.batch_size reports per job", mono=True))
-    o.extend(path(p, [(X[k], B3 + B3_H // 2), (X[k - 1] + COL_W, B3 + B3_H // 2)]) for k in (3, 2))
-    check_x, evaluation_x = X[1] + 130, X[2] + 72
-    o.append(path(p, [(check_x, B3 + B3_H), (check_x, B4 - 28), (evaluation_x, B4 - 28), (evaluation_x, B4)]))
-    o.append(note(p, check_x + 12, B4 - 34, "the candidate"))
-    o.append(path(p, [(X[2] + WIDE, B4 + 50), (X[4], B4 + 50)]))
-    o.append(path(p, [(X[4], B4 + 70), (X[2] + WIDE, B4 + 70)], p["muted"]))
-    o.append(path(p, [(X[2], B4 + 70), (X[1] + COL_W, B4 + 70)]))
-    o.append(path(p, [(X[1], B4 + 70), (X[0] + COL_W, B4 + 70)]))
-    commit_x = X[0] + COL_W - 40
-    o.append(path(p, [(commit_x, B4), (commit_x, B2 + B2_H)], p["reef"], width=1.8))
-    o.append(note(p, commit_x - 10, B4 - 36, "published:", "end", color=p["reef"]))
-    o.append(note(p, commit_x - 10, B4 - 18, "the new head", "end", color=p["reef"]))
+    # One training step: the workspace gets the head and a batch of raw traces; then the method, the check, the
+    # evaluation, the policy and the release rule.
+    route_y = B2 + BOX_H + 32
+    o.append(path(p, [(X[1] + 150, B2 + BOX_H), (X[1] + 150, route_y), (X[3] + 40, route_y), (X[3] + 40, B3)]))
+    o.append(write(X[1] + 164, route_y - 8, "the head", MONO, p["muted"], mono=True))
+    traces_x = X[3] + 170
+    o.append(path(p, [(traces_x, B2 + BOX_H), (traces_x, B3)]))
+    o.append(badge(p, traces_x + 26, route_y - 2, 4, "reef"))
+    o.append(write(traces_x + 46, route_y + 3, "a batch of raw traces", BODY, p["ink"]))
+    o.extend(path(p, [(X[k], B3 + BOX_H // 2), (X[k - 1] + COL_W, B3 + BOX_H // 2)]) for k in (3, 2))
+    check_x, evaluation_x, elbow_y = X[1] + 110, X[2] + 60, B4 - 28
+    o.append(path(p, [(check_x, B3 + BOX_H), (check_x, elbow_y), (evaluation_x, elbow_y), (evaluation_x, B4)]))
+    o.append(write(check_x + 12, elbow_y - 7, "the candidate", MONO, p["muted"], mono=True))
+    o.append(path(p, [(X[3] + COL_W, B4 + 30), (X[4], B4 + 30)]))
+    o.append(path(p, [(X[4], B4 + 46), (X[3] + COL_W, B4 + 46)], p["muted"]))
+    o.extend(path(p, [(X[k], B4 + BOX_H // 2), (X[k - 1] + COL_W, B4 + BOX_H // 2)]) for k in (2, 1))
+    commit_x = X[0] + COL_W - 16
+    o.append(path(p, [(commit_x, B4), (commit_x, B2 + BOX_H)], p["reef"], width=1.8))
+    o.append(write(commit_x - 10, elbow_y - 7, "published", MONO, p["reef"], anchor="end", mono=True))
 
     o.append("</svg>")
     return "\n".join(o)
