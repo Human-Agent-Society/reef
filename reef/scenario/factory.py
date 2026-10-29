@@ -381,6 +381,7 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
+                samples=store.samples,
             )
             if any(
                 component_trainer.trainer.trains
