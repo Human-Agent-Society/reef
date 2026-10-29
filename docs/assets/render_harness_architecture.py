@@ -17,7 +17,7 @@ from pathlib import Path
 from render_architecture import arrow, cap, font_files, text
 
 ROOT = Path(__file__).resolve().parent
-W, H = 1556, 1460
+W, H = 1556, 1482
 
 THEMES = {
     "light": {
@@ -55,9 +55,9 @@ ROWS = {
     "A2": (298, 140),
     "B1": (574, 118),
     "B2": (748, 96),
-    "B3": (932, 118),
-    "B4": (1106, 140),
-    "B5": (1290, 122),
+    "B3": (932, 140),
+    "B4": (1128, 140),
+    "B5": (1312, 122),
 }
 A1, A1_H = ROWS["A1"]
 A2, A2_H = ROWS["A2"]
@@ -67,8 +67,8 @@ B3, B3_H = ROWS["B3"]
 B4, B4_H = ROWS["B4"]
 B5, B5_H = ROWS["B5"]
 MACHINE_TOP, MACHINE_BOTTOM = 92, 454
-REEF_TOP, REEF_BOTTOM = 534, 1430
-BAND_TOP, BAND_BOTTOM = 900, 1266
+REEF_TOP, REEF_BOTTOM = 534, 1452
+BAND_TOP, BAND_BOTTOM = 900, 1288
 
 TITLE, BODY, MONO = 18, 14, 13
 
@@ -105,7 +105,10 @@ BOXES = [
         ["each call with its reply, and each report, per scenario;", "a report names its calls by agent_record_id"],
     ),
     (4, "B3", 1, "reef", 4, "Batch", ["the pipeline selects reports", "and makes one job of", "`evolution.batch_size"]),
-    (3, "B3", 1, "reef", None, "Workspace", ["a copy of the head in harness/,", "and the job's traces with", "their scores and feedback"]),
+    (
+        3, "B3", 1, "reef", None, "Workspace",
+        ["harness/: a copy of the head", "material/: one trace per report,", "its calls, score and feedback", "state/: the method's own files"],
+    ),
     (2, "B3", 1, "reef", 5, "Method", ["`step(context)", "edits the copy; its services:", "models, calls, check, evaluate"]),
     (1, "B3", 1, "reef", 6, "Check", ["`validate_tree", "refuses a file that no part", "takes, or that its format refuses"]),
     (
@@ -320,7 +323,8 @@ def render(theme: str, fonts) -> str:
     ]
     o.append(path(p, head_route))
     o.append(note(p, X[1] + 214, B2 + B2_H + 25, "the head"))
-    o.extend(path(p, [(X[k], B3 + 59), (X[k - 1] + COL_W, B3 + 59)]) for k in (4, 3, 2))
+    o.extend(path(p, [(X[k], B3 + B3_H // 2), (X[k - 1] + COL_W, B3 + B3_H // 2)]) for k in (4, 3, 2))
+    o.append(note(p, X[4] - GAP // 2, B3 - 10, "the job's traces", "middle"))
     check_x, evaluation_x = X[1] + 130, X[2] + 72
     o.append(path(p, [(check_x, B3 + B3_H), (check_x, B4 - 28), (evaluation_x, B4 - 28), (evaluation_x, B4)]))
     o.append(note(p, check_x + 12, B4 - 34, "the candidate"))
