@@ -36,6 +36,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.registry import build_named_recipe
+from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
@@ -120,16 +122,11 @@ def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
 # -- the grader: exact last-line answers ---------------------------------------------------------
 
 
-def test_evaluate_grades_exact_final_lines(evolution) -> None:
+def test_evaluate_grades_exact_final_lines_and_anything_else_as_zero(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
     assert evolution.evaluate(task, rollout((pi_message(f"Working...\n\n{answer}"),))) == 1.0
     assert evolution.evaluate(task, rollout(({"role": "assistant", "content": answer},))) == 1.0
-
-
-def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
-    prefix, answer = next(iter(evolution.ANSWERS.items()))
-    task = f"{prefix} the task"
     assert evolution.evaluate(task, rollout((pi_message(f"{answer}!"),))) == 0.0
     assert evolution.evaluate(task, rollout((pi_message(f"The answer is {answer}"),))) == 0.0
     assert evolution.evaluate(task, rollout(())) == 0.0
@@ -247,8 +244,6 @@ def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> 
 
     Its state goes under ``tmp_path``; ``evolution`` sets further ``evolution`` keys.
     """
-    from reef.service.assembly import _upstream_runtime
-
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / filename)
     materialized = tmp_path / "harness_evolve.yaml"
@@ -333,9 +328,6 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
 ) -> None:
     """The README deployment: ``reef.recipe: deployment`` is read back from the directory the service's own env
     names; a stale directory name here fails at boot, so the file's own paths are checked against the checkout."""
-    from reef.recipe.registry import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
-
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", model_id)
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
@@ -380,8 +372,6 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
 def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> None:
     """The long-running deployment takes requests and holds a win that touches a code extension until a person
     activates it; the two demo files run in auto, where a request is refused, and hold nothing back."""
-    from reef.service.assembly import _serving_recipe
-
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")

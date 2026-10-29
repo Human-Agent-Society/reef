@@ -93,7 +93,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    # Runs the suite in parallel, as CI does (-n 8 --dist loadfile).
+    # Runs the suite in parallel, as CI does (-n 8; addopts selects --dist worksteal).
     "pytest-xdist==3.8.0",
     "ruff==0.17.2",
 ]
@@ -235,9 +235,11 @@ precision = 1
 fail_under = 80
 
 [tool.pytest.ini_options]
-# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with duration = 0.00s
-addopts = "--verbose --pyargs --durations=0 --strict-markers --import-mode=importlib"
+# Report the 20 slowest tests; --durations=0 lists every test.
+# With -n, worksteal spreads single tests over the workers and moves queued
+# tests from a busy worker to an idle one, so one slow file cannot hold the run.
+# Every test must therefore pass alone and in any order. Without -n, --dist has no effect.
+addopts = "--verbose --pyargs --durations=20 --strict-markers --import-mode=importlib --dist worksteal"
 testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
 # directories to ignore when discovering tests
 norecursedirs = [
