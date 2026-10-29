@@ -269,8 +269,8 @@ end. Each checkpoint is a candidate that Reef can publish.
 Train SFT for some jobs of another recipe
 -----------------------------------------
 
-A recipe can train some jobs with SFT, for example its trajectory jobs before
-RL task jobs, as the SFT-then-RL recipe does. Its ``parameters_by_kind()``
+A recipe can train some jobs with SFT, for example its trajectory jobs, and its
+task jobs with a policy objective. Its ``parameters_by_kind()``
 puts ``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
 parameter of the jobs of that kind (`Train each kind of sample with its own
 method

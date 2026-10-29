@@ -389,8 +389,8 @@ held-out tasks. It adds the tasks to the scenario's imported tasks, which the
 `task-import section <../user-guide/operate.rst#import-harbor-tasks>`__ also
 adds to. A task's name is its ID among the scenario's training samples, so it
 cannot be the ID of an uploaded trajectory. An upload to the
-``train`` split needs a recipe that trains on imported tasks, such as the
-SFT-then-RL recipe (`SFT then RL <configuration.rst#sft-then-rl>`__). If the
+``train`` split needs a recipe that trains on imported tasks
+(``Sample2Job.accepts_imported_tasks``); no built-in recipe does. If the
 recipe does not, Reef refuses the upload with 400. The ``eval`` split takes
 tasks for any recipe, because an `artifact evaluation <#evaluate-an-artifact>`__
 runs them.
