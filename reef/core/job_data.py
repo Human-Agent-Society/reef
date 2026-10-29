@@ -129,7 +129,7 @@ class JobData:
     ``<scenario>:instruction:<request id>`` for an instruction's data.
     ``samples`` is a tuple of ``TrajectorySample`` and ``TaskSample`` values in
     the order of the sample-to-job stage; it can be empty, for a harness step
-    that runs an instruction alone. ``request`` is the training instruction that
+    that runs an instruction with no held samples. ``request`` is the training instruction that
     the data carries, or None. The constructor refuses other sample types.
     Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming

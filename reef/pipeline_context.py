@@ -18,7 +18,7 @@ from reef.storage.tasks import TaskStorage
 class PipelineContext:
     """What the training pipeline and its stages read for one scenario: its report contract, logger, and mode.
 
-    Values: ``training_mode`` is ``auto``, ``manual`` or ``hybrid``;
+    Values: ``training_mode`` is ``auto`` or ``manual``;
     ``default_job_samples`` is None or a positive int; ``Trainer.build`` gives
     None to a trainer that trains nothing. The constructor refuses other values.
     Purpose: ``Trainer.build`` makes it. The pipeline and each stage's
@@ -42,8 +42,8 @@ class PipelineContext:
     manual_enabled: bool = True
 
     def __post_init__(self) -> None:
-        if self.training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if self.training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         if self.default_job_samples is not None and (
             not isinstance(self.default_job_samples, int)
             or isinstance(self.default_job_samples, bool)

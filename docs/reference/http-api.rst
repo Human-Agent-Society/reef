@@ -533,8 +533,8 @@ Manual training
 ---------------
 
 ``POST /reef/train`` queues one training instruction for a scenario in
-``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
-proposer that accepts ``requests``). It takes the user's ``text``,
+``data.training_mode: manual``. In a harness evolution scenario the proposer
+must accept ``requests``. It takes the user's ``text``,
 originating ``session`` and ``release_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
@@ -568,16 +568,19 @@ what the change added. Nothing on the service runs a check:
 the install script only reads the check offs, and the update notice prints
 the setup list instead of the update while an item is unmet.
 
-The three modes differ in what starts a step. ``auto``, the default,
-trains on traffic and refuses an instruction with HTTP 400. ``manual``
-runs instructions only and never trains on traffic; harness evolution
-runs an instruction alone, without samples. ``hybrid`` trains on traffic and
-runs instructions: a queued instruction goes first, oldest first, one per
-step, and the units that automatic job data would take next, up to
-``job_samples`` traces (by default ``evolution.batch_size``) and possibly none, ride beside it
-as the samples of its data (scored traces, or unscored records when the
-``pipeline`` section names the inference stages), so the proposer reads the
-request next to them; with none queued the step trains as ``auto`` does.
+The two modes differ in what starts a step. ``auto``, the default,
+trains on traffic when ``job_samples`` samples are held, and refuses an
+instruction with HTTP 400. ``manual`` starts a step only for an instruction,
+oldest first, one per step. The instruction's data takes the units that
+automatic job data would take next, up to ``job_samples``:
+
+- A weight recipe waits until ``job_samples`` samples are held, then trains
+  them. The instruction is the request to train; its ``text`` goes into the
+  commit's ``training_request`` metrics.
+- Harness evolution runs the instruction at once, with up to ``job_samples``
+  traces (by default ``evolution.batch_size``) and possibly none. The traces
+  are scored traces, or unscored records when the ``pipeline`` section names
+  the inference stages. The proposer reads the request next to them.
 
 .. code:: bash
 
@@ -597,7 +600,7 @@ instruction (a proposer error, for one) is not retried: the next step
 consumes the instruction with a committed row whose ``skipped`` reads
 ``instruction failed`` and whose ``error`` carries the failure, and the
 queue moves on. Send the instruction again to run it again. That row
-consumes the instruction alone: in ``hybrid`` the units that rode beside it
+consumes the instruction alone: the units that rode beside it
 stay held for the next job, so no failing trace is consumed unread. The
 ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
 every step, instruction steps included, and stop automatic steps only; an
@@ -747,13 +750,13 @@ changed. To change the data processor's mode:
    {"training_mode": "manual"}
 
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
-The values are ``auto``, ``manual`` and ``hybrid``: ``"auto"`` resumes recipe
-training alone, ``"hybrid"`` keeps it and takes instructions too. The change
-selects subsequent job data; job data already reserved or running completes
-in its original mode. The modes share buffered data, so auto and hybrid can
-train on traffic collected while manual was selected. Accepted instructions
-wait for a mode that takes them, including instructions not yet read when
-the selector changes to auto.
+The values are ``auto`` and ``manual``: ``"auto"`` starts a job whenever
+``job_samples`` samples are held, and ``"manual"`` starts one only for an
+instruction. The change selects subsequent job data; job data already
+reserved or running completes in its original mode. The modes share buffered
+data, so auto can train on traffic collected while manual was selected.
+Accepted instructions wait for manual, including instructions not yet read
+when the selector changes to auto.
 
 A Reef process runs at most one scenario that trains full weights, on a single
 thread, so preparation, remote execution, and commit never interleave. It may
@@ -763,8 +766,8 @@ so record acceptance never waits for artifact evolution.
 
 Unknown scenarios return ``404`` without implicit creation; invalid payloads
 return ``400``. A processor that does not support the requested mode returns
-``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
-require a proposer that explicitly accepts ``requests``.
+``501`` without changing its state. Harness ``manual`` also
+requires a proposer that explicitly accepts ``requests``.
 
 ``GET /reef/status`` reports the selected ``training_mode``. Reef stores the
 mode with the scenario's settings, so a reload and a restart keep it.
@@ -1167,9 +1170,8 @@ Harness requests
 
 ``reef-<adapter> harness "<request>"`` and pi's ``/reefine <request>``
 submit the user's instruction through ``POST /reef/train``, described under
-`Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
-(the deployment keeps learning from failures) or ``manual``, or switch an
-existing scenario with ``POST /reef/scenarios/{scenario}/update``.
+`Manual training <#manual-training>`__. Set ``data.training_mode: manual``,
+or switch an existing scenario with ``POST /reef/scenarios/{scenario}/update``.
 The commands send ``text``, ``session`` and the installed ``release_id``;
 HTTP 200 acknowledges durable acceptance and returns ``agent_record_id``.
 They require no inference receipts and leave captured receipts available for

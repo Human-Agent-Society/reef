@@ -313,52 +313,17 @@
    "request": null
   }
  ],
- "cordis_hybrid": [
+ "cordis_manual_cap": [
   {
-   "data_id": "s:data:1",
+   "data_id": "s:instruction:train-1",
    "consumed": [
     "i-c-0",
     "i-c-1",
-    "r-c-0",
-    "r-c-1"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 0.0,
-     "sources": [
-      "i-c-0",
-      "r-c-0"
-     ],
-     "training": {}
-    },
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 1.0,
-     "sources": [
-      "i-c-1",
-      "r-c-1"
-     ],
-     "training": {}
-    }
-   ],
-   "released": [
-    "i-c-0",
-    "i-c-1",
-    "r-c-0",
-    "r-c-1"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:data:2",
-   "consumed": [
     "i-c-2",
-    "i-c-3",
+    "r-c-0",
+    "r-c-1",
     "r-c-2",
-    "r-c-3"
+    "train-1"
    ],
    "items": [
     {
@@ -370,7 +335,27 @@
       "r-c-2"
      ],
      "training": {}
-    },
+    }
+   ],
+   "released": [
+    "i-c-0",
+    "i-c-1",
+    "i-c-2",
+    "r-c-0",
+    "r-c-1",
+    "r-c-2",
+    "train-1"
+   ],
+   "request": "train-1"
+  },
+  {
+   "data_id": "s:instruction:train-2",
+   "consumed": [
+    "i-c-3",
+    "r-c-3",
+    "train-2"
+   ],
+   "items": [
     {
      "group": null,
      "recipe": {},
@@ -383,120 +368,8 @@
     }
    ],
    "released": [
-    "i-c-2",
     "i-c-3",
-    "r-c-2",
-    "r-c-3"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:data:3",
-   "consumed": [
-    "i-c-4",
-    "i-c-5",
-    "r-c-4",
-    "r-c-5"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 4.0,
-     "sources": [
-      "i-c-4",
-      "r-c-4"
-     ],
-     "training": {}
-    },
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 5.0,
-     "sources": [
-      "i-c-5",
-      "r-c-5"
-     ],
-     "training": {}
-    }
-   ],
-   "released": [
-    "i-c-4",
-    "i-c-5",
-    "r-c-4",
-    "r-c-5"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:instruction:train-1",
-   "consumed": [
-    "train-1"
-   ],
-   "items": [],
-   "released": [
-    "train-1"
-   ],
-   "request": "train-1"
-  },
-  {
-   "data_id": "s:instruction:train-2",
-   "consumed": [
-    "i-c-6",
-    "r-c-6",
-    "train-2"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 1.0,
-     "sources": [
-      "i-c-6",
-      "r-c-6"
-     ],
-     "training": {}
-    }
-   ],
-   "released": [
-    "i-c-6",
-    "r-c-6",
-    "train-2"
-   ],
-   "request": "train-2"
-  }
- ],
- "cordis_manual_cap": [
-  {
-   "data_id": "s:instruction:train-1",
-   "consumed": [
-    "i-c-0",
-    "i-c-1",
-    "r-c-0",
-    "r-c-1",
-    "train-1"
-   ],
-   "items": [],
-   "released": [
-    "i-c-0",
-    "i-c-1",
-    "r-c-0",
-    "r-c-1",
-    "train-1"
-   ],
-   "request": "train-1"
-  },
-  {
-   "data_id": "s:instruction:train-2",
-   "consumed": [
-    "i-c-2",
-    "r-c-2",
-    "train-2"
-   ],
-   "items": [],
-   "released": [
-    "i-c-2",
-    "r-c-2",
+    "r-c-3",
     "train-2"
    ],
    "request": "train-2"

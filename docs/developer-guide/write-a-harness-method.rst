@@ -78,15 +78,14 @@ proposer that runs an agent overrides ``runs_agent`` to return ``True``.
 Manual requests
 ~~~~~~~~~~~~~~~
 
-In ``manual`` or ``hybrid`` training mode, the proposer must override
+In ``manual`` training mode, the proposer must override
 ``reads_requests`` to return ``True``. Otherwise the recipe fails at startup
 with ``RecipeConfigError``. See `Manual training
 <../reference/http-api.rst#manual-training>`__ for the request route.
 
 ``requests`` contains one mapping with ``id``, ``text``, ``session``,
-``release_id``, ``requires``, and ``untrusted=True``. In ``manual`` mode,
-``samples`` is empty. In ``hybrid`` mode, it contains up to
-``job_samples`` samples from the next automatic job data, and may be
+``release_id``, ``requires``, and ``untrusted=True``. ``samples`` contains up
+to ``job_samples`` samples from the next automatic job data, and may be
 empty. These samples are
 scored traces, or unscored records with the inference stages that "Two
 trace sources" below describes.
