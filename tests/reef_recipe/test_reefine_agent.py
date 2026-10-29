@@ -16,8 +16,11 @@ from pathlib import Path
 import pytest
 
 from reef.core.training_request import TrainingRequest
+from reef.execution.sandbox.e2b import E2BSession
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, RolloutTimeout
+from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch, TreeWorkspace
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine import proposer
@@ -25,9 +28,6 @@ from reef.recipe.reefine.agent import AgentProposer, AgentRun
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
-from reef.sandbox.e2b import E2BSession
-from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome
-from reef.sandbox.remote import pack
 from reef.train.harness_backend.calls import StepCalls, budgeted_bindings
 from reef.train.harness_backend.contract import AgentHost, ProposalContext, TreeProposal
 
@@ -252,7 +252,7 @@ FAKE_PI = textwrap.dedent(
     assert "PI_OFFLINE" not in os.environ, "an agent or a trial runs online"
     assert pathlib.Path(os.environ["PI_CODING_AGENT_DIR"], "{tools}").exists() == (
         "REEF_PROPOSER_URL" in os.environ)
-    # The episode environment is minimal, so the test sets the mode in a file beside the binary.
+    # The rollout environment is minimal, so the test sets the mode in a file beside the binary.
     mode_file = pathlib.Path(sys.argv[0]).with_name("mode")
     mode = mode_file.read_text() if mode_file.exists() else ""
     if "REEF_PROPOSER_URL" in os.environ:
@@ -458,7 +458,7 @@ def test_without_a_request_an_agent_host_or_pi_the_text_proposer_answers(tmp_pat
 
 @pytest.mark.unit
 def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(tmp_path) -> None:
-    from reef.sandbox.process import SandboxExecutor
+    from reef.execution.sandbox.process import SandboxExecutor
 
     executor = SandboxExecutor(network="isolated", forward_ports=(4123,))
     argv = executor.bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path / "workspace", env={})
@@ -488,12 +488,12 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
 
 @pytest.mark.unit
 def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
+    from reef.execution.sandbox.e2b import E2BExecutor
+    from reef.execution.sandbox.modal import ModalExecutor
+    from reef.execution.sandbox.process import SandboxExecutor, SandboxUnavailable
+    from reef.execution.sandbox.remote import deployment_owner
     from reef.recipe.errors import RecipeConfigError
     from reef.recipe.harness import proposer_agent_settings
-    from reef.sandbox.e2b import E2BExecutor
-    from reef.sandbox.modal import ModalExecutor
-    from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
-    from reef.sandbox.remote import deployment_owner
 
     assert proposer_agent_settings(None, {}) == (None, 1800.0, 300.0)
     executor, timeout_s, trial_s = proposer_agent_settings({"sandbox": "none", "timeout_s": 60}, {})
@@ -673,7 +673,7 @@ def test_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, mo
 
     def launch(*args, timeout, **kwargs):
         timeouts.append(timeout)
-        raise EpisodeTimeout("trial deadline")
+        raise RolloutTimeout("trial deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     try:
@@ -717,7 +717,7 @@ def test_timeout_keeps_candidate_and_progress_without_publishing(tmp_path, upstr
         assert "pi.getActiveTools()" in reference and "**replaces**" in reference
         (root / "workspace/harness/rules.md").write_text("Unfinished candidate")
         (root / "workspace/progress.md").write_text("API confirmed; tool isolation remains unchecked.")
-        raise EpisodeTimeout("deadline")
+        raise RolloutTimeout("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     proposal = AgentProposer().propose(context(served_models(upstream, [], host), "x", host))

@@ -6,17 +6,17 @@ installed. The pi variant proposes with the built-in Reefine text proposer;
 these classes are the scorers of both variants and the native proposer.
 """
 
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.run import RolloutResult
 from reef.train.harness_backend.contract import ProposalContext, Proposer, TreeProposal
 
 from . import evolution, native_evolution
 
 
-class AnswerScorer(EpisodeScorer):
-    """``evolution.evaluate``: exact last-line answer grading of the episode's final assistant text."""
+class AnswerScorer(RolloutScorer):
+    """``evolution.evaluate``: exact last-line answer grading of the rollout's final assistant text."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return evolution.evaluate(task, result)
 
 
@@ -28,8 +28,8 @@ class NativeSelfProposer(Proposer):
         return None if patch is None else TreeProposal(patch)
 
 
-class NativeAnswerScorer(EpisodeScorer):
+class NativeAnswerScorer(RolloutScorer):
     """``native_evolution.evaluate``: the same grading over the native-jsonl trajectory."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return native_evolution.evaluate(task, result)

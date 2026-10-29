@@ -69,9 +69,9 @@ with its prompt, tools, and tool executor taken from the pinned checkout in
 the task image and its model calls served by Reef; the two simulator roles
 stay outside Reef, the verifier scores the run from its `world.nmdb`, and
 each finished week's change in company value is reported against the
-week's decision turns while the episode runs. It demonstrates how to adopt
+week's decision turns while the rollout runs. It demonstrates how to adopt
 a benchmark's agent as a Reef harness and how to shape an online,
-per-period reward for one long episode.
+per-period reward for one long rollout.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto
@@ -123,15 +123,15 @@ from `GET /reef/harness`, and seals rounds for the preregistered gain
 criterion carried verbatim from the sealed campaign. Its `harbor/` is one
 WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
-one-episode reef-eval smoke over it.
+one-rollout reef-eval smoke over it.
 
 [Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
 turns a plain-language request into a harness update. The served model
-proposes the change, the evaluation checks that the changed harness still
-works, and code extensions wait for a promote before they are served.
-`reef serve --recipe reefine` starts its profile without a checkout, and the
+proposes the change and an evaluation checks it. Code extensions wait for a
+person to activate them before they are served. `reef serve --recipe reefine`
+starts its profile without a checkout, and the
 [Reefine tutorial](../tutorials/reefine/README.md) records a bug-fix flow, a
-research loop, and which requests passed the checks.
+research loop, and which requests passed the evaluation.
 
 ## Basic
 
@@ -171,7 +171,7 @@ Around those stacks, the loop on the Harbor task standard: a
 Harbor agent harness that records its model call through Reef and reports
 the verifier reward back at trial end (`harness/`), the loop written out
 (`run.py` — [reef-eval](https://github.com/Human-Agent-Society/reef-eval)'s
-`Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
+`Lab.run`, one rollout), and a launcher (`run.sh`) that starts Reef from
 `external-provider.yaml` with local overrides and runs it.
 
 ## Beta recipes

@@ -19,6 +19,7 @@ from tests.support.config_helpers import load_harness_deployment as load_config
 
 from reef.core.plugins import PluginReference
 from reef.dispatcher.ingest import training_request_refusal
+from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import FloorPlugin
 from reef.harness.tree import HarnessTree, TreeKind
 from reef.harness.tree.checks import directive_shaped, secret_shaped
@@ -75,7 +76,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_text_proposer_and_the_floor(
     path = TUTORIAL / "configs" / "deployment.yaml"
     config = load_config(path)
     section = config["evolution"]
-    assert section["review_kinds"] == ["code_extension"]
+    assert config["activation"] == {"module": "always", "config": {"review_kinds": ["code_extension"]}}
     assert section["selection"] == "floor"
     assert config["data"]["training_mode"] == "manual"
     # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
@@ -104,7 +105,8 @@ def test_deployment_yaml_builds_the_recipe_with_the_text_proposer_and_the_floor(
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, ReefineRecipe) and built.adapter == "pi"
-    assert built.review_kinds == (TreeKind.CODE_EXTENSION,)
+    rule = built.activation_rule()
+    assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {TreeKind.CODE_EXTENSION}
     # Manual mode needs a proposer that reads requests, which Reefine's does; the build refuses otherwise.
     assert isinstance(built.propose, proposer.TextProposer) and built.training_mode == "manual"
     assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
@@ -160,20 +162,22 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
 
 def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> None:
     patch = {"rules.md": None, "extensions/speak.ts": "export default function (pi) {}", "notes.txt": "x"}
-    pending = {"pending": True, "metrics": {"selected": True, "patch": patch}}
-    rejected = {"metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
-    skipped = {"metrics": {"skipped": "no proposal"}}
-    assert run_module.result_of(pending) == "pending"
+    base = {"release_id": "rel-1", "artifact_id": "rel-1", "active": False, "activated": True, "checkpoint": False}
+    inactive = {**base, "checkpoint": True, "activated": False, "metrics": {"selected": True, "patch": patch}}
+    rejected = {**base, "metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
+    skipped = {**base, "metrics": {"skipped": "no proposal"}}
+    assert run_module.result_of(inactive) == "inactive"
+    assert run_module.result_of({**inactive, "active": True, "activated": True}) == "selected"
     assert run_module.result_of(rejected) == "rejected"
-    assert run_module.result_of(skipped) == "skipped: no proposal"
-    assert run_module.result_of({"operation": "promote"}) == "promote"
-    assert run_module.changes_of(pending["metrics"]) == [
+    assert run_module.result_of(skipped) == "skipped"
+    assert run_module.result_of({**base, "checkpoint": True, "activated": True, "operation": "creation"}) == "creation"
+    assert run_module.changes_of(inactive["metrics"]) == [
         "write extensions/speak.ts",
         "write notes.txt",
         "remove rules.md",
     ]
     # A path off the layout has no kind: the page shows it as "?".
-    assert run_module.kinds_of(pending["metrics"]) == ["?", "code_extension", "rules"]
+    assert run_module.kinds_of(inactive["metrics"]) == ["?", "code_extension", "rules"]
     assert run_module.kinds_of(rejected["metrics"]) == []
     assert run_module.tally(rejected["metrics"]) == "0 / 1 / 2"
     assert run_module.tally(skipped["metrics"]) == "-"
@@ -194,7 +198,7 @@ def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> No
     }
     assert run_module.tally_parts(always) == (1, 1, 1)
     assert run_module.tally(always) == "1 / 1 / 1"
-    # A failed episode scores None and ranks below every number, as reef's own tally ranks it.
+    # A failed rollout scores None and ranks below every number, as reef's own tally ranks it.
     failed = {
         "selection": {
             "evaluation": {"metrics": {"candidate_scores": [1.0, None, 1.0], "current_scores": [1.0, 1.0, 0.0]}}
@@ -221,7 +225,7 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
             "request": "g",
             "filed": True,
             "kinds": "code_extension",
-            "result": "pending",
+            "result": "inactive",
             "wins": 0,
             "losses": 0,
             "ties": 3,
@@ -232,7 +236,7 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
         # Under the floor a row carries passed and failed: met the floor is won, missed is evaluated and lost.
         {"request": "j", "filed": True, "kinds": "rules", "result": "selected", "passed": 1, "failed": 0},
         {"request": "k", "filed": True, "kinds": "skill", "result": "rejected", "passed": 0, "failed": 1},
-        {"request": "l", "filed": True, "kinds": "code_extension", "result": "pending", "passed": 1, "failed": 0},
+        {"request": "l", "filed": True, "kinds": "code_extension", "result": "inactive", "passed": 1, "failed": 0},
     ]
     assert run_module.totals_of(results) == {
         "filed": 11,
@@ -240,7 +244,7 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
         "admitted": 7,
         "won": 3,
         "published": 3,
-        "pending": 2,
+        "inactive": 2,
     }
 
 

@@ -39,11 +39,11 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
 |                                                                                  | the named scenario and kept by nobody: what a     |
-|                                                                                  | recipe's evaluation episodes call; a flat         |
+|                                                                                  | recipe's evaluation rollouts call; a flat         |
 |                                                                                  | release's request hooks stay out, since the       |
-|                                                                                  | episode runs a candidate of it. It serves a       |
+|                                                                                  | rollout runs a candidate of it. It serves a       |
 |                                                                                  | scenario loaded in this process and never creates |
-|                                                                                  | one: 404 for a scenario deleted under its episode |
+|                                                                                  | one: 404 for a scenario deleted under its rollout |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
 |                                                                                  | composed release: every other component's hooks   |
@@ -63,12 +63,14 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                             | enqueue one training instruction                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                                                          | every known scenario, current release and harness |
+| ``GET /reef/scenarios``                                                          | every known scenario, active release and harness  |
 |                                                                                  | adapter                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``                                       | update the scenario training mode                 |
+| ``POST /reef/scenarios/{scenario}/update``                                       | update a scenario's settings                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/settings``                                      | read a scenario's settings                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``                                      | what this scenario accepts                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -78,20 +80,29 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/records/{record_id}``                           | one retained record and its trace payload         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/releases``                                      | ``{scenario, releases}``, newest first            |
+| ``GET /reef/scenarios/{scenario}/artifacts``                                     | ``{scenario, artifacts}``, newest first           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/rollback``                                     | republish an earlier release as the head          |
+| ``POST /reef/scenarios/{scenario}/artifacts``                                    | import a directory as a new artifact              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/promote``                                      | serve a release held for review                   |
+| ``POST /reef/scenarios/{scenario}/activate``                                     | make an existing artifact the one that serves     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/train-from``                                   | set the artifact a trainer starts its next job or |
+|                                                                                  | step from                                         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/tasks``                                         | imported tasks, their splits, which trained       |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations``                                  | evaluate one artifact of a release                |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations``                                   | artifact evaluations, newest first                |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                   | one evaluation: its state and result              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness``                                                            | the served harness tree, rendered for the         |
-|                                                                                  | adapter or as its source tree                     |
+| ``GET /reef/harness``                                                            | the harness tree of the active release, rendered  |
+|                                                                                  | for the adapter or as its source tree             |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                                                   | the harness release catalog, oldest first         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -130,7 +141,7 @@ Headers
 | ``x-reef-release-id``             | optional: bind a new scenario to this starting release; |
 |                                   | on an existing scenario it must name the bound starting |
 |                                   | release, or the request is HTTP 409. Inference always   |
-|                                   | answers from the scenario's current release; to pull a  |
+|                                   | answers from the scenario's active release; to pull a   |
 |                                   | specific release, use ``?release_id=`` on the harness   |
 |                                   | manifest.                                               |
 +-----------------------------------+---------------------------------------------------------+
@@ -138,8 +149,8 @@ Headers
 |                                   | ``metadata.tags``. The ``release`` tag can select the   |
 |                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout episode that |
-|                                   | Reef runs itself. It is served from the scenario's      |
+| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
+|                                   | runs itself. It is served from the scenario's           |
 |                                   | release like any other call, but no record is kept, and |
 |                                   | the response keeps its ``training`` block with the      |
 |                                   | runtime load ID that answered. The call must not        |
@@ -157,7 +168,7 @@ conditions hold:
 - Its surface has no inference hooks, and it has no training component.
 - The tag names a release in that scenario's catalog.
 
-Otherwise the record names the current served release, including when the tag
+Otherwise the record names the active release, including when the tag
 is absent or unknown. The tag does not change which release serves inference.
 
 For example, a harness client pulled release A before the service published
@@ -174,7 +185,7 @@ Scenario model settings
 scenario. Existing scenarios retain their settings on repeated creation.
 The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
-existing ``training_mode`` field. Send ``model: null`` to restore deployment
+other `scenario settings <#scenario-updates>`__. Send ``model: null`` to restore deployment
 defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
@@ -215,7 +226,7 @@ headers; envelope fields other than the three shown above are rejected.
 the selected recipe's recorded-input contract: native provider request fields
 with an existing ``response``, or another complete example that its processor
 understands. Import does not synthesize missing training tensors, run inference,
-or assign the current serving artifact to externally generated examples.
+or assign the active artifact to externally generated examples.
 Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
 To upload ATIF trajectories that are already complete, see
@@ -363,10 +374,12 @@ Upload Harbor tasks
 Use this route to give a scenario your own Harbor tasks, for training or as
 held-out tasks. It adds the tasks to the scenario's task store
 ``imported-tasks``, the same store that the `task-import section
-<../user-guide/operate.rst#import-harbor-tasks>`__ fills. The scenario's recipe
-must read imported tasks, such as the SFT-then-RL recipe (`SFT then RL
-<configuration.rst#sft-then-rl>`__). If it does not, Reef refuses the upload
-with 400.
+<../user-guide/operate.rst#import-harbor-tasks>`__ fills. An upload to the
+``train`` split needs a recipe that trains on imported tasks, such as the
+SFT-then-RL recipe (`SFT then RL <configuration.rst#sft-then-rl>`__). If the
+recipe does not, Reef refuses the upload with 400. The ``eval`` split takes
+tasks for any recipe, because an `artifact evaluation <#evaluate-an-artifact>`__
+runs them.
 
 The body is a gzip-compressed tar archive with ``Content-Type:
 application/gzip``. The archive and the files it unpacks to are each at most
@@ -401,6 +414,108 @@ same receipt. Reef returns:
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
 [{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
 added. ``trained`` is true once a task job trained the task.
+
+Evaluate an artifact
+--------------------
+
+Use these routes to score one artifact of a scenario on the scenario's eval
+tasks. An artifact is one component of one of the scenario's artifacts, such
+as the ``weights`` of a model checkpoint. A policy is a harness and a model,
+and the artifact is one side of it, so the request configures the other side.
+Reef runs the rollouts itself and stores the result with the scenario. The
+evaluation never changes what the scenario serves, and its model calls are not
+records. A scenario can also hold settings that Reef evaluates each new
+artifact with (`Automatic evaluation`_).
+
+This version evaluates a model artifact (a ``model`` or ``model_adapter``
+component) with a Harbor agent, on a runtime that serves any artifact on
+request: the Tinker runtime. Reef refuses a harness artifact, a model artifact
+on another runtime, and a scenario whose artifacts also hold a harness, with
+400.
+
+First upload the tasks to the ``eval`` split (`Upload Harbor tasks
+<#upload-harbor-tasks>`__). Then start the evaluation:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/scenarios/my-agent/evaluations \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"artifact_id": "8f3c...", "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}'
+
+The body takes these fields:
+
+- ``artifact_id`` (required): one of the scenario's artifacts, by the
+  ``artifact_id`` that ``GET /reef/scenarios/{scenario}/artifacts`` lists.
+- ``component``: the component to evaluate. Leave it out when the artifacts
+  hold one component with a kind.
+- ``harness``: the Harbor agent that runs a model artifact. ``{"name":
+  "terminus-2"}`` runs Reef's default terminus-2 configuration. Any other
+  agent is its whole Harbor configuration, with ``{model}``, ``{base_url}``
+  and ``{api_key}`` where Reef fills them in, as the Tinker job parameter
+  ``rollout.agent`` takes it.
+- ``model``: the model binding that a harness artifact runs on. A request
+  sets exactly one of ``harness`` and ``model``.
+- ``task_names``: the eval tasks to run. Leave it out to run every eval task.
+- ``rollouts_per_task``: the rollouts of each task, 1 by default.
+- ``environment``: the Harbor environment type, ``docker`` by default.
+
+The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
+``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
+it runs and after it ends:
+
+.. code:: json
+
+   {"evaluation_id": "1d0e...", "state": "finished",
+    "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
+                "model": null, "task_names": [], "rollouts_per_task": 2, "environment": "docker"},
+    "created_at": 1793169552.2, "finished_at": 1793169840.7,
+    "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
+                          "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
+                          "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
+    "mean_score": 0.5, "error": null}
+
+``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
+evaluation holds its ``policy_evaluation``: the harness and the model that its
+rollouts ran, and each rollout's score by task (see `Rollout
+<glossary.rst#rollout>`__). A failed one holds its ``error``. An evaluation
+that was queued or running when the service stopped reads as ``failed``; Reef
+does not resume it. ``GET /reef/scenarios/{scenario}/evaluations`` lists the
+evaluations, newest first, at most ``limit`` (50 by default).
+
+Reef returns:
+
+- 400, and runs nothing, for a request that the scenario cannot run: an
+  unknown field or task, the wrong side configured, a component that is no
+  side of a policy, an artifact or a runtime that this version refuses, or no
+  eval task;
+- 404 for an unknown scenario, artifact or evaluation;
+- 429 when the service runs two evaluations already.
+
+Automatic evaluation
+~~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/update`` with ``artifact_evaluation`` stores
+the settings that Reef evaluates each new artifact of the scenario with. The
+settings are the body of an evaluation request without ``artifact_id``:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/scenarios/my-agent/update \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2}}'
+
+Reef checks the settings against the scenario's active artifact, as it checks
+a request, but the eval tasks may still be missing. The answer holds the
+stored settings, or 400 for settings that the scenario cannot run. Send
+``"artifact_evaluation": null`` to stop the automatic evaluations.
+
+Each training step that publishes a checkpoint is a new artifact. Reef then
+stores an evaluation of it in the ``queued`` state and runs it when fewer than
+two evaluations run. The evaluations routes list it like any other. An
+automatic evaluation that cannot run, for example because the eval split holds
+no task, is not stored; the service logs why.
 
 Manual training
 ---------------
@@ -576,7 +691,7 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios``                     | every known scenario, its current release   |
+| ``GET /reef/scenarios``                     | every known scenario, its active release    |
 |                                             | once loaded and, for a harness recipe, the  |
 |                                             | ``adapter`` its tree is rendered for, also  |
 |                                             | while the scenario loads                    |
@@ -611,9 +726,17 @@ adapter residency evicts it.
 Scenario updates
 ~~~~~~~~~~~~~~~~
 
-``POST /reef/scenarios/{scenario}/update`` updates an existing scenario.
-Currently, only ``training_mode`` is supported; unknown fields are rejected.
-To change the data processor's mode:
+``POST /reef/scenarios/{scenario}/update`` updates an existing scenario. The
+body holds one or more of these settings. Reef rejects other fields:
+
+- ``training_mode``: the mode of the data processor, below.
+- ``model``: the scenario's model (`Scenario model settings`_).
+- ``artifact_evaluation``: the settings that Reef evaluates each new artifact
+  with (`Automatic evaluation`_).
+- ``activation``: the scenario's activation rule, below.
+
+The response holds the scenario name and each setting that the request
+changed. To change the data processor's mode:
 
 .. code:: json
 
@@ -639,10 +762,69 @@ return ``400``. A processor that does not support the requested mode returns
 ``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
 require a proposer that explicitly accepts ``requests``.
 
-``GET /reef/status`` reports the selected ``training_mode``. This selector
-is runtime state, not persisted scenario configuration: a service restart
-uses the recipe's configured mode again, while a scenario reload after a
-failed step keeps the selected mode.
+``GET /reef/status`` reports the selected ``training_mode``. Reef stores the
+mode with the scenario's settings, so a reload and a restart keep it.
+
+The ``activation`` setting selects the rule that decides whether Reef
+activates each new artifact of this scenario. It replaces the deployment's
+`activation section <configuration.rst#the-activation-section>`__ for this
+scenario. Send one of the built-in rules:
+
+.. code:: json
+
+   {"activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}}
+
+The ``module`` is one of these rules:
+
+- ``always``: ``config`` takes ``review_kinds``.
+- ``never``: there is no ``config``.
+- ``evaluated``: ``config`` takes ``min_mean_score``.
+
+The response holds the stored rule. Send ``"activation": null`` to follow the
+deployment's rule again. The setting names only built-in rules. Reef answers
+HTTP 400 for a ``package.module:ClassName`` rule, because a client must not
+choose the code that the service imports. Set such a rule in the deployment's
+``activation`` section.
+
+The ``evaluated`` rule activates an artifact only after an evaluation of it.
+Thus it needs ``artifact_evaluation``. Reef checks the two settings together,
+and stores both or neither. Reef answers HTTP 400 when, after the request, the
+rule that applies is ``evaluated`` and the scenario has no
+``artifact_evaluation``. Thus a request can set both at once, or set
+``artifact_evaluation`` first. Reef also refuses a request that clears
+``artifact_evaluation`` under ``evaluated``.
+
+A new rule applies to the artifacts that training makes after the change. It
+never activates an existing artifact. Under ``evaluated``, Reef activates an
+artifact when an evaluation of it finishes after the change with a
+``mean_score`` of at least ``min_mean_score``.
+
+Read the settings
+~~~~~~~~~~~~~~~~~
+
+``GET /reef/scenarios/{scenario}/settings`` returns the settings of an existing
+scenario:
+
+.. code:: json
+
+   {
+     "scenario": "agents",
+     "training_mode": "auto",
+     "model": null,
+     "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
+     "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
+     "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}
+   }
+
+- ``training_mode`` and ``model`` are what the scenario runs. ``model`` is the
+  redacted view of `Scenario model settings`_, or null for the deployment's
+  model.
+- ``artifact_evaluation`` and ``activation`` are the stored settings, or null.
+- ``effective_activation`` is the rule that applies: the scenario's
+  ``activation``, else the deployment's. When the deployment names a rule
+  class of its own, ``module`` is the ``package.module:ClassName`` of that class.
+
+An unknown scenario returns ``404``.
 
 Inference
 ---------
@@ -653,8 +835,8 @@ Request
 Send the same body you would send to the provider. Reef never touches your
 sampling parameters. 
 
-Before calling the model, Reef reads the scenario's current artifact ref and
-builds the request against that release. The stored exchange normally uses
+Before calling the model, Reef reads the ref of the scenario's active release
+and builds the request against that release. The stored exchange normally uses
 that frozen ref, even if an update completes mid-request. For a scenario that
 only delivers files to clients, `Client release tags`_ describes when the
 record instead names the harness release the client runs.
@@ -689,19 +871,20 @@ training, including when a report references their IDs directly or retained
 records are replayed after a restart.
 
 On a scenario that serves harness files, every inference response also
-carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when
-the response is written, so a head that moves during the call shows on the
-next one. A resident ``reef-native serve`` process compares it with the
-release it mounted and learns of a new head on its next model call, with no
-extra request. A weight serving scenario sends no such header, and neither
-does the evaluation route, whose caller runs a candidate and follows no head.
+carries ``x-reef-release-id``: the active release when the response is
+written, so an activation during the call shows on the next one. A resident
+``reef-native serve`` process compares it with the release it mounted and
+learns of a new active release on its next model call, with no extra
+request. A weight serving scenario sends no such header, and neither does the
+evaluation route, whose caller runs a candidate and follows no active
+release.
 
 A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
 The evaluation calls do not present a service token. When auth is configured,
 the service issues a random token at startup that opens the evaluation routes
-alone, and hands it to the recipe: the episodes and proposer run candidate
-code, which can then sample the served release but reach no other route. A
+alone, and hands it to the recipe: the rollouts and proposer run candidate
+code, which can then sample the active release but reach no other route. A
 restart issues a new one.
 
 Response
@@ -754,7 +937,7 @@ data inside ``metadata`` or ``feedback``.
      - no
      - Recipe metadata; ``training.eligible`` is not supported. ``metadata.task``
        (``name``, with ``path`` and ``digest`` when known) or
-       ``metadata.harbor.task_name`` names the Harbor task the episode ran;
+       ``metadata.harbor.task_name`` names the Harbor task the rollout ran;
        the assembled training sample carries it as ``task``, so a recipe can
        group samples by task.
 
@@ -811,14 +994,14 @@ Receiving an update
 -------------------
 
 For weight-training scenarios there is nothing to do: keep calling the same
-inference endpoint and it serves the latest published weights. The artifact
+inference endpoint and it serves the active release. The artifact
 lives in the inference runtime, so requests reach the new release directly.
 
 A scenario whose artifact is the harness tree works the other way: the client
-pulls. It fetches the served tree with ``GET /reef/harness``, writes the files
-where its agent reads them, binds the agent's model to this Reef, and runs the
-agent on that release. The release it runs is then the one whose receipts it
-reports against. `Use a published tree
+pulls. It fetches the tree of the active release with ``GET /reef/harness``,
+writes the files where its agent reads them, binds the agent's model to this
+Reef, and runs the agent on that release. The release it runs is then the one
+whose receipts it reports against. `Use a published tree
 <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__ shows a
 client.
 
@@ -833,10 +1016,14 @@ Harness artifacts
 |                                | name to its content id) when the release binds several, and   |
 |                                | an ``x-reef-release-id`` response header                      |
 +--------------------------------+---------------------------------------------------------------+
-| ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
-|                                | carrying the evaluation metrics of the publishing step and    |
-|                                | ``page_path``, its step's page with the query a browser opens |
-|                                | it by                                                         |
+| ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first: the creation and      |
+|                                | every training step, also a step that published nothing       |
+|                                | (``checkpoint: false``). Each row has ``artifact_id``,        |
+|                                | ``component``, ``active`` (true on exactly one row, the       |
+|                                | active release) and ``activated`` (true when the row's        |
+|                                | artifact has been active at some time); each training row     |
+|                                | carries the evaluation metrics of its step and ``page_path``, |
+|                                | its step's page with the query a browser opens it by          |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
@@ -868,9 +1055,8 @@ serves HTTP 404 until a step publishes a tree.
 gives the shape) over the release's chain, merged by name with the newest
 definition winning. A request's items are per release, so a later release
 whose request named nothing still carries the extension an earlier one
-added. The chain follows ``parent_release_id`` through the catalog, a
-promote or rollback row continuing at the release it copied; a releases row
-carries its own step's list alone. One request's cap of 8 does not bound the
+added. The chain follows ``parent_release_id`` through the catalog; a
+releases row carries its own step's list alone. One request's cap of 8 does not bound the
 union of a chain. Reef runs no check: the client checks each item before it
 runs the release.
 
@@ -878,18 +1064,18 @@ Use ``?release_id=`` to request a specific catalog release, in either form.
 An unknown or unrestorable release returns HTTP 404.
 
 Catalog and manifest reads do not wait for an evolve step's proposer or
-evaluation episodes: they continue serving the existing releases while a
+evaluation rollouts: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
-rollback so a manifest's artifact and evaluation metrics come from the same
-release: reads do not interleave with head movement and its commit-history
-update.
+activation so a manifest's artifact and evaluation metrics come from the same
+release: reads do not interleave with a change of the active release and its
+commit-history update.
 
 Proposals
 ~~~~~~~~~
 
-An agent running on the served tree can propose a change to it. The
+An agent running on the tree of the active release can propose a change to it. The
 proposal enters the same evaluation as the method's own: nothing it says is served
-until paired episodes settle it.
+until paired rollouts settle it.
 
 .. code:: bash
 
@@ -913,20 +1099,22 @@ until paired episodes settle it.
 | ``release_id`` | the release the proposer was running                                 |
 +----------------+----------------------------------------------------------------------+
 
-The service validates the patched head tree for the scenario's adapter, the
-same validation an evolve step runs on a method's patch. Every path must be
-on the harness layout and of a kind the adapter renders, each file must pass
-its kind's checks (no credential-shaped literal, for one), and the tree must
-render. A patch that changes no file's text is refused too. The answer is
-``{proposal_id, admitted, reason, release_id}``: ``reason`` lists every
-problem that refused the patch, separated by ``;``, else ``null``;
-``release_id`` is the head the patch was validated against.
+The service validates the patched tree of the active release for the
+scenario's adapter, the same validation an evolve step runs on a method's
+patch. Every path must be on the harness layout and of a kind the adapter
+renders, each file must pass its kind's checks (no credential-shaped literal,
+for one), and the tree must render. A patch that changes no file's text is
+refused too. The answer is ``{proposal_id, admitted, reason, release_id}``:
+``reason`` lists every problem that refused the patch, separated by ``;``,
+else ``null``; ``release_id`` is the active release that the patch was
+validated against.
 
 An admitted proposal waits in the scenario's inbox
 (``evolution.proposals_dir``) until the next automatic evolve step takes it,
 oldest first, before the method's own ``propose`` is asked. The step
-validates the patch again against its own head, since the head may have
-moved; a patch that no longer passes is refused and the step is skipped.
+validates the patch again against the tree of its training start, which can
+differ from the active release; a patch that no longer passes is refused and
+the step is skipped.
 Otherwise the evaluation settles it like a patch of the method's. The
 commit that settles it carries ``proposal: {id, session, release_id,
 reason}`` in its metrics, and the releases row carries that commit. When
@@ -961,55 +1149,283 @@ release_id, requires}`` (with ``client`` when the request sent one) and, for
 a method that records notes beside its proposal, ``proposal_notes``, both
 visible through the release catalog.
 
-Rollback
-~~~~~~~~
+Artifacts
+~~~~~~~~~
 
-Pulling an older release changes only your local copy. To move the release Reef
-*serves*, send ``POST /reef/scenarios/{scenario}/rollback`` with
-``{"release_id": "…"}``; it answers the new head. Reef republishes that
-checkpoint as a new commit rather than rewinding history, so step numbers stay
-monotonic.
+An artifact is the content of one component of a release, such as a
+checkpoint's weights or a harness tree. Training makes artifacts: each
+checkpoint that a weight trainer saves, and each tree that a harness trainer
+keeps. The release that created a scenario holds the creation artifact of each
+component: the artifact the scenario started from, by default the base
+artifact that Reef imported from the deployment's model or seed (`The base
+artifact <../user-guide/operate.rst#the-base-artifact>`__). ``artifact_id``
+names an artifact:
 
-Choose a target from ``GET /reef/scenarios/{scenario}/releases``, which lists
-**newest first**; ``GET /reef/harness/releases`` lists oldest first. Only
-releases marked ``restorable`` can be rolled back.
+- In a scenario of one component, it is the ``release_id`` of the release
+  that made the artifact. Every shipped recipe serves one component, so there
+  ``artifact_id`` and ``release_id`` are equal for every artifact that a
+  training step or an import made.
+- In a scenario of several components, it is ``<release_id>:<component>``.
+- A release that carries a component forward keeps that component's
+  ``artifact_id``. The creation makes no artifact, so the creation artifact
+  keeps the ``artifact_id`` of the release that made it. For the base
+  artifact, that is the ID of the repository's base release.
 
-In a scenario that trains weights, a rollback to other weights also moves
-where training continues. Reef first imports the release into the training
-component. It then commits the rollback and cancels the running job. The next
-job starts from the imported release. When the component cannot start from
-the release, Reef refuses the rollback with HTTP 409. The Slime component
-always refuses, because its workers continue from their own latest
-checkpoint. A Slime scenario therefore cannot roll back.
+``GET /reef/scenarios/{scenario}/artifacts`` answers ``{scenario,
+artifacts}``, **newest first**. Each row is one artifact of one component:
 
-Review before serving
-~~~~~~~~~~~~~~~~~~~~~
++-----------------------+------------------------------------------------------+
+| Field                 | Meaning                                              |
++=======================+======================================================+
+| ``artifact_id``       | the artifact                                         |
++-----------------------+------------------------------------------------------+
+| ``component``         | the component whose content it is                    |
++-----------------------+------------------------------------------------------+
+| ``release_id``        | the release that made it                             |
++-----------------------+------------------------------------------------------+
+| ``parent_release_id`` | the parent of that release                           |
++-----------------------+------------------------------------------------------+
+| ``content_id``        | its content in a scenario of one component;          |
+|                       | ``null`` in a scenario of several components         |
++-----------------------+------------------------------------------------------+
+| ``operation``         | ``creation`` for the creation artifact,              |
+|                       | ``training``, ``import``, or ``recovery`` for the    |
+|                       | artifact that a store without a durable commit log   |
+|                       | served at a restart                                  |
++-----------------------+------------------------------------------------------+
+| ``recorded_at``       | the commit time, ``null`` for the creation artifact  |
++-----------------------+------------------------------------------------------+
+| ``active``            | true for the active artifact of each component       |
++-----------------------+------------------------------------------------------+
+| ``activated``         | true when the artifact has been active at some time  |
++-----------------------+------------------------------------------------------+
+| ``metrics``,          | training rows only: the step's metrics and the       |
+| ``record_progress``   | record high-water mark that the step consumed        |
++-----------------------+------------------------------------------------------+
+| ``source``            | import rows only: ``{uri, version}`` that the import |
+|                       | read                                                 |
++-----------------------+------------------------------------------------------+
 
-With ``evolution.publish: review``, or when a selected patch changes a file
-of a kind listed in ``evolution.review_kinds`` or a ``native_loop`` file, the
-winning tree is committed to the catalog but not served: its row carries
-``pending: true``, the manifest keeps serving the previous head, and
-``?release_id=`` pulls the pending tree for a trial run.
-``POST /reef/scenarios/{scenario}/promote``
-with ``{"release_id": "..."}`` serves it by the same republish path as
-rollback, so the promotion is itself a commit record with
-``operation: promote`` and the promoted tree becomes a new release. In a
-scenario with several components the promote publishes the held release's
-changed component on the combination served now, and it is listed as a
-harness release only when the tree changed.
+The list holds artifacts only. A training step that made no artifact, such
+as a rejected or skipped step, a job submission or a job's end, has no row;
+``GET /reef/scenarios/{scenario}/commits`` holds its record (see `Record and
+commit history`_). Activations and train-from operations have no rows either.
+
+Import an artifact
+~~~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
+artifact from the directory that a URI names. Leave out ``component`` when
+the scenario has one component. The body is ``{"source": "<uri>"}``. Reef
+checks the layout below on the source, and then copies the directory from one
+of these URIs:
+
+- ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
+  full 40-digit commit SHA and the component holds model weights, Reef keeps a
+  reference to the revision instead of a copy (see below).
+- ``s3://bucket/prefix/``: every object under the prefix. Empty folder
+  markers, keys that end in ``/``, are skipped.
+- ``file:///absolute/path``: a directory on the service's file system,
+  percent encoded as ``Path.as_uri()`` writes it. Its files are copied.
+- A scheme that ``storage.artifact-sources`` adds.
+
+To import a directory from your own machine, put it in one of these places
+first, for example an S3 prefix.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"source": "s3://my-bucket/adapters/run-7/"}' \
+     "$REEF_URL/reef/scenarios/code-repair/artifacts"
+
+The answer is HTTP 201 with ``{scenario, component, artifact_id, release_id,
+content_id}``. ``content_id`` comes from the files: the SHA-256 of each file's
+path and SHA-256. The same files from two sources have the same
+``content_id``, and each import is a new artifact.
+
+An import of ``hf://org/model@<commit>`` with a full commit SHA into a
+component of model weights stores only a reference, ``hf-reference.json``.
+Any other component, such as a harness, stores a copy, because its readers
+read the files themselves. Reef checks the layout from the revision's
+file list and its small files, and takes each weight file's SHA-256 from the
+Hub, so it downloads no weights. ``content_id`` is the value that a copy of
+the same files gets. The repo must stay on the Hub while Reef serves or trains
+the artifact. A private repo needs a token that the service reads in Hugging
+Face's standard way, such as ``HF_TOKEN``. A revision that does not resolve for
+that token answers HTTP 400.
+
+The directory must have the layout of the releases that the scenario's
+component makes. The training backend and its configuration decide it:
+
++-----------------------------+------------------------------------------------+------------------+
+| Component                   | The directory holds                            | Other files      |
++=============================+================================================+==================+
+| Full weights (Slime)        | ``config.json`` and ``*.safetensors`` or       | allowed          |
+|                             | ``*.bin`` at the root                          |                  |
++-----------------------------+------------------------------------------------+------------------+
+| LoRA adapter (Slime)        | ``adapter/adapter_config.json`` and            | allowed          |
+|                             | ``adapter/adapter_model.safetensors`` or       |                  |
+|                             | ``.bin``; ``r`` is at most the configured      |                  |
+|                             | rank, and ``target_modules`` is a list within  |                  |
+|                             | the configured modules                         |                  |
++-----------------------------+------------------------------------------------+------------------+
+| Tinker                      | ``tinker-checkpoint.json`` of the configured   | allowed          |
+|                             | model, rank and service; its ``state_path``    |                  |
+|                             | resolves on that service as a LoRA of that     |                  |
+|                             | model and rank                                 |                  |
++-----------------------------+------------------------------------------------+------------------+
+| Harness                     | a source tree whose files are UTF-8 text and   | refused: a path  |
+|                             | pass validation for the adapter, the files a   | off the harness  |
+|                             | harness release stores                         | layout fails     |
+|                             |                                                | validation       |
++-----------------------------+------------------------------------------------+------------------+
+
+A component without a layout, such as the records of a trainer that serves
+nothing, takes no import.
+
+Reef publishes a release beside the chain. It binds the new artifact and the
+other components as the active release binds them. It appends an ``import``
+record. The active release, the chain tip and every training start stay, and
+the activation rule does not run. Activate the artifact or train from it as
+from any other artifact. The answer comes after the release is published, so
+give a large import a long client timeout.
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 201    | the artifact is imported                                           |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
+|        | to read; an unknown ``component``, or ``component`` is missing in  |
+|        | a scenario with several components; the component takes no         |
+|        | import (Reef reads nothing for these three); the directory does    |
+|        | not have the component's layout, or its admission check refuses it |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario; Reef reads nothing then                          |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
++--------+--------------------------------------------------------------------+
+| 503    | the source failed, for example S3 refused the read                 |
++--------+--------------------------------------------------------------------+
+
+Activate an artifact
+~~~~~~~~~~~~~~~~~~~~
+
+Pulling an older release changes only your local copy. Reef serves the
+scenario's *active release*: inference answers from it, and
+``GET /reef/harness`` serves its tree. The active
+release binds the active artifact of each component. To serve another
+artifact, send ``POST /reef/scenarios/{scenario}/activate``:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"artifact_id": "<id>"}' \
+     "$REEF_URL/reef/scenarios/code-repair/activate"
+
+The body is ``{"artifact_id": "<id>", "component": "<name>"}``. Leave out
+``component`` when the scenario has one component. The answer is
+``{scenario, component, artifact_id, release_id, content_id}``:
+``artifact_id`` names the activated artifact, ``component`` names its
+component, ``release_id`` is the active release afterwards, and
+``content_id`` is the artifact's content.
+
+- In a scenario of one component, activation writes no artifact or release.
+  It appends an ``activate`` record, and the release that made the artifact
+  serves again.
+- In a scenario of several components, activation publishes a release: the
+  active release with ``component`` bound to the artifact, and the other
+  components as the active release binds them. It makes no new content and
+  does not move the `chain tip
+  <../advanced_topics/state-model.rst#the-release-chain>`__.
+
+Activating the active artifact changes nothing. Activation never changes a
+trainer's training start. A full-weight serving runtime that activates the
+base artifact after it served a checkpoint loads the base artifact's files.
+
+Train from an artifact
+~~~~~~~~~~~~~~~~~~~~~~
+
+Each trainer has a training start: the artifact that its next training job
+(a weight trainer) or evolve step (a harness trainer) starts from. After each
+job or step, the trainer moves its training start to its own newest output.
+``POST /reef/scenarios/{scenario}/train-from`` sets the start to an existing
+artifact and cancels the running job:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"artifact_id": "<id>"}' \
+     "$REEF_URL/reef/scenarios/code-repair/train-from"
+
+The body is ``{"artifact_id": "<id>", "component": "<name>"}``.
+``component`` names the trainer's component. Leave it out when the scenario
+has one component; a scenario with several components requires it. The
+answer is ``{scenario, component, artifact_id}``. Train-from never changes
+the active release.
+
+Whether a trainer can start from an artifact depends on the trainer:
+
+- The Tinker component imports the artifact's checkpoint manifest, which
+  names the saved training state with the optimizer state.
+- The Slime component refuses every artifact, because its workers continue
+  from their own latest checkpoint.
+- A harness trainer starts its next evolve step from the artifact's tree.
+
+A weight artifact without optimizer state, such as the base artifact,
+starts training with a new optimizer state.
+
+Both routes answer these statuses:
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 200    | the artifact is active (``activate``) or is the trainer's start    |
+|        | (``train-from``)                                                   |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body; the artifact has no durable bytes; an unknown    |
+|        | ``component``, or ``component`` is missing in a scenario with      |
+|        | several components; ``activate``: the runtime cannot serve the     |
+|        | artifact; ``train-from``: the trainer cannot start from the        |
+|        | artifact                                                           |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario or artifact                                       |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
+|        | after the commit                                                   |
++--------+--------------------------------------------------------------------+
+
+`Activate an artifact <../user-guide/operate.rst#activate-an-artifact>`__
+explains when Reef activates a new artifact automatically. `Go back to an
+older artifact <../user-guide/operate.rst#go-back-to-an-older-artifact>`__
+explains how to go back to an older one for good.
+
+Inactive artifacts
+~~~~~~~~~~~~~~~~~~
+
+The deployment's activation rule can leave a new tree inactive, for example
+a tree whose patch changes a file of a tree kind in the ``always`` rule's
+``review_kinds``, or a ``native_loop`` file. The step then makes the tree as a
+release but does not activate it. Its row carries ``active: false`` and
+``activated: false``. The manifest keeps serving the active release, and
+``?release_id=`` pulls the inactive tree for a trial run. To make it serve,
+send the row's ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.
 
 In a scenario with several components, ``GET /reef/harness/releases``, the
 release pages and ``GET /reef/harness`` speak of the releases that changed the
-pulled tree: another component's step, or a rollback or promote that restored
-other weights under the same tree, is not listed and is no new head. In the
-rows listed, ``parent_release_id`` names the previous listed release, the one
-the tree descends from, and ``composed_parent_release_id`` the release the
-combination was published on; a rejected or skipped step, which published
-nothing, is named by the listed release it ran on (``composed_release_id``
-keeps the combination served then); and a rollback or promote whose target
-is not listed names the listed release that target carried
-(``composed_rollback_target_release_id`` keeps the target). Every release
-stays addressable by id through ``?release_id=`` on the manifest.
+pulled tree. Another component's step is not listed and is no new release of
+that tree. In the rows listed, ``parent_release_id`` names the previous listed release, the
+one the tree descends from. When the release's own parent differs,
+``composed_parent_release_id`` keeps it. A rejected or skipped step made no
+release, so its row names the listed release that the active release carried,
+and ``composed_release_id`` keeps the active release's own id. The tree
+that Reef serves is that of the active release, or of the listed release it
+carried.
+Every release stays addressable by id through ``?release_id=`` on the
+manifest.
 
 Version page
 ~~~~~~~~~~~~
@@ -1018,11 +1434,11 @@ Version page
 page (``text/html``, no asset, its data inline) for one catalog row. ``step``
 is the row's position in ``GET /reef/harness/releases`` oldest first, the
 creation row being 0, which is the commit step: a rejected step publishes
-nothing and its row carries the head's release id, so the step is what names
-it. The page shares its chrome with the request page below: the same branded
+nothing and its row carries the active release's id, so the step is what
+names it. The page shares its chrome with the request page below: the same branded
 header, palette, card layout, automatic light and dark themes and responsive
 behavior, and one status vocabulary, so a step reads ``Published``,
-``Ready for review``, ``Not selected`` or ``No changes`` in place of the
+``Waiting for activation``, ``Not selected`` or ``No changes`` in place of the
 record's own field names. The page has these sections, each its own card,
 in this order: Why (the request the
 step read, else the claimed proposal's reason, else a failure in the job data),
@@ -1040,7 +1456,7 @@ only when the row carries a review or that list), Result (the result and what
 it means, then the evaluation's numbers: ``wins``, ``losses``, ``ties``,
 ``passed``, ``failed``,
 ``floor_score``, ``evaluation_sides``, ``current_score``, ``candidate_score`` and
-``episode_failures``, each when the row carries it, so a ``floor`` evaluation,
+``rollout_failures``, each when the row carries it, so a ``floor`` evaluation,
 which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
 and no ``current_score``, then the skip reason, the selection reason, the step
 record directory when ``evolution.step_record_dir`` is set, and
@@ -1049,25 +1465,23 @@ when the step recorded one), Setup (the request's ``requires`` with
 name, kind, check and prompt, then the items the release carries from
 earlier steps in its chain, the same union the manifest's ``requires``
 carries; a rejected or skipped row lists only its own items, since its
-release id is the head's; then, under "Refused by the step", the items the
-step refused, from ``proposal_notes.refused_requires`` and, when the row
-carries it, ``training_request.refused_requires``, each as written with its
-reason; nothing when all are empty) and Chain (the parent release, this release,
-and its children: the steps evaluated on it, won, lost or pending, and a promote
-or rollback made on it, each linking that step's own page; a rejected or
+release id is the active release's; then, under "Refused by the step", the
+items the step refused, from ``proposal_notes.refused_requires`` and, when
+the row carries it, ``training_request.refused_requires``, each as written
+with its reason; nothing when all are empty) and Chain (the parent release,
+this release, and its children: the steps evaluated on it, won, lost or
+inactive, each linking that step's own page; a rejected or
 skipped step published nothing, so its
-Chain names the head it ran on and no children).
+Chain names the release it ran on and no children).
 Above the sections a step walk links the neighbouring steps, and the logo and
-the "Harness" crumb lead to the served head; a dead end, and the served head's
-own page, leave the link as plain text. Every link either page draws is one
+the "Harness" crumb lead to the active release's page; a dead end, and the
+active release's own page, leave the link as plain text. Every link either page draws is one
 of the two ``/page`` routes, the only ones a browser can open, since the
 catalog answers JSON and refuses a query token.
-The line under the title carries the release id, marks the served head as
-``Currently served`` and reads the commit time as a date in UTC. The served
-head is the newest
-row that is neither pending nor a rejected or skipped step. A pending row
-that a later ``promote`` row names in ``rollback_target_release_id`` reads
-``Promoted at step N``, where N is that later row's step. A step outside the
+The line under the title carries the release id and reads the commit time as
+a date in UTC. On the active release, the row marked ``active``, it also
+carries the chip ``Active release``. A step that made an artifact that was
+never activated (``activated: false``) reads ``Waiting for activation``. A step outside the
 catalog is HTTP 404 naming the range; a step that is not a number, or longer
 than nine digits, is HTTP 404 too. The row itself rides in a
 ``<script type="application/json">`` block at the end of the page, every
@@ -1095,7 +1509,7 @@ time and machine requirements are available in expandable details.
 Progress shows
 the request's state and what it means: ``queued`` while no step has taken
 the request, ``proposing`` while the served model writes the change,
-``evaluating`` while the candidate's episodes run (with their count and the
+``evaluating`` while the candidate's rollouts run (with their count and the
 step record directory when the backend reports them, and the time into the
 step), and ``running`` while the trainer holds the request and the backend
 reports no phase. While a step holds the request, Activity lists what the proposer has
@@ -1111,12 +1525,12 @@ id settles the page: the reload stops and Progress gives way to Result
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
 ``proposer failure``, the release id and a link to the version page), What
 changed (each file the patch writes or removes, with its kind in the harness
-layout; labeled Proposed changes for pending, rejected, skipped or failed
+layout; labeled Proposed changes for inactive, rejected, skipped or failed
 steps), Review (its result and the points it left uncovered, when the step
 recorded a review) and Design (the plan and its How to use part, when the
 step recorded them). A published result names the next action,
 ``GET /reef/harness``, with what the release requires where the harness
-runs; a pending result names the promote request. An unknown
+runs; an inactive result names the activate request. An unknown
 id, or one that is not a training instruction, is HTTP 404 naming it.
 
 ``GET /reef/harness/requests/{record_id}/progress`` answers the same reading
@@ -1127,7 +1541,7 @@ row landed as once it settles, else null), ``state`` (the page's own
 the settled row's result once a row answers the request, including ``failed``
 when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total``,
+step holds this request, ``started_at``, ``rollouts_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
 ``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
 ``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
@@ -1137,7 +1551,7 @@ an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 naming it.
 
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
-``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
+``evaluation_task_count`` and ``evaluation_context``. Running rollouts use the
 phase ``evaluating``. Reviews and settled proposals store their outcome under
 ``result``. A harness manifest carries the evaluation metrics under
 ``evaluation`` only.
@@ -1173,7 +1587,7 @@ Retained step files
 for the same catalog step, authenticated and scenario-scoped like the version
 page. The response is ``{"status": "retained", "files": [{"path": "proposer.json",
 "bytes": 123}]}``. Add ``?path=proposer.json`` (or an inventory path under
-``episodes/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
+``rollouts/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
 The service does not interpret proposer replies or agent events. A console can
 render those persisted formats without changing their learning semantics.
 
@@ -1220,6 +1634,7 @@ a training job runs or an update is being published.
          "training_mode": "auto",
          "processor": {"...": "..."},
          "inference_admission": {"...": "..."},
+         "artifacts": {"weights": {"active": "5e1c...", "training_start": "5e1c..."}},
          "training_job": {"job_id": "9c41...", "backend": "slime", "checkpoints_handled": 0},
          "finished_jobs": 2
        }
@@ -1230,6 +1645,10 @@ a training job runs or an update is being published.
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
 ``job_data_ready`` says whether the processor has a job's data waiting.
+``artifacts`` gives two ``artifact_id`` values for each component: its
+active artifact and its trainer's training start. A value is ``null`` when
+Reef does not know it. Both values start at the creation artifact.
+
 ``processor`` includes ``ready_samples``, the samples of the held record sets
 and uploaded trajectories; ``job_samples``, the samples that automatic job
 data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``,
@@ -1254,19 +1673,14 @@ and ``processor`` describe the first trainer that trains, else the first
 trainer. The scenario-wide ``last_committed_step`` is the latest commit of
 any recipe component.
 
-In a scenario of several trainers, every new training row from
-``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
-trainer that made it. Rows of a scenario of one trainer carry no
-``component``, and neither do rows written before Reef named components.
+Every row of ``GET /reef/scenarios/{scenario}/artifacts`` names the
+``component`` whose artifact it is.
 
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
-step that skipped or rejected its candidate. A rollback advances
-``scenario_step`` without replacing the latest training outcome. A deployment
-without an agent-record directory has no durable commit history, so after a
-restart from a rollback checkpoint this field is ``null`` until the next
-training commit.
+step that skipped or rejected its candidate. An activation or a train-from
+advances ``scenario_step`` without replacing the latest training outcome.
 
 ``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
 that serves per-scenario adapters reports the engines' shared adapter
@@ -1279,8 +1693,9 @@ Status codes
 | Status | Cause                                                       |
 +========+=============================================================+
 | 400    | malformed body, a missing or empty ``x-reef-scenario`` on a |
-|        | scenario-scoped route, or a report violating the recipe's   |
-|        | declared schema                                             |
+|        | scenario-scoped route, a report violating the recipe's      |
+|        | declared schema, or an activation or a train-from naming an |
+|        | artifact that Reef cannot serve or train from               |
 +--------+-------------------------------------------------------------+
 | 401    | missing or wrong bearer token, or ``x-api-key`` when no     |
 |        | Authorization header is sent; the two harness pages also    |
@@ -1291,14 +1706,14 @@ Status codes
 |        | authorization belongs to the gateway in front of Reef.      |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (with implicit creation off, or on         |
-|        | ``POST /reef/train``), unknown release, unknown adapter, no |
-|        | configured harness recipe, or a scenario that serves no     |
-|        | files                                                       |
+|        | ``POST /reef/train``), unknown release or artifact, unknown |
+|        | adapter, no configured harness recipe, or a scenario that   |
+|        | serves no files                                             |
 +--------+-------------------------------------------------------------+
 | 409    | a base artifact conflicting with the scenario registration, |
-|        | record id resent with different content, a rollback naming  |
-|        | a release that is not restorable, or an engine that reports |
-|        | no serving runtime load ID                                  |
+|        | record id resent with different content, an activation or a |
+|        | train-from while a training result waits for its commit, or |
+|        | an engine that reports no serving runtime load ID           |
 +--------+-------------------------------------------------------------+
 | 502    | the upstream provider failed on its own account             |
 +--------+-------------------------------------------------------------+
@@ -1372,9 +1787,24 @@ query parameter to filter commits whose recorded ``consumed_ids`` contain
 any requested ID (at most 100 IDs of 1–256 characters). This is exact set
 membership, not an eligibility decision. Each row exposes ``step``,
 ``operation``, ``operation_verified``, ``recorded_at``, ``artifact_ref``,
-``pending``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
+``activated``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
 private checkpoint recovery data are excluded. Commit metadata remains
 available when trace bodies expire.
+
+``operation`` is one of three values:
+
+- ``training``: a training step. ``artifact_ref`` is the release the step
+  made, or the active release when the step made none. ``activated`` is true
+  when the activation rule activated the artifact that the step made; it is
+  false for every other row.
+- ``activate``: an activation. ``artifact_ref`` is the release that serves
+  afterwards.
+- ``train_from``: a new training start. ``artifact_ref`` names the artifact
+  that the trainer starts from.
+
+The active release is the release of the newest activation in the log. A
+training step that made an artifact and activated it counts as an
+activation.
 
 The existing ``GET /reef/scenarios/{scenario}/contract`` also reports
 ``training_mode`` and processor ``status`` alongside ``processor`` and
@@ -1390,4 +1820,5 @@ cached commit history; the response is bounded, not a new persisted index.
 
 Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation
-results. The console owns that interpretation. Consumption is not proof of promotion.
+results. The console owns that interpretation. Consumption is not proof that a
+release made from the records serves.

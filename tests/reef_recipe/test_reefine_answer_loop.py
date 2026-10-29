@@ -30,7 +30,7 @@ from tests.support.harness_methods import (
 )
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.recipe.reefine import proposer
 from reef.train.harness_backend import ProposalContext
 

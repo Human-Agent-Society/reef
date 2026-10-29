@@ -47,7 +47,7 @@ def patch_to(served: Mapping[str, str], child: Mapping[str, str]) -> TreePatch:
 
 
 def candidate_tree(served: HarnessTree, texts: Mapping[str, str]) -> HarnessTree:
-    """The served tree with a candidate's texts in place of its own: the tree a minibatch episode runs."""
+    """The served tree with a candidate's texts in place of its own: the tree a minibatch rollout runs."""
     return served.apply(patch_to(served.files, texts))
 
 

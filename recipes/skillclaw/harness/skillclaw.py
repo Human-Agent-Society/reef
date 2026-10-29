@@ -12,7 +12,7 @@ or rewritten skill, evaluated as one candidate tree. The sealed night never
 removes a skill, so the patch removes no file. A night that applies nothing
 returns ``None`` and the served pool stands.
 
-``evaluate`` grades the probe episodes by exact final answer. With
+``evaluate`` grades the probe rollouts by exact final answer. With
 ``selection: always`` in skillclaw.yaml those scores are recorded, but they
 do not decide the publish: SkillClaw publishes every non-skip night and the
 next day's traffic judges the pool, which is the method's own regime.
@@ -34,8 +34,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import TrajectorySample
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import TreePatch
 
 from . import evolver, night, prompts
@@ -210,8 +210,8 @@ def propose(
         shutil.rmtree(incumbent, ignore_errors=True)
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    """Grade the last line of the probe episode's final assistant text, 1.0 exact."""
+def evaluate(task: str, result: RolloutResult) -> float:
+    """Grade the last line of the probe rollout's final assistant text, 1.0 exact."""
     return grade_probe(task, _final_assistant_text(result.trajectory))
 
 

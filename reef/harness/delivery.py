@@ -13,7 +13,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tree import HarnessTree, render_tree
-from reef.surface.base import ComponentSurface, FileTree, HarnessInfo, Surface
+from reef.surface.base import ArtifactLayout, ComponentSurface, FileTree, HarnessInfo, Surface
 from reef.surface.files import TextFileTree
 
 #: The component name a harness surface binds.
@@ -46,15 +46,18 @@ def create_harness_surface(
     served_api: str = "openai",
     model_metadata: Mapping[str, ModelMetadata] | None = None,
     served_metadata: ModelMetadata | None = None,
+    layout: ArtifactLayout | None = None,
 ) -> Surface:
     """A surface that serves each release of the ``harness`` component as ``descriptor``'s rendered files.
 
     ``harness`` carries the model the recipe serves, its API dialect, its
     metadata, and the further models a client may switch to, for the routes
-    that tell a client how to reach Reef.
+    that tell a client how to reach Reef. ``layout`` checks an imported harness; ``None`` takes no import.
     """
     return Surface(
-        components={HARNESS_COMPONENT: ComponentSurface(files=HarnessFiles(descriptor))},
+        components={
+            HARNESS_COMPONENT: ComponentSurface(files=HarnessFiles(descriptor), kind="harness_plugin", layout=layout)
+        },
         harness=HarnessInfo(
             served_model=served_model,
             served_api=served_api,

@@ -18,7 +18,7 @@ from tests.support.harness_methods import PLAN_MARKER, TREE, Model, answer, desi
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, TreeKind
 from reef.recipe.reefine import proposer
 

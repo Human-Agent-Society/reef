@@ -18,6 +18,7 @@ from typing import Any, Self
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
 from reef.evaluation.harness import HarnessCandidate
+from reef.train.harness_backend.backend import rollout_values
 
 from .population import POPULATION_KEY, Population, finite_scores
 
@@ -39,8 +40,8 @@ class MetaHarnessSelection(BackendEvaluateMixin, SelectionPlugin):
         if not isinstance(candidate, HarnessCandidate):
             raise TypeError(f"the Meta-Harness selection decides a HarnessCandidate, got {type(candidate).__name__}")
         population = Population.from_dict(candidate.method_state.get(POPULATION_KEY))
-        candidate_scores = finite_scores(evaluation.metrics.get("candidate_scores", ()))
-        current_scores = finite_scores(evaluation.metrics.get("current_scores", ()))
+        candidate_scores = finite_scores(rollout_values(evaluation.metrics.get("candidate_scores", [])))
+        current_scores = finite_scores(rollout_values(evaluation.metrics.get("current_scores", [])))
         if len(candidate_scores) != len(current_scores):
             raise ValueError("Meta-Harness evaluation score vectors must have equal lengths")
         served = None if population.served_id is None else population.served
@@ -59,15 +60,15 @@ class MetaHarnessSelection(BackendEvaluateMixin, SelectionPlugin):
             metrics["population_candidate_id"] = proposed.candidate_id
             metrics["population_parent_id"] = proposed.parent_id
             # The next step records this evaluation; the count includes it already.
-            metrics["target_episode_calls"] = population.episode_calls + len(candidate_scores) + len(current_scores)
+            metrics["target_rollout_calls"] = population.rollout_calls + len(candidate_scores) + len(current_scores)
         else:
-            metrics["target_episode_calls"] = population.episode_calls
+            metrics["target_rollout_calls"] = population.rollout_calls
         return SelectionDecision(
             selected=candidate_mean > incumbent_mean,
             policy="meta_harness",
             reason=(
                 f"candidate scored {candidate_mean:.4f} against committed incumbent {incumbent_mean:.4f} "
-                f"over {len(candidate_scores)} episode results"
+                f"over {len(candidate_scores)} rollout results"
             ),
             evaluation=evaluation,
             metrics=metrics,

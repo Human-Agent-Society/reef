@@ -69,12 +69,15 @@ def collect(work: Path) -> dict:
     commits.sort(key=lambda row: row.get("recorded_at") or 0)
     releases = [{"release_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
     previous = seed_files
+    # The tree of each release by id, so an activation or a new training start shows the tree it names.
+    files_by_release: dict[str, dict] = {"seed": seed_files}
     for row in commits:
         metrics = row.get("metrics") or {}
         operation = row.get("operation")
         ref = row.get("artifact_ref") or {}
-        if operation in ("rollback", "promote"):
-            # Not a step: the head moved by hand, to a tree the page does not rebuild.
+        if operation in ("activate", "train_from"):
+            # Not a step: a person activated a release or set the training start. The row carries no state.
+            named = files_by_release.get(ref.get("release_id"), previous)
             releases.append(
                 {
                     "release_id": ref.get("release_id"),
@@ -84,13 +87,18 @@ def collect(work: Path) -> dict:
                     "recorded_at": row.get("recorded_at"),
                     "patch": [],
                     "result": None,
-                    "files": previous,
+                    "files": named,
                     "diff": None,
                 }
             )
+            if operation == "train_from":
+                # The next step evolves the tree the new training start names.
+                previous = named
             continue
         if operation != "training":
             continue
+        # A step builds on its parent release, so the first step names the seed's release id.
+        files_by_release.setdefault(ref.get("parent_release_id"), previous)
         published = bool(metrics.get("selected"))
         selection = metrics.get("selection") or {}
         patch = metrics.get("patch") or {}
@@ -120,6 +128,8 @@ def collect(work: Path) -> dict:
                 "diff": changed(previous, patch) if published else None,
             }
         )
+        if published:
+            files_by_release[ref.get("release_id")] = files
         previous = files
 
     sessions = []
@@ -344,7 +354,7 @@ function renderProcess() {
     const what = e.type === 'turn' ? `turn in session ${short(d.session)} on release ${short(d.release_id)}` : describe(e);
     tr.innerHTML = `<td class="t">${sec(t)}</td><td>${esc(e.type)}</td><td>${esc(what)}</td>`; tb.appendChild(tr);
   });
-  if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the episode form writes none.</td></tr>';
+  if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the rollout form writes none.</td></tr>';
 }
 function sync() { document.getElementById('scrub').value = state.pos; renderGraph(); renderDetail(); }
 document.getElementById('relsel').onchange = e => { state.release = +e.target.value; renderChain(); renderGraph(); };

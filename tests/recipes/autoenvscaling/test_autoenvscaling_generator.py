@@ -254,7 +254,7 @@ def test_a_staged_copy_of_the_same_task_passes_validation_and_stays_staged(tmp_p
     (item,) = asyncio.run(generator.generate(REQUEST))
     staged = asyncio.run(service.write_task(item))
     assert asyncio.run(generator.validate(item)).is_valid
-    assert staged.path.is_dir() and item.name not in service.deleted, "an episode may be using the staged copy"
+    assert staged.path.is_dir() and item.name not in service.deleted, "a rollout may be using the staged copy"
 
 
 def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
@@ -523,7 +523,7 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     assert task.source_agent_record_ids == ("rec-1", "session-1")
     assert task.config["environment"]["build_timeout_sec"] == 1200
     assert task.instruction == DOCUMENT["instruction"] + "\n"
-    # Every episode passed: outside the default band, inside with the band off.
+    # Every rollout passed: outside the default band, inside with the band off.
     assert [entry["band"] for entry in report(tmp_path)["tasks"]] == ["inside"]
     assert report(tmp_path)["proposals"][0]["designer_record_id"] == "rec-1"
 
@@ -599,7 +599,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     generation.close()
     assert len(generated.tasks) == 2 and delivery_error == ""
     assert [result.rollout_rewards for result in results] == [(0.5, 0.5)] * 2
-    assert service.episode_requests == [], "the training component runs the training episodes"
+    assert service.rollout_requests == [], "the training component runs the training rollouts"
     assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
 

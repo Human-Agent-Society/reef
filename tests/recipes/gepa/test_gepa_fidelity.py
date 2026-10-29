@@ -27,10 +27,10 @@ from gepa.core.state import GEPAState
 from recipes.gepa.archive import Archive
 from recipes.gepa.proposer import Feedback, GEPAProposer, GEPASettings, archive_for_step, sync
 from recipes.gepa.selection import GEPASelection
-from reef.core.evaluation import EvaluationResult
-from reef.evaluation.harness import HarnessCandidate, ScoredEpisode
+from reef.core.evaluation import EvaluationResult, RolloutScore, RolloutScores
+from reef.evaluation.harness import HarnessCandidate, ScoredRollout
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, TreeKind
 from reef.train.harness_backend.contract import ProposalContext, SampleSource, StepOutcome, TrialRunner
 
@@ -113,13 +113,19 @@ def run_upstream(run_dir: Path, budget: int):
 
 
 class ReefTrials(TrialRunner):
-    """The proposer's minibatch episodes: a tree answers with the token its rules text and the task encode."""
+    """The proposer's minibatch rollouts: a tree answers with the token its rules text and the task encode."""
 
-    def run(self, tree: HarnessTree, tasks) -> tuple[ScoredEpisode, ...]:
+    def run(self, tree: HarnessTree, tasks) -> tuple[ScoredRollout, ...]:
         text = tree.files["rules.md"]
         return tuple(
-            ScoredEpisode(score_of(output_for(text, task)), None, reply=output_for(text, task)) for task in tasks
+            ScoredRollout(RolloutScore(score_of(output_for(text, task))), None, reply=output_for(text, task))
+            for task in tasks
         )
+
+
+def rollout_scores(tasks: tuple[str, ...], values: tuple[float, ...]) -> list[dict[str, Any]]:
+    """The evaluation's JSON form of one scored rollout per task."""
+    return RolloutScores.by_task(tasks, [RolloutScore(value) for value in values]).to_json()
 
 
 class Reflector(ModelBinding):
@@ -205,7 +211,10 @@ def run_reef(iterations: int) -> tuple[Archive, dict[int, dict[str, Any]]]:
             EvaluationResult(
                 evaluator="test",
                 evaluator_version="1",
-                metrics={"candidate_scores": candidate_scores, "current_scores": current_scores},
+                metrics={
+                    "candidate_scores": rollout_scores(validation, candidate_scores),
+                    "current_scores": rollout_scores(validation, current_scores),
+                },
             ),
         )
         last_outcome = StepOutcome(

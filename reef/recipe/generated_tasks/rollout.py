@@ -1,6 +1,6 @@
 """The generated-task task jobs: the task pool, the tasks handed out to one job, and the IDs its commit lists.
 
-The training component rolls the tasks of a task job out itself; Reef runs no episode of them. One job's
+The training component rolls the tasks of a task job out itself; Reef runs no rollout of them. One job's
 tasks are handed out at a time:
 
 1. When no tasks are handed out, ``GeneratedTaskJobData`` takes up to ``tasks_per_step`` tasks from its

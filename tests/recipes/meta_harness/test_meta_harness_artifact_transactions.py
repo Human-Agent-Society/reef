@@ -42,7 +42,7 @@ def publication_case(tmp_path, request):
             tmp_path / "artifacts.git",
             work_dir=tmp_path / "work",
             cache_dir=tmp_path / "cache",
-            bootstrap_files=recipe.base_artifact_files(),
+            base=recipe.base_artifact_source(),
         )
 
     return recipe, factory, chat, tmp_path / "records"

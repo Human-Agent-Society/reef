@@ -4,7 +4,7 @@ The proposer is ``harness.native_evolution.propose`` with the serve file's
 seed tree and one recorded failure; each sample is one model call. A sample
 is parsed when it yields a patch and admitted when the patch passes
 ``validate_patch`` for the native adapter, the same check the evolve step
-runs before any episode. The table this prints is the one the README's
+runs before any rollout. The table this prints is the one the README's
 results carry.
 """
 
@@ -25,7 +25,7 @@ from harness import native_evolution
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, locate, validate_patch
 
 KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")

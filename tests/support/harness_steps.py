@@ -2,7 +2,7 @@
 
 A fake pi binary that writes its rendered rules into its session, the
 deployment's model binding, a pi seed tree, an in-memory releases reader of
-one component, and a recipe and a backend built over them. Episodes run the
+one component, and a recipe and a backend built over them. Rollouts run the
 fake binary through the real adapter path, so render, launch and the
 trajectory read are the production code.
 """
@@ -14,11 +14,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.artifact.artifact import ArtifactNotFound
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -41,7 +41,7 @@ event = {"type": "agent_end", "prompt": prompt, "rules": rules_path.read_text() 
 (session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
 """
 
-#: The deployment's model binding: rendered into episodes at run time, never into a tree.
+#: The deployment's model binding: rendered into rollouts at run time, never into a tree.
 MODEL = ModelBinding(base_url="http://localhost:8000", model="qwen3-8b", api_key="dummy")
 
 #: A pi seed: one setting, and rules without the marker.
@@ -67,8 +67,8 @@ def runtime() -> InferenceProxyRuntime:
     return InferenceProxyRuntime(model_path=MODEL.model, base_url=MODEL.base_url, api_key=MODEL.api_key)
 
 
-def marker_score(task: str, result: EpisodeResult) -> float:
-    """1.0 when the episode's rendered rules carry ``marker``."""
+def marker_score(task: str, result: RolloutResult) -> float:
+    """1.0 when the rollout's rendered rules carry ``marker``."""
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
@@ -108,7 +108,7 @@ def harness_recipe(
     """A pi recipe over the fake binary; ``fields`` set any other recipe field."""
     return HarnessEvolutionRecipe(
         resolve_proposer(propose, reads_requests=reads_requests),
-        resolve_episode_scorer(score),
+        resolve_rollout_scorer(score),
         tasks,
         binary=str(make_pi_binary(tmp_path)),
         seed=seed,

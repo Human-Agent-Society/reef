@@ -6,8 +6,8 @@ training imports lazy.
 
 from __future__ import annotations
 
-from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.run import EpisodeResult
+from reef.evaluation.harness import RolloutScorer
+from reef.harness.rollouts.run import RolloutResult
 from reef.train.harness_backend.contract import ProposalContext, Proposer, TreeProposal
 
 from . import skillclaw
@@ -21,8 +21,8 @@ class NightProposer(Proposer):
         return None if patch is None else TreeProposal(patch)
 
 
-class ProbeScorer(EpisodeScorer):
-    """Exact last-line grading of the probe episodes (:func:`skillclaw.evaluate`)."""
+class ProbeScorer(RolloutScorer):
+    """Exact last-line grading of the probe rollouts (:func:`skillclaw.evaluate`)."""
 
-    def score(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: RolloutResult) -> float:
         return skillclaw.evaluate(task, result)

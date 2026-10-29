@@ -2,7 +2,7 @@ Write a harness method
 ======================
 
 A harness method decides which change to try at each step and how to score
-an evaluation episode. Reef does the rest: it reads the head tree from the
+an evaluation rollout. Reef does the rest: it reads the head tree from the
 scenario's git history, applies the method's patch, validates the candidate
 tree for the adapter, runs the evaluation, commits the result, and publishes
 a selected tree as a new release.
@@ -21,7 +21,7 @@ method's own; the other parts have defaults.
 +======================+=======================+==================================================+
 | Proposer             | ``Proposer``          | Always: it returns the change for each step.     |
 +----------------------+-----------------------+--------------------------------------------------+
-| Episode scorer       | ``EpisodeScorer``     | When no recipe default scores its episodes.      |
+| Rollout scorer       | ``RolloutScorer``     | When no recipe default scores its rollouts.      |
 +----------------------+-----------------------+--------------------------------------------------+
 | Selection policy     | ``SelectionPlugin``   | When it decides publication its own way; the     |
 |                      |                       | default is ``score_comparison``.                 |
@@ -31,7 +31,7 @@ method's own; the other parts have defaults.
 +----------------------+-----------------------+--------------------------------------------------+
 
 ``Proposer``, ``Promoter`` and the step's types are in
-``reef.train.harness_backend``; ``EpisodeScorer`` is in
+``reef.train.harness_backend``; ``RolloutScorer`` is in
 ``reef.evaluation.harness``, and ``SelectionPlugin`` in ``reef.evaluation``.
 A method never subclasses the backend. Everything a step gives the method is
 in one ``ProposalContext``, and everything the method gives back is in one
@@ -47,13 +47,13 @@ A small method
 --------------
 
 This method adds one rule to ``rules.md`` the first time a step's samples
-contain a failure, and scores an episode by its final answer. The ``[fib]`` prefix is a
+contain a failure, and scores a rollout by its final answer. The ``[fib]`` prefix is a
 convention of this method: Reef passes the task text through unchanged.
 
 .. code:: python
 
-   from reef.evaluation.harness import EpisodeScorer
-   from reef.harness.episodes.trajectory import final_assistant_text
+   from reef.evaluation.harness import RolloutScorer
+   from reef.harness.rollouts.trajectory import final_assistant_text
    from reef.harness.tree import TreePatch
    from reef.train.harness_backend import ProposalContext, Proposer, TreeProposal
 
@@ -72,7 +72,7 @@ convention of this method: Reef passes the task text through unchanged.
            return TreeProposal(TreePatch({"rules.md": rules + RULE}))
 
 
-   class ExactAnswer(EpisodeScorer):
+   class ExactAnswer(RolloutScorer):
        def score(self, task, result):
            """1.0 when the final assistant text ends with the task's expected answer."""
            text = final_assistant_text(result.trajectory) or ""
@@ -133,7 +133,7 @@ The context
 | ``last_outcome``     | The ``StepOutcome`` of the latest evaluated step, ``None`` before the  |
 |                      | first.                                                                 |
 +----------------------+------------------------------------------------------------------------+
-| ``trials``           | A ``TrialRunner`` for trial episodes of a tree.                        |
+| ``trials``           | A ``TrialRunner`` for trial rollouts of a tree.                        |
 +----------------------+------------------------------------------------------------------------+
 | ``agent_host``       | Set only for a proposer that runs a coding agent. See `Run a coding    |
 |                      | agent`_.                                                               |
@@ -178,14 +178,14 @@ If ``propose`` raises, the step fails and publishes nothing.
 Validation
 ~~~~~~~~~~
 
-Reef validates the patched tree for the adapter before it runs an episode.
+Reef validates the patched tree for the adapter before it runs a rollout.
 Every path must sit on the layout and be of a kind the adapter renders, every
 file must pass its kind's content checks, and the tree must render. A patch
 that changes no text is a problem too.
 
 A patch with problems gets one retry: Reef calls ``propose`` again with the
 same context and ``problems`` set. A second patch with problems skips the
-step, and the reason names the problems. The episodes test only a valid tree.
+step, and the reason names the problems. The rollouts test only a valid tree.
 
 Keep state between steps
 ------------------------
@@ -200,7 +200,7 @@ the method's own.
 The result of an evaluated step reaches the method at its next proposal:
 ``context.last_outcome`` is a ``StepOutcome`` with ``step``, ``patch``,
 ``selected``, ``reason``, and the per-task ``candidate_scores`` and
-``current_scores`` (``None`` for an episode that could not run). It is the
+``current_scores`` (``None`` for a rollout that could not run). It is the
 outcome of the latest step that evaluated the method's own proposal: a
 recheck and a client's proposal from ``POST /reef/harness/proposals`` leave
 it as it was. A method folds it into its state at the next step. Compare
@@ -235,13 +235,14 @@ Every call counts against ``evolution.max_model_calls_per_step`` (0, no cap,
 by default). A call past the cap raises ``RuntimeError``. The step record's
 ``proposer.json`` keeps every call when ``evolution.step_record_dir`` is set.
 
-``context.trials.run(tree, tasks)`` runs one episode of ``tree`` per task,
-in task order, and returns a ``ScoredEpisode`` for each, with ``score``
-(``None`` when the episode could not run), ``failure`` and ``reply``. Trials
+``context.trials.run(tree, tasks)`` runs one rollout of ``tree`` per task,
+in task order, and returns a ``ScoredRollout`` for each, with ``score`` (a
+``RolloutScore``, failed when the rollout could not run), ``failure`` and
+``reply``. Trials
 use the evaluation's worker pool, model binding and scorer, so a trial
 measures what the evaluation would. A method that probes its candidates
 before it settles on a patch, such as GEPA's minibatch check, uses trials
-instead of launching episodes itself.
+instead of launching rollouts itself.
 
 Run a coding agent
 ------------------
@@ -250,7 +251,7 @@ A proposer that runs a coding agent overrides the ``runs_agent`` property to
 return ``True``. When the deployment configures ``evolution.proposer_agent``,
 ``context.agent_host`` is an ``AgentHost``: the adapter ``descriptor`` and
 its installed ``binary``, the agent's ``executor`` (its isolation, separate
-from the episodes), the step's record directory ``step_dir``, the
+from the rollouts), the step's record directory ``step_dir``, the
 ``timeout_s`` of the whole run and the ``trial_timeout_s`` of each trial, and
 ``calls``, the step's budget and record. Without that setting
 ``agent_host`` is ``None``.
@@ -284,20 +285,21 @@ person's machine that the request did not name: an ``env`` variable, a
 request's own items into the step's ``training_request`` metrics, and the
 release manifest serves them to clients.
 
-Reef evaluates a request's patch and applies the same ``evolution.publish``
-policy as for other steps. Pending client proposals and periodic rechecks
-cannot take over the step assigned to a request.
+Reef evaluates a request's patch as it evaluates other patches. The
+deployment's activation rule decides whether its release serves, as for
+other steps. Pending client proposals and periodic rechecks cannot take over
+the step assigned to a request.
 
-Score an episode
-----------------
+Score a rollout
+---------------
 
-``EpisodeScorer.score(task, result)`` scores one completed episode. Reef
+``RolloutScorer.score(task, result)`` scores one completed rollout. Reef
 calls it for each side the selection policy evaluates; ``floor`` evaluates
 only the candidate. The ``result`` holds the exit code, stdout, stderr, and
-the parsed ``trajectory``. Episodes that could not run do not reach the
+the parsed ``trajectory``. Rollouts that could not run do not reach the
 scorer. A judge that calls a model overrides
 ``score_with_models(task, result, models)`` instead.
-``VerifierRewardScorer`` scores a Harbor task episode by its verifier's
+``VerifierRewardScorer`` scores a Harbor task rollout by its verifier's
 reward.
 
 Selection policies
@@ -309,20 +311,43 @@ Selection policies
   pairings it wins exceed the ones it loses by more than
   ``evolution.min_win_margin``.
 - ``floor`` runs only the candidate and selects it when every task reaches
-  ``evolution.floor_score`` (default ``1.0``). An episode that could not run
-  misses the floor. ``current_scores`` is empty.
+  ``evolution.floor_score`` (default ``1.0``). A rollout that gave no answer
+  fails its task. A rollout that did not run fails no task, but a task with
+  no rollout that ran does not pass. The training start does not run under
+  ``floor``, so ``current_scores`` is empty.
 - ``always`` selects every evaluated candidate.
 
-A custom policy reads ``EvaluationResult.metrics``, which holds the per-task
-score lists ``candidate_scores`` and ``current_scores`` in task order; a
-score is ``None`` when an episode could not run. The candidate is a
-``reef.evaluation.harness.HarnessCandidate``, whose ``method_state`` is the
-state the proposal committed. The policy below selects a candidate only when
-at least one task improves and none regresses:
+An evaluation runs rollouts and gives their scores. A selection policy reads
+the scores and decides whether the candidate is published.
+``EvaluationResult.metrics`` holds the scores of each side,
+``candidate_scores`` and ``current_scores``, as
+``reef.core.evaluation.RolloutScores`` in JSON: one entry for each task, in
+task order, each with the scores of its rollouts in run order. Read them with
+``RolloutScores.from_json``. Each rollout's ``RolloutScore`` is one of two
+cases:
+
+- A score: the rollout ran, and ``value`` is the scorer's value. A rollout
+  where the tree gave no answer scores 0: an error ended its turn, or
+  ``forbid_residue`` refused its residue. The candidate caused it.
+- Failed: ``value`` is ``None`` (``"failed"`` in JSON). The environment could
+  not run the rollout: the launch failed, the trial never ran, or its
+  trajectory could not be read. The candidate did not cause it.
+
+The built-in policies use ``reef.evaluation.evaluators.compare_scores`` and
+``check_floor``. ``compare_scores`` pairs the two sides rollout by rollout,
+compares their values, and drops a pair with a failed side;
+``score_comparison`` reports the dropped pairs as ``dropped``. ``check_floor``
+passes a task when every rollout that did not fail reaches the floor.
+
+The candidate is a ``reef.evaluation.harness.HarnessCandidate``, whose
+``method_state`` is the state the proposal committed. The policy below
+selects a candidate only when at least one rollout improves and none
+regresses:
 
 .. code:: python
 
    from reef import CandidateEvaluator, SelectionDecision
+   from reef.core.evaluation import RolloutScores
    from reef.evaluation import SelectionPlugin
 
 
@@ -338,13 +363,14 @@ at least one task improves and none regresses:
            return self.candidate_backend.evaluate(candidate)
 
        def decide(self, candidate, evaluation):
-           pairs = zip(
-               evaluation.metrics["candidate_scores"],
-               evaluation.metrics["current_scores"],
-               strict=True,
-           )
-           scores = [(c if c is not None else -1e30, k if k is not None else -1e30) for c, k in pairs]
-           selected = all(c >= k for c, k in scores) and any(c > k for c, k in scores)
+           candidate_scores = RolloutScores.from_json(evaluation.metrics["candidate_scores"])
+           current_scores = RolloutScores.from_json(evaluation.metrics["current_scores"])
+           pairs = [
+               (mine.value, theirs.value)
+               for mine, theirs in zip(candidate_scores.rollouts(), current_scores.rollouts(), strict=True)
+               if not (mine.is_failed or theirs.is_failed)
+           ]
+           selected = all(c >= k for c, k in pairs) and any(c > k for c, k in pairs)
            return SelectionDecision(
                selected=selected,
                policy="pareto",
@@ -496,7 +522,7 @@ Every method package keeps each part in the same file:
 
    recipe.py       the HarnessEvolutionRecipe subclass: its name, its config fields, and evolution_spec()
    proposer.py     its Proposer
-   scorer.py       its EpisodeScorer, when it scores episodes its own way
+   scorer.py       its RolloutScorer, when it scores rollouts its own way
    selection.py    its SelectionPlugin, when it selects its own way
    processor.py    its record stages, when it reads records its own way
    seed/           its first tree
@@ -550,10 +576,12 @@ chat-template control token. The step counts these under
 ``evolution.max_promoted_tasks`` overall.
 
 Put code-bearing kinds that client text can shape (``code_extension``,
-``native_tool`` and ``native_hook``) in ``evolution.review_kinds`` so a
-person reviews them before publication. A ``native_graph`` holds no code and
-can publish on the evaluation alone; add it to ``review_kinds`` if every
-loop change should be reviewed. A ``native_loop`` always waits for a person.
+``native_tool`` and ``native_hook``) in the ``always`` activation rule's
+``review_kinds``, so a person reviews them before they serve (`Configuration
+<../reference/configuration.rst#the-activation-section>`__). A
+``native_graph`` holds no code and can serve on the evaluation alone; add it
+to ``review_kinds`` if every loop change should be reviewed. A
+``native_loop`` always waits for a person.
 
 .. warning::
 

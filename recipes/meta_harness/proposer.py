@@ -18,7 +18,7 @@ from typing import Any
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch, locate, validate_tree
 from reef.train.harness_backend.contract import ProposalContext, Proposer, TreeProposal
 
@@ -65,9 +65,9 @@ class MetaHarnessSettings:
     Values: ``mode`` is one of ``SEARCH_MODES``; ``model`` names the binding
     that proposes, which must not be the model under test. ``kinds`` are the
     evolvable kinds, empty for every kind the adapter renders.
-    ``max_candidates`` and ``max_target_episodes`` ≥ 0 are budgets, 0 for
+    ``max_candidates`` and ``max_target_rollouts`` ≥ 0 are budgets, 0 for
     none; ``max_files`` ≥ 1 caps a proposed tree. ``evaluation_cost`` is the
-    episodes one evaluation runs, both sides.
+    rollouts one evaluation runs, both sides.
     Purpose: ``MetaHarnessRecipe`` parses it; ``MetaHarnessProposer`` runs by it.
     """
 
@@ -76,7 +76,7 @@ class MetaHarnessSettings:
     model: str = "proposer"
     kinds: tuple[TreeKind, ...] = ()
     max_candidates: int = 0
-    max_target_episodes: int = 0
+    max_target_rollouts: int = 0
     max_files: int = 32
 
     def __post_init__(self) -> None:
@@ -86,7 +86,7 @@ class MetaHarnessSettings:
             raise ValueError("evolution.meta_harness.model must not be empty")
         for label, value in (
             ("max_candidates", self.max_candidates),
-            ("max_target_episodes", self.max_target_episodes),
+            ("max_target_rollouts", self.max_target_rollouts),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"evolution.meta_harness.{label} must be a non-negative integer")
@@ -113,11 +113,11 @@ class MetaHarnessProposer(Proposer):
         if settings.max_candidates and population.generated_candidates >= settings.max_candidates:
             population.record_attempt(step=attempt, status="budget_exhausted", budget="max_candidates")
             return keep(population, {"status": "budget_exhausted", "budget": "max_candidates"})
-        if settings.max_target_episodes and (
-            population.episode_calls + settings.evaluation_cost > settings.max_target_episodes
+        if settings.max_target_rollouts and (
+            population.rollout_calls + settings.evaluation_cost > settings.max_target_rollouts
         ):
-            population.record_attempt(step=attempt, status="budget_exhausted", budget="max_target_episodes")
-            return keep(population, {"status": "budget_exhausted", "budget": "max_target_episodes"})
+            population.record_attempt(step=attempt, status="budget_exhausted", budget="max_target_rollouts")
+            return keep(population, {"status": "budget_exhausted", "budget": "max_target_rollouts"})
         prompt = self.prompt(population, context, available, kinds)
         population.proposer_calls += 1
         reply = self.binding(context.models).chat(

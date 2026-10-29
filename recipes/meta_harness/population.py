@@ -24,7 +24,7 @@ OUTCOMES = frozenset({"pending", "retained", "selected"})
 
 
 def finite_scores(values: Sequence[float | None]) -> tuple[float, ...]:
-    """A non-empty score vector of finite values, a failed episode read as zero."""
+    """A non-empty score vector of finite values, a failed rollout read as zero."""
     scores = tuple(0.0 if value is None else float(value) for value in values)
     if not scores:
         raise ValueError("candidate score vectors must not be empty")
@@ -136,8 +136,8 @@ class Population:
     ``served_id`` and ``pending_id`` name candidates the list holds, or are
     ``None``; ``pending_id`` and ``pending_step`` are both set or both
     ``None``, and a pending candidate has the ``pending`` outcome.
-    ``proposer_calls`` and ``episode_calls`` ≥ 0 count the model calls and
-    the evaluation episodes the search spent. ``attempts`` records each
+    ``proposer_calls`` and ``rollout_calls`` ≥ 0 count the model calls and
+    the evaluation rollouts the search spent. ``attempts`` records each
     proposal attempt, kept or not.
     Purpose: the method state of a Meta-Harness scenario under
     ``POPULATION_KEY``; the proposer reads and updates it each step, and the
@@ -149,7 +149,7 @@ class Population:
     pending_id: str | None = None
     pending_step: int | None = None
     proposer_calls: int = 0
-    episode_calls: int = 0
+    rollout_calls: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -168,7 +168,7 @@ class Population:
             raise ValueError("population pending_id and pending_step are both set or both None")
         if self.pending_id is not None and self.by_id(self.pending_id).outcome != "pending":
             raise ValueError("population pending candidate must have pending outcome")
-        for label, value in (("proposer_calls", self.proposer_calls), ("episode_calls", self.episode_calls)):
+        for label, value in (("proposer_calls", self.proposer_calls), ("rollout_calls", self.rollout_calls)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"population {label} must be a non-negative integer")
 
@@ -192,7 +192,7 @@ class Population:
             pending_id=None if pending is None else str(pending),
             pending_step=None if pending_step is None else int(pending_step),
             proposer_calls=int(value.get("proposer_calls", 0)),
-            episode_calls=int(value.get("episode_calls", 0)),
+            rollout_calls=int(value.get("rollout_calls", 0)),
             attempts=[json.loads(json.dumps(dict(row), sort_keys=True)) for row in attempts],
         )
 
@@ -204,7 +204,7 @@ class Population:
             "pending_id": self.pending_id,
             "pending_step": self.pending_step,
             "proposer_calls": self.proposer_calls,
-            "episode_calls": self.episode_calls,
+            "rollout_calls": self.rollout_calls,
             "attempts": [dict(attempt) for attempt in self.attempts],
         }
 
@@ -291,7 +291,7 @@ class Population:
         if outcome.selected:
             self.served_id = candidate.candidate_id
         self.pending_id = self.pending_step = None
-        self.episode_calls += len(outcome.candidate_scores) + len(outcome.current_scores)
+        self.rollout_calls += len(outcome.candidate_scores) + len(outcome.current_scores)
         return candidate
 
     def record_attempt(self, **values: Any) -> None:

@@ -1,7 +1,7 @@
 name: harness-smoke
 
 # Runs the real pinned pi, codex, dsh, and hermes binaries through render,
-# run_episode, and the trajectory reader against a stub model server
+# run_rollout, and the trajectory reader against a stub model server
 # (tests/smoke/): the guard against a release changing a format the hermetic
 # fakes only imitate.
 # Non-blocking: not in the required check set until stable.
@@ -73,7 +73,7 @@ jobs:
         env:
           REEF_REAL_PI_BINARY: ${{ runner.temp }}/pi/node_modules/.bin/pi
           REEF_REAL_PI_SESSION_OUT: ${{ runner.temp }}/real-pi-session.jsonl
-      # The raw session the episode wrote: the refresh source for the
+      # The raw session the rollout wrote: the refresh source for the
       # hermetic fixture at tests/harness/data/pi_session_real/.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -166,7 +166,7 @@ jobs:
   # The same guard for Terminus 2 (tests/harness/test_terminus_agent.py),
   # whose real dependency is a Python package rather than a pinned binary: that
   # harbor still accepts the trial the runner builds and resolves its skill
-  # roots. A full episode needs Docker and a model, so it stays the opt-in
+  # roots. A full rollout needs Docker and a model, so it stays the opt-in
   # tests/smoke/test_real_terminus.py.
   real-terminus:
     needs: [changes]

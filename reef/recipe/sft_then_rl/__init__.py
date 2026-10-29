@@ -2,16 +2,10 @@
 
 - ``processor``: ``SFTThenRLJobData``, the sample-to-job stage that holds SFT samples and hands the imported train
   tasks to the training component as task jobs, and ``SFTThenRLJobPlan``, which gives each job its method.
-- ``processor`` also holds ``ImportedTaskEvaluation``, the evaluation of every artifact on the eval tasks.
 - ``recipe``: ``SFTThenRLRecipe``, the SFT stages with that sample-to-job stage and job plan.
 """
 
-from reef.recipe.sft_then_rl.processor import (
-    ImportedTaskEvaluation,
-    SFTThenRLJobData,
-    SFTThenRLJobPlan,
-    SFTThenRLJobSettings,
-)
+from reef.recipe.sft_then_rl.processor import SFTThenRLJobData, SFTThenRLJobPlan, SFTThenRLJobSettings
 from reef.recipe.sft_then_rl.recipe import SFTThenRLRecipe
 
-__all__ = ["ImportedTaskEvaluation", "SFTThenRLJobData", "SFTThenRLJobPlan", "SFTThenRLJobSettings", "SFTThenRLRecipe"]
+__all__ = ["SFTThenRLJobData", "SFTThenRLJobPlan", "SFTThenRLJobSettings", "SFTThenRLRecipe"]

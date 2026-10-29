@@ -29,12 +29,11 @@ from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
 from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import RECORD_KIND, CommitHistoryError, CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord
+from reef.storage.commits import CommitRecord, active_artifact_ref
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.harness_backend.state import HarnessState
@@ -143,22 +142,121 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
     log.append(sample_record(step=2, runtime_load_id="w2"))
     assert log.training_run_position() == (0, 2)
 
-    rollback = CommitRecord(
+    start = CommitRecord(
         scenario="math",
         step=3,
-        artifact_ref=ArtifactRef("artifact:1", "checkpoint:3", "checkpoint:1"),
-        checkpoint=True,
-        algorithm_state={"steps": 2},
-        high_water_sequence=4,
-        high_water_offset=4,
-        operation="rollback",
-        rollback_target_release_id="checkpoint:1",
+        artifact_ref=ArtifactRef("artifact:1", "checkpoint:1", None),
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation="train_from",
     )
-    log.append(rollback)
+    log.append(start)
     assert log.training_run_position() == (3, 0)
 
     log.append(sample_record(step=4, runtime_load_id="w4"))
     assert log.training_run_position() == (3, 1)
+    # An activation changes what serves, not the training run.
+    log.append(
+        CommitRecord(
+            scenario="math",
+            step=5,
+            artifact_ref=ArtifactRef("artifact:1", "checkpoint:1", None),
+            checkpoint=False,
+            algorithm_state=None,
+            high_water_sequence=0,
+            high_water_offset=0,
+            operation="activate",
+        )
+    )
+    assert log.training_run_position() == (3, 1)
+
+
+def operation_record(operation: str, step: int, release_id: str, **changes) -> CommitRecord:
+    """An activation or a new training start at ``step`` naming ``release_id``, with ``changes`` applied."""
+    values = {
+        "scenario": "math",
+        "step": step,
+        "artifact_ref": ArtifactRef(f"content:{release_id}", release_id, None),
+        "checkpoint": False,
+        "algorithm_state": None,
+        "high_water_sequence": 0,
+        "high_water_offset": 0,
+        "operation": operation,
+    }
+    return CommitRecord(**{**values, **changes})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["activate", "train_from"])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"activated": True},
+        {"algorithm_state": {"steps": 1}},
+        {"metrics": {"loss": 1.0}},
+        {"training_job_id": "job-1"},
+        {"high_water_sequence": 3},
+        {"high_water_offset": 3},
+        {"consumed_ids": frozenset({"i1"})},
+    ],
+)
+def test_activations_and_training_starts_carry_no_trainer_state(operation, changes) -> None:
+    assert CommitRecord.from_dict(operation_record(operation, 1, "r1").to_dict()).operation == operation
+    with pytest.raises(CommitHistoryError, match=r"must not carry|made an artifact is activated"):
+        operation_record(operation, 1, "r1", **changes)
+
+
+@pytest.mark.unit
+def test_each_operation_names_its_artifact_exactly() -> None:
+    # A one-component activation names the release that made the artifact; a composed one names the release it
+    # published, with the component and the manifest.
+    operation_record("activate", 1, "r1")
+    operation_record("activate", 1, "r1", component="harness", components={"harness": "c", "weights": "w"})
+    for changes in (
+        {"component": "harness"},
+        {"components": {"harness": "c"}},
+        {"component": "config", "components": {"harness": "c"}},
+    ):
+        with pytest.raises(CommitHistoryError, match="an activate commit names a component"):
+            operation_record("activate", 1, "r1", **changes)
+    for operation in ("activate", "train_from"):
+        with pytest.raises(CommitHistoryError, match="makes no artifact"):
+            operation_record(operation, 1, "r1", checkpoint=True)
+    # A new start names a trainer's component and publishes nothing.
+    operation_record("train_from", 1, "r1", component="weights")
+    with pytest.raises(CommitHistoryError, match="publishes no release"):
+        operation_record("train_from", 1, "r1", components={"weights": "c"})
+    for operation in ("rollback", "promote", "creation"):
+        with pytest.raises(CommitHistoryError, match="operation must be"):
+            operation_record(operation, 1, "r1")
+    with pytest.raises(CommitHistoryError, match="scenario must be a non-empty string"):
+        operation_record("activate", 1, "r1", scenario="")
+    with pytest.raises(CommitHistoryError, match="only a training commit that made an artifact is activated"):
+        replace(sample_record(), activated=True)
+
+
+@pytest.mark.unit
+def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
+    creation = ArtifactRef("content:base", "base", None)
+    made = replace(sample_record(step=1, checkpoint=True), activated=True)
+    held = sample_record(step=2, checkpoint=True, runtime_load_id="w2")
+    nothing = replace(sample_record(step=3), artifact_ref=made.artifact_ref)
+    assert active_artifact_ref((), creation) == creation
+    assert active_artifact_ref((made,), creation) == made.artifact_ref
+    assert made.to_dict()["activated"] is True and "activated" not in held.to_dict()
+    assert CommitRecord.from_dict(made.to_dict()) == made
+    # An artifact the rule did not activate, a step that made nothing and a new training start activate nothing.
+    start = operation_record("train_from", 4, "base")
+    assert active_artifact_ref((made, held, nothing, start), creation) == made.artifact_ref
+    activation = operation_record("activate", 5, held.artifact_ref.release_id, artifact_ref=held.artifact_ref)
+    assert active_artifact_ref((made, held, nothing, start, activation), creation) == held.artifact_ref
+    back = operation_record("activate", 6, "base", artifact_ref=creation)
+    assert active_artifact_ref((made, held, nothing, start, activation, back), creation) == creation
+    # A training step that makes and activates an artifact afterwards is the newest activation.
+    newest = replace(sample_record(step=7, checkpoint=True, runtime_load_id="w7"), activated=True)
+    assert active_artifact_ref((made, held, activation, back, newest), creation) == newest.artifact_ref
 
 
 @pytest.mark.unit
@@ -551,7 +649,6 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             job_loop=JobLoop(
                 component,
                 FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
-                AlwaysSelectCheckpointPlugin(),
                 scenario=scenario,
             ),
             algorithm_state=algorithm_state,
@@ -705,7 +802,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     wait_for_jobs(first, 1)
     submitted, checkpoint, _ = committed_records(agent_record_dir)
     assert checkpoint.checkpoint is True
-    assert checkpoint.metrics["selected"] is True
+    assert checkpoint.activated is True
 
     # Simulate the crash after the checkpoint's publication: the history loses its checkpoint record and the
     # job's end, which a crashed process would never have committed.
@@ -841,7 +938,9 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     checkpoint = first.get_or_create_scenario("math").store.history()[1]
     assert checkpoint.checkpoint is True
 
-    second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory)
+    first.close()
+    # Inspect checkpoint recovery before the worker can commit the missing job's failure.
+    second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory, hold_local_cycles=True)
     recovered = second.get_or_create_scenario("math")
 
     # The release chain ends at the checkpoint, so recovery returns to its step and metrics.
@@ -851,6 +950,8 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     assert recovered_status["step"] == 2
     assert recovered_status["metrics"] == checkpoint.metrics
     assert not list(tmp_path.rglob("*.sqlite3"))
+
+    second.close()
 
 
 def build_harness_evolve_dispatcher(tmp_path, backend_factory, *, propose=lambda context: None, agent_record_dir=None):
@@ -1141,7 +1242,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
-    assert scenario.trainer.state == JobLoopState().to_dict()
+    assert scenario.trainer.state == JobLoopState(scenario.trainer.job_loop_required().component.base_start).to_dict()
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     assert len(scenario.store.history()) == 1
@@ -1166,7 +1267,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
-    rollback_target = original.current_artifact_ref().release_id
+    # The creation carries the base artifact, whose artifact_id is the repository base release's.
+    activation_target = original.repository.backend.resolve_release("base").release_id
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
@@ -1191,29 +1293,29 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
 
     assert release_failed.wait(1)
     assert reload_started.wait(1)
-    rollback_started = Event()
-    rollback_returned = Event()
-    rollback_errors: list[Exception] = []
+    activation_started = Event()
+    activation_returned = Event()
+    activation_errors: list[Exception] = []
 
-    def rollback() -> None:
-        rollback_started.set()
+    def activate() -> None:
+        activation_started.set()
         try:
-            dispatcher.rollback("skills", rollback_target)
+            dispatcher.activate("skills", activation_target)
         except Exception as exc:
-            rollback_errors.append(exc)
+            activation_errors.append(exc)
         finally:
-            rollback_returned.set()
+            activation_returned.set()
 
-    rollback_thread = Thread(target=rollback)
-    rollback_thread.start()
-    assert rollback_started.wait(1)
+    activation_thread = Thread(target=activate)
+    activation_thread.start()
+    assert activation_started.wait(1)
     try:
-        assert not rollback_returned.wait(0.05), "rollback entered before durable recovery"
+        assert not activation_returned.wait(0.05), "activation entered before durable recovery"
     finally:
         allow_reload.set()
-    rollback_thread.join(1)
-    assert not rollback_thread.is_alive()
-    assert rollback_errors == []
+    activation_thread.join(1)
+    assert not activation_thread.is_alive()
+    assert activation_errors == []
 
     wait_for_step(dispatcher, 1, scenario="skills")
     recovered = dispatcher.get_or_create_scenario("skills")

@@ -2,7 +2,7 @@
 
 Reefine turns plain-language requests into versioned harness changes: skills,
 rules, agent commands, or pi extensions. This tutorial asks for a change over
-HTTP, follows its step on the request page, promotes a held release, and pulls
+HTTP, follows its step on the request page, activates a held release, and pulls
 the result. The scripted demos then run the same path end to end and run a pi
 session on the new tree.
 
@@ -75,24 +75,24 @@ When I ask a research question, search for relevant papers, download and read th
 
 These are example requests, not built-in Reefine modes.
 
-## 4. Review and promote the result
+## 4. Review and activate the result
 
 When the step settles, the page shows the result, the files the change wrote,
 the review, the design and its How to use section, and the next action. The
 default evaluation checks that the harness can run `echo reef-ok` and return
 its output. Passing this health task does not prove that your requested
 behavior works: read the design and the review. Rejected or skipped requests
-leave the served release unchanged.
+leave the active release unchanged.
 
-A release that changes an extension waits as pending, because an extension
+A release that changes an extension stays inactive, because an extension
 runs in pi's process with your privileges. Inspect its files and declared
-requirements on the page before you serve it. Then promote it with the id the
-page names:
+requirements on the page before you serve it. Then activate it with the
+artifact id the page names:
 
 ```bash
 curl -fsS -H 'Content-Type: application/json' \
-  -d '{"release_id": "<the pending release id>"}' \
-  http://127.0.0.1:8901/reef/scenarios/reefine-tutorial/promote
+  -d '{"artifact_id": "<the artifact id the page names>"}' \
+  http://127.0.0.1:8901/reef/scenarios/reefine-tutorial/activate
 ```
 
 ## 5. Pull the result
@@ -140,16 +140,16 @@ A demo runs these steps in `run.py`:
    page link.
 2. Wait: it prints each new catalog row until the step for its request
    settles.
-3. Promote: it saves a pending release's step page beside the run, then
-   promotes the release.
-4. Install: it pulls the head's source tree
+3. Activate: it saves an inactive release's step page beside the run, then
+   activates the release.
+4. Install: it pulls the active release's source tree
    (`GET /reef/harness?form=source`), checks each `requires` item on this
    machine, and renders the tree for pi with a model binding at this Reef
    into `work/harness`.
 5. Show: it runs one headless `pi -p` session on the installed tree and
    prints the session's tool calls in order and its final answer.
 
-**The demos promote pending extensions and run each requirement check
+**The demos activate inactive extensions and run each requirement check
 without asking.** They do not pause for the review described above. An unset
 variable, a missing binary, or a check that does not exit 0 stops a demo with
 exit code `2`. If no change is selected, the show session runs the previously
@@ -167,7 +167,7 @@ The script sets proposer limits of 900 seconds and 16,384 tokens by default.
 
 Measurement submits up to 12 fixed skill and rule requests, one at a time.
 It reports accepted requests, proposed changes, evaluated candidates, health
-passes, published releases, and pending releases. It does not install those
+passes, published releases, and inactive releases. It does not install those
 updates or run a session after each request.
 
 Each run saves `work/<mode>-<timestamp>.json`. A demo's session and saved step

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.artifact import Artifact, ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -16,7 +16,7 @@ from reef.surface import Surface
 PI_RULES_RENDER = {"pi-agent/AGENTS.md": "rule\n", "pi-agent/models.json": "{}\n", "pi-agent/settings.json": "{}\n"}
 #: A pi harness evolution recipe: what its surface serves is the subject here, so it never builds a backend.
 PI_RECIPE = HarnessEvolutionRecipe(
-    resolve_proposer(lambda context: None), resolve_episode_scorer(lambda task, result: 0.0), ("t",)
+    resolve_proposer(lambda context: None), resolve_rollout_scorer(lambda task, result: 0.0), ("t",)
 )
 
 
@@ -133,11 +133,11 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
 
 def test_harness_recipes_name_their_adapter(tmp_path, monkeypatch) -> None:
     (tmp_path / "demo_adapter_surface.py").write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.harness_backend.contract import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, context):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))

@@ -3,7 +3,7 @@
 Each step runs through the phases the trainer runs (``backend_step``) on an
 in-memory commit history whose base release is the pi seed; the test
 records a published tree as the next release, as the scenario committer
-does. Episodes run the fake pi binary, whose score prefers rules that hold
+does. Rollouts run the fake pi binary, whose score prefers rules that hold
 the marker.
 """
 
@@ -49,7 +49,7 @@ def state_of(result: TrainStepResult) -> HarnessState:
 def test_a_winning_patch_publishes_the_head_tree_with_the_patch_applied(tmp_path: Path) -> None:
     backend, releases = harness_backend(tmp_path, lambda context: MARKER)
     result = backend_step(backend, batch(1), backend.initial_state())
-    assert result.metrics["selected"] is True and result.pending is False
+    assert result.metrics["selected"] is True and result.changed_kinds == {TreeKind.RULES}
     assert result.metrics["head_release_id"] == "base" and result.metrics["patch"] == MARKER.to_json()
     assert HarnessTree.read(result.artifact.local_path) == PI_SEED.apply(MARKER)
     selection = result.metrics["selection"]
@@ -58,7 +58,7 @@ def test_a_winning_patch_publishes_the_head_tree_with_the_patch_applied(tmp_path
         "score_comparison",
         "demo:1:candidate",
     )
-    assert selection["metrics"] == {"wins": 1, "losses": 0, "ties": 0} and result.metrics["wins"] == 1
+    assert selection["metrics"] == {"wins": 1, "losses": 0, "ties": 0, "dropped": 0} and result.metrics["wins"] == 1
     reason = selection["reason"]
     state = state_of(result)
     assert state.steps == 1 and state.failure_streak == 0 and state.rejected == ()
@@ -178,31 +178,12 @@ def test_an_aborted_step_refuses_its_claimed_proposal(tmp_path: Path) -> None:
     assert backend.failed_step_metrics() == {"failed_stage": "evaluating", "patch": MARKER.to_json()}
 
 
-@pytest.mark.parametrize(
-    ("fields", "patch", "pending"),
-    [
-        ({"publish": "review"}, MARKER, True),
-        (
-            {"review_kinds": (TreeKind.CODE_EXTENSION,)},
-            TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"}),
-            True,
-        ),
-        ({"review_kinds": (TreeKind.CODE_EXTENSION,)}, MARKER, False),
-    ],
-    ids=["publish-review", "reviewed-kind", "other-kind"],
-)
-def test_a_win_waits_for_review_under_publish_review_or_when_it_changes_a_reviewed_kind(
-    tmp_path: Path, fields: dict, patch: TreePatch, pending: bool
-) -> None:
-    backend, _ = harness_backend(tmp_path, lambda context: patch, **fields)
+def test_a_win_names_the_tree_kinds_its_patch_changes_for_the_activation_rule(tmp_path: Path) -> None:
+    patch = TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"})
+    backend, _ = harness_backend(tmp_path, lambda context: patch)
     result = backend_step(backend, batch(1), backend.initial_state())
-    assert result.metrics["selected"] is True and result.artifact is not None and result.pending is pending
-
-
-def test_a_native_loop_change_always_waits_for_review(tmp_path: Path) -> None:
-    backend, _ = harness_backend(tmp_path, lambda context: None)
-    assert backend.held_for_review(TreePatch({"native/loops/main.py": "NAME = 'main'\n"}))
-    assert not backend.held_for_review(MARKER)
+    assert result.metrics["selected"] is True and result.artifact is not None
+    assert result.changed_kinds == {TreeKind.RULES, TreeKind.CODE_EXTENSION}
 
 
 def test_a_recheck_evaluates_the_replaced_tree_against_the_head_and_keeps_the_head_when_it_loses(
@@ -213,8 +194,8 @@ def test_a_recheck_evaluates_the_replaced_tree_against_the_head_and_keeps_the_he
         tmp_path, lambda context: asked.append(context.step) or MARKER, recheck_every=2
     )
     first = backend_step(backend, batch(1), backend.initial_state())
-    assert state_of(first).rollback_release_id == "base"
-    assert state_of(first).rollback_context == first.metrics["evaluation_context"]
+    assert state_of(first).recheck_release_id == "base"
+    assert state_of(first).recheck_context == first.metrics["evaluation_context"]
     published(releases, "r1", first)
 
     second = backend_step(backend, batch(2), first.state)
@@ -227,7 +208,7 @@ def test_a_recheck_evaluates_the_replaced_tree_against_the_head_and_keeps_the_he
     state = state_of(second)
     # A recheck is no proposal: the streak, the rejections and the method's latest outcome stay as they were.
     assert state.failure_streak == 0 and state.rejected == () and state.last_outcome == state_of(first).last_outcome
-    assert state.rollback_release_id == "base"
+    assert state.recheck_release_id == "base"
 
 
 def test_a_recheck_rolls_back_when_the_replaced_tree_wins(tmp_path: Path) -> None:
@@ -241,19 +222,18 @@ def test_a_recheck_rolls_back_when_the_replaced_tree_wins(tmp_path: Path) -> Non
         lambda context: MARKER,
         score=score,
         recheck_every=2,
-        review_kinds=(TreeKind.RULES,),
     )
     first = backend_step(backend, batch(1), backend.initial_state())
-    assert first.metrics["selected"] is True and first.pending is True
+    assert first.metrics["selected"] is True
     published(releases, "r1", first)
     prefer_marker[0] = False
     second = backend_step(backend, batch(2), first.state)
     assert second.metrics["recheck"] is True and second.metrics["rolled_back"] is True
     assert HarnessTree.read(second.artifact.local_path) == PI_SEED
-    # The rollback serves a tree published before, so only publish: review holds it.
-    assert second.pending is False
+    # The recheck's tree changes the rules back, and the activation rule decides from that kind.
+    assert second.changed_kinds == {TreeKind.RULES}
     state = state_of(second)
-    assert state.rollback_release_id is None and state.rollback_context is None
+    assert state.recheck_release_id is None and state.recheck_context is None
     assert state.failure_streak == 0 and state.last_outcome == state_of(first).last_outcome
 
 
@@ -261,7 +241,7 @@ def test_a_recheck_runs_off_cadence_when_the_evaluation_context_drifted(tmp_path
     backend, releases = harness_backend(tmp_path, lambda context: None, recheck_every=2)
     releases.publish("r1", PI_SEED.apply(MARKER))
     stale = {**backend.evaluation_context(), "model": "an-older-model"}
-    state = HarnessState(steps=2, rollback_release_id="base", rollback_context=stale).to_json()
+    state = HarnessState(steps=2, recheck_release_id="base", recheck_context=stale).to_json()
     result = backend_step(backend, batch(3), state)
     assert result.metrics["recheck"] is True and result.metrics["recheck_reason"] == "drift"
     assert result.metrics["rolled_back"] is False
@@ -284,12 +264,12 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
 
     def propose(context):
         progress = holder["backend"].step_progress
-        seen.append((progress.phase, progress.request_id, progress.episodes_total))
+        seen.append((progress.phase, progress.request_id, progress.rollouts_total))
         return MARKER
 
     def score(task, result):
         progress = holder["backend"].step_progress
-        seen.append((progress.phase, progress.request_id, progress.episodes_total))
+        seen.append((progress.phase, progress.request_id, progress.rollouts_total))
         return 1.0
 
     backend, _ = harness_backend(tmp_path, propose, score=score, reads_requests=True)
@@ -339,11 +319,11 @@ def test_the_context_carries_the_step_the_head_the_samples_and_the_methods_state
     assert dict(two.method_state) == {"seen": 1} and two.manifest is not None
 
 
-def test_a_trial_scores_a_tree_on_the_evaluations_episodes(tmp_path: Path) -> None:
+def test_a_trial_scores_a_tree_on_the_evaluations_rollouts(tmp_path: Path) -> None:
     scores: list[float | None] = []
 
     def propose(context):
-        scores.extend(episode.score for episode in context.trials.run(PI_SEED.apply(MARKER), ("one", "two")))
+        scores.extend(rollout.score.value for rollout in context.trials.run(PI_SEED.apply(MARKER), ("one", "two")))
         return
 
     backend, _ = harness_backend(tmp_path, propose)
